@@ -22,7 +22,16 @@ def _empty():
             "rows": [], "machine_colors": {}}
 
 
-def build_gantt(schedule, batches, masters):
+def _row_status(source_so_refs, status_by_so):
+    if not status_by_so:
+        return ""
+    statuses = {status_by_so.get(sn) for sn in source_so_refs if status_by_so.get(sn)}
+    if len(statuses) == 1:
+        return next(iter(statuses))
+    return "Mixed" if statuses else ""
+
+
+def build_gantt(schedule, batches, masters, status_by_so=None):
     if not schedule:
         return _empty()
 
@@ -92,6 +101,7 @@ def build_gantt(schedule, batches, masters):
             "so_no": (", ".join(b.source_so_refs) if b else ""),
             "so_qty": (b.qty if b else ""),
             "so_delivery_date": (b.so_delivery_date.isoformat() if b else ""),
+            "status": _row_status(b.source_so_refs if b else [], status_by_so),
             "bars": bars,
         })
 

@@ -250,6 +250,7 @@ class Actual:
     no_load_min: float = 0.0
     other_work_min: float = 0.0
     remarks: str = ""
+    mark_complete: bool = False   # user denotes the order complete on this entry
 
     # Loss categories that count as wasted machine time.
     DOWNTIME_FIELDS = (
@@ -308,6 +309,7 @@ class Actual:
             "no_load_min": self.no_load_min,
             "other_work_min": self.other_work_min,
             "remarks": self.remarks,
+            "mark_complete": self.mark_complete,
         }
 
     @classmethod
@@ -330,6 +332,47 @@ class Actual:
             no_load_min=d.get("no_load_min", 0.0),
             other_work_min=d.get("other_work_min", 0.0),
             remarks=d.get("remarks", d.get("downtime_reason", "")),
+            mark_complete=d.get("mark_complete", False),
+        )
+
+
+@dataclass
+class Order:
+    """One order in the persistent order book, keyed by its unique SO number.
+
+    Status is DERIVED, never stored: COMPLETE if ``completed`` (set only when the
+    user denotes it on a Rule 8 entry), else RUNNING if it has any actuals, else
+    PENDING. ``produced_good`` / ``remaining`` are computed from the actuals."""
+
+    so_no: str
+    item_code: str
+    item_name: str
+    ordered_qty: float
+    delivery_date: date
+    completed: bool = False
+    first_seen: str = ""
+
+    def to_json(self):
+        return {
+            "so_no": self.so_no,
+            "item_code": self.item_code,
+            "item_name": self.item_name,
+            "ordered_qty": self.ordered_qty,
+            "delivery_date": self.delivery_date.isoformat(),
+            "completed": self.completed,
+            "first_seen": self.first_seen,
+        }
+
+    @classmethod
+    def from_json(cls, d: dict) -> "Order":
+        return cls(
+            so_no=d["so_no"],
+            item_code=d["item_code"],
+            item_name=d.get("item_name", ""),
+            ordered_qty=d.get("ordered_qty", 0.0),
+            delivery_date=date.fromisoformat(d["delivery_date"]),
+            completed=d.get("completed", False),
+            first_seen=d.get("first_seen", ""),
         )
 
 

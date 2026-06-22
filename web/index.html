@@ -48,18 +48,17 @@
       </label>
     </div>
     <div class="actions">
-      <button id="run-btn" class="primary">▶ Run plan</button>
-      <button id="rerun-btn">↻ Rerun MRP (Rule 9)</button>
+      <button id="run-btn" class="primary">▶ Plan</button>
       <span id="status" class="status"></span>
     </div>
   </section>
 
   <section class="datasource">
-    <label class="upload-label">📁 Production Excel
+    <label class="upload-label">📁 Upload orders (Excel)
       <input id="xlsx-file" type="file" accept=".xlsx" />
     </label>
-    <button id="upload-btn">Upload &amp; use</button>
-    <span id="dataset-status" class="status">Data: test file (Test2.xlsx) — upload your own to plan against it.</span>
+    <button id="upload-btn">Upload &amp; merge</button>
+    <span id="dataset-status" class="status">No orders yet — upload your Excel to add them to the order book.</span>
   </section>
 
   <section id="report-panel" class="report hidden">

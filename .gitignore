@@ -13,3 +13,4 @@ data/actuals.json
 
 # macOS
 .DS_Store
+data/store/
