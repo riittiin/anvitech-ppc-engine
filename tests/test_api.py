@@ -78,6 +78,21 @@ def test_actual_marks_order_complete():
     assert so214[sti] == "Complete"
 
 
+def test_delete_selected_and_clear_all():
+    _upload_test_workbook()
+    assert len(client.get("/orders").json()["orders"]["rows"]) == 7
+
+    # Delete one order permanently.
+    d = client.post("/orders/delete", json={"so_nos": ["24-25SO214"]})
+    assert d.status_code == 200 and d.json()["deleted"] == 1
+    rows = client.get("/orders").json()["orders"]["rows"]
+    assert len(rows) == 6 and not any("24-25SO214" in str(r) for r in rows)
+
+    # Clear everything.
+    assert client.post("/orders/clear", json={}).status_code == 200
+    assert client.get("/orders").json()["orders"]["rows"] == []
+
+
 def test_bad_upload_returns_400():
     bad = client.post("/upload", files={"file": ("x.xlsx", b"not excel", "application/octet-stream")})
     assert bad.status_code == 400

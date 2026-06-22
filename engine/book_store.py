@@ -36,6 +36,27 @@ def add_orders(orders) -> None:
         s.hset(ORDERS_KEY, o.so_no, json.dumps(o.to_json()))
 
 
+def delete_orders(so_nos) -> int:
+    """Permanently delete orders (active or archived) by SO number, and purge
+    their production actuals. Returns how many SO numbers were targeted."""
+    s = get_store()
+    targets = set(so_nos)
+    for sn in targets:
+        s.hdel(ORDERS_KEY, sn)
+        s.hdel(COMPLETED_KEY, sn)
+    remaining = [a for a in load_actuals() if a.so_no not in targets]
+    s.list_set(ACTUALS_KEY, [json.dumps(a.to_json()) for a in remaining])
+    return len(targets)
+
+
+def delete_all() -> None:
+    """Wipe all orders + actuals (keeps the uploaded masters)."""
+    s = get_store()
+    s.delete_key(ORDERS_KEY)
+    s.delete_key(COMPLETED_KEY)
+    s.delete_key(ACTUALS_KEY)
+
+
 def complete_order(so_no: str) -> bool:
     """Move an active order into the completed archive. Returns False if unknown."""
     s = get_store()

@@ -174,18 +174,25 @@ async function renderOrders() {
     html += '<p class="placeholder">No orders yet. Upload your Excel above to add them, then click <strong>Plan</strong>.</p>';
     root.innerHTML = html; return;
   }
+  html += '<div class="ord-toolbar">'
+    + '<button id="ord-del-sel">🗑 Delete selected</button> '
+    + '<button id="ord-del-all" class="danger">Delete ALL data</button>'
+    + '<span class="muted"> · deletes permanently from the database (and their actuals)</span></div>';
   html += orderTableHtml(currentOrders);
   html += '<p class="g-note">Pending = not started · Running = production logged · Complete = you marked it complete on a Rule 8 entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty.</p>';
   root.innerHTML = html;
+  wireOrdersDelete();
 }
 
 function orderTableHtml(table) {
   const sIdx = table.columns.indexOf("Status");
-  let h = '<div class="table-wrap"><table><thead><tr>';
+  const soIdx = table.columns.indexOf("SO No");
+  let h = '<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="ord-all-check" title="select all"></th>';
   table.columns.forEach((c) => (h += `<th>${escapeHtml(c)}</th>`));
   h += "</tr></thead><tbody>";
   table.rows.forEach((row) => {
-    h += "<tr>";
+    const so = soIdx >= 0 ? String(row[soIdx]) : "";
+    h += `<tr><td><input type="checkbox" class="ordsel" value="${escapeHtml(so)}"></td>`;
     row.forEach((cell, i) => {
       const v = cell === null || cell === undefined ? "" : String(cell);
       if (i === sIdx) h += `<td><span class="status-pill status-${v.toLowerCase()}">${escapeHtml(v)}</span></td>`;
@@ -194,6 +201,30 @@ function orderTableHtml(table) {
     h += "</tr>";
   });
   return h + "</tbody></table></div>";
+}
+
+function wireOrdersDelete() {
+  const allCheck = $("ord-all-check");
+  if (allCheck) allCheck.onclick = () => {
+    document.querySelectorAll(".ordsel").forEach((c) => (c.checked = allCheck.checked));
+  };
+  $("ord-del-sel").onclick = async () => {
+    const sel = [...document.querySelectorAll(".ordsel:checked")].map((c) => c.value);
+    if (!sel.length) { setStatus("No rows selected to delete."); return; }
+    if (!confirm(`Permanently delete ${sel.length} order(s) and their production data? This cannot be undone.`)) return;
+    await fetch("/orders/delete", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ so_nos: sel }),
+    });
+    setStatus(`Deleted ${sel.length} order(s).`);
+    currentOrders = null; await runPlan();
+  };
+  $("ord-del-all").onclick = async () => {
+    if (!confirm("Permanently delete ALL orders and production data from the database? This cannot be undone.")) return;
+    await fetch("/orders/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    setStatus("All orders deleted.");
+    currentOrders = null; await runPlan();
+  };
 }
 
 // ---- Gantt ----

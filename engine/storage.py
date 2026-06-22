@@ -81,6 +81,14 @@ class LocalStore:
         d = self._read(key)
         return list(d.get("l", [])) if isinstance(d, dict) else []
 
+    def list_set(self, key, values) -> None:
+        self._write(key, {"l": list(values)})
+
+    def delete_key(self, key) -> None:
+        p = self._path(key)
+        if p.exists():
+            p.unlink()
+
 
 class UpstashStore:
     """Redis-over-HTTP via the Upstash REST API."""
@@ -121,6 +129,14 @@ class UpstashStore:
     def list_all(self, key) -> list:
         return self._cmd("LRANGE", key, 0, -1) or []
 
+    def list_set(self, key, values) -> None:
+        self._cmd("DEL", key)
+        if values:
+            self._cmd("RPUSH", key, *values)
+
+    def delete_key(self, key) -> None:
+        self._cmd("DEL", key)
+
 
 class MongoStore:
     """MongoDB Atlas backend (bigger free tier). Maps the kv/hash/list interface
@@ -156,6 +172,13 @@ class MongoStore:
     def list_all(self, key) -> list:
         d = self.db.list.find_one({"_id": key})
         return list(d.get("l", [])) if d else []
+
+    def list_set(self, key, values) -> None:
+        self.db.list.update_one({"_id": key}, {"$set": {"l": list(values)}}, upsert=True)
+
+    def delete_key(self, key) -> None:
+        for coll in ("kv", "hash", "list"):
+            self.db[coll].delete_one({"_id": key})
 
 
 def get_store():

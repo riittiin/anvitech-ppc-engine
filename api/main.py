@@ -23,7 +23,7 @@ import secrets
 import uuid
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.staticfiles import StaticFiles
@@ -116,6 +116,10 @@ def _report_table(masters):
 # --------------------------------------------------------------------------- #
 class RunRequest(BaseModel):
     config: Optional[dict] = None
+
+
+class DeleteRequest(BaseModel):
+    so_nos: List[str] = []
 
 
 class ActualRequest(BaseModel):
@@ -311,6 +315,20 @@ def orders():
     completed = book_store.load_completed_orders()
     actuals = book_store.load_actuals()
     return {"orders": to_table(orderbook.order_rows(active, completed, actuals))}
+
+
+@app.post("/orders/delete")
+def delete_orders(req: DeleteRequest):
+    """Permanently delete the given SO numbers (orders + their actuals)."""
+    n = book_store.delete_orders(req.so_nos)
+    return {"deleted": n}
+
+
+@app.post("/orders/clear")
+def clear_orders():
+    """Permanently delete ALL orders + actuals (masters are kept)."""
+    book_store.delete_all()
+    return {"cleared": True}
 
 
 @app.get("/gantt")

@@ -60,6 +60,27 @@ def test_active_so_lines_use_remaining_and_skip_done():
     assert by == {"SO1": 6}                                  # only SO1, at remaining 6
 
 
+def test_delete_orders_removes_order_and_its_actuals():
+    book_store.add_orders([_order("SO1", "A", 10, D), _order("SO2", "B", 5, D)])
+    book_store.append_actual(Actual("SO1", "A", D, qty_produced=4))
+    book_store.append_actual(Actual("SO2", "B", D, qty_produced=2))
+
+    book_store.delete_orders(["SO1"])
+    assert "SO1" not in book_store.load_active_orders()
+    assert "SO2" in book_store.load_active_orders()
+    remaining = book_store.load_actuals()
+    assert [a.so_no for a in remaining] == ["SO2"]   # SO1's actual purged
+
+
+def test_delete_all_wipes_orders_and_actuals():
+    book_store.add_orders([_order("SO1", "A", 10, D)])
+    book_store.append_actual(Actual("SO1", "A", D, qty_produced=4))
+    book_store.delete_all()
+    assert book_store.load_active_orders() == {}
+    assert book_store.load_completed_orders() == {}
+    assert book_store.load_actuals() == []
+
+
 def test_persistence_round_trip_and_complete():
     book_store.add_orders([_order("SO1", "A", 10, D)])
     book_store.append_actual(Actual("SO1", "A", D, qty_produced=4))

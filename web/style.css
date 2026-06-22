@@ -155,6 +155,10 @@ tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
 
 .complete-check { display: block; margin: 16px 0; font-size: 13px; color: var(--text); }
 .complete-check input { margin-right: 6px; vertical-align: middle; }
+
+.ord-toolbar { margin: 0 0 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+button.danger:hover { opacity: 0.9; }
 .g-toolbar { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
 .g-toolbar button { padding: 2px 10px; margin-left: 4px; font-size: 14px; line-height: 1; }
 .g-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 8px; }
