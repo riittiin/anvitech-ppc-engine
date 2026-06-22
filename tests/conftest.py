@@ -12,6 +12,7 @@ def _isolate_store(tmp_path, monkeypatch):
     monkeypatch.setenv("STORE_DIR", str(tmp_path / "store"))
     monkeypatch.delenv("UPSTASH_REDIS_REST_URL", raising=False)
     monkeypatch.delenv("UPSTASH_REDIS_REST_TOKEN", raising=False)
+    monkeypatch.delenv("MONGODB_URI", raising=False)
     yield
 
 

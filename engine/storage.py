@@ -122,8 +122,47 @@ class UpstashStore:
         return self._cmd("LRANGE", key, 0, -1) or []
 
 
+class MongoStore:
+    """MongoDB Atlas backend (bigger free tier). Maps the kv/hash/list interface
+    onto three collections; hash uses per-field $set/$unset and list uses $push,
+    so writes are atomic per field/entry (no read-modify-write overwrite)."""
+
+    DB_NAME = "anvitech"
+
+    def __init__(self, uri: str):
+        import pymongo  # lazy import; only needed when Mongo is configured
+        self.db = pymongo.MongoClient(uri)[self.DB_NAME]
+
+    def kv_get(self, key) -> Optional[str]:
+        d = self.db.kv.find_one({"_id": key})
+        return d["v"] if d else None
+
+    def kv_set(self, key, value: str) -> None:
+        self.db.kv.update_one({"_id": key}, {"$set": {"v": value}}, upsert=True)
+
+    def hgetall(self, key) -> dict:
+        d = self.db.hash.find_one({"_id": key})
+        return dict(d.get("h", {})) if d else {}
+
+    def hset(self, key, field, value: str) -> None:
+        self.db.hash.update_one({"_id": key}, {"$set": {f"h.{field}": value}}, upsert=True)
+
+    def hdel(self, key, field) -> None:
+        self.db.hash.update_one({"_id": key}, {"$unset": {f"h.{field}": ""}})
+
+    def list_append(self, key, value: str) -> None:
+        self.db.list.update_one({"_id": key}, {"$push": {"l": value}}, upsert=True)
+
+    def list_all(self, key) -> list:
+        d = self.db.list.find_one({"_id": key})
+        return list(d.get("l", [])) if d else []
+
+
 def get_store():
-    """Production Upstash store if configured, else a local file store."""
+    """Pick the backend: MongoDB Atlas > Upstash Redis > local file."""
+    mongo_uri = os.environ.get("MONGODB_URI")
+    if mongo_uri:
+        return MongoStore(mongo_uri)
     url = os.environ.get("UPSTASH_REDIS_REST_URL")
     token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
     if url and token:

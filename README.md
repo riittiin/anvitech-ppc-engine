@@ -51,8 +51,12 @@ production; locally the app keeps using `data/actuals.json` + memory.
 
 1. **Put the code on GitHub.** `git init && git add -A && git commit -m "init"`,
    create a repo, and push (Render deploys from Git).
-2. **Create a free Upstash Redis database** (no card) at upstash.com → open the DB →
-   copy its **REST URL** and **REST TOKEN**.
+2. **Pick a durable store** (the engine selects: MongoDB > Upstash > local file):
+   - **MongoDB Atlas (recommended, 5 GB free):** create a free M0 cluster, a DB
+     user, allow network access `0.0.0.0/0`, copy the `mongodb+srv://…` string →
+     set env var `MONGODB_URI`. (Needs `pymongo[srv]`, already in requirements.)
+   - **or Upstash Redis (256 MB free):** create a DB → copy its **REST URL** and
+     **REST TOKEN** → set `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`.
 3. **Create the Render service:** render.com → New → **Blueprint** → pick this repo
    (it reads `render.yaml`). Render builds and gives you a public `…onrender.com` URL.
 4. **Set env vars** in the Render service (Settings → Environment):

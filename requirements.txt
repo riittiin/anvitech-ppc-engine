@@ -2,4 +2,5 @@ fastapi
 uvicorn[standard]
 openpyxl
 python-multipart
+pymongo[srv]
 pytest

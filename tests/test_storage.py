@@ -36,3 +36,29 @@ def test_upstash_store_when_configured(monkeypatch):
     monkeypatch.setenv("UPSTASH_REDIS_REST_URL", "https://x.upstash.io")
     monkeypatch.setenv("UPSTASH_REDIS_REST_TOKEN", "tok")
     assert isinstance(storage.get_store(), storage.UpstashStore)
+
+
+def test_mongo_selected_and_takes_priority(monkeypatch):
+    import pytest
+    pytest.importorskip("pymongo")
+    # Mongo wins even if Upstash is also set. Use a plain (non-SRV) URI so the
+    # client stays lazy and doesn't do a DNS lookup here.
+    monkeypatch.setenv("MONGODB_URI", "mongodb://u:p@fake:27017/")
+    monkeypatch.setenv("UPSTASH_REDIS_REST_URL", "https://x.upstash.io")
+    monkeypatch.setenv("UPSTASH_REDIS_REST_TOKEN", "tok")
+    assert isinstance(storage.get_store(), storage.MongoStore)
+
+
+def test_mongo_store_round_trips_with_mongomock(monkeypatch):
+    import pytest
+    mongomock = pytest.importorskip("mongomock")
+    import pymongo
+    monkeypatch.setattr(pymongo, "MongoClient", mongomock.MongoClient)
+
+    s = storage.MongoStore("mongodb://fake/")
+    s.kv_set("k", "v"); assert s.kv_get("k") == "v"
+    s.hset("orders", "SO1", "a"); s.hset("orders", "SO2", "b")
+    assert s.hgetall("orders") == {"SO1": "a", "SO2": "b"}
+    s.hdel("orders", "SO1"); assert s.hgetall("orders") == {"SO2": "b"}
+    s.list_append("acts", "one"); s.list_append("acts", "two")
+    assert s.list_all("acts") == ["one", "two"]
