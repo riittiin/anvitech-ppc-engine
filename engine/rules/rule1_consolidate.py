@@ -1,0 +1,81 @@
+"""Rule 1 — Consolidate sales orders.
+
+Group SO lines of the SAME item code whose delivery dates fall within a
+configurable window (default 10 days) into one production batch.
+
+Pure function: ``run(so_lines, config, notes, masters) -> list[Batch]``.
+
+Algorithm (per item code): sort that item's lines by delivery date, then walk
+them greedily — a line joins the current batch if its delivery date is within
+``window`` days of the batch's GOVERNING (earliest) date; otherwise it opens a
+new batch. The governing date is the earliest delivery in the batch (it drives
+priority in Rule 2).
+"""
+from __future__ import annotations
+
+from collections import defaultdict
+
+from ..models import Batch
+
+
+def run(so_lines, config=None, notes=None, masters=None, **kw):
+    notes = notes if notes is not None else []
+    window = config.consolidation_window_days if config else 10
+
+    by_item = defaultdict(list)
+    for so in so_lines:
+        by_item[so.item_code].append(so)
+
+    batches = []
+    batch_counter = 0
+    for item_code in sorted(by_item.keys()):
+        # Lines sorted by SO delivery date; the batch's SO delivery date is the
+        # earliest one in the group (the binding customer commitment).
+        lines = sorted(by_item[item_code], key=lambda s: s.delivery_date)
+        current = None
+        for line in lines:
+            if current is None or (line.delivery_date - current["so_date"]).days > window:
+                if current is not None:
+                    batches.append(_finalize(current, batch_counter))
+                    batch_counter += 1
+                current = {
+                    "item_code": item_code,
+                    "item_name": line.item_name,
+                    "so_date": line.delivery_date,
+                    "qty": line.qty,
+                    "so_refs": [line.so_no],
+                }
+            else:
+                current["qty"] += line.qty
+                current["so_refs"].append(line.so_no)
+                gap = (line.delivery_date - current["so_date"]).days
+                notes.append(
+                    f"{item_code}: SO {line.so_no} (SO delivery date "
+                    f"{line.delivery_date.isoformat()}) clubbed into batch with SO "
+                    f"delivery date {current['so_date'].isoformat()} "
+                    f"— {gap} day(s) apart, within {window}-day window"
+                )
+        if current is not None:
+            batches.append(_finalize(current, batch_counter))
+            batch_counter += 1
+
+    # Note the singletons / splits for visibility.
+    for b in batches:
+        if len(b.source_so_refs) == 1:
+            notes.append(
+                f"{b.item_code}: SO {b.source_so_refs[0]} stands alone "
+                f"(no other line within {window} days)"
+            )
+
+    return batches
+
+
+def _finalize(cur, idx) -> Batch:
+    return Batch(
+        batch_id=f"B{idx + 1:03d}",
+        item_code=cur["item_code"],
+        item_name=cur["item_name"],
+        qty=cur["qty"],
+        so_delivery_date=cur["so_date"],
+        source_so_refs=list(cur["so_refs"]),
+    )

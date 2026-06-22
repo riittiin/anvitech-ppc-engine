@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Anvitech PPC Engine</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Anvitech PPC Engine</h1>
+  </header>
+
+  <section class="controls">
+    <div class="config">
+      <label>Consolidation window (days)
+        <input id="cfg-window" type="number" value="10" min="0" />
+      </label>
+      <label>Setup time (min)
+        <input id="cfg-setup" type="number" value="90" min="0" />
+      </label>
+      <label>Overlap mode
+        <select id="cfg-overlap">
+          <option value="sequential">Sequential</option>
+          <option value="overlap">Overlap %</option>
+        </select>
+      </label>
+      <label>Overlap %
+        <input id="cfg-overlap-pct" type="number" value="50" min="0" max="100" />
+      </label>
+      <label>Parallel trigger (qty)
+        <input id="cfg-parallel" type="number" value="400" min="0" />
+      </label>
+      <label>Priority metric (Rule 3)
+        <select id="cfg-priority-metric">
+          <option value="slack">Least slack</option>
+          <option value="critical_ratio">Critical ratio</option>
+          <option value="process_time">Process time (legacy)</option>
+        </select>
+      </label>
+      <label>Priority window
+        <select id="cfg-priority-window">
+          <option value="">No limit</option>
+          <option value="3">Within 3 days</option>
+          <option value="10">Within 10 days</option>
+          <option value="0">Exact date only</option>
+        </select>
+      </label>
+    </div>
+    <div class="actions">
+      <button id="run-btn" class="primary">▶ Run plan</button>
+      <button id="rerun-btn">↻ Rerun MRP (Rule 9)</button>
+      <span id="status" class="status"></span>
+    </div>
+  </section>
+
+  <section class="datasource">
+    <label class="upload-label">📁 Production Excel
+      <input id="xlsx-file" type="file" accept=".xlsx" />
+    </label>
+    <button id="upload-btn">Upload &amp; use</button>
+    <span id="dataset-status" class="status">Data: test file (Test2.xlsx) — upload your own to plan against it.</span>
+  </section>
+
+  <section id="report-panel" class="report hidden">
+    <button id="report-toggle" class="report-summary"></button>
+    <div id="report-detail" class="hidden"></div>
+  </section>
+
+  <nav id="tabs" class="tabs"></nav>
+
+  <main id="tab-content" class="tab-content">
+    <p class="placeholder">Click <strong>Run plan</strong> to populate the rule tabs.</p>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

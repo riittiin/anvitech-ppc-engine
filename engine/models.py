@@ -1,0 +1,359 @@
+"""Typed data models for the PPC engine.
+
+Every model exposes ``as_row()`` returning an ordered dict of plain,
+JSON-serializable values. The pipeline's ``to_table`` helper uses that to turn
+any model (or list of models) into a ``{columns, rows}`` table for the trace —
+so the per-rule frontend tabs need no per-model code (Design spec §5).
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from typing import Optional
+
+
+def _fmt(value):
+    """Render a value as a plain, JSON-friendly scalar for a trace table cell."""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    return value
+
+
+# --------------------------------------------------------------------------- #
+# Demand
+# --------------------------------------------------------------------------- #
+@dataclass
+class SOLine:
+    """One raw sales-order line from the SO list sheet."""
+
+    so_no: str
+    item_code: str
+    item_name: str
+    qty: float
+    delivery_date: date
+    pending_qty: Optional[float] = None
+    customer: str = ""
+    remarks: str = ""
+
+    def as_row(self):
+        return {
+            "SO No": self.so_no,
+            "Item Code": self.item_code,
+            "Item Name": self.item_name,
+            "Qty": self.qty,
+            "SO Delivery Date": _fmt(self.delivery_date),
+            "Pending Qty": self.pending_qty,
+            "Customer": self.customer,
+            "Remarks": self.remarks,
+        }
+
+
+@dataclass
+class Batch:
+    """A consolidated production batch (Rule 1 output)."""
+
+    batch_id: str
+    item_code: str
+    item_name: str
+    qty: float
+    so_delivery_date: date         # the SO Delivery Date that governs the batch
+                                   # (earliest SO delivery date of the merged lines)
+    source_so_refs: list = field(default_factory=list)
+    total_process_time: Optional[float] = None  # filled by Rule 3 (cycle-time sum)
+
+    def as_row(self):
+        return {
+            "Batch ID": self.batch_id,
+            "Item Code": self.item_code,
+            "Item Name": self.item_name,
+            "Qty": self.qty,
+            "SO Delivery Date": _fmt(self.so_delivery_date),
+            "Source SOs": _fmt(self.source_so_refs),
+            "Total Process Time (min)": self.total_process_time,
+        }
+
+
+# --------------------------------------------------------------------------- #
+# Routing master
+# --------------------------------------------------------------------------- #
+@dataclass
+class Process:
+    """One step in an item's routing."""
+
+    seq: int
+    name: str
+    cycle_time: Optional[float]      # minutes per piece
+    total_time: Optional[float]      # minutes (as recorded; may be sparse)
+    suggested_machine: Optional[str]  # raw label from the sheet
+    allotted_machine: Optional[str]
+
+    def as_row(self):
+        return {
+            "Seq": self.seq,
+            "Process": self.name,
+            "Cycle Time (min)": self.cycle_time,
+            "Total Time (min)": self.total_time,
+            "Suggested M/c": self.suggested_machine,
+            "Allotted M/c": self.allotted_machine,
+        }
+
+
+@dataclass
+class Routing:
+    """An item's full recipe: ordered processes + RM info."""
+
+    item_code: str
+    description: str
+    customer: str
+    rm_type: str
+    moq: Optional[float]
+    processes: list = field(default_factory=list)  # list[Process]
+
+    def total_cycle_time(self) -> float:
+        """Rule 3 metric: sum of per-process cycle times (minutes).
+
+        Confirmed against the SO Remarks oracle: this ranking (not the sparse
+        'Total time' column) reproduces the documented priorities.
+        """
+        return sum(p.cycle_time for p in self.processes if isinstance(p.cycle_time, (int, float)))
+
+    def as_row(self):
+        return {
+            "Item Code": self.item_code,
+            "Description": self.description,
+            "Customer": self.customer,
+            "RM Type": self.rm_type,
+            "MOQ": self.moq,
+            "# Processes": len(self.processes),
+            "Total Cycle Time (min)": self.total_cycle_time(),
+        }
+
+
+# --------------------------------------------------------------------------- #
+# Resource masters
+# --------------------------------------------------------------------------- #
+@dataclass
+class Machine:
+    """A machine/resource. ``provisional`` = referenced by a routing but not yet
+    in Machine master (PENDING_MASTER_DATA). Adding it to the Excel later needs
+    no code change — it simply stops being provisional."""
+
+    machine_no: str        # canonical id (normalized, e.g. 'CNC4')
+    display_name: str      # as written in the master, e.g. 'CNC 4'
+    machine_type: str
+    hr_rate: Optional[float] = None
+    provisional: bool = False
+
+    def as_row(self):
+        return {
+            "Machine No": self.display_name,
+            "Canonical": self.machine_no,
+            "Type": self.machine_type,
+            "Hr Rate (Rs)": self.hr_rate,
+            "Provisional": self.provisional,
+        }
+
+
+@dataclass
+class Operator:
+    name: str
+    preferred_machines_raw: str = ""
+    machines: list = field(default_factory=list)  # best-effort canonical ids
+
+    def as_row(self):
+        return {
+            "Operator": self.name,
+            "Preferred Machines": self.preferred_machines_raw,
+            "Parsed": _fmt(self.machines),
+        }
+
+
+@dataclass
+class WorkCalendar:
+    """Non-working days. Weekly off = every Thursday (weekday 3) + holidays +
+    operator leaves."""
+
+    weekly_off_weekday: int = 3  # Thursday
+    holidays: list = field(default_factory=list)  # list[date]
+    leaves: list = field(default_factory=list)     # list[(name, date)]
+
+    def is_working_day(self, d: date) -> bool:
+        if d.weekday() == self.weekly_off_weekday:
+            return False
+        if d in self.holidays:
+            return False
+        return True
+
+
+# --------------------------------------------------------------------------- #
+# Schedule + actuals
+# --------------------------------------------------------------------------- #
+@dataclass
+class ScheduleEntry:
+    """One process of one batch placed on a machine (Rule 6 output)."""
+
+    batch_id: str
+    item_code: str
+    process_seq: int
+    process_name: str
+    machine: str            # canonical id chosen
+    qty: float
+    occupancy_min: float
+    start: datetime
+    end: datetime
+    notes: str = ""
+
+    def as_row(self):
+        return {
+            "Batch ID": self.batch_id,
+            "Item Code": self.item_code,
+            "Seq": self.process_seq,
+            "Process": self.process_name,
+            "Machine": self.machine,
+            "Qty": self.qty,
+            "Occupancy (min)": round(self.occupancy_min, 2),
+            "Start": _fmt(self.start),
+            "End": _fmt(self.end),
+            "Notes": self.notes,
+        }
+
+
+@dataclass
+class Actual:
+    """A daily production entry (Rule 8). Persisted to data/actuals.json.
+
+    Mirrors the shop's 'Daily Production Entry' form: identity (date / shift / SO /
+    item / process), output (produced / rejected), the actual setup time, and the
+    six downtime/loss categories in minutes, plus free-text remarks.
+    """
+
+    # --- identity / context ------------------------------------------------- #
+    so_no: str
+    item_code: str
+    entry_date: date
+    qty_produced: float = 0.0
+    qty_rejected: float = 0.0
+    shift: str = ""
+    item_name: str = ""      # auto-prompted from the routing (display only)
+    process: str = ""        # which routing process this entry reports
+    # --- actual setup time (planned default lives in config.setup_time_min) -- #
+    actual_setup_min: float = 0.0
+    # --- downtime / loss categories (minutes) ------------------------------- #
+    no_power_min: float = 0.0
+    no_operator_min: float = 0.0
+    tool_problem_min: float = 0.0
+    machine_breakdown_min: float = 0.0
+    no_load_min: float = 0.0
+    other_work_min: float = 0.0
+    remarks: str = ""
+
+    # Loss categories that count as wasted machine time.
+    DOWNTIME_FIELDS = (
+        ("no_power_min", "No Power"),
+        ("no_operator_min", "No Operator"),
+        ("tool_problem_min", "Tool Problem"),
+        ("machine_breakdown_min", "M/c Breakdown"),
+        ("no_load_min", "No Load"),
+        ("other_work_min", "Other Work"),
+    )
+
+    def total_downtime_min(self) -> float:
+        return sum(getattr(self, f) for f, _ in self.DOWNTIME_FIELDS)
+
+    def good_qty(self) -> float:
+        """Pieces that actually fulfil the order = produced − rejected."""
+        return max(self.qty_produced - self.qty_rejected, 0.0)
+
+    def as_row(self):
+        return {
+            "Date": _fmt(self.entry_date),
+            "Shift": self.shift,
+            "SO No": self.so_no,
+            "Item Code": self.item_code,
+            "Item Name": self.item_name,
+            "Process": self.process,
+            "Qty Produced": self.qty_produced,
+            "Qty Rejected": self.qty_rejected,
+            "Good Qty": self.good_qty(),
+            "Setup (min)": self.actual_setup_min,
+            "No Power": self.no_power_min,
+            "No Operator": self.no_operator_min,
+            "Tool Problem": self.tool_problem_min,
+            "M/c Breakdown": self.machine_breakdown_min,
+            "No Load": self.no_load_min,
+            "Other Work": self.other_work_min,
+            "Total Downtime (min)": self.total_downtime_min(),
+            "Remarks": self.remarks,
+        }
+
+    def to_json(self):
+        return {
+            "so_no": self.so_no,
+            "item_code": self.item_code,
+            "entry_date": self.entry_date.isoformat(),
+            "qty_produced": self.qty_produced,
+            "qty_rejected": self.qty_rejected,
+            "shift": self.shift,
+            "item_name": self.item_name,
+            "process": self.process,
+            "actual_setup_min": self.actual_setup_min,
+            "no_power_min": self.no_power_min,
+            "no_operator_min": self.no_operator_min,
+            "tool_problem_min": self.tool_problem_min,
+            "machine_breakdown_min": self.machine_breakdown_min,
+            "no_load_min": self.no_load_min,
+            "other_work_min": self.other_work_min,
+            "remarks": self.remarks,
+        }
+
+    @classmethod
+    def from_json(cls, d: dict) -> "Actual":
+        return cls(
+            so_no=d.get("so_no", ""),
+            item_code=d.get("item_code", ""),
+            entry_date=date.fromisoformat(d["entry_date"]),
+            qty_produced=d.get("qty_produced", 0.0),
+            qty_rejected=d.get("qty_rejected", 0.0),
+            shift=d.get("shift", ""),
+            item_name=d.get("item_name", ""),
+            process=d.get("process", ""),
+            # accept the old key name for forward-compat with any saved file.
+            actual_setup_min=d.get("actual_setup_min", d.get("setup_time_min", 0.0)),
+            no_power_min=d.get("no_power_min", 0.0),
+            no_operator_min=d.get("no_operator_min", 0.0),
+            tool_problem_min=d.get("tool_problem_min", 0.0),
+            machine_breakdown_min=d.get("machine_breakdown_min", 0.0),
+            no_load_min=d.get("no_load_min", 0.0),
+            other_work_min=d.get("other_work_min", 0.0),
+            remarks=d.get("remarks", d.get("downtime_reason", "")),
+        )
+
+
+@dataclass
+class Masters:
+    """Everything loaded from Test2.xlsx, plus the loader validation report."""
+
+    machines: dict = field(default_factory=dict)    # canonical id -> Machine
+    routings: dict = field(default_factory=dict)     # item_code -> Routing
+    operators: list = field(default_factory=list)    # list[Operator]
+    calendar: WorkCalendar = field(default_factory=WorkCalendar)
+    report: list = field(default_factory=list)       # list[dict] non-blocking issues
+
+    def add_report(self, kind: str, ref: str, message: str):
+        self.report.append({"kind": kind, "ref": ref, "message": message})
+
+
+@dataclass
+class PlanRun:
+    """Carrier object threaded through the pipeline (Design spec §4)."""
+
+    so_lines: list = field(default_factory=list)
+    batches: list = field(default_factory=list)
+    batches_sorted: list = field(default_factory=list)
+    batches_prioritized: list = field(default_factory=list)
+    schedule: list = field(default_factory=list)
+    actuals: list = field(default_factory=list)

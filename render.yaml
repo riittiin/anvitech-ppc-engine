@@ -1,0 +1,19 @@
+# Render Blueprint — free public deployment.
+# Create the service from this file (Render dashboard → New → Blueprint), then set
+# the secret env vars (marked sync:false) in the dashboard.
+services:
+  - type: web
+    name: anvitech-ppc
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: APP_USERNAME           # login id
+        sync: false
+      - key: APP_PASSWORD           # login password
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL # from the Upstash console (durable storage)
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false

@@ -1,0 +1,13 @@
+# Keep the deployment small — exclude anything not needed at runtime.
+tests/
+docs/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+data/actuals.json
+~$*.xlsx
+.gstack/
+implementation.md
+START_HERE_FOR_IMPLEMENTATION.md
