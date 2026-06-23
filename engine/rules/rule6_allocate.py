@@ -123,9 +123,12 @@ def run(batches, config=None, notes=None, masters=None, **kw):
         ))
 
         # Advance this batch and set when its next process may start (Rule 5).
+        # Overlap measures the previous process's CUTTING time only (setup
+        # excluded); a no-cutting step does not overlap.
         s["next"] += 1
         if s["next"] < len(s["routing"].processes):
-            elapsed = r5.elapsed_before_next(occ, config)
+            run_min = (proc.cycle_time or 0.0) * (s["batch"].qty or 0.0)
+            elapsed = r5.elapsed_before_next(occ, run_min, config)
             s["ready"] = clock.advance(start, elapsed)
         scheduled += 1
 

@@ -110,13 +110,28 @@ Provide a two-option selection:
 - **(a) Sequential** — a process starts only after the previous process is
   **fully completed**, OR
 - **(b) Overlap** — a process starts after **50% (user-defined) of the previous
-  process** is done.
+  process's _cutting time_** is done.
+
+**What the 50% measures (data-confirmed decision).** Machine occupancy =
+*cutting time* (cycle × qty) **+ a 90-min setup** (Rule 4). The source rule says
+"50% of first operation time," but does not define whether that includes setup.
+It is measured against the **cutting time only — the setup is excluded**, because
+while the previous operation cuts, the *next* machine's own setup runs in
+parallel (so the previous setup need not be counted). This makes the knob mean
+"start the next operation when X% of the parts are machined," and it shortens the
+plan more than counting setup would.
+
+**No-cutting steps don't overlap.** A finishing/inspection step with **no cycle
+time** (deburring, CMM, inspection, washing, packing) produces nothing gradually,
+so overlap is meaningless for it — its successor **waits for it to fully
+complete** (as in sequential mode). Overlap only compresses real machining steps.
 
 - **Source:** original Rule 6 (sheet rows 19–20, verbatim: "second operation
   shall start after first is fully completed" / "after 50% (or user defined) of
   first operation time is over")
 - **Consumed by:** Rule 6 (start-time calculation for each next process)
-- **Parameter:** overlap threshold = 50% (configurable)
+- **Parameter:** overlap threshold = 50% (configurable). The percentage applies
+  to the previous process's cutting time, not its setup.
 
 ### ⚙️ Rule 7 — Parallel machine for large batches  *(Parameter / calc — nested in Rule 6)*
 If **batch size > 400**, allot a **separate (preferred) machine for the next CNC

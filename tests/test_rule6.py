@@ -116,6 +116,37 @@ def test_machine_view_reports_zero_idle_when_continuous():
     assert m_summary["Utilization %"] >= 99.0
 
 
+def test_overlap_excludes_setup_and_skips_no_cutting_steps():
+    """Under overlap: a machining step's successor starts after % of its CUTTING
+    only (setup excluded); a no-cutting finishing step does NOT overlap — its
+    successor waits for it to fully complete."""
+    masters = Masters(
+        machines={"M": _machine("M"), "N": _machine("N"), "O": _machine("O")},
+        calendar=WorkCalendar(),
+    )
+    masters.routings["X"] = Routing(
+        item_code="X", description="", customer="", rm_type="", moq=None,
+        processes=[
+            Process(1, "machine", cycle_time=10, total_time=None, suggested_machine="M", allotted_machine=None),
+            Process(2, "deburr", cycle_time=None, total_time=None, suggested_machine="N", allotted_machine=None),
+            Process(3, "inspect", cycle_time=None, total_time=None, suggested_machine="O", allotted_machine=None),
+        ],
+    )
+    cfg = Config(plan_start_date=date(2025, 3, 5),
+                 overlap_mode=OVERLAP_PERCENT, overlap_percent=50)
+    batch = Batch(batch_id="X1", item_code="X", item_name="X", qty=10,
+                  so_delivery_date=date(2025, 3, 7), source_so_refs=["SO"])
+    sched = rule6_allocate.run([batch], config=cfg, masters=masters)
+    p1 = next(e for e in sched if e.process_seq == 1)  # machining (cutting 100 + setup 90)
+    p2 = next(e for e in sched if e.process_seq == 2)  # finishing (no cutting)
+    p3 = next(e for e in sched if e.process_seq == 3)  # finishing (no cutting)
+
+    # P2 (after a machining step) overlaps: starts before P1 fully finishes.
+    assert p2.start < p1.end
+    # P3 (after a no-cutting step) does NOT overlap: starts when P2 fully ends.
+    assert p3.start == p2.end
+
+
 def test_no_routing_raises_rule_error(loaded):
     _, masters = loaded
     from engine.pipeline import RuleError

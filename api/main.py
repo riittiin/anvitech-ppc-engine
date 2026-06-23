@@ -178,15 +178,34 @@ def _augment_helpers(trace, plan_run, config, masters):
         "config": config.to_dict(), "notes": notes4, "error": None, "reached": True,
     }
 
-    seq = r5.elapsed_before_next(200, Config(overlap_mode=OVERLAP_SEQUENTIAL))
-    ov = r5.elapsed_before_next(200, Config(overlap_mode=OVERLAP_PERCENT, overlap_percent=config.overlap_percent))
+    # Rule 5 applied to THIS plan: every operation handoff, what it waited under
+    # sequential vs this run, and how much overlap pulled the next op earlier.
+    pct = config.overlap_percent
+    overlap_rows = r5.build_overlap_view(plan_run.schedule, config)
+    total_pulled = sum(r["Pulled earlier (min)"] for r in overlap_rows)
+    n_overlapped = sum(1 for r in overlap_rows if r["Overlap applied"].startswith("yes"))
+    rule5_notes = [
+        f"Active mode this run: {config.overlap_mode}"
+        + (f" ({pct}% of cutting time)" if config.overlap_mode == OVERLAP_PERCENT else ""),
+        f"{len(overlap_rows)} operation handoff(s) in this plan; {n_overlapped} overlapped, "
+        f"pulling later operations {total_pulled:g} working-minutes earlier in total vs sequential.",
+        "Overlap % applies to the cutting time only — the 90-min setup is excluded "
+        "(the next machine is set up in parallel). A step with no cutting time "
+        "(deburring, inspection, washing, packing) does not overlap; its successor "
+        "waits for it to fully complete.",
+    ]
+    if not overlap_rows:
+        rule5_notes.append("No scheduled operations yet — upload orders and click Plan.")
     trace["rule5"] = {
-        "input": to_table([{"Previous occupancy (min)": 200}]),
-        "output": to_table([
-            {"Mode": "sequential", "Next starts after (min)": seq},
-            {"Mode": f"overlap {config.overlap_percent}%", "Next starts after (min)": ov},
-        ]),
-        "config": config.to_dict(), "notes": [f"active mode this run: {config.overlap_mode}"],
+        "input": to_table([{
+            "Overlap mode": config.overlap_mode,
+            "Overlap %": pct,
+            "Setup excluded from overlap (min)": config.setup_time_min,
+            "Operation handoffs in plan": len(overlap_rows),
+        }]),
+        "output": to_table(overlap_rows),
+        "config": config.to_dict(),
+        "notes": rule5_notes,
         "error": None, "reached": True,
     }
 
