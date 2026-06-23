@@ -1,8 +1,11 @@
 # HANDOFF — Anvitech PPC Engine
 
-Orientation for a **new Claude Code session** taking over this project. Read
-[`CLAUDE.md`](CLAUDE.md) first (design principles, data flow, code map); this doc is
-the current-state snapshot and operational notes.
+Orientation for a **new Claude Code session** taking over this project. The goal is
+to pick up **exactly where the last session left off — same standards, same way of
+working with the user, same grasp of the domain**, not just the same codebase. Read
+this whole file (especially **"How to pick up where the last session left off"**
+below), then [`CLAUDE.md`](CLAUDE.md) for the technical reference (design principles,
+data flow, code map).
 
 ---
 
@@ -17,6 +20,57 @@ job shop. **Built, tested, and deployed live.**
   Render auto-redeploys.
 - **65 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
   Python engine.
+
+## How to pick up where the last session left off (behavioral context)
+
+This project was built across one long, iterative session. To continue smoothly,
+**work the way that session did** — the patterns below are what kept it on track.
+This section matters as much as the architecture.
+
+### Who the user is
+- The **owner/operator of Anvitech** (a precision-machining job shop) — a domain
+  expert on the shop floor, **not a software engineer**. He talks in business terms:
+  sales orders, SO numbers, delivery dates, shifts, downtime, machines.
+- He wants a **real, free, deployed** tool his workers + planner will actually use.
+  Cost must be **$0** (hence free tiers: Render + MongoDB Atlas free).
+- **Decisive and iterative.** He surfaces edge cases and "loopholes" himself and
+  wants to **understand the *why*** before changing things.
+- He **does the external-service signups himself** (Render, Atlas, etc.) and expects
+  you to do **all the code** and give him **only his manual steps** — one at a time,
+  with exact clicks, marked "do now" vs "after I deploy." He gets understandably
+  frustrated when stuck navigating a dashboard ("where is X?") — be **patient and
+  precise**, point at the exact button, and ask what he sees if unsure.
+
+### How to behave (the working norms that worked)
+1. **Verify before you claim anything works.** Run `pytest`, do a `curl` smoke of the
+   real flow (upload → plan → actual → mark-complete → delete), load the UI and check
+   the browser console, and hit the live URL (`401` = up). **Evidence before
+   assertions** — never say "it works" without it.
+2. **Plain language, business framing.** No jargon. Use **tables** and **short numbered
+   steps**. Explain shop-floor impact, not implementation detail, unless he asks.
+3. **Be honest — including about your own mistakes.** State tradeoffs and caveats up
+   front; correct yourself when wrong (e.g. MongoDB free is **512 MB, not 5 GB** — a
+   real mid-session correction). Never paper over a limitation to sound finished.
+4. **Decide-and-state; ask only when it matters.** Make sensible defaults and say so.
+   Ask a **single focused question** only when genuinely ambiguous AND it changes the
+   outcome (SO# identity, archive-vs-delete, overdue handling were worth asking; most
+   things weren't).
+5. **Plan big features first.** For substantive work use brainstorming → spec → plan:
+   one question at a time, present the design, get approval, write the spec to
+   `docs/superpowers/specs/`, *then* implement. The order book was built exactly this way.
+6. **Protect the live site.** It's deployed and holds real data. Build risky/large
+   changes on a **branch**, merge to `main` only when approved. **Commit/push to `main`
+   only when the user asks** (push = deploy).
+7. **Keep the UI minimal.** He values an uncluttered interface (he had the rule tabs
+   stripped to just input / output / notes). Add nothing that doesn't serve the flow.
+8. **Reuse, never duplicate.** Rules stay pure; the order book is the only stateful
+   layer; "Plan" reuses Rules 1–7.
+9. **Keep tests, the golden snapshot, and docs in lockstep** with every change.
+
+### Communication shape
+- Lead with the result/answer, then the detail.
+- Use ✅ / ⚠️ and tables so status is scannable.
+- End with a clear next step or **one** focused question — not a wall of options.
 
 ## What it is now (architecture)
 
