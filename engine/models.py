@@ -224,7 +224,7 @@ class ScheduleEntry:
 
 @dataclass
 class Actual:
-    """A daily production entry (Rule 8). Persisted to data/actuals.json.
+    """A daily production entry (Rule 8). Persisted via the durable store (book_store/storage).
 
     Mirrors the shop's 'Daily Production Entry' form: identity (date / shift / SO /
     item / process), output (produced / rejected), the actual setup time, and the

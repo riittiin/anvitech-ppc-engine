@@ -10,22 +10,23 @@ machines following 9 business rules, then re-plans as actual production comes in
 
 - **Rules (source of truth):** [`RULES.md`](RULES.md) — the 9 rules in execution
   order, with input/output for each.
-- **Design spec:** [`docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md`](docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md)
-- **Build plan:** [`implementation.md`](implementation.md)
+- **Design spec (original 9 rules):** [`docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md`](docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md)
+- **Order-book design (current architecture):** [`docs/superpowers/specs/2026-06-22-order-book-design.md`](docs/superpowers/specs/2026-06-22-order-book-design.md)
 - **Original data + requirements:** `Test2.xlsx` (12 sheets).
 
 ## Stack
 
 - **Backend:** Python + FastAPI. The engine is plain Python; FastAPI is a thin layer.
 - **Frontend:** lightweight HTML/JS with **per-rule tabs**.
-- **Data source:** `Test2.xlsx`, read **read-only** via openpyxl. **Test-only:** in
-  production the user **uploads** the masters/SO Excel through the website; the
-  loader runs against the uploaded workbook, with `Test2.xlsx` as the test/demo
-  default. Implemented via `POST /upload` (parses to an in-memory `dataset_id`;
-  `load_all` accepts a BytesIO); the frontend sends `dataset_id` on every call,
-  falling back to `Test2.xlsx` when none. Uploaded datasets are in-memory only
-  (durable storage is a deferred task).
-- **Writable data:** `data/actuals.json` only.
+- **Data source:** `Test2.xlsx`, read **read-only** via openpyxl — the **test/demo
+  default** only. In production the user **uploads** their masters/SO Excel via
+  `POST /upload`, which **merges the orders into a persistent order book** (keyed by
+  unique SO number) and stores the workbook's masters. `load_all` accepts a path or
+  a BytesIO.
+- **Persistent state (the order book):** orders, their actuals, and the latest
+  masters live in a durable key/value store. `engine/storage.py` selects the backend:
+  **MongoDB Atlas (`MONGODB_URI`) > Upstash Redis > local file (`data/store/`)**.
+  This store is the only thing the app writes; `Test2.xlsx` is never modified.
 
 ## Non-negotiable design principles
 
@@ -35,14 +36,16 @@ violate them without the user's explicit say-so.
 1. **Every rule is a pure function.** `def run(input_data, config, masters) -> output`.
    No global state, no UI calls, no rule calling another rule. Only `pipeline.py`
    knows the order.
-2. **Rule 9 reuses Rules 1–7 — never duplicates them.** Rule 9 imports and calls
-   `rule1..rule7` with updated quantities. A fix to Rules 1–7 must automatically
-   flow to the loop. If you find yourself copying rule logic into Rule 9, stop.
+2. **Planning reuses Rules 1–7 — never duplicates them.** The order book emits the
+   active SO-lines (each at its *remaining* qty = ordered − good produced) and feeds
+   them straight into the unchanged Rules 1–7 (`api._plan` → `pipeline.run_forward`).
+   "Plan" and the old "Rerun MRP" are now one action. Never copy rule logic into the
+   order-book layer (`engine/orderbook.py`).
 3. **The pipeline snapshots every rule's input and output into a trace.** This is
    what powers the per-rule tabs. Don't add per-rule UI code — visibility comes
    from the trace. See `pipeline.py` `run_rule()`.
-4. **`Test2.xlsx` is read-only.** The only thing the app writes is
-   `data/actuals.json`. Keep source data clean and runs reproducible.
+4. **`Test2.xlsx` is read-only.** The only thing the app writes is the durable
+   store (order book + actuals, via `engine/storage.py`). Keep source data clean.
 5. **Fail loud, fail localized — two distinct layers:**
    - **(a) Loader-level data gaps** (`PENDING_MASTER_DATA`, `NO_ROUTING`) are
      **non-blocking**: report them and continue, skipping only the affected
@@ -54,14 +57,24 @@ violate them without the user's explicit say-so.
 ## Data flow (memorize this)
 
 ```
-so_lines → R1 consolidate → R2 sort by date → R3 tiebreak (reads routing)
-        → R6 allocate (uses R4 setup, R5 overlap, R7 parallel + masters)
-        → R8 capture actuals → R9 rerun MRP (calls R1..R7 again)
+Upload Excel ─▶ MERGE into the Order Book (by SO#)   ┐
+Rule 8 actual ─▶ recorded vs SO# (+ optional complete)┘
+                              │
+   Order Book ──▶ active SO-lines (remaining qty) ──▶ R1 consolidate ─▶ R2 sort
+   (orders · actuals · masters)                       ─▶ R3 smart priority (slack)
+                                                       ─▶ R6 allocate (R4 setup,
+                                                          R5 overlap, R7 parallel)
+                                                       ─▶ schedule + Gantt
 ```
 
-- Forward chain: `1 → 2 → 3 → 6 → 8 → 9 (loop)`
-- Consumed inside Rule 6: Rules 4, 5, 7
-- Rule 3 also reads the routing master.
+- Forward chain (the pure rules): `1 → 2 → 3 → 6`. Rules **4, 5, 7** are consumed
+  inside Rule 6; Rule 3 also reads the routing master.
+- **"Plan"** = take every active (non-completed) order at its remaining qty and run
+  the forward chain. It **unifies the old "Run" and "Rerun MRP"**. The trace's
+  `rule9` tab is a *view* of the planned book, not a separate module.
+- Order lifecycle (status is **derived**): **Pending** → *(first actual)* →
+  **Running** → *(user ticks "mark complete" on a Rule 8 entry)* → **Complete**
+  (archived, excluded from planning).
 
 ## Known data quirks in Test2.xlsx (handle in the loader)
 
@@ -115,11 +128,12 @@ so_lines → R1 consolidate → R2 sort by date → R3 tiebreak (reads routing)
 - Regenerate golden trace after an intentional logic change:
   `REGEN_GOLDEN=1 pytest -k golden`
 - **Login:** whole app is behind HTTP Basic Auth — `APP_USERNAME`/`APP_PASSWORD`
-  env vars (defaults `anvitech`/`ppc2025`). Implemented as a middleware in
-  `api/main.py`.
-- **Vercel deploy:** `vercel.json` + `api/index.py` (entrypoint re-exporting the
-  app). Actuals write to `/tmp` on Vercel (ephemeral) via `ACTUALS_PATH`/`VERCEL`
-  detection in `rule8`. See README "Deploying to Vercel".
+  env vars (defaults `anvitech`/`ppc2025`). Middleware in `api/main.py`.
+- **Deploy (Render + MongoDB Atlas):** `render.yaml` runs `uvicorn api.main:app`.
+  On Render set env vars: `APP_USERNAME`, `APP_PASSWORD`, and the store
+  (`MONGODB_URI`, or the Upstash pair). Persistence is **opt-in** via those vars;
+  with none set the app uses a local file store (`data/store/`). Pushing to `main`
+  auto-redeploys. See README "Free public deployment".
 
 ## Map of the code
 
@@ -131,14 +145,25 @@ so_lines → R1 consolidate → R2 sort by date → R3 tiebreak (reads routing)
 - `engine/worktime.py` — `WorkClock`: shifts + Thursday/holiday skip for Rule 6.
 - `engine/pipeline.py` — `run_rule` (snapshots in/out/config/notes), `run_forward`
   (1→2→3→6), `RuleError`, `to_table`.
-- `engine/gantt.py` — `build_gantt`: turns the Rule 6 schedule into the worker-facing
-  Gantt view-model (per-order rows, day axis, time-positioned bars coloured by
-  machine). Served at `GET /gantt` and bundled in `/run`/`/rerun`; rendered in the
-  web `📊 Gantt` tab.
-- `engine/rules/ruleN_*.py` — one pure `run(...)` per rule; 4/5/7 also expose the
-  calc helpers Rule 6 imports.
-- `api/main.py` — FastAPI endpoints + helper-tab augmentation.
-- `web/` — per-rule tabs (`app.js` renders the trace; no per-rule UI code).
+- `engine/orderbook.py` — **order-book logic (pure)**: `merge_upload` (add new /
+  flag repeat / flag completed / intra-upload dedup, all by SO#), `derive_status`
+  (Pending/Running/Complete), `active_so_lines` (remaining qty for planning),
+  `order_rows` (dashboard).
+- `engine/book_store.py` — durable persistence of the book: active orders + the
+  completed archive (hashes by SO#), actuals (append-only list), masters workbook.
+  `delete_orders` / `delete_all` for permanent deletes.
+- `engine/storage.py` — the store interface (kv/hash/list) + backends:
+  `MongoStore` / `UpstashStore` / `LocalStore`; `get_store()` picks by env.
+- `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
+  (per-order rows, hour axis, time-positioned bars by machine, Pending/Running label).
+- `engine/rules/ruleN_*.py` — Rules 1–8, one pure `run(...)` each; 4/5/7 also expose
+  the calc helpers Rule 6 imports. (There is no `rule9` module — Rule 9 is the unified
+  "Plan" over the order book; see `api._plan`.)
+- `api/main.py` — FastAPI: `/upload` (merge), `/run`=`/rerun` (plan the book),
+  `/orders` (+ `/orders/delete`, `/orders/clear`), `/actuals`, `/items`, `/gantt`,
+  `/report`, `/trace/{id}`. Login + no-cache middleware. Helper-tab augmentation.
+- `web/` — `📋 Orders` tab (order book + delete), the per-rule tabs, and a
+  `📊 Gantt` tab; `app.js` renders the trace (no per-rule UI code).
 
 ## Resolved design decision (data-confirmed)
 
@@ -150,5 +175,5 @@ oracle (`61240807-01` highest, `61247047-01` lowest, `61241949-01` > `61247047-0
 
 - This project was scoped via the brainstorming → spec → plan flow. When making
   substantive changes, update `RULES.md` / the spec first, then the code.
-- Not currently a git repo. Initialize before committing if the user wants version
-  control.
+- Git repo on GitHub (`riittiin/anvitech-ppc-engine`); pushing to `main`
+  auto-deploys to Render. Commit/push to `main` only when the user asks.

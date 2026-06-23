@@ -11,7 +11,7 @@ output into a trace that the per-rule frontend tabs render.
 
 > Authority docs: [`CLAUDE.md`](CLAUDE.md) · [`RULES.md`](RULES.md) ·
 > [design spec](docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md) ·
-> [`implementation.md`](implementation.md)
+> [order-book design](docs/superpowers/specs/2026-06-22-order-book-design.md)
 
 ## Quick start
 
@@ -25,10 +25,11 @@ pytest
 uvicorn api.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000`, set the config knobs, and click **Run plan**. Each
-numbered tab shows that rule's input table, output table, config used, and the
-decision notes it logged. A failing rule shows a red error on its tab and marks
-downstream tabs "not reached".
+Open `http://127.0.0.1:8000`. The **📋 Orders** tab is the home view (the order
+book). **Upload your Excel** to add orders, then click **Plan** to schedule them.
+Each numbered rule tab shows that rule's input/output, config, and decision notes;
+a failing rule shows a red error and marks downstream tabs "not reached". The
+**📊 Gantt** tab is the worker-facing schedule.
 
 ## Login (whole app is gated)
 
@@ -39,63 +40,43 @@ The entire app — UI, API, and static assets — sits behind HTTP Basic Auth (o
 - `APP_PASSWORD` (default `ppc2025`)
 
 Change them locally with `APP_USERNAME=… APP_PASSWORD=… uvicorn api.main:app`, and
-set them in the Vercel project settings for production. **Change the defaults before
+set them as env vars on your host (e.g. Render). **Change the defaults before
 exposing the app.**
 
-## Free public deployment (Render + Upstash — no credit card)
+## Free public deployment (Render + a free database — no credit card)
 
-This is the recommended free, public, **persistent** setup. Render hosts the app
-(free web service, public HTTPS); Upstash Redis (free) stores actuals + uploaded
-workbooks so nothing is lost. Persistence is **opt-in via env vars** — set them in
-production; locally the app keeps using `data/actuals.json` + memory.
+Render hosts the app (free web service, public HTTPS); a free database makes the
+order book + actuals durable. Persistence is **opt-in via env vars** — locally, with
+none set, the app uses a local file store (`data/store/`). The live deployment runs
+on **Render + MongoDB Atlas**.
 
-1. **Put the code on GitHub.** `git init && git add -A && git commit -m "init"`,
-   create a repo, and push (Render deploys from Git).
-2. **Pick a durable store** (the engine selects: MongoDB > Upstash > local file):
-   - **MongoDB Atlas (recommended, 5 GB free):** create a free M0 cluster, a DB
-     user, allow network access `0.0.0.0/0`, copy the `mongodb+srv://…` string →
-     set env var `MONGODB_URI`. (Needs `pymongo[srv]`, already in requirements.)
-   - **or Upstash Redis (256 MB free):** create a DB → copy its **REST URL** and
-     **REST TOKEN** → set `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`.
+1. **Push the code to GitHub** (Render deploys from Git).
+2. **Pick a durable store** — the engine selects **MongoDB > Upstash > local file**:
+   - **MongoDB Atlas (recommended):** free **M0 cluster (512 MB)**. Create a DB user,
+     allow network access `0.0.0.0/0`, copy the `mongodb+srv://…` string → set
+     `MONGODB_URI`. (`pymongo[srv]` is already in `requirements.txt`.)
+   - **or Upstash Redis (256 MB free):** copy the DB's REST URL + token → set
+     `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`.
 3. **Create the Render service:** render.com → New → **Blueprint** → pick this repo
-   (it reads `render.yaml`). Render builds and gives you a public `…onrender.com` URL.
-4. **Set env vars** in the Render service (Settings → Environment):
-   - `APP_USERNAME`, `APP_PASSWORD` — your login.
-   - `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` — from step 2.
-   Save → Render redeploys.
-5. Open the URL, log in, upload your Excel, and use it. Actuals + uploads now persist.
+   (it reads `render.yaml`). You get a public `…onrender.com` URL.
+4. **Set env vars** on the Render service: `APP_USERNAME`, `APP_PASSWORD`, and the
+   store var(s) from step 2. Save → it redeploys.
+5. Open the URL, log in, **upload your Excel**, click **Plan**. Orders + actuals now
+   persist across sessions and devices.
 
 Free-tier note: the Render free service **sleeps after ~15 min idle**, so the first
-visit after a quiet period takes ~30–60s to wake — fine for an internal tool. The
-data itself lives in Upstash, so sleeping never loses it.
-
-## Deploying to Vercel (alternative)
-
-Files already in place: `vercel.json` (build + routes), `api/index.py` (serverless
-entrypoint re-exporting the FastAPI app), `.vercelignore`, slim `requirements.txt`.
-
-1. Install the CLI and log in: `npm i -g vercel && vercel login`.
-2. From the project root: `vercel` (preview) then `vercel --prod` (production).
-   Or push to GitHub and "Import Project" in the Vercel dashboard.
-3. In **Project → Settings → Environment Variables**, set `APP_USERNAME` and
-   `APP_PASSWORD` (and optionally `ACTUALS_PATH`). Redeploy.
-
-**Important Vercel constraints (serverless):**
-- `Test2.xlsx` is bundled read-only via `includeFiles` — reads work fine.
-- The filesystem is read-only except `/tmp` (ephemeral). For durable actuals +
-  uploads, set `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (free Upstash)
-  — the same opt-in storage layer used for Render. Without them, actuals fall back
-  to `/tmp` (wiped on cold starts). Note: Vercel's free Hobby plan is
-  **non-commercial only**; Render's free tier has no such restriction.
-- In-memory run cache isn't shared across invocations, so `GET /trace/{id}` may miss
-  on a different instance — the UI doesn't rely on it (it uses the `/run` response).
+visit after a quiet period takes ~30–60s to wake. The data lives in your database,
+so sleeping never loses it. (`GET /trace/{id}` may miss across instances — the UI
+uses the `/run` response directly, so it doesn't matter.)
 
 ## How it works
 
 ```
-so_lines → R1 consolidate → R2 sort by date → R3 tiebreak (reads routing)
-        → R6 allocate (uses R4 setup, R5 overlap, R7 parallel + masters)
-        → R8 capture actuals → R9 rerun MRP (calls R1..R7 again)
+Upload Excel ─▶ merge into the Order Book (by SO#)
+Order Book ─▶ active SO-lines (remaining qty) ─▶ R1 consolidate ─▶ R2 sort ─▶
+              R3 smart priority ─▶ R6 allocate (R4 setup, R5 overlap, R7 parallel)
+              ─▶ schedule + Gantt
+Rule 8 actuals reduce each order's remaining qty; "mark complete" archives it.
 ```
 
 - **Forward chain:** `1 → 2 → 3 → 6`. Rules **4, 5, 7** are calc helpers consumed
@@ -106,28 +87,27 @@ so_lines → R1 consolidate → R2 sort by date → R3 tiebreak (reads routing)
   breaks ties between equally-ready operations. The Rule 6 tab shows the schedule
   plus a **machine-wise view** (per-machine queue + utilization %) so you can see
   machines run continuously (the CNC bottleneck sits near 97% utilization).
-- **Rule 9 reuses Rules 1–7** — it imports and re-calls them with balance
-  quantities, so any fix to 1–7 flows into the loop automatically. The reuse test
-  (`tests/test_rule9.py`) proves re-running with zero actuals reproduces the
-  original schedule.
+- **Stateful order book.** Uploads merge into a persistent book (keyed by SO#);
+  **Plan** schedules every active order at its *remaining* qty (ordered − good
+  produced) through Rules 1–7 unchanged — so "Run" and "Rerun MRP" are one action.
+  Orders flow Pending → Running (first actual) → Complete (ticked on a Rule 8 entry).
+  Durable in MongoDB/Upstash — see `engine/orderbook.py` + `book_store.py`.
 
 ### Layers
 
 | Layer | What |
 |---|---|
-| `engine/` | Pure Python: `config`, `models`, `loaders`, `worktime`, `pipeline`, `rules/` |
-| `api/` | Thin FastAPI wrapper: `/run`, `/trace/{id}`, `/actuals`, `/rerun`, `/report` |
-| `web/` | Per-rule tabs that render the trace (no per-rule UI code) + a worker-facing **📊 Gantt** tab |
-| `tests/` | One file per rule + pipeline, golden snapshot, and API tests |
+| `engine/` | Pure Python: `config`, `models`, `loaders`, `worktime`, `pipeline`, `rules/`, the order-book layer (`orderbook`, `book_store`, `storage`), and `gantt` |
+| `api/` | Thin FastAPI: `/upload`, `/run`(=`/rerun`), `/orders` (+ `/orders/delete`, `/orders/clear`), `/actuals`, `/items`, `/gantt`, `/report`, `/trace/{id}`; login + no-cache middleware |
+| `web/` | `📋 Orders`, the per-rule tabs, and `📊 Gantt` — `app.js` renders the trace (no per-rule UI code) |
+| `tests/` | Per-rule, order book, storage, pipeline, golden snapshot, and API |
 
 ## Key design facts
 
 - **`Test2.xlsx` is read-only** and is the **test/demo default**. In production the
-  user **uploads** their masters/SO Excel via the "Production Excel → Upload & use"
-  control; it's parsed to an in-memory `dataset_id` that every run is tagged with
-  (falls back to `Test2.xlsx` when nothing is uploaded). Uploaded datasets are
-  in-memory only for now — durable storage is a deferred task. The only writable
-  data is `data/actuals.json` (Rule 8).
+  user **uploads** their masters/SO Excel; the orders merge into the **persistent
+  order book** (keyed by SO#) and the masters are stored. The only thing the app
+  writes is the durable store (`engine/storage.py`: MongoDB > Upstash > local file).
 - **"Total process time" (Rule 3) = sum of per-process _cycle_ times.** This was
   confirmed against the SO Remarks oracle in the sheet — it reproduces the
   documented priorities (item `61240807-01` highest, `61247047-01` lowest); the

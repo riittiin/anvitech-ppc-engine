@@ -181,7 +181,7 @@ the **Daily Production Entry** form. Fields captured:
 
 - **Source:** original Rule 7 + `Sample entry window format`
 - **Input:** the schedule (Rule 6) + manual entry via the Daily Production Entry form
-- **Output:** actuals data (`data/actuals.json`) + a per-item-code output/downtime
+- **Output:** actuals data (durable store) + a per-item-code output/downtime
   rollup shown on the Rule 8 tab
 
 ### 🔁 Rule 9 — Re-run MRP and regenerate the plan  *(Loop)*
@@ -191,6 +191,10 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 - **Source:** original Rule 8
 - **Input:** actuals (Rule 8) + balance remaining
 - **Output:** triggers a fresh run starting at Rule 1
+- **Implementation note:** realized as the unified **"Plan"** over the persistent
+  order book — it emits every active order at its remaining qty (ordered − good
+  produced) and re-runs Rules 1–7. "Run" and "Rerun MRP" are one action; there is no
+  separate `rule9` module (the engine's `orderbook.active_so_lines` does this).
 
 ---
 
