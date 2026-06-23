@@ -46,6 +46,25 @@ uvicorn api.main:app --reload            # http://127.0.0.1:8000
 Locally, with no store env vars set, data goes to `data/store/` (gitignored).
 Default login is `anvitech` / `ppc2025`. **Deploy:** push to `main`.
 
+## Git, GitHub & deploy workflow
+
+- This is a **git repo**; `origin` = GitHub **`riittiin/anvitech-ppc-engine`** (private).
+- **`gh` CLI is installed and authenticated** as `riittiin`, and git's author identity
+  is set globally — so a session here can `git commit`, `git push`, and use `gh`
+  (PRs/issues) **without any setup**.
+- **Deploy = push to `main`.** Render watches `main` and auto-redeploys from
+  `render.yaml` (runs `uvicorn api.main:app`). There is **no separate deploy step** —
+  pushing IS deploying.
+- **Commit message convention:** end every commit message with
+  `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+- **Commit / push to `main` ONLY when the user asks** — it goes straight to the live
+  site. For risky/large work, branch first (`git checkout -b feature`) and merge to
+  `main` once approved (that earlier order-book build was done on a branch first).
+- **Verify a deploy:** Render dashboard → the service's **Events** tab shows the
+  build; or from a shell:
+  `curl -s -o /dev/null -w '%{http_code}\n' https://anvitech-ppc.onrender.com/` →
+  **401** = up & healthy (the login gate); **502/503** = it crashed (check Render **Logs**).
+
 ## Live deployment specifics (no secrets in this file)
 
 - **Render** service `anvitech-ppc` — free web service; **sleeps after ~15 min idle**
