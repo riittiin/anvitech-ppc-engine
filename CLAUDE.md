@@ -1,6 +1,8 @@
 # CLAUDE.md — Anvitech PPC Engine
 
 Guidance for any Claude session working in this repository. Read this first.
+**Taking over a fresh?** Start with [`HANDOFF.md`](HANDOFF.md) — current deployed
+state, live URL, what's done vs deferred, and operational gotchas.
 
 ## What this project is
 
