@@ -283,20 +283,36 @@ def _plan(config: Config):
     _augment_helpers(trace, plan_run, config, masters, lost=lost,
                      unattributed=unattributed, actuals=actuals)
 
-    # Rule 8 tab: the active order book is what was planned, by remaining qty.
+    # Rule 8 tab: the active order book by remaining qty. List EVERY active order
+    # so the count matches the Orders tab; flag the ones with nothing left to make
+    # (fully produced but not yet marked complete) — they aren't scheduled, which
+    # is why they don't appear in the schedule/Gantt.
     good = orderbook.produced_good_by_so(actuals)
     status_by_so = {sn: orderbook.derive_status(o, good) for sn, o in active.items()}
+
+    def _r8_row(o):
+        remaining = max(o.ordered_qty - good.get(o.so_no, 0.0), 0.0)
+        return {"SO No": o.so_no, "Item Code": o.item_code, "Remaining Qty": remaining,
+                "SO Delivery Date": o.delivery_date.isoformat(),
+                "Status": status_by_so[o.so_no],
+                "In this plan": "scheduled" if remaining > 0 else "no — fully produced, mark complete"}
+
+    r8_rows = sorted((_r8_row(o) for o in active.values()),
+                     key=lambda r: (r["SO Delivery Date"], r["SO No"]))
+    scheduled = sum(1 for r in r8_rows if r["Remaining Qty"] > 0)
     trace["rule8"] = {
-        "input": to_table([{"Active orders": len(active), "Actuals applied": len(actuals)}]),
-        "output": to_table([
-            {"SO No": s.so_no, "Item Code": s.item_code, "Remaining Qty": s.qty,
-             "SO Delivery Date": s.delivery_date.isoformat(),
-             "Status": status_by_so.get(s.so_no, "")}
-            for s in so_lines
-        ]),
+        "input": to_table([{"Active orders": len(active),
+                            "Scheduled (work remaining)": scheduled,
+                            "Actuals applied": len(actuals)}]),
+        "output": to_table(r8_rows),
         "config": config.to_dict(),
-        "notes": ["Unified Plan: every active order planned by its remaining qty "
-                  "(ordered − good produced). Completed orders are excluded."],
+        "notes": [
+            "Unified Plan: every active order is listed at its remaining qty "
+            "(ordered − good produced). Completed orders are excluded.",
+            "An order fully produced but not yet marked complete shows Remaining 0 "
+            "and 'In this plan = no' — it isn't scheduled until you tick 'mark "
+            "complete' on a Rule 7 entry to archive it.",
+        ],
         "error": None, "reached": True,
     }
 
