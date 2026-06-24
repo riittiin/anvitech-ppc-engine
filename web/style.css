@@ -59,6 +59,7 @@ button {
   padding: 8px 14px; cursor: pointer; font-size: 13px;
 }
 button:hover { border-color: var(--accent); }
+button:disabled { opacity: 0.55; cursor: progress; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 .status { color: var(--muted); font-size: 12px; }
 

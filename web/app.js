@@ -368,7 +368,9 @@ async function wireActualsForm() {
       mark_complete: $("a-complete").checked,
     };
     if (!body.so_no || !body.item_code) {
-      setStatus("Enter SO No and Item Code before saving."); return;
+      setStatus("⚠ Enter SO No and Item Code before saving.");
+      $(body.so_no ? "a-item" : "a-so").focus();
+      return;
     }
     // Guard against re-saving the exact same entry (the #1 cause of duplicates).
     if (actualIsDuplicate(body) && !confirm(
@@ -376,22 +378,40 @@ async function wireActualsForm() {
         + `${body.qty_produced} produced on ${body.entry_date}). Save another?`)) {
       return;
     }
-    btn.disabled = true;                       // block rapid double-clicks
+    // Immediate feedback so you know the click registered.
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = "Saving…";
+    setStatus("Saving…");
     try {
       const res = await fetch("/actuals", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
-      if (res.ok) {
-        const d = await res.json();
-        const msg = `✓ Saved — ${d.saved} entr${d.saved === 1 ? "y" : "ies"} on record.`
-          + (d.completed_order ? ` Order ${body.so_no} marked complete.` : "");
-        await runPlan();                       // re-renders a fresh (blank) form
-        setStatus(msg);                        // keep the confirmation after re-planning
+      if (!res.ok) {
+        setStatus("Save failed: " + (await res.text()));
+        btn.disabled = false; btn.textContent = label; return;
+      }
+      const d = await res.json();
+      // Update the actuals table + rollup straight from the response — no heavy
+      // re-plan, so the save feels instant. The schedule refreshes on next Plan.
+      if (currentTrace && currentTrace.rule7) {
+        currentTrace.rule7.output = d.actuals;
+        currentTrace.rule7.tables = [{
+          title: "Per item code — output & downtime rollup (minutes summed across entries)",
+          table: d.by_item,
+        }];
+      }
+      try { currentOrders = (await (await fetch("/orders")).json()).orders; } catch (e) {}
+      if (d.completed_order) {
+        // Show the result where it actually changed: the Orders tab.
+        setStatus(`✓ Saved. Order ${body.so_no} marked complete and archived.`);
+        activeTab = "orders"; renderTabs(); renderTab("orders");
       } else {
-        setStatus("Save failed: " + (await res.text())); btn.disabled = false;
+        setStatus(`✓ Saved — ${d.saved} entr${d.saved === 1 ? "y" : "ies"} on record.`
+          + " Click ▶ Plan to refresh the schedule.");
+        renderTab("rule7");                    // fresh blank form + updated output table
       }
     } catch (e) {
-      setStatus("Save error: " + e.message); btn.disabled = false;
+      setStatus("Save error: " + e.message); btn.disabled = false; btn.textContent = label;
     }
   };
 }
