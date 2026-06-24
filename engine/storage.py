@@ -181,16 +181,33 @@ class MongoStore:
             self.db[coll].delete_one({"_id": key})
 
 
+_STORE_CACHE: dict = {}
+
+
 def get_store():
-    """Pick the backend: MongoDB Atlas > Upstash Redis > local file."""
+    """Pick the backend: MongoDB Atlas > Upstash Redis > local file.
+
+    The chosen backend is **cached per configuration** and reused across every
+    call. This matters most for Mongo: a ``MongoClient`` owns a connection pool
+    and is designed to be created once and shared. Building a new one per call
+    (as this used to) re-ran SRV DNS resolution + TLS handshake + auth on every
+    request — the dominant source of latency. Keyed by env so tests that swap
+    ``STORE_DIR`` / backends still get an isolated store.
+    """
     mongo_uri = os.environ.get("MONGODB_URI")
-    if mongo_uri:
-        return MongoStore(mongo_uri)
     url = os.environ.get("UPSTASH_REDIS_REST_URL")
     token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
-    if url and token:
-        return UpstashStore(url, token)
-    base = os.environ.get("STORE_DIR") or (
-        Path(__file__).resolve().parent.parent / "data" / "store"
-    )
-    return LocalStore(base)
+    base = str(os.environ.get("STORE_DIR") or (
+        Path(__file__).resolve().parent.parent / "data" / "store"))
+    key = (mongo_uri, url, token, base)
+
+    store = _STORE_CACHE.get(key)
+    if store is None:
+        if mongo_uri:
+            store = MongoStore(mongo_uri)
+        elif url and token:
+            store = UpstashStore(url, token)
+        else:
+            store = LocalStore(base)
+        _STORE_CACHE[key] = store
+    return store

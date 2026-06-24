@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import io
 import os
 import secrets
@@ -85,22 +84,33 @@ async def no_cache(request, call_next):
 # Cached in-process, keyed by the workbook's content hash.
 # --------------------------------------------------------------------------- #
 _RUNS: dict = {}
-_MASTERS_CACHE: dict = {"id": None, "masters": None}
+_MASTERS_CACHE: dict = {"key": None, "masters": None}
+
+
+def _store_env_key():
+    """Identity of the active store config — so the masters cache resets when a
+    test swaps STORE_DIR/backend, but stays warm in production."""
+    return (os.environ.get("MONGODB_URI"),
+            os.environ.get("UPSTASH_REDIS_REST_URL"),
+            os.environ.get("STORE_DIR"))
 
 
 def _current_masters():
+    """Masters from the latest uploaded workbook, else the bundled test file.
+
+    Parsed once and cached in-process; only re-read from the durable store when a
+    new workbook is uploaded (which clears the cache) or the store config changes.
+    Avoids pulling + re-parsing the (large) workbook blob on every request."""
+    key = _store_env_key()
+    if _MASTERS_CACHE["masters"] is not None and _MASTERS_CACHE["key"] == key:
+        return _MASTERS_CACHE["masters"]
     raw = book_store.load_masters_bytes()
     if raw is None:
-        ident = "bundled"
-        if _MASTERS_CACHE["id"] != ident:
-            _, masters = load_all()  # bundled Test2.xlsx (so the app works pre-upload)
-            _MASTERS_CACHE.update(id=ident, masters=masters)
-        return _MASTERS_CACHE["masters"]
-    ident = hashlib.md5(raw).hexdigest()
-    if _MASTERS_CACHE["id"] != ident:
+        _, masters = load_all()  # bundled Test2.xlsx (so the app works pre-upload)
+    else:
         _, masters = load_all(io.BytesIO(raw))
-        _MASTERS_CACHE.update(id=ident, masters=masters)
-    return _MASTERS_CACHE["masters"]
+    _MASTERS_CACHE.update(key=key, masters=masters)
+    return masters
 
 
 def _report_table(masters):
@@ -149,7 +159,7 @@ def _machine_display(masters, mid):
     return m.display_name if m else mid
 
 
-def _augment_helpers(trace, plan_run, config, masters, lost=None, unattributed=None):
+def _augment_helpers(trace, plan_run, config, masters, lost=None, unattributed=None, actuals=None):
     if "rule3" in trace and trace["rule3"].get("reached", True) and plan_run.batches_prioritized:
         breakdown = r3.build_priority_breakdown(plan_run.batches_prioritized, config, masters)
         trace["rule3"]["tables"] = [
@@ -232,7 +242,8 @@ def _augment_helpers(trace, plan_run, config, masters, lost=None, unattributed=N
         "error": None, "reached": True,
     }
 
-    actuals = book_store.load_actuals()
+    if actuals is None:
+        actuals = book_store.load_actuals()
     total_down = sum(a.total_downtime_min() for a in actuals)
     trace["rule7"] = {
         "input": to_table([{"Source": "Daily Production Entry form → durable store"}]),
@@ -269,7 +280,8 @@ def _plan(config: Config):
 
     plan_run = PlanRun(so_lines=so_lines)
     trace = run_forward(plan_run, config, masters, machine_lost_min=lost)
-    _augment_helpers(trace, plan_run, config, masters, lost=lost, unattributed=unattributed)
+    _augment_helpers(trace, plan_run, config, masters, lost=lost,
+                     unattributed=unattributed, actuals=actuals)
 
     # Rule 8 tab: the active order book is what was planned, by remaining qty.
     good = orderbook.produced_good_by_so(actuals)
@@ -314,7 +326,7 @@ async def upload(file: UploadFile = File(...)):
     masters_updated = False
     if masters.routings:  # only replace masters when the file actually has them
         book_store.save_masters_bytes(contents)
-        _MASTERS_CACHE["id"] = None  # invalidate cache
+        _MASTERS_CACHE["masters"] = None  # invalidate cache → re-read on next plan
         masters_updated = True
 
     active = book_store.load_active_orders()

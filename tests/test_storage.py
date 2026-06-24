@@ -27,6 +27,12 @@ def test_list_append_is_additive():
     assert s.list_all("acts") == ["one", "two"]
 
 
+def test_get_store_is_cached_per_config():
+    # Same config -> the SAME instance is reused (one connection pool in prod),
+    # instead of rebuilding the backend on every call.
+    assert storage.get_store() is storage.get_store()
+
+
 def test_local_store_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("UPSTASH_REDIS_REST_URL", raising=False)
     assert isinstance(storage.get_store(), storage.LocalStore)
