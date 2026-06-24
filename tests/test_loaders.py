@@ -1,5 +1,7 @@
 """Loader tests — expected counts and the known non-blocking data quirks."""
-from engine.loaders import load_all, normalize_resource_id, parse_date
+from engine.loaders import (
+    load_all, normalize_resource_id, parse_date, parse_resource_candidates,
+)
 from datetime import date
 
 
@@ -45,3 +47,30 @@ def test_parse_date_handles_string_and_datetime():
     from datetime import datetime
     assert parse_date("28/03/2025") == date(2025, 3, 28)
     assert parse_date(datetime(2025, 3, 28)) == date(2025, 3, 28)
+
+
+# --------------------------------------------------------------------------- #
+# Alternative ("preferred") machines: a cell like "CNC3/CNC6" = either machine
+# --------------------------------------------------------------------------- #
+def test_parse_resource_candidates_splits_alternatives():
+    assert parse_resource_candidates("CNC3/CNC6") == ["CNC3", "CNC6"]
+    assert parse_resource_candidates("CNC 3 / CNC 6") == ["CNC3", "CNC6"]   # spaces
+    assert parse_resource_candidates("CNC6/CNC3") == ["CNC6", "CNC3"]       # order kept
+    assert parse_resource_candidates("CNC3 or CNC6") == ["CNC3", "CNC6"]    # 'or'
+
+
+def test_parse_resource_candidates_single_and_empty():
+    assert parse_resource_candidates("VMC2") == ["VMC2"]
+    assert parse_resource_candidates("") == []
+    assert parse_resource_candidates(None) == []
+    assert parse_resource_candidates("   ") == []
+    assert parse_resource_candidates("CNC6/CNC6") == ["CNC6"]               # dedupe
+
+
+def test_alternative_cells_register_each_machine_not_a_merged_id(loaded):
+    _, masters = loaded
+    # The merged ids the old code produced must NOT exist.
+    for bogus in ("CNC3CNC6", "VMC2VMC3", "CNC1CNC4", "CNC6CNC3"):
+        assert bogus not in masters.machines
+    # VMC3 (from "VMC2/VMC3", absent from the master) is registered provisional.
+    assert "VMC3" in masters.machines and masters.machines["VMC3"].provisional

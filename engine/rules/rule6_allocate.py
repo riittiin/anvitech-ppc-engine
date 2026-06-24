@@ -26,16 +26,19 @@ from datetime import datetime
 
 from ..models import ScheduleEntry
 from ..worktime import WorkClock
-from ..loaders import normalize_resource_id
+from ..loaders import normalize_resource_id, parse_resource_candidates
 from . import rule4_setup_time as r4
 from . import rule5_overlap_mode as r5
 
 
-def _resolve_resource(proc):
-    """Canonical resource id for a process: suggested, else allotted, else a
-    generic station named after the process itself."""
+def _resolve_candidates(proc):
+    """Ordered candidate machine ids for a process (first = preferred).
+
+    A "Suggested M/c" cell may list ALTERNATIVES ('CNC3/CNC6') — the process may run
+    on any of them, and the scheduler picks the earliest-free. Falls back to a generic
+    station named after the process when no machine is given."""
     raw = proc.suggested_machine or proc.allotted_machine or proc.name
-    return normalize_resource_id(raw)
+    return parse_resource_candidates(raw) or [normalize_resource_id(proc.name)]
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, **kw):
@@ -103,12 +106,18 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             if s["next"] >= len(s["routing"].processes):
                 continue
             proc = s["routing"].processes[s["next"]]
-            resource = _resolve_resource(proc)
-            note = ""
-
+            candidates = _resolve_candidates(proc)
             occ = r4.occupancy_minutes(proc.cycle_time, s["batch"].qty, config)
-            machine_ready = machine_free.get(resource, plan_start)
-            feasible = clock.advance(max(s["ready"], machine_ready), 0)
+
+            # Among the allowed machines, pick the one that can start earliest. Strict
+            # '<' keeps the first-listed (preferred) machine on a tie -> deterministic.
+            resource, feasible = None, None
+            for cand in candidates:
+                cand_feasible = clock.advance(
+                    max(s["ready"], machine_free.get(cand, plan_start)), 0)
+                if feasible is None or cand_feasible < feasible:
+                    resource, feasible = cand, cand_feasible
+            note = f"chose {resource} of {'/'.join(candidates)}" if len(candidates) > 1 else ""
 
             # Non-delay: earliest feasible start wins; priority breaks ties.
             key = (feasible, s["prio"], s["batch"].batch_id, proc.seq)

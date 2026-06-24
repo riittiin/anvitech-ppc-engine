@@ -165,6 +165,15 @@ def test_lost_minutes_synthetic_station_when_no_suggested_machine():
     assert lost == {"DEBURRING": 12.0}
 
 
+def test_lost_minutes_alternative_machine_keys_on_preferred_real_machine():
+    # A process allowed on "CNC3/CNC6": downtime must attribute to a REAL candidate
+    # (the preferred CNC3), matching the id Rule 6 schedules on — not "CNC3CNC6".
+    masters = _masters(_routing("X", [("CNC FIRST SIDE", "CNC3/CNC6")]))
+    a = _actual("X", "CNC FIRST SIDE", no_power_min=30)
+    lost, unattributed = orderbook.machine_lost_minutes([a], masters, planned_setup_min=90)
+    assert lost == {"CNC3": 30.0} and unattributed == []
+
+
 def test_lost_minutes_zero_loss_is_ignored():
     masters = _masters(_routing("X", [("CNC FIRST SIDE", "CNC 4")]))
     a = _actual("X", "CNC FIRST SIDE", actual_setup_min=90)   # no overrun, no downtime

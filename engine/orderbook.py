@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from .models import Order, SOLine, fmt_date
-from .loaders import normalize_resource_id
+from .loaders import normalize_resource_id, parse_resource_candidates
 
 PENDING = "Pending"
 RUNNING = "Running"
@@ -93,11 +93,12 @@ def machine_lost_minutes(actuals, masters, planned_setup_min):
 
     For each actual: ``lost = setup overrun (actual − planned, if positive) + total
     downtime``. The machine is resolved from ``(item_code, process)`` via the routing
-    using the SAME id Rule 6 schedules on (suggested → allotted → process name,
-    normalized), so the keys match the scheduler's ``machine_free`` keys. Returns
-    ``(lost_by_machine, unattributed)``; ``unattributed`` lists entries whose
-    process/routing could not be matched (free-text typos, missing routing) so the
-    loss is surfaced rather than silently dropped or raised on."""
+    using the SAME candidates Rule 6 schedules on. When the process allows alternatives
+    ('CNC3/CNC6'), the loss is attributed to the **preferred** (first) candidate — an
+    approximation, since the Daily-entry Actual has no "which machine ran" field yet
+    (a noted future enhancement). Returns ``(lost_by_machine, unattributed)``;
+    ``unattributed`` lists entries whose process/routing could not be matched
+    (free-text typos, missing routing) so the loss is surfaced, never silently dropped."""
     lost = defaultdict(float)
     unattributed = []
     for a in actuals:
@@ -113,7 +114,8 @@ def machine_lost_minutes(actuals, masters, planned_setup_min):
             unattributed.append({"so_no": a.so_no, "item_code": a.item_code,
                                  "process": a.process, "lost": loss})
             continue
-        mid = normalize_resource_id(proc.suggested_machine or proc.allotted_machine or proc.name)
+        cands = parse_resource_candidates(proc.suggested_machine or proc.allotted_machine or proc.name)
+        mid = cands[0] if cands else normalize_resource_id(proc.name)
         lost[mid] += loss
     return dict(lost), unattributed
 

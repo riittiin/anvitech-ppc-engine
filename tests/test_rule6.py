@@ -185,6 +185,53 @@ def test_machine_lost_min_default_is_noop():
            [(e.machine, e.start, e.end) for e in explicit_none]
 
 
+def _alt_masters(suggested="M/N"):
+    """Two machines M, N and one item 'X' whose single process may run on either."""
+    masters = Masters(machines={"M": _machine("M"), "N": _machine("N")},
+                      calendar=WorkCalendar())
+    masters.routings["X"] = Routing(
+        item_code="X", description="", customer="", rm_type="", moq=None,
+        processes=[Process(1, "OP", cycle_time=10, total_time=None,
+                           suggested_machine=suggested, allotted_machine=None)],
+    )
+    return masters
+
+
+def _xbatch(bid="X1"):
+    return Batch(batch_id=bid, item_code="X", item_name="X", qty=1,
+                 so_delivery_date=date(2025, 3, 7), source_so_refs=[bid])
+
+
+def test_alternative_machine_avoids_the_busy_one():
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    masters = _alt_masters("M/N")
+    # M is held busy by recorded downtime -> the op must take N.
+    sched = rule6_allocate.run([_xbatch()], config=cfg, masters=masters,
+                               machine_lost_min={"M": 600})
+    assert sched[0].machine == "N"
+
+
+def test_alternative_machine_prefers_first_listed_when_both_free():
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    assert rule6_allocate.run([_xbatch()], config=cfg, masters=_alt_masters("M/N"))[0].machine == "M"
+    assert rule6_allocate.run([_xbatch()], config=cfg, masters=_alt_masters("N/M"))[0].machine == "N"
+
+
+def test_alternative_machines_load_balance_across_contending_ops():
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    masters = _alt_masters("M/N")
+    sched = rule6_allocate.run([_xbatch("A"), _xbatch("B")], config=cfg, masters=masters)
+    assert {e.machine for e in sched} == {"M", "N"}   # split, not both on M
+
+
+def test_alternative_machine_choice_is_noted():
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    alt = rule6_allocate.run([_xbatch()], config=cfg, masters=_alt_masters("M/N"))[0]
+    assert "M" in alt.notes and "N" in alt.notes and "chose" in alt.notes.lower()
+    single = rule6_allocate.run([_xbatch()], config=cfg, masters=_alt_masters("M"))[0]
+    assert single.notes == ""        # non-alternative ops stay un-noted
+
+
 def test_seeded_machine_does_not_affect_other_machines():
     """Lost time on machine M must NOT delay an operation that runs on machine N
     (isolation — only the affected machine's queue slips)."""

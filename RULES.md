@@ -159,6 +159,14 @@ ready; it never forces a machine to wait for a higher-priority batch whose
 operation isn't ready yet. This is the core of the optimization: maximize machine
 utilization while honouring delivery-date priority.
 
+**Alternative ("preferred") machines.** A process's *Suggested M/c* cell may list
+**alternatives separated by `/`** (e.g. `CNC3/CNC6` = run on either CNC3 or CNC6).
+The scheduler picks the **earliest-available** of the allowed machines, so work
+**load-balances** across them automatically (once one is taken it's busy, so the
+next contending operation grabs the other). On a tie the **first-listed** machine
+wins (it's the preferred one), keeping plans deterministic. A listed machine not
+yet in the Machine master is registered as a provisional machine and still used.
+
 While running, Rule 6 consumes: ⚙️ Rule 4 (setup time) and ⚙️ Rule 5 (overlap mode).
 
 - **Source:** original Rule 4 + `Machine master` + `Operator & shift Master` +

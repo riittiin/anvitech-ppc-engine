@@ -49,6 +49,22 @@ def normalize_resource_id(raw) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(raw).upper())
 
 
+def parse_resource_candidates(raw) -> list:
+    """Canonical machine ids a routing cell allows, in order (first = preferred).
+
+    A "Suggested M/c" cell may list ALTERNATIVES separated by '/', ',', '&' or ' or '
+    (e.g. 'CNC3/CNC6' = run on either CNC3 or CNC6). Returns an ordered, deduped list
+    of normalized ids; empty/None -> []. The same split is used for operators."""
+    if raw is None:
+        return []
+    out = []
+    for token in re.split(r"[/&,]| or ", str(raw)):
+        cid = normalize_resource_id(token)
+        if cid and cid not in out:
+            out.append(cid)
+    return out
+
+
 def parse_date(value):
     """Coerce a cell to a ``date``. Handles datetime cells and 'dd/mm/yyyy'
     strings (the SO sheet mixes both). Returns None if unparseable."""
@@ -270,8 +286,11 @@ def _validate(masters: Masters, so_lines):
     for routing in masters.routings.values():
         for proc in routing.processes:
             for raw in (proc.suggested_machine, proc.allotted_machine):
-                if raw:
-                    _register_provisional(masters, raw)
+                # A cell may list alternatives ("CNC3/CNC6") — register EACH so a
+                # missing one (e.g. VMC3) becomes its own provisional machine, not a
+                # merged bogus id.
+                for cid in parse_resource_candidates(raw):
+                    _register_provisional(masters, cid)
 
     # NO_ROUTING: SO item codes with no recipe — report and (caller) skip them.
     seen = set()
