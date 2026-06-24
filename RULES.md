@@ -31,12 +31,12 @@ Each rule is tagged by its role in the data flow:
        │                            ◄── ⚙️ Rule 5 (overlap mode)
        │                            ◄── masters (machine / operator / calendar)
        │  the schedule
-   🔻 Rule 8  Capture daily actuals
+   🔻 Rule 7  Capture daily actuals
        │  actuals
-   🔁 Rule 9  Re-run MRP  ──────────────────────────► back to Rule 1
+   🔁 Rule 8  Re-run MRP  ──────────────────────────► back to Rule 1
 ```
 
-**True forward pipeline:** `1 → 2 → 3 → 6 → 8 → 9 (loop)`
+**True forward pipeline:** `1 → 2 → 3 → 6 → 7 → 8 (loop)`
 **Consumed inside Rule 6:** Rules 4, 5.
 
 ---
@@ -132,11 +132,11 @@ complete** (as in sequential mode). Overlap only compresses real machining steps
 - **Parameter:** overlap threshold = 50% (configurable). The percentage applies
   to the previous process's cutting time, not its setup.
 
-> **Note — Rule 7 (parallel machine) was removed.** The original sheet had a
-> "Rule 5b / Rule 7" that, for batches over 400, moved a CNC operation to a
-> separate machine. It never delivered true parallel processing (it relocated
-> the operation rather than splitting the batch) and is no longer part of the
-> engine. Rule numbers are kept as-is for traceability; there is simply no Rule 7.
+> **Note — the old "parallel machine" rule was removed.** An earlier draft had a
+> rule that, for batches over 400, moved a CNC operation to a separate machine.
+> It never delivered true parallel processing (it relocated the operation rather
+> than splitting the batch) and is no longer part of the engine. The remaining
+> rules are renumbered into a clean 1–8 sequence.
 
 ---
 
@@ -176,14 +176,14 @@ While running, Rule 6 consumes: ⚙️ Rule 4 (setup time) and ⚙️ Rule 5 (ov
 
 ## PHASE 5 — Execute and re-plan *(closed loop)*
 
-### 🔻 Rule 8 — Capture daily actuals  *(Pipeline stage)*
+### 🔻 Rule 7 — Capture daily actuals  *(Pipeline stage)*
 **After every shift / next morning**, enter the previous period's production via
 the **Daily Production Entry** form. Fields captured:
 
 - *Identity (manual):* Date, Shift, SO No, Item Code. *Auto/dropdown:* Item Name
   (auto-prompted from the routing) and Process (dropdown of the item's routing).
 - *Output (manual):* Qty Produced, Qty Rejected. **Good qty = produced − rejected**
-  is what fulfils the order and drives Rule 9's balance (rejected pieces stay to
+  is what fulfils the order and drives Rule 8's balance (rejected pieces stay to
   be remade).
 - *Actual setting time (manual):* the real setup vs the planned `setup_time_min`.
 - *Downtime/loss categories (manual, minutes):* No Power, No Operator, Tool
@@ -193,19 +193,19 @@ the **Daily Production Entry** form. Fields captured:
 - **Source:** original Rule 7 + `Sample entry window format`
 - **Input:** the schedule (Rule 6) + manual entry via the Daily Production Entry form
 - **Output:** actuals data (durable store) + a per-item-code output/downtime
-  rollup shown on the Rule 8 tab
+  rollup shown on the Rule 7 tab
 
-### 🔁 Rule 9 — Re-run MRP and regenerate the plan  *(Loop)*
+### 🔁 Rule 8 — Re-run MRP and regenerate the plan  *(Loop)*
 After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 **actual completed qty + balance remaining**, looping back to Phase 1.
 
 - **Source:** original Rule 8
-- **Input:** actuals (Rule 8) + balance remaining
+- **Input:** actuals (Rule 7) + balance remaining
 - **Output:** triggers a fresh run starting at Rule 1
 - **Implementation note:** realized as the unified **"Plan"** over the persistent
   order book — it emits every active order at its remaining qty (ordered − good
-  produced) and re-runs Rules 1–7. "Run" and "Rerun MRP" are one action; there is no
-  separate `rule9` module (the engine's `orderbook.active_so_lines` does this).
+  produced) and re-runs Rules 1–6. "Run" and "Rerun MRP" are one action; there is no
+  dedicated rule module for it (the engine's `orderbook.active_so_lines` does this).
 
 ---
 

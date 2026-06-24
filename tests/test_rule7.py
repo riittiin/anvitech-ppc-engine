@@ -1,8 +1,8 @@
-"""Rule 8 — capture daily entry (full form) via the durable store + aggregation."""
+"""Rule 7 — capture daily entry (full form) via the durable store + aggregation."""
 from datetime import date
 
 from engine.models import Actual
-from engine.rules import rule8_capture_actuals
+from engine.rules import rule7_capture_actuals
 
 
 def _entry(**kw):
@@ -17,9 +17,9 @@ def test_full_form_round_trip():
         qty_produced=82, qty_rejected=3, actual_setup_min=120,
         no_power_min=80, no_operator_min=30, tool_problem_min=15, remarks="late start",
     )
-    rule8_capture_actuals.run(a)
+    rule7_capture_actuals.run(a)
 
-    r = rule8_capture_actuals.load_actuals()[0]
+    r = rule7_capture_actuals.load_actuals()[0]
     assert r.shift == "1st shift" and r.process == "CNC FIRST SIDE"
     assert r.qty_produced == 82 and r.qty_rejected == 3 and r.good_qty() == 79
     assert r.total_downtime_min() == 125               # 80 + 30 + 15
@@ -27,9 +27,9 @@ def test_full_form_round_trip():
 
 
 def test_appends():
-    rule8_capture_actuals.run(_entry(qty_produced=5))
-    rule8_capture_actuals.run(_entry(qty_produced=3, entry_date=date(2025, 8, 2)))
-    assert len(rule8_capture_actuals.load_actuals()) == 2
+    rule7_capture_actuals.run(_entry(qty_produced=5))
+    rule7_capture_actuals.run(_entry(qty_produced=3, entry_date=date(2025, 8, 2)))
+    assert len(rule7_capture_actuals.load_actuals()) == 2
 
 
 def test_aggregate_by_item_sums_downtime_per_item():
@@ -38,7 +38,7 @@ def test_aggregate_by_item_sums_downtime_per_item():
         _entry(qty_produced=42, qty_rejected=2, no_operator_min=20, no_power_min=80,
                entry_date=date(2025, 8, 2)),
     ]
-    rows = rule8_capture_actuals.aggregate_by_item(actuals)
+    rows = rule7_capture_actuals.aggregate_by_item(actuals)
     assert len(rows) == 1
     row = rows[0]
     assert row["Qty Produced"] == 82 and row["Good Qty"] == 79

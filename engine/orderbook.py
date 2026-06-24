@@ -2,7 +2,7 @@
 
 This is the stateful layer's brain: it decides how an upload merges into the book,
 derives each order's status, and produces the active SO-lines (with remaining qty)
-that feed the unchanged Rules 1-7. Keeping it pure makes every rule here testable
+that feed the unchanged Rules 1-6. Keeping it pure makes every rule here testable
 in isolation; persistence lives in ``book_store``.
 """
 from __future__ import annotations

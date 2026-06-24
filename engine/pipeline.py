@@ -113,7 +113,7 @@ def run_rule(trace: dict, name: str, fn, input_data, *, config=None, **kw):
 # Forward chain
 # --------------------------------------------------------------------------- #
 RULE_NAMES = [
-    "rule1", "rule2", "rule3", "rule4", "rule5", "rule6", "rule8", "rule9",
+    "rule1", "rule2", "rule3", "rule4", "rule5", "rule6", "rule7", "rule8",
 ]
 
 
@@ -165,5 +165,5 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters) -> dict:
         _mark_not_reached(trace, failed_at + 1)
         return trace
 
-    _mark_not_reached(trace, len(RULE_NAMES))  # fill rule4/5/8/9 placeholders
+    _mark_not_reached(trace, len(RULE_NAMES))  # fill rule4/5/7/8 placeholders
     return trace

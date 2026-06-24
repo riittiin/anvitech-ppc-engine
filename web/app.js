@@ -8,10 +8,10 @@ const RULES = {
   rule4: { n: 4, title: "Setup time" },
   rule5: { n: 5, title: "Overlap mode" },
   rule6: { n: 6, title: "Allocate to machines" },
-  rule8: { n: 8, title: "Capture actuals" },
-  rule9: { n: 9, title: "Plan (book → remaining qty)" },
+  rule7: { n: 7, title: "Capture actuals" },
+  rule8: { n: 8, title: "Plan (book → remaining qty)" },
 };
-const ORDER = ["rule1","rule2","rule3","rule4","rule5","rule6","rule8","rule9"];
+const ORDER = ["rule1","rule2","rule3","rule4","rule5","rule6","rule7","rule8"];
 
 let currentTrace = null;
 let currentGantt = null;
@@ -141,7 +141,7 @@ function renderTab(key) {
     html += `<div class="error-box"><strong>Rule error</strong> — record `
       + `<code>${escapeHtml(String(entry.error.record_id))}</code>: ${escapeHtml(entry.error.message)}</div>`;
   }
-  if (key === "rule8") html += actualsFormHtml();
+  if (key === "rule7") html += actualsFormHtml();
 
   html += '<div class="io">';
   html += `<div class="panel"><h3>Input</h3>${tableHtml(entry.input)}</div>`;
@@ -158,7 +158,7 @@ function renderTab(key) {
     html += "</ul></div>";
   }
   root.innerHTML = html;
-  if (key === "rule8") wireActualsForm();
+  if (key === "rule7") wireActualsForm();
 }
 
 // ---- Orders dashboard ----

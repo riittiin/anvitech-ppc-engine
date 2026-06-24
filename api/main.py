@@ -40,7 +40,7 @@ from engine.rules import (
     rule4_setup_time as r4,
     rule5_overlap_mode as r5,
     rule6_allocate as r6,
-    rule8_capture_actuals as r8,
+    rule7_capture_actuals as r7,
 )
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -142,7 +142,7 @@ class ActualRequest(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Helper-tab augmentation (Rules 3/4/5/8 + Rule 6 machine view)
+# Helper-tab augmentation (Rules 3/4/5/7 + Rule 6 machine view)
 # --------------------------------------------------------------------------- #
 def _augment_helpers(trace, plan_run, config, masters):
     if "rule3" in trace and trace["rule3"].get("reached", True) and plan_run.batches_prioritized:
@@ -210,7 +210,7 @@ def _augment_helpers(trace, plan_run, config, masters):
 
     actuals = book_store.load_actuals()
     total_down = sum(a.total_downtime_min() for a in actuals)
-    trace["rule8"] = {
+    trace["rule7"] = {
         "input": to_table([{"Source": "Daily Production Entry form → durable store"}]),
         "output": to_table(actuals), "config": None,
         "notes": [
@@ -219,7 +219,7 @@ def _augment_helpers(trace, plan_run, config, masters):
             "marking complete on an entry archives that order.",
         ],
         "tables": [{"title": "Per item code — output & downtime rollup (minutes summed across entries)",
-                    "table": to_table(r8.aggregate_by_item(actuals))}],
+                    "table": to_table(r7.aggregate_by_item(actuals))}],
         "error": None, "reached": True,
     }
     return trace
@@ -239,10 +239,10 @@ def _plan(config: Config):
     trace = run_forward(plan_run, config, masters)
     _augment_helpers(trace, plan_run, config, masters)
 
-    # Rule 9 tab: the active order book is what was planned, by remaining qty.
+    # Rule 8 tab: the active order book is what was planned, by remaining qty.
     good = orderbook.produced_good_by_so(actuals)
     status_by_so = {sn: orderbook.derive_status(o, good) for sn, o in active.items()}
-    trace["rule9"] = {
+    trace["rule8"] = {
         "input": to_table([{"Active orders": len(active), "Actuals applied": len(actuals)}]),
         "output": to_table([
             {"SO No": s.so_no, "Item Code": s.item_code, "Remaining Qty": s.qty,
@@ -387,7 +387,7 @@ def post_actuals(req: ActualRequest):
         no_load_min=req.no_load_min, other_work_min=req.other_work_min,
         remarks=req.remarks, mark_complete=req.mark_complete,
     )
-    all_actuals = r8.run(actual)
+    all_actuals = r7.run(actual)
     completed = False
     if req.mark_complete:
         completed = book_store.complete_order(req.so_no)
@@ -395,7 +395,7 @@ def post_actuals(req: ActualRequest):
         "saved": len(all_actuals),
         "completed_order": completed,
         "actuals": to_table(all_actuals),
-        "by_item": to_table(r8.aggregate_by_item(all_actuals)),
+        "by_item": to_table(r7.aggregate_by_item(all_actuals)),
     }
 
 

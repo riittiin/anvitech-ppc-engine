@@ -37,7 +37,7 @@ def test_empty_book_plans_cleanly():
     r = client.post("/run", json={"config": {}})
     assert r.status_code == 200
     trace = r.json()["trace"]
-    for rule in ["rule1", "rule2", "rule3", "rule6", "rule8", "rule9"]:
+    for rule in ["rule1", "rule2", "rule3", "rule6", "rule7", "rule8"]:
         assert rule in trace
     assert r.json()["orders"]["rows"] == []          # nothing uploaded yet
 

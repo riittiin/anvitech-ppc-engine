@@ -1,4 +1,4 @@
-"""Rule 8 — Capture daily actuals.
+"""Rule 7 — Capture daily actuals.
 
 After each shift, the previous period's production (qty produced/rejected, actual
 setup, the six downtime categories, remarks, and an optional "mark order complete"

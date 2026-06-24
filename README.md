@@ -76,7 +76,7 @@ Upload Excel ─▶ merge into the Order Book (by SO#)
 Order Book ─▶ active SO-lines (remaining qty) ─▶ R1 consolidate ─▶ R2 sort ─▶
               R3 smart priority ─▶ R6 allocate (R4 setup, R5 overlap)
               ─▶ schedule + Gantt
-Rule 8 actuals reduce each order's remaining qty; "mark complete" archives it.
+Rule 7 actuals reduce each order's remaining qty; "mark complete" archives it.
 ```
 
 - **Forward chain:** `1 → 2 → 3 → 6`. Rules **4, 5, 7** are calc helpers consumed
@@ -89,8 +89,8 @@ Rule 8 actuals reduce each order's remaining qty; "mark complete" archives it.
   machines run continuously (the CNC bottleneck sits near 97% utilization).
 - **Stateful order book.** Uploads merge into a persistent book (keyed by SO#);
   **Plan** schedules every active order at its *remaining* qty (ordered − good
-  produced) through Rules 1–7 unchanged — so "Run" and "Rerun MRP" are one action.
-  Orders flow Pending → Running (first actual) → Complete (ticked on a Rule 8 entry).
+  produced) through Rules 1–6 unchanged — so "Run" and "Rerun MRP" are one action.
+  Orders flow Pending → Running (first actual) → Complete (ticked on a Rule 7 entry).
   Durable in MongoDB/Upstash — see `engine/orderbook.py` + `book_store.py`.
 
 ### Layers

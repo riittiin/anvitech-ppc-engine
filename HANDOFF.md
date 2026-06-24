@@ -64,7 +64,7 @@ This section matters as much as the architecture.
 7. **Keep the UI minimal.** He values an uncluttered interface (he had the rule tabs
    stripped to just input / output / notes). Add nothing that doesn't serve the flow.
 8. **Reuse, never duplicate.** Rules stay pure; the order book is the only stateful
-   layer; "Plan" reuses Rules 1–7.
+   layer; "Plan" reuses Rules 1–6.
 9. **Keep tests, the golden snapshot, and docs in lockstep** with every change.
 
 ### Communication shape
@@ -77,13 +77,13 @@ This section matters as much as the architecture.
 The 9 business rules (see [`RULES.md`](RULES.md)) turn sales orders into a
 machine-by-machine schedule + Gantt, re-planning as actual production comes in. The
 engine is a **persistent, shared Order Book** (keyed by unique SO number) sitting
-**above the unchanged pure Rules 1–7**:
+**above the unchanged pure Rules 1–6**:
 
 - **Upload** an Excel → orders **merge** into the book (new SO# → Pending; a
   known/completed/intra-file-duplicate SO# → flagged, never double-counted).
 - **Plan** (one button; unifies the old "Run" + "Rerun MRP") → schedules every
-  *active* order at its **remaining** qty (ordered − good produced) through Rules 1–7.
-- **Rule 8** daily entry records production; the first actual flips an order
+  *active* order at its **remaining** qty (ordered − good produced) through Rules 1–6.
+- **Rule 7** daily entry records production; the first actual flips an order
   Pending → Running; ticking **"mark complete"** on an entry → Complete (archived).
 - **Delete** (single / multiple / all) permanently removes from the database.
 - **Login:** HTTP Basic Auth gates the whole app. **Persistence:**
@@ -135,7 +135,7 @@ Default login is `anvitech` / `ppc2025`. **Deploy:** push to `main`.
   flagged, never double-counted; an order is **never auto-deleted** for being absent
   from an upload.
 - **Status is derived:** Pending (no actuals) → Running (≥1 actual) → Complete
-  (**explicit — only via the Rule 8 "mark complete" tick; the engine NEVER
+  (**explicit — only via the Rule 7 "mark complete" tick; the engine NEVER
   auto-completes**, not even at remaining ≤ 0).
 - **Rule 3 priority = least slack** = (working-time-until-due) − (work-needed); no
   window by default; on equal dates it reduces to "more process time first." Metric
@@ -148,7 +148,7 @@ Default login is `anvitech` / `ppc2025`. **Deploy:** push to `main`.
 
 ## Done vs deferred
 
-**Done:** order book + lifecycle, upload-merge + dedup, completion via Rule 8,
+**Done:** order book + lifecycle, upload-merge + dedup, completion via Rule 7,
 unified Plan, hour-resolution Gantt with status labels, login, Render + MongoDB
 deploy, permanent delete (single/multi/all), append-safe storage.
 

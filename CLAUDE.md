@@ -38,9 +38,9 @@ violate them without the user's explicit say-so.
 1. **Every rule is a pure function.** `def run(input_data, config, masters) -> output`.
    No global state, no UI calls, no rule calling another rule. Only `pipeline.py`
    knows the order.
-2. **Planning reuses Rules 1–7 — never duplicates them.** The order book emits the
+2. **Planning reuses Rules 1–6 — never duplicates them.** The order book emits the
    active SO-lines (each at its *remaining* qty = ordered − good produced) and feeds
-   them straight into the unchanged Rules 1–7 (`api._plan` → `pipeline.run_forward`).
+   them straight into the unchanged Rules 1–6 (`api._plan` → `pipeline.run_forward`).
    "Plan" and the old "Rerun MRP" are now one action. Never copy rule logic into the
    order-book layer (`engine/orderbook.py`).
 3. **The pipeline snapshots every rule's input and output into a trace.** This is
@@ -60,7 +60,7 @@ violate them without the user's explicit say-so.
 
 ```
 Upload Excel ─▶ MERGE into the Order Book (by SO#)   ┐
-Rule 8 actual ─▶ recorded vs SO# (+ optional complete)┘
+Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
                               │
    Order Book ──▶ active SO-lines (remaining qty) ──▶ R1 consolidate ─▶ R2 sort
    (orders · actuals · masters)                       ─▶ R3 smart priority (slack)
@@ -73,9 +73,9 @@ Rule 8 actual ─▶ recorded vs SO# (+ optional complete)┘
   inside Rule 6; Rule 3 also reads the routing master.
 - **"Plan"** = take every active (non-completed) order at its remaining qty and run
   the forward chain. It **unifies the old "Run" and "Rerun MRP"**. The trace's
-  `rule9` tab is a *view* of the planned book, not a separate module.
+  `rule8` tab is a *view* of the planned book, not a separate module.
 - Order lifecycle (status is **derived**): **Pending** → *(first actual)* →
-  **Running** → *(user ticks "mark complete" on a Rule 8 entry)* → **Complete**
+  **Running** → *(user ticks "mark complete" on a Rule 7 entry)* → **Complete**
   (archived, excluded from planning).
 
 ## Known data quirks in Test2.xlsx (handle in the loader)
@@ -158,10 +158,9 @@ Rule 8 actual ─▶ recorded vs SO# (+ optional complete)┘
   `MongoStore` / `UpstashStore` / `LocalStore`; `get_store()` picks by env.
 - `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
   (per-order rows, hour axis, time-positioned bars by machine, Pending/Running label).
-- `engine/rules/ruleN_*.py` — Rules 1–6 and 8, one pure `run(...)` each; 4/5 also expose
-  the calc helpers Rule 6 imports. (Rule 7 was removed; there is no `rule7` module.
-  There is no `rule9` module either — Rule 9 is the unified
-  "Plan" over the order book; see `api._plan`.)
+- `engine/rules/ruleN_*.py` — Rules 1–7, one pure `run(...)` each; 4/5 also expose
+  the calc helpers Rule 6 imports. (Rule 7 = `rule7_capture_actuals`. There is no
+  `rule8` module — Rule 8 is the unified "Plan" over the order book; see `api._plan`.)
 - `api/main.py` — FastAPI: `/upload` (merge), `/run`=`/rerun` (plan the book),
   `/orders` (+ `/orders/delete`, `/orders/clear`), `/actuals`, `/items`, `/gantt`,
   `/report`, `/trace/{id}`. Login + no-cache middleware. Helper-tab augmentation.
