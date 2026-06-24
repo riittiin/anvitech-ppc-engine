@@ -29,7 +29,6 @@ Each rule is tagged by its role in the data flow:
        ▼
    🔻 Rule 6  Allocate to machines  ◄── ⚙️ Rule 4 (setup time)
        │                            ◄── ⚙️ Rule 5 (overlap mode)
-       │                            ◄── ⚙️ Rule 7 (parallel machine, batch>400)
        │                            ◄── masters (machine / operator / calendar)
        │  the schedule
    🔻 Rule 8  Capture daily actuals
@@ -38,7 +37,7 @@ Each rule is tagged by its role in the data flow:
 ```
 
 **True forward pipeline:** `1 → 2 → 3 → 6 → 8 → 9 (loop)`
-**Consumed inside Rule 6:** Rules 4, 5, 7.
+**Consumed inside Rule 6:** Rules 4, 5.
 
 ---
 
@@ -133,13 +132,11 @@ complete** (as in sequential mode). Overlap only compresses real machining steps
 - **Parameter:** overlap threshold = 50% (configurable). The percentage applies
   to the previous process's cutting time, not its setup.
 
-### ⚙️ Rule 7 — Parallel machine for large batches  *(Parameter / calc — nested in Rule 6)*
-If **batch size > 400**, allot a **separate (preferred) machine for the next CNC
-setup** so the batch runs in parallel rather than queuing on one machine.
-
-- **Source:** original Rule 5b
-- **Consumed by:** Rule 6 (machine selection for large batches)
-- **Parameter:** parallel trigger = 400 nos (configurable)
+> **Note — Rule 7 (parallel machine) was removed.** The original sheet had a
+> "Rule 5b / Rule 7" that, for batches over 400, moved a CNC operation to a
+> separate machine. It never delivered true parallel processing (it relocated
+> the operation rather than splitting the batch) and is no longer part of the
+> engine. Rule numbers are kept as-is for traceability; there is simply no Rule 7.
 
 ---
 
@@ -162,8 +159,7 @@ ready; it never forces a machine to wait for a higher-priority batch whose
 operation isn't ready yet. This is the core of the optimization: maximize machine
 utilization while honouring delivery-date priority.
 
-While running, Rule 6 consumes: ⚙️ Rule 4 (setup time), ⚙️ Rule 5 (overlap mode),
-⚙️ Rule 7 (parallel machine).
+While running, Rule 6 consumes: ⚙️ Rule 4 (setup time) and ⚙️ Rule 5 (overlap mode).
 
 - **Source:** original Rule 4 + `Machine master` + `Operator & shift Master` +
   `Weekly off & holiday master`
@@ -220,4 +216,3 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 | Consolidation window | 10 days | Rule 1 |
 | Setup time per process | 90 min | Rule 4 |
 | Operation overlap mode | Sequential / 50% overlap | Rule 5 |
-| Parallel machine trigger | batch size > 400 | Rule 7 |

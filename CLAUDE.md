@@ -65,11 +65,11 @@ Rule 8 actual ─▶ recorded vs SO# (+ optional complete)┘
    Order Book ──▶ active SO-lines (remaining qty) ──▶ R1 consolidate ─▶ R2 sort
    (orders · actuals · masters)                       ─▶ R3 smart priority (slack)
                                                        ─▶ R6 allocate (R4 setup,
-                                                          R5 overlap, R7 parallel)
+                                                          R5 overlap)
                                                        ─▶ schedule + Gantt
 ```
 
-- Forward chain (the pure rules): `1 → 2 → 3 → 6`. Rules **4, 5, 7** are consumed
+- Forward chain (the pure rules): `1 → 2 → 3 → 6`. Rules **4, 5** are consumed
   inside Rule 6; Rule 3 also reads the routing master.
 - **"Plan"** = take every active (non-completed) order at its remaining qty and run
   the forward chain. It **unifies the old "Run" and "Rerun MRP"**. The trace's
@@ -119,7 +119,7 @@ Rule 8 actual ─▶ recorded vs SO# (+ optional complete)┘
 - One test file per rule under `tests/`, named `test_ruleN.py`. Seed tests with
   the worked examples annotated in `Test2.xlsx` (see spec §9).
 - Configurable params live in `engine/config.py` with validation: consolidation
-  window (10d), setup time (90min), overlap mode (50%), parallel trigger (400).
+  window (10d), setup time (90min), overlap mode (50%).
 - Keep files focused; if a rule file grows large it's probably doing too much.
 
 ## Commands
@@ -158,8 +158,9 @@ Rule 8 actual ─▶ recorded vs SO# (+ optional complete)┘
   `MongoStore` / `UpstashStore` / `LocalStore`; `get_store()` picks by env.
 - `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
   (per-order rows, hour axis, time-positioned bars by machine, Pending/Running label).
-- `engine/rules/ruleN_*.py` — Rules 1–8, one pure `run(...)` each; 4/5/7 also expose
-  the calc helpers Rule 6 imports. (There is no `rule9` module — Rule 9 is the unified
+- `engine/rules/ruleN_*.py` — Rules 1–6 and 8, one pure `run(...)` each; 4/5 also expose
+  the calc helpers Rule 6 imports. (Rule 7 was removed; there is no `rule7` module.
+  There is no `rule9` module either — Rule 9 is the unified
   "Plan" over the order book; see `api._plan`.)
 - `api/main.py` — FastAPI: `/upload` (merge), `/run`=`/rerun` (plan the book),
   `/orders` (+ `/orders/delete`, `/orders/clear`), `/actuals`, `/items`, `/gantt`,

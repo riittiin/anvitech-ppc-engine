@@ -15,8 +15,7 @@ Each operation respects:
   * the working calendar (Thursdays off, holidays) and shifts — via WorkClock,
   * machine availability (one operation at a time per machine),
   * Rule 4 (setup time) for occupancy,
-  * Rule 5 (overlap mode) for when the next process of the same batch may start,
-  * Rule 7 (parallel machine) for large CNC batches.
+  * Rule 5 (overlap mode) for when the next process of the same batch may start.
 
 Pure function: ``run(prioritized_batches, config, notes, masters) -> list[ScheduleEntry]``.
 Raises RuleError on a contract violation (e.g. a batch with no routing).
@@ -30,7 +29,6 @@ from ..worktime import WorkClock
 from ..loaders import normalize_resource_id
 from . import rule4_setup_time as r4
 from . import rule5_overlap_mode as r5
-from . import rule7_parallel_machine as r7
 
 
 def _resolve_resource(proc):
@@ -55,7 +53,6 @@ def run(batches, config=None, notes=None, masters=None, **kw):
         config.plan_start_date.day,
         config.first_shift_start_hour,
     )
-    cnc_machines = [m for m in masters.machines if m.startswith("CNC")]
 
     # One state record per batch. ``ready`` is the earliest its NEXT process may
     # start (precedence constraint from the previous process); ``next`` indexes
@@ -76,7 +73,6 @@ def run(batches, config=None, notes=None, masters=None, **kw):
             "routing": routing,
             "next": 0,
             "ready": plan_start,
-            "parallel": r7.should_parallelize(batch.qty, config),
         })
 
     total_ops = sum(len(s["routing"].processes) for s in states)
@@ -94,12 +90,6 @@ def run(batches, config=None, notes=None, masters=None, **kw):
             proc = s["routing"].processes[s["next"]]
             resource = _resolve_resource(proc)
             note = ""
-            # Rule 7 — large CNC batch: take a separate free CNC for this setup.
-            if s["parallel"] and resource.startswith("CNC") and len(cnc_machines) > 1:
-                chosen = r7.pick_parallel_machine(resource, cnc_machines, machine_free)
-                if chosen != resource:
-                    note = f"parallel (qty>{config.parallel_trigger_qty}): {resource}->{chosen}"
-                    resource = chosen
 
             occ = r4.occupancy_minutes(proc.cycle_time, s["batch"].qty, config)
             machine_ready = machine_free.get(resource, plan_start)
@@ -140,8 +130,6 @@ def run(batches, config=None, notes=None, masters=None, **kw):
         f"Non-delay scheduling: {len(summary)} resources used; {zero_idle} ran with "
         f"zero idle inside their active span; total idle within spans = {round(total_idle, 1)} min."
     )
-    if any(s["parallel"] for s in states):
-        notes.append("Rule 7 active: large batch(es) split a parallel CNC setup.")
 
     return schedule
 

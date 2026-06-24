@@ -113,7 +113,7 @@ def run_rule(trace: dict, name: str, fn, input_data, *, config=None, **kw):
 # Forward chain
 # --------------------------------------------------------------------------- #
 RULE_NAMES = [
-    "rule1", "rule2", "rule3", "rule4", "rule5", "rule6", "rule7", "rule8", "rule9",
+    "rule1", "rule2", "rule3", "rule4", "rule5", "rule6", "rule8", "rule9",
 ]
 
 
@@ -133,7 +133,7 @@ def _mark_not_reached(trace: dict, from_index: int):
 def run_forward(plan_run: PlanRun, config: Config, masters: Masters) -> dict:
     """Run the forward planning chain 1 → 2 → 3 → 6, returning the trace.
 
-    Rules 4/5/7 are consumed inside Rule 6 (their effect is logged in rule6's
+    Rules 4/5 are consumed inside Rule 6 (their effect is logged in rule6's
     notes); they are surfaced as helper trace entries by the API layer if needed.
     """
     config.validate()
@@ -165,5 +165,5 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters) -> dict:
         _mark_not_reached(trace, failed_at + 1)
         return trace
 
-    _mark_not_reached(trace, len(RULE_NAMES))  # fill rule4/5/7/8/9 placeholders
+    _mark_not_reached(trace, len(RULE_NAMES))  # fill rule4/5/8/9 placeholders
     return trace

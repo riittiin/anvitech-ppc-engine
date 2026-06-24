@@ -37,9 +37,6 @@ class Config:
     overlap_mode: str = OVERLAP_SEQUENTIAL
     overlap_percent: int = 50  # only used when overlap_mode == OVERLAP_PERCENT
 
-    # Rule 7 — batch size strictly above this triggers a parallel machine.
-    parallel_trigger_qty: int = 400
-
     # Rule 3 — smart priority. The metric folds due date + workload into urgency.
     #   slack          = (working time until SO delivery date) − (work needed)
     #   critical_ratio = (time until due) / (work needed)
@@ -72,8 +69,6 @@ class Config:
             )
         if not (0 <= self.overlap_percent <= 100):
             errs.append("overlap_percent must be within 0..100")
-        if self.parallel_trigger_qty < 0:
-            errs.append("parallel_trigger_qty must be >= 0")
         if self.priority_metric not in PRIORITY_METRICS:
             errs.append(f"priority_metric must be one of {PRIORITY_METRICS}")
         if self.priority_window_days is not None and self.priority_window_days < 0:

@@ -40,7 +40,6 @@ from engine.rules import (
     rule4_setup_time as r4,
     rule5_overlap_mode as r5,
     rule6_allocate as r6,
-    rule7_parallel_machine as r7,
     rule8_capture_actuals as r8,
 )
 
@@ -143,7 +142,7 @@ class ActualRequest(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Helper-tab augmentation (Rules 3/4/5/7/8 + Rule 6 machine view)
+# Helper-tab augmentation (Rules 3/4/5/8 + Rule 6 machine view)
 # --------------------------------------------------------------------------- #
 def _augment_helpers(trace, plan_run, config, masters):
     if "rule3" in trace and trace["rule3"].get("reached", True) and plan_run.batches_prioritized:
@@ -206,17 +205,6 @@ def _augment_helpers(trace, plan_run, config, masters):
         "output": to_table(overlap_rows),
         "config": config.to_dict(),
         "notes": rule5_notes,
-        "error": None, "reached": True,
-    }
-
-    rows7 = [{"Batch": b.batch_id, "Item": b.item_code, "Qty": b.qty,
-              "Trigger (>%d)" % config.parallel_trigger_qty: r7.should_parallelize(b.qty, config)}
-             for b in plan_run.batches_prioritized]
-    trace["rule7"] = {
-        "input": to_table([{"Parallel trigger qty": config.parallel_trigger_qty}]),
-        "output": to_table(rows7), "config": config.to_dict(),
-        "notes": ["no batch exceeds the trigger in this dataset" if not any(
-            r7.should_parallelize(b.qty, config) for b in plan_run.batches_prioritized) else "parallel CNC applied"],
         "error": None, "reached": True,
     }
 

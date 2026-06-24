@@ -8,11 +8,10 @@ const RULES = {
   rule4: { n: 4, title: "Setup time" },
   rule5: { n: 5, title: "Overlap mode" },
   rule6: { n: 6, title: "Allocate to machines" },
-  rule7: { n: 7, title: "Parallel machine" },
   rule8: { n: 8, title: "Capture actuals" },
   rule9: { n: 9, title: "Plan (book → remaining qty)" },
 };
-const ORDER = ["rule1","rule2","rule3","rule4","rule5","rule6","rule7","rule8","rule9"];
+const ORDER = ["rule1","rule2","rule3","rule4","rule5","rule6","rule8","rule9"];
 
 let currentTrace = null;
 let currentGantt = null;
@@ -31,7 +30,6 @@ function readConfig() {
     setup_time_min: Number($("cfg-setup").value),
     overlap_mode: $("cfg-overlap").value,
     overlap_percent: Number($("cfg-overlap-pct").value),
-    parallel_trigger_qty: Number($("cfg-parallel").value),
     priority_metric: $("cfg-priority-metric").value,
     priority_window_days: $("cfg-priority-window").value,
   };

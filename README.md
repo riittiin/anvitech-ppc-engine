@@ -74,7 +74,7 @@ uses the `/run` response directly, so it doesn't matter.)
 ```
 Upload Excel ─▶ merge into the Order Book (by SO#)
 Order Book ─▶ active SO-lines (remaining qty) ─▶ R1 consolidate ─▶ R2 sort ─▶
-              R3 smart priority ─▶ R6 allocate (R4 setup, R5 overlap, R7 parallel)
+              R3 smart priority ─▶ R6 allocate (R4 setup, R5 overlap)
               ─▶ schedule + Gantt
 Rule 8 actuals reduce each order's remaining qty; "mark complete" archives it.
 ```
@@ -131,7 +131,6 @@ Rule 8 actuals reduce each order's remaining qty; "mark complete" archives it.
 | Consolidation window | 10 days | Rule 1 |
 | Setup time per process | 90 min | Rule 4 |
 | Operation overlap mode | sequential / 50% | Rule 5 |
-| Parallel machine trigger | qty > 400 | Rule 7 |
 
 All validated at run start. Edit them live in the frontend or pass a `config`
 object to `POST /run`.
