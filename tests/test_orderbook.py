@@ -1,7 +1,7 @@
 """Order-book pure logic: merge, status derivation, active lines, persistence."""
 from datetime import date
 
-from engine.models import SOLine, Order, Actual
+from engine.models import SOLine, Order, Actual, Masters, Routing, Process
 from engine import orderbook, book_store
 
 
@@ -92,3 +92,81 @@ def test_persistence_round_trip_and_complete():
     assert book_store.complete_order("SO1") is True
     assert "SO1" not in book_store.load_active_orders()
     assert book_store.load_completed_orders()["SO1"].completed is True
+
+
+# --------------------------------------------------------------------------- #
+# machine_lost_minutes: downtime + setup overrun attributed per machine
+# --------------------------------------------------------------------------- #
+def _routing(item, procs):
+    """procs = list of (process_name, suggested_machine)."""
+    return Routing(
+        item_code=item, description="", customer="", rm_type="", moq=None,
+        processes=[Process(seq=i + 1, name=name, cycle_time=1, total_time=None,
+                           suggested_machine=sm, allotted_machine=None)
+                   for i, (name, sm) in enumerate(procs)],
+    )
+
+
+def _masters(*routings):
+    return Masters(routings={r.item_code: r for r in routings})
+
+
+def _actual(item, process, **kw):
+    return Actual(so_no="SO1", item_code=item, entry_date=D, process=process, **kw)
+
+
+def test_lost_minutes_downtime_plus_setup_overrun_per_machine():
+    masters = _masters(_routing("X", [("CNC FIRST SIDE", "CNC 4")]))
+    # setup overrun 120-90=30, plus 30 breakdown = 60, on canonical "CNC4".
+    a = _actual("X", "CNC FIRST SIDE", actual_setup_min=120, machine_breakdown_min=30)
+    lost, unattributed = orderbook.machine_lost_minutes([a], masters, planned_setup_min=90)
+    assert lost == {"CNC4": 60.0}
+    assert unattributed == []
+
+
+def test_lost_minutes_setup_under_plan_does_not_give_time_back():
+    masters = _masters(_routing("X", [("CNC FIRST SIDE", "CNC 4")]))
+    # actual setup 60 < planned 90 -> overrun clamped to 0; only the 20 downtime counts.
+    a = _actual("X", "CNC FIRST SIDE", actual_setup_min=60, no_power_min=20)
+    lost, _ = orderbook.machine_lost_minutes([a], masters, planned_setup_min=90)
+    assert lost == {"CNC4": 20.0}
+
+
+def test_lost_minutes_accumulate_on_same_machine():
+    masters = _masters(_routing("X", [("CNC FIRST SIDE", "CNC 4")]))
+    a1 = _actual("X", "CNC FIRST SIDE", no_power_min=15)
+    a2 = _actual("X", "CNC FIRST SIDE", tool_problem_min=25)
+    lost, _ = orderbook.machine_lost_minutes([a1, a2], masters, planned_setup_min=90)
+    assert lost == {"CNC4": 40.0}
+
+
+def test_lost_minutes_unmatched_process_is_unattributed_not_fatal():
+    masters = _masters(_routing("X", [("CNC FIRST SIDE", "CNC 4")]))
+    a = _actual("X", "TYPO PROCESS", no_power_min=15)
+    lost, unattributed = orderbook.machine_lost_minutes([a], masters, planned_setup_min=90)
+    assert lost == {}
+    assert len(unattributed) == 1 and unattributed[0]["process"] == "TYPO PROCESS"
+
+
+def test_lost_minutes_missing_routing_is_unattributed():
+    masters = _masters(_routing("X", [("CNC FIRST SIDE", "CNC 4")]))
+    a = _actual("ZZZ", "CNC FIRST SIDE", no_power_min=15)   # no routing for ZZZ
+    lost, unattributed = orderbook.machine_lost_minutes([a], masters, planned_setup_min=90)
+    assert lost == {}
+    assert len(unattributed) == 1 and unattributed[0]["item_code"] == "ZZZ"
+
+
+def test_lost_minutes_synthetic_station_when_no_suggested_machine():
+    # A finishing step with no suggested machine -> Rule 6 names a station after the
+    # process; lost time must key on that same id (normalize of the process name).
+    masters = _masters(_routing("X", [("DEBURRING", None)]))
+    a = _actual("X", "DEBURRING", no_operator_min=12)
+    lost, _ = orderbook.machine_lost_minutes([a], masters, planned_setup_min=90)
+    assert lost == {"DEBURRING": 12.0}
+
+
+def test_lost_minutes_zero_loss_is_ignored():
+    masters = _masters(_routing("X", [("CNC FIRST SIDE", "CNC 4")]))
+    a = _actual("X", "CNC FIRST SIDE", actual_setup_min=90)   # no overrun, no downtime
+    lost, unattributed = orderbook.machine_lost_minutes([a], masters, planned_setup_min=90)
+    assert lost == {} and unattributed == []

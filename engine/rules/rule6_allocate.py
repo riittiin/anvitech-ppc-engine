@@ -38,7 +38,7 @@ def _resolve_resource(proc):
     return normalize_resource_id(raw)
 
 
-def run(batches, config=None, notes=None, masters=None, **kw):
+def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, **kw):
     # Imported lazily to avoid a circular import (pipeline imports this module).
     from ..pipeline import RuleError
 
@@ -78,6 +78,21 @@ def run(batches, config=None, notes=None, masters=None, **kw):
     total_ops = sum(len(s["routing"].processes) for s in states)
     machine_free: dict[str, datetime] = {}
     schedule: list[ScheduleEntry] = []
+
+    # Downtime loop-back: a machine that lost time in the actuals is treated as
+    # unavailable for that many WORKING minutes from the plan start, so its whole
+    # queue slips later (non-delay scheduling then handles the rest).
+    if machine_lost_min:
+        seeded = []
+        for mid, mins in machine_lost_min.items():
+            if mins and mins > 0:
+                machine_free[mid] = clock.advance(plan_start, mins)
+                seeded.append(f"{mid} +{round(mins)} min")
+        if seeded:
+            notes.append(
+                "Downtime loop-back: seeded recorded lost time into machine "
+                "availability — " + ", ".join(sorted(seeded)) + "."
+            )
 
     scheduled = 0
     guard = 0

@@ -32,6 +32,7 @@ function readConfig() {
     overlap_percent: Number($("cfg-overlap-pct").value),
     priority_metric: $("cfg-priority-metric").value,
     priority_window_days: $("cfg-priority-window").value,
+    apply_downtime_to_plan: $("cfg-apply-downtime").checked,
   };
 }
 

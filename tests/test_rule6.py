@@ -157,3 +157,44 @@ def test_no_routing_raises_rule_error(loaded):
         assert False, "expected RuleError"
     except RuleError as e:
         assert e.rule == "rule6"
+
+
+def test_seeded_machine_lost_time_delays_first_op():
+    """machine_lost_min seeds a machine as unavailable for N working-minutes, so its
+    first op starts that much later (downtime looping back into the schedule)."""
+    masters = _synthetic_masters()
+    cfg = Config(plan_start_date=date(2025, 3, 5))  # Wednesday, 08:00 start
+    b = Batch(batch_id="B", item_code="B", item_name="B", qty=1,
+              so_delivery_date=date(2025, 3, 8), source_so_refs=["B"])  # single op on M
+
+    base = rule6_allocate.run([b], config=cfg, masters=masters)
+    seeded = rule6_allocate.run([b], config=cfg, masters=masters, machine_lost_min={"M": 120})
+
+    assert base[0].start == datetime(2025, 3, 5, 8, 0)        # M free at plan start
+    assert seeded[0].start == datetime(2025, 3, 5, 10, 0)     # M held 120 working-min
+
+
+def test_machine_lost_min_default_is_noop():
+    masters = _synthetic_masters()
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    b = Batch(batch_id="B", item_code="B", item_name="B", qty=1,
+              so_delivery_date=date(2025, 3, 8), source_so_refs=["B"])
+    no_kw = rule6_allocate.run([b], config=cfg, masters=masters)
+    explicit_none = rule6_allocate.run([b], config=cfg, masters=masters, machine_lost_min=None)
+    assert [(e.machine, e.start, e.end) for e in no_kw] == \
+           [(e.machine, e.start, e.end) for e in explicit_none]
+
+
+def test_seeded_machine_does_not_affect_other_machines():
+    """Lost time on machine M must NOT delay an operation that runs on machine N
+    (isolation — only the affected machine's queue slips)."""
+    masters = _synthetic_masters()       # routing A: op1 on N, op2 on M
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    a = Batch(batch_id="A", item_code="A", item_name="A", qty=1,
+              so_delivery_date=date(2025, 3, 7), source_so_refs=["A"])
+
+    base = rule6_allocate.run([a], config=cfg, masters=masters)
+    seeded = rule6_allocate.run([a], config=cfg, masters=masters, machine_lost_min={"M": 180})
+    n_base = next(e for e in base if e.machine == "N")
+    n_seed = next(e for e in seeded if e.machine == "N")
+    assert n_seed.start == n_base.start    # the N op is untouched by M's lost time

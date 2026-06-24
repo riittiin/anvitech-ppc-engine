@@ -47,6 +47,11 @@ header h1 { margin: 0; font-size: 20px; }
   border: 1px solid var(--border); border-radius: 6px;
   padding: 6px 8px; width: 130px; font-size: 13px;
 }
+.config label.cfg-check {
+  flex-direction: row; align-items: center; gap: 7px;
+  align-self: flex-end; padding-bottom: 7px;
+}
+.config label.cfg-check input { width: auto; }
 .actions { display: flex; align-items: center; gap: 10px; }
 button {
   background: var(--panel-2); color: var(--text);

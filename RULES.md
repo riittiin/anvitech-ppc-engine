@@ -172,6 +172,17 @@ While running, Rule 6 consumes: ⚙️ Rule 4 (setup time) and ⚙️ Rule 5 (ov
     how you see that machines run continuously.
   - Drives `Planning status monitoring`, `Machinewise`, `Weekly Production plan`.
 
+**Downtime loop-back (`apply_downtime_to_plan`, default on in the UI).** Recorded
+Rule 7 actuals feed lost machine time back into this allocation: for each entry,
+`lost = max(actual setup − planned setup, 0) + total downtime` is attributed to the
+machine that entry's process runs on (resolved by the same id Rule 6 schedules on),
+**accumulated per machine**, and seeded as that machine's *unavailable* time at the
+start of the plan. The machine's whole queue then slips by its lost time — so a power
+cut / breakdown / over-long setup pushes the plan later instead of being ignored. The
+loss is cumulative across re-plans (total lost so far). Entries whose `process` can't
+be matched to a routing step are reported as *unattributed* (not fed in), never fatal.
+This affects **placement only** — Rule 3 priority is intentionally unchanged in v1.
+
 ---
 
 ## PHASE 5 — Execute and re-plan *(closed loop)*
@@ -216,3 +227,4 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 | Consolidation window | 10 days | Rule 1 |
 | Setup time per process | 90 min | Rule 4 |
 | Operation overlap mode | Sequential / 50% overlap | Rule 5 |
+| Apply downtime to plan | on (UI) | Rule 6 ← Rule 7 |

@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from .models import Order, SOLine
+from .loaders import normalize_resource_id
 
 PENDING = "Pending"
 RUNNING = "Running"
@@ -84,6 +85,37 @@ def active_so_lines(active_orders: dict, actuals) -> list:
             qty=remaining, delivery_date=o.delivery_date,
         ))
     return lines
+
+
+def machine_lost_minutes(actuals, masters, planned_setup_min):
+    """Lost machine time recorded in actuals, attributed per machine — for feeding
+    back into Rule 6 as availability delays. Pure (no storage/IO).
+
+    For each actual: ``lost = setup overrun (actual − planned, if positive) + total
+    downtime``. The machine is resolved from ``(item_code, process)`` via the routing
+    using the SAME id Rule 6 schedules on (suggested → allotted → process name,
+    normalized), so the keys match the scheduler's ``machine_free`` keys. Returns
+    ``(lost_by_machine, unattributed)``; ``unattributed`` lists entries whose
+    process/routing could not be matched (free-text typos, missing routing) so the
+    loss is surfaced rather than silently dropped or raised on."""
+    lost = defaultdict(float)
+    unattributed = []
+    for a in actuals:
+        loss = max((a.actual_setup_min or 0.0) - planned_setup_min, 0.0) + a.total_downtime_min()
+        if loss <= 0:
+            continue
+        routing = masters.routings.get(a.item_code)
+        proc = None
+        if routing is not None:
+            want = (a.process or "").strip()
+            proc = next((p for p in routing.processes if p.name.strip() == want), None)
+        if proc is None:
+            unattributed.append({"so_no": a.so_no, "item_code": a.item_code,
+                                 "process": a.process, "lost": loss})
+            continue
+        mid = normalize_resource_id(proc.suggested_machine or proc.allotted_machine or proc.name)
+        lost[mid] += loss
+    return dict(lost), unattributed
 
 
 def order_rows(active_orders: dict, completed_orders: dict, actuals) -> list:
