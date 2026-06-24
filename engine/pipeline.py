@@ -37,9 +37,9 @@ class RuleError(Exception):
 # --------------------------------------------------------------------------- #
 def _cell(value):
     if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M")
+        return value.strftime("%d-%m-%Y %H:%M")     # DD-MM-YYYY HH:MM (app-wide)
     if isinstance(value, date):
-        return value.isoformat()
+        return value.strftime("%d-%m-%Y")           # DD-MM-YYYY
     if isinstance(value, (list, tuple)):
         return ", ".join(str(v) for v in value)
     return value

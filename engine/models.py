@@ -13,14 +13,26 @@ from typing import Optional
 
 
 def _fmt(value):
-    """Render a value as a plain, JSON-friendly scalar for a trace table cell."""
+    """Render a value as a plain, JSON-friendly scalar for a trace table cell.
+
+    Dates display as DD-MM-YYYY (datetimes as DD-MM-YYYY HH:MM) everywhere in the
+    app — see ``fmt_date`` / ``fmt_datetime``."""
     if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M")
+        return fmt_datetime(value)
     if isinstance(value, date):
-        return value.isoformat()
+        return fmt_date(value)
     if isinstance(value, list):
         return ", ".join(str(v) for v in value)
     return value
+
+
+# Display format for every date / datetime shown to the user (DD-MM-YYYY).
+def fmt_date(d) -> str:
+    return d.strftime("%d-%m-%Y")
+
+
+def fmt_datetime(dt) -> str:
+    return dt.strftime("%d-%m-%Y %H:%M")
 
 
 # --------------------------------------------------------------------------- #

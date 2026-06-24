@@ -144,6 +144,14 @@ function renderTab(key) {
   }
   if (key === "rule7") html += actualsFormHtml();
 
+  // Task 3: let operators download the machine schedule to print and follow.
+  if (key === "rule6" && entry.output && entry.output.rows && entry.output.rows.length) {
+    html += '<div class="dl-toolbar">'
+      + '<button id="dl-schedule" class="primary">⬇ Download schedule (CSV)</button>'
+      + '<button id="dl-machine">⬇ Download machine-wise view</button>'
+      + '<span class="muted"> — opens in Excel; print it for the floor</span></div>';
+  }
+
   html += '<div class="io">';
   html += `<div class="panel"><h3>Input</h3>${tableHtml(entry.input)}</div>`;
   html += `<div class="panel"><h3>Output</h3>${tableHtml(entry.output)}</div>`;
@@ -160,6 +168,38 @@ function renderTab(key) {
   }
   root.innerHTML = html;
   if (key === "rule7") wireActualsForm();
+  if (key === "rule6") {
+    const sched = $("dl-schedule");
+    if (sched) sched.onclick = () => downloadCsv(`anvitech-schedule-${todayStamp()}.csv`, entry.output);
+    const mach = $("dl-machine");
+    const mView = entry.tables && entry.tables[0] && entry.tables[0].table;
+    if (mach && mView) mach.onclick = () => downloadCsv(`anvitech-machine-schedule-${todayStamp()}.csv`, mView);
+    else if (mach) mach.style.display = "none";
+  }
+}
+
+// ---- CSV download (for printing schedules) ----
+function todayStamp() {
+  const d = new Date();
+  return `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`;
+}
+function tableToCsv(table) {
+  const esc = (v) => {
+    const s = v === null || v === undefined ? "" : String(v);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [table.columns.map(esc).join(",")];
+  table.rows.forEach((r) => lines.push(r.map(esc).join(",")));
+  return lines.join("\r\n");
+}
+function downloadCsv(filename, table) {
+  if (!table || !table.columns) return;
+  const blob = new Blob(["﻿" + tableToCsv(table)], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
 }
 
 // ---- Orders dashboard ----
@@ -297,7 +337,7 @@ function actualsFormHtml() {
     fy("Date", `<input id="a-date" type="date" value="${today}" />`) +
     fy("Shift", `<input id="a-shift" value="1st shift" />`) +
     fy("SO No", `<input id="a-so" value="" placeholder="e.g. 24-25SO209" />`) +
-    fy("Item Code", `<input id="a-item" value="" placeholder="e.g. 61241949-01" />`) +
+    fr("Item Code <span class=auto>(auto from SO No)</span>", `<input id="a-item" value="" placeholder="auto-fills from SO No" />`) +
     fr("Item Name <span class=auto>(auto)</span>", `<input id="a-itemname" readonly />`) +
     fr("Process <span class=auto>(dropdown)</span>", `<select id="a-process"></select>`);
   const right =
@@ -316,6 +356,15 @@ function actualsFormHtml() {
     <div class="entry-grid"><div class="entry-col">${left}</div><div class="entry-col">${right}</div></div>
     <label class="complete-check"><input id="a-complete" type="checkbox" /> <strong>Mark this order (SO No) complete</strong> — archives it; the engine never auto-completes.</label>
     <button id="a-save" class="primary">Save daily entry</button>`;
+}
+
+// Task 1: typing the SO No auto-fills its Item Code (from the order book), then
+// the item name + process dropdown follow.
+function fillItemFromSO() {
+  const so = $("a-so").value.trim();
+  const map = ITEMS && ITEMS.so_to_item ? ITEMS.so_to_item : {};
+  if (map[so]) { $("a-item").value = map[so]; }
+  fillItemMeta();
 }
 
 function fillItemMeta() {
@@ -337,20 +386,26 @@ function fillItemMeta() {
 
 // True if an identical entry (same date / SO / item / process / produced / rejected)
 // is already on record — used to warn before saving an accidental duplicate.
+function isoToDdmmyyyy(iso) {            // "2025-08-01" -> "01-08-2025" (display format)
+  const p = String(iso).split("-");
+  return p.length === 3 ? `${p[2]}-${p[1]}-${p[0]}` : String(iso);
+}
 function actualIsDuplicate(body) {
   const t = currentTrace && currentTrace.rule7 && currentTrace.rule7.output;
   if (!t || !t.rows || !t.rows.length) return false;
   const ix = (n) => t.columns.indexOf(n);
   const [di, si, ii, pi, qp, qr] =
     ["Date", "SO No", "Item Code", "Process", "Qty Produced", "Qty Rejected"].map(ix);
+  const dateCell = isoToDdmmyyyy(body.entry_date);   // stored Date column is DD-MM-YYYY
   return t.rows.some((r) =>
-    String(r[di]) === String(body.entry_date) && String(r[si]) === String(body.so_no) &&
+    String(r[di]) === dateCell && String(r[si]) === String(body.so_no) &&
     String(r[ii]) === String(body.item_code) && String(r[pi]) === String(body.process) &&
     Number(r[qp]) === Number(body.qty_produced) && Number(r[qr]) === Number(body.qty_rejected));
 }
 
 async function wireActualsForm() {
   await ensureItems();
+  $("a-so").addEventListener("input", fillItemFromSO);   // SO No -> Item Code (auto)
   $("a-item").addEventListener("input", fillItemMeta);
   fillItemMeta();
   $("a-save").onclick = async () => {

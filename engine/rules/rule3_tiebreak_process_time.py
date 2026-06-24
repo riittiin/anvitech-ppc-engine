@@ -34,6 +34,7 @@ from ..config import (
     PRIORITY_CRITICAL_RATIO,
     PRIORITY_PROCESS_TIME,
 )
+from ..models import fmt_date
 from ..worktime import WorkClock
 from . import rule4_setup_time as r4
 
@@ -123,9 +124,9 @@ def run(batches, config=None, notes=None, masters=None, **kw):
             beaten = earlier_due_after[0]
             _, _, slack_e, _ = _metrics(beaten, masters, clock, plan_start, config)
             notes.append(
-                f"{b.item_code} (due {b.so_delivery_date.isoformat()}, slack "
+                f"{b.item_code} (due {fmt_date(b.so_delivery_date)}, slack "
                 f"{round(slack_b)} min) prioritized ahead of earlier-due "
-                f"{beaten.item_code} (due {beaten.so_delivery_date.isoformat()}, slack "
+                f"{beaten.item_code} (due {fmt_date(beaten.so_delivery_date)}, slack "
                 f"{round(slack_e)} min) — higher lateness risk."
             )
 
@@ -145,7 +146,7 @@ def build_priority_breakdown(ordered, config, masters):
             "Batch": b.batch_id,
             "Item Code": b.item_code,
             "Qty": b.qty,
-            "SO Delivery Date": b.so_delivery_date.isoformat(),
+            "SO Delivery Date": fmt_date(b.so_delivery_date),
             "Work needed (min)": round(work, 1),
             "Time available (min)": round(avail, 1),
             "Slack (min)": round(slack, 1),

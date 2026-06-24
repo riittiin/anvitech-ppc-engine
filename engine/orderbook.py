@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from .models import Order, SOLine
+from .models import Order, SOLine, fmt_date
 from .loaders import normalize_resource_id
 
 PENDING = "Pending"
@@ -132,12 +132,14 @@ def order_rows(active_orders: dict, completed_orders: dict, actuals) -> list:
             "Ordered": o.ordered_qty,
             "Produced (good)": prod,
             "Remaining": remaining,
-            "SO Delivery Date": o.delivery_date.isoformat(),
+            "SO Delivery Date": fmt_date(o.delivery_date),
             "Status": status,
             "Note": "ready to complete" if (status == RUNNING and remaining <= 0) else "",
         }
 
-    rows = [row(o, derive_status(o, good)) for o in active_orders.values()]
-    rows += [row(o, COMPLETE) for o in completed_orders.values()]
-    rows.sort(key=lambda r: (r["Status"] == COMPLETE, r["SO Delivery Date"], r["SO No"]))
-    return rows
+    # Sort by the real delivery date (not the DD-MM-YYYY display string, which
+    # wouldn't sort chronologically). Active first, then completed.
+    items = ([(o, derive_status(o, good)) for o in active_orders.values()]
+             + [(o, COMPLETE) for o in completed_orders.values()])
+    items.sort(key=lambda t: (t[1] == COMPLETE, t[0].delivery_date, t[0].so_no))
+    return [row(o, status) for o, status in items]

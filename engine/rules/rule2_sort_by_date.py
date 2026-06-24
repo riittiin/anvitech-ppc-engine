@@ -7,12 +7,14 @@ Pure function: ``run(batches, config, notes, masters) -> list[Batch]``.
 """
 from __future__ import annotations
 
+from ..models import fmt_date
+
 
 def run(batches, config=None, notes=None, masters=None, **kw):
     notes = notes if notes is not None else []
     ordered = sorted(batches, key=lambda b: b.so_delivery_date)
     notes.append(
         "Sorted by SO delivery date (earliest first): "
-        + " < ".join(f"{b.item_code}@{b.so_delivery_date.isoformat()}" for b in ordered)
+        + " < ".join(f"{b.item_code}@{fmt_date(b.so_delivery_date)}" for b in ordered)
     )
     return ordered

@@ -103,11 +103,17 @@ def test_report_lists_pending_master_data():
     assert "PENDING_MASTER_DATA" in str(client.get("/report").json())
 
 
+def _parse_dt(s):
+    # "DD-MM-YYYY HH:MM" -> a sortable tuple (chronological, cross-month safe).
+    from datetime import datetime
+    return datetime.strptime(s, "%d-%m-%Y %H:%M")
+
+
 def _earliest_start_for(plan, machine):
     out = plan["trace"]["rule6"]["output"]
     ci = {c: i for i, c in enumerate(out["columns"])}
-    starts = [row[ci["Start"]] for row in out["rows"] if row[ci["Machine"]] == machine]
-    return min(starts)  # "YYYY-MM-DD HH:MM" strings sort chronologically
+    starts = [_parse_dt(row[ci["Start"]]) for row in out["rows"] if row[ci["Machine"]] == machine]
+    return min(starts)
 
 
 def test_downtime_loops_back_into_the_schedule():
@@ -116,7 +122,7 @@ def test_downtime_loops_back_into_the_schedule():
 
     out = off["trace"]["rule6"]["output"]
     ci = {c: i for i, c in enumerate(out["columns"])}
-    first = min(out["rows"], key=lambda r: r[ci["Start"]])     # earliest op overall
+    first = min(out["rows"], key=lambda r: _parse_dt(r[ci["Start"]]))   # earliest op overall
     machine, item, process = first[ci["Machine"]], first[ci["Item Code"]], first[ci["Process"]]
     base_start = _earliest_start_for(off, machine)
 

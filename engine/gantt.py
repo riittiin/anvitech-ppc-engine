@@ -90,8 +90,8 @@ def build_gantt(schedule, batches, masters, status_by_so=None):
                 "color": color_by_id[e.machine],
                 "offset_days": round(offset, 4),
                 "duration_days": round(duration, 4),
-                "start": e.start.strftime("%Y-%m-%d %H:%M"),
-                "end": e.end.strftime("%Y-%m-%d %H:%M"),
+                "start": e.start.strftime("%d-%m-%Y %H:%M"),
+                "end": e.end.strftime("%d-%m-%Y %H:%M"),
                 "qty": e.qty,
             })
         rows.append({
@@ -100,7 +100,7 @@ def build_gantt(schedule, batches, masters, status_by_so=None):
             "item_code": (b.item_code if b else entries[0].item_code),
             "so_no": (", ".join(b.source_so_refs) if b else ""),
             "so_qty": (b.qty if b else ""),
-            "so_delivery_date": (b.so_delivery_date.isoformat() if b else ""),
+            "so_delivery_date": (b.so_delivery_date.strftime("%d-%m-%Y") if b else ""),
             "status": _row_status(b.source_so_refs if b else [], status_by_so),
             "bars": bars,
         })

@@ -30,7 +30,7 @@ from pydantic import BaseModel
 
 from engine.config import Config, OVERLAP_SEQUENTIAL, OVERLAP_PERCENT
 from engine.loaders import load_all
-from engine.models import PlanRun, Actual
+from engine.models import PlanRun, Actual, fmt_date
 from engine.pipeline import run_forward, to_table
 from engine.gantt import build_gantt
 from engine import book_store, orderbook
@@ -293,12 +293,13 @@ def _plan(config: Config):
     def _r8_row(o):
         remaining = max(o.ordered_qty - good.get(o.so_no, 0.0), 0.0)
         return {"SO No": o.so_no, "Item Code": o.item_code, "Remaining Qty": remaining,
-                "SO Delivery Date": o.delivery_date.isoformat(),
+                "SO Delivery Date": fmt_date(o.delivery_date),
                 "Status": status_by_so[o.so_no],
                 "In this plan": "scheduled" if remaining > 0 else "no — fully produced, mark complete"}
 
-    r8_rows = sorted((_r8_row(o) for o in active.values()),
-                     key=lambda r: (r["SO Delivery Date"], r["SO No"]))
+    # Sort by the real date (not the DD-MM-YYYY display string).
+    r8_rows = [_r8_row(o) for o in sorted(active.values(),
+                                          key=lambda o: (o.delivery_date, o.so_no))]
     scheduled = sum(1 for r in r8_rows if r["Remaining Qty"] > 0)
     trace["rule8"] = {
         "input": to_table([{"Active orders": len(active),

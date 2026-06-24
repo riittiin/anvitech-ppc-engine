@@ -11,7 +11,7 @@ layer, not here, so this stays focused on actuals.
 """
 from __future__ import annotations
 
-from ..models import Actual
+from ..models import Actual, fmt_date
 from .. import book_store
 
 
@@ -62,7 +62,7 @@ def run(new_entries, config=None, notes=None, masters=None, **kw):
         notes.append(
             f"Recorded {a.qty_produced:g} produced / {a.qty_rejected:g} rejected "
             f"(good {a.good_qty():g}) for {a.item_code} (SO {a.so_no}) on "
-            f"{a.entry_date.isoformat()}; setup {a.actual_setup_min:g} min, "
+            f"{fmt_date(a.entry_date)}; setup {a.actual_setup_min:g} min, "
             f"downtime {a.total_downtime_min():g} min"
             + (" — MARKED COMPLETE" if a.mark_complete else "")
         )

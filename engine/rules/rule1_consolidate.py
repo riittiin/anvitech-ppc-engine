@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from ..models import Batch
+from ..models import Batch, fmt_date
 
 
 def run(so_lines, config=None, notes=None, masters=None, **kw):
@@ -51,8 +51,8 @@ def run(so_lines, config=None, notes=None, masters=None, **kw):
                 gap = (line.delivery_date - current["so_date"]).days
                 notes.append(
                     f"{item_code}: SO {line.so_no} (SO delivery date "
-                    f"{line.delivery_date.isoformat()}) clubbed into batch with SO "
-                    f"delivery date {current['so_date'].isoformat()} "
+                    f"{fmt_date(line.delivery_date)}) clubbed into batch with SO "
+                    f"delivery date {fmt_date(current['so_date'])} "
                     f"— {gap} day(s) apart, within {window}-day window"
                 )
         if current is not None:

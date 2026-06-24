@@ -60,6 +60,7 @@ button {
 }
 button:hover { border-color: var(--accent); }
 button:disabled { opacity: 0.55; cursor: progress; }
+.dl-toolbar { display: flex; align-items: center; gap: 10px; margin: 4px 0 14px; flex-wrap: wrap; }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 .status { color: var(--muted); font-size: 12px; }
 
