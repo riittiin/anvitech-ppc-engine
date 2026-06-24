@@ -292,23 +292,24 @@ function fy(label, inner) { return `<label class="efield fy">${label}${inner}</l
 function fr(label, inner) { return `<label class="efield fr">${label}${inner}</label>`; }
 
 function actualsFormHtml() {
+  const today = new Date().toISOString().slice(0, 10);
   const left =
-    fy("Date", `<input id="a-date" type="date" value="2025-08-01" />`) +
+    fy("Date", `<input id="a-date" type="date" value="${today}" />`) +
     fy("Shift", `<input id="a-shift" value="1st shift" />`) +
-    fy("SO No", `<input id="a-so" value="24-25SO214" />`) +
-    fy("Item Code", `<input id="a-item" value="61240807-01" />`) +
+    fy("SO No", `<input id="a-so" value="" placeholder="e.g. 24-25SO209" />`) +
+    fy("Item Code", `<input id="a-item" value="" placeholder="e.g. 61241949-01" />`) +
     fr("Item Name <span class=auto>(auto)</span>", `<input id="a-itemname" readonly />`) +
     fr("Process <span class=auto>(dropdown)</span>", `<select id="a-process"></select>`);
   const right =
-    fy("Qty Produced", `<input id="a-prod" type="number" value="82" />`) +
-    fy("Qty Rejected", `<input id="a-rej" type="number" value="3" />`) +
-    fy("Actual Setting Time (min)", `<input id="a-setup" type="number" value="120" />`) +
-    fy("No Power (min)", `<input id="a-nopower" type="number" value="80" />`) +
-    fy("No Operator (min)", `<input id="a-noop" type="number" value="30" />`) +
-    fy("Tool Problem (min)", `<input id="a-tool" type="number" value="15" />`) +
-    fy("Machine Breakdown (min)", `<input id="a-mbd" type="number" value="0" />`) +
-    fy("No Load (min)", `<input id="a-noload" type="number" value="0" />`) +
-    fy("Other Work (min)", `<input id="a-other" type="number" value="0" />`) +
+    fy("Qty Produced", `<input id="a-prod" type="number" min="0" value="" />`) +
+    fy("Qty Rejected", `<input id="a-rej" type="number" min="0" value="" />`) +
+    fy("Actual Setting Time (min)", `<input id="a-setup" type="number" min="0" value="" />`) +
+    fy("No Power (min)", `<input id="a-nopower" type="number" min="0" value="" />`) +
+    fy("No Operator (min)", `<input id="a-noop" type="number" min="0" value="" />`) +
+    fy("Tool Problem (min)", `<input id="a-tool" type="number" min="0" value="" />`) +
+    fy("Machine Breakdown (min)", `<input id="a-mbd" type="number" min="0" value="" />`) +
+    fy("No Load (min)", `<input id="a-noload" type="number" min="0" value="" />`) +
+    fy("Other Work (min)", `<input id="a-other" type="number" min="0" value="" />`) +
     fy("Remarks", `<textarea id="a-remarks" rows="2"></textarea>`);
   return `
     <div class="entry-legend"><span class="lg lg-y">Manual entry</span><span class="lg lg-r">Auto-prompt / dropdown</span></div>
@@ -319,6 +320,11 @@ function actualsFormHtml() {
 
 function fillItemMeta() {
   const code = $("a-item").value.trim();
+  if (!code) {
+    $("a-itemname").value = "";
+    $("a-process").innerHTML = `<option value="">—</option>`;
+    return;
+  }
   const meta = ITEMS && ITEMS.items ? ITEMS.items[code] : null;
   if (meta) {
     $("a-itemname").value = meta.item_name || "";
@@ -329,15 +335,30 @@ function fillItemMeta() {
   }
 }
 
+// True if an identical entry (same date / SO / item / process / produced / rejected)
+// is already on record — used to warn before saving an accidental duplicate.
+function actualIsDuplicate(body) {
+  const t = currentTrace && currentTrace.rule7 && currentTrace.rule7.output;
+  if (!t || !t.rows || !t.rows.length) return false;
+  const ix = (n) => t.columns.indexOf(n);
+  const [di, si, ii, pi, qp, qr] =
+    ["Date", "SO No", "Item Code", "Process", "Qty Produced", "Qty Rejected"].map(ix);
+  return t.rows.some((r) =>
+    String(r[di]) === String(body.entry_date) && String(r[si]) === String(body.so_no) &&
+    String(r[ii]) === String(body.item_code) && String(r[pi]) === String(body.process) &&
+    Number(r[qp]) === Number(body.qty_produced) && Number(r[qr]) === Number(body.qty_rejected));
+}
+
 async function wireActualsForm() {
   await ensureItems();
   $("a-item").addEventListener("input", fillItemMeta);
   fillItemMeta();
   $("a-save").onclick = async () => {
+    const btn = $("a-save");
     const num = (id) => Number($(id).value) || 0;
     const body = {
       entry_date: $("a-date").value, shift: $("a-shift").value,
-      so_no: $("a-so").value, item_code: $("a-item").value,
+      so_no: $("a-so").value.trim(), item_code: $("a-item").value.trim(),
       item_name: $("a-itemname").value, process: $("a-process").value,
       qty_produced: num("a-prod"), qty_rejected: num("a-rej"),
       actual_setup_min: num("a-setup"), no_power_min: num("a-nopower"),
@@ -346,14 +367,32 @@ async function wireActualsForm() {
       other_work_min: num("a-other"), remarks: $("a-remarks").value,
       mark_complete: $("a-complete").checked,
     };
-    const res = await fetch("/actuals", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-    });
-    if (res.ok) {
-      const d = await res.json();
-      setStatus(`Saved (${d.saved} actuals).` + (d.completed_order ? ` Order ${body.so_no} marked complete.` : "") + " Re-planning…");
-      runPlan();
-    } else setStatus("Save failed: " + (await res.text()));
+    if (!body.so_no || !body.item_code) {
+      setStatus("Enter SO No and Item Code before saving."); return;
+    }
+    // Guard against re-saving the exact same entry (the #1 cause of duplicates).
+    if (actualIsDuplicate(body) && !confirm(
+        `An identical entry is already saved (SO ${body.so_no}, ${body.process || "—"}, `
+        + `${body.qty_produced} produced on ${body.entry_date}). Save another?`)) {
+      return;
+    }
+    btn.disabled = true;                       // block rapid double-clicks
+    try {
+      const res = await fetch("/actuals", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const d = await res.json();
+        const msg = `✓ Saved — ${d.saved} entr${d.saved === 1 ? "y" : "ies"} on record.`
+          + (d.completed_order ? ` Order ${body.so_no} marked complete.` : "");
+        await runPlan();                       // re-renders a fresh (blank) form
+        setStatus(msg);                        // keep the confirmation after re-planning
+      } else {
+        setStatus("Save failed: " + (await res.text())); btn.disabled = false;
+      }
+    } catch (e) {
+      setStatus("Save error: " + e.message); btn.disabled = false;
+    }
   };
 }
 
