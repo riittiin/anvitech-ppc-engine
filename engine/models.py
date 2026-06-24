@@ -218,9 +218,11 @@ class ScheduleEntry:
     start: datetime
     end: datetime
     notes: str = ""
+    so_refs: list = field(default_factory=list)   # SO number(s) this batch came from
 
     def as_row(self):
         return {
+            "SO No": _fmt(self.so_refs),
             "Batch ID": self.batch_id,
             "Item Code": self.item_code,
             "Seq": self.process_seq,

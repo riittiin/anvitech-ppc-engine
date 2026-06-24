@@ -125,6 +125,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             batch_id=s["batch"].batch_id, item_code=s["batch"].item_code,
             process_seq=proc.seq, process_name=proc.name, machine=resource,
             qty=s["batch"].qty, occupancy_min=occ, start=start, end=end, notes=note,
+            so_refs=list(s["batch"].source_so_refs),
         ))
 
         # Advance this batch and set when its next process may start (Rule 5).
@@ -184,6 +185,7 @@ def build_machine_view(schedule, masters, config):
             idle = clock.working_minutes_between(prev_end, e.start) if prev_end else 0.0
             timeline.append({
                 "Machine": display(mid),
+                "SO No": ", ".join(e.so_refs),
                 "Batch": e.batch_id,
                 "Item Code": e.item_code,
                 "Process": e.process_name,
