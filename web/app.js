@@ -17,7 +17,7 @@ let currentTrace = null;
 let currentGantt = null;
 let currentOrders = null;     // {columns, rows} from /run or /orders
 let ITEMS = null;
-let ganttHourWidth = 20;
+let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour detail)
 let activeTab = "orders";
 
 const $ = (id) => document.getElementById(id);
@@ -276,23 +276,20 @@ function renderGantt() {
       + '<p class="placeholder">No schedule to chart. Upload orders and click Plan.</p>';
     return;
   }
-  const HW = ganttHourWidth, DAYW = 24 * HW, axisW = g.num_days * DAYW;
-  const isWorkingHour = (di, h) => {
-    if (h >= 8) return !!g.days[di].working;
-    if (h < 5) return di > 0 && !!g.days[di - 1].working;
-    return false;
-  };
+  const DAYW = ganttDayWidth, axisW = g.num_days * DAYW;
   const monthCells = g.months.map((m) => `<div class="g-month" style="width:${m.days * DAYW}px">${escapeHtml(m.label)}</div>`).join("");
   const dayCells = g.days.map((d) => `<div class="g-day${d.working ? "" : " g-off"}" style="width:${DAYW}px">${d.day} ${escapeHtml(d.month.slice(0, 3))}</div>`).join("");
-  let hourCells = "";
-  g.days.forEach((d, di) => { for (let h = 0; h < 24; h++) hourCells += `<div class="g-hour${isWorkingHour(di, h) ? "" : " g-hoff"}" style="width:${HW}px">${h}</div>`; });
-  const grid = `repeating-linear-gradient(to right, transparent 0, transparent ${HW - 1}px, rgba(140,145,156,0.18) ${HW - 1}px, rgba(140,145,156,0.18) ${HW}px),`
-    + `repeating-linear-gradient(to right, transparent 0, transparent ${DAYW - 1}px, var(--border) ${DAYW - 1}px, var(--border) ${DAYW}px)`;
+  // Day-level chart: one column per day, no hour ruler. Day gridlines only,
+  // with non-working days (Thursdays / holidays) shaded behind the bars.
+  const grid = `repeating-linear-gradient(to right, transparent 0, transparent ${DAYW - 1}px, var(--border) ${DAYW - 1}px, var(--border) ${DAYW}px)`;
+  const offDays = g.days.map((d, i) => d.working ? "" : `<div class="g-offday" style="left:${i * DAYW}px;width:${DAYW}px"></div>`).join("");
+  const dateOnly = (s) => String(s).split(" ")[0];   // "DD-MM-YYYY HH:MM" -> "DD-MM-YYYY"
 
   const rowsHtml = g.rows.map((r) => {
     const bars = r.bars.map((b) => {
-      const left = b.offset_days * DAYW, w = Math.max(b.duration_days * DAYW, 6);
-      const tip = `${b.process} · ${b.machine} · ${b.start} → ${b.end} · qty ${b.qty}`;
+      const left = b.offset_days * DAYW, w = Math.max(b.duration_days * DAYW, 8);
+      const d0 = dateOnly(b.start), d1 = dateOnly(b.end);
+      const tip = `${b.process} · ${b.machine} · ${d0}${d1 !== d0 ? " → " + d1 : ""} · qty ${b.qty}`;
       return `<div class="g-bar" style="left:${left}px;width:${w}px;background:${b.color}" title="${escapeHtml(tip)}">${escapeHtml(b.process)}</div>`;
     }).join("");
     const st = r.status || "";
@@ -300,26 +297,26 @@ function renderGantt() {
       <td>${escapeHtml(r.item_name)}</td><td>${escapeHtml(r.item_code)}</td>
       <td>${escapeHtml(r.so_no)}</td><td>${r.so_qty}</td><td>${escapeHtml(r.so_delivery_date)}</td>
       <td>${st ? `<span class="status-pill status-${st.toLowerCase()}">${escapeHtml(st)}</span>` : ""}</td>
-      <td class="g-timeline"><div class="g-track" style="width:${axisW}px;background-image:${grid}">${bars}</div></td>
+      <td class="g-timeline"><div class="g-track" style="width:${axisW}px;background-image:${grid}">${offDays}${bars}</div></td>
     </tr>`;
   }).join("");
 
   const legend = Object.entries(g.machine_colors).map(([m, c]) => `<span class="g-leg"><span class="g-chip" style="background:${c}"></span>${escapeHtml(m)}</span>`).join("");
   root.innerHTML = `
     <div class="rule-header"><h2>Production Planning — Gantt</h2></div>
-    <div class="g-toolbar">Zoom (hour width) <button id="g-zoom-out">−</button> <button id="g-zoom-in">+</button>
-      <span class="muted">· hour columns; shaded = non-working</span></div>
+    <div class="g-toolbar">Zoom (day width) <button id="g-zoom-out">−</button> <button id="g-zoom-in">+</button>
+      <span class="muted">· one column per day; shaded = non-working day</span></div>
     <div class="g-scroll"><table class="g-table"><thead>
-      <tr><th class="g-corner" colspan="6" rowspan="2">Dates / hours →</th>
+      <tr><th class="g-corner" colspan="6" rowspan="2">Dates →</th>
           <th class="g-axis"><div class="g-band" style="width:${axisW}px">${monthCells}</div></th></tr>
       <tr><th class="g-axis"><div class="g-band" style="width:${axisW}px">${dayCells}</div></th></tr>
       <tr><th>Item name</th><th>Item Code</th><th>SO No</th><th>SO Qty</th><th>SO Del date</th><th>Status</th>
-          <th class="g-axis"><div class="g-band" style="width:${axisW}px">${hourCells}</div></th></tr>
+          <th class="g-axis"><div class="g-band" style="width:${axisW}px"></div></th></tr>
     </thead><tbody>${rowsHtml}</tbody></table></div>
     <div class="g-legend"><strong>Machines (bar colour):</strong> ${legend}</div>
-    <p class="g-note">Each bar = one process by its real start/end time, coloured by machine. Status = Pending/Running per order.</p>`;
-  $("g-zoom-in").onclick = () => { ganttHourWidth = Math.min(ganttHourWidth + 8, 80); renderGantt(); };
-  $("g-zoom-out").onclick = () => { ganttHourWidth = Math.max(ganttHourWidth - 8, 8); renderGantt(); };
+    <p class="g-note">Each bar = one process, coloured by machine, placed on the day(s) it runs. Status = Pending/Running per order.</p>`;
+  $("g-zoom-in").onclick = () => { ganttDayWidth = Math.min(ganttDayWidth + 40, 560); renderGantt(); };
+  $("g-zoom-out").onclick = () => { ganttDayWidth = Math.max(ganttDayWidth - 40, 80); renderGantt(); };
 }
 
 // ---- Rule 8 daily entry form ----

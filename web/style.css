@@ -191,6 +191,7 @@ button.danger:hover { opacity: 0.9; }
   position: relative; height: 28px;
   background-image: repeating-linear-gradient(to right, transparent 0, transparent 45px, var(--border) 45px, var(--border) 46px);
 }
+.g-offday { position: absolute; top: 0; bottom: 0; background: rgba(210, 153, 34, 0.10); }   /* non-working day */
 .g-bar {
   position: absolute; top: 4px; height: 20px; line-height: 20px;
   padding: 0 5px; font-size: 11px; color: #1a1a1a; border-radius: 3px;
