@@ -8,10 +8,18 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    # Login credentials are baked into api/auth.py and work with no env vars set.
+    # Set any of these to OVERRIDE a baked-in value without a code change.
     envVars:
-      - key: APP_USERNAME           # login id
+      - key: ADMIN_USERNAME         # overrides the baked admin username (optional)
         sync: false
-      - key: APP_PASSWORD           # login password
+      - key: ADMIN_PASSWORD         # overrides the baked admin password (optional)
+        sync: false
+      - key: USER_USERNAME          # overrides the baked user username (optional)
+        sync: false
+      - key: USER_PASSWORD          # overrides the baked user password (optional)
+        sync: false
+      - key: SESSION_SECRET         # optional; else a random secret is generated + stored
         sync: false
       - key: UPSTASH_REDIS_REST_URL # from the Upstash console (durable storage)
         sync: false

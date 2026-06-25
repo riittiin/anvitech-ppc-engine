@@ -13,6 +13,13 @@ def _isolate_store(tmp_path, monkeypatch):
     monkeypatch.delenv("UPSTASH_REDIS_REST_URL", raising=False)
     monkeypatch.delenv("UPSTASH_REDIS_REST_TOKEN", raising=False)
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    # Clear in-process auth state (rate limiter + cached session secret) so each
+    # test starts clean and resolves its secret from its own isolated store.
+    try:
+        from api import auth
+        auth.reset_auth_state()
+    except Exception:
+        pass
     yield
 
 

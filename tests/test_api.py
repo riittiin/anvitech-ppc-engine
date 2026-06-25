@@ -1,26 +1,34 @@
-"""API smoke tests — login gate + order-book flow (upload → plan → actuals)."""
-import base64
+"""API smoke tests — login gate + order-book flow (upload → plan → actuals).
 
+The app is gated by a signed session cookie now (not Basic Auth), so tests log in
+as admin via POST /login (the TestClient keeps the cookie). A fresh client is made
+per test so the cookie matches each test's isolated store/secret."""
 import pytest
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from api.main import app, APP_USERNAME, APP_PASSWORD  # noqa: E402
+from api.main import app  # noqa: E402
+from api import auth  # noqa: E402
 from engine.loaders import DEFAULT_XLSX  # noqa: E402
-
-
-def _auth(user, pwd):
-    return {"Authorization": "Basic " + base64.b64encode(f"{user}:{pwd}".encode()).decode()}
-
-
-client = TestClient(app)
-client.headers.update(_auth(APP_USERNAME, APP_PASSWORD))
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+_ACCTS = auth._accounts()
+_ADMIN = next(u for u, a in _ACCTS.items() if a["role"] == auth.ADMIN)
+_ADMIN_PWD = _ACCTS[_ADMIN]["password"]
 
-def _upload_test_workbook():
+
+@pytest.fixture
+def client():
+    """A TestClient logged in as admin (cookie persisted on the client)."""
+    c = TestClient(app)
+    r = c.post("/login", data={"username": _ADMIN, "password": _ADMIN_PWD})
+    assert r.status_code == 200  # 303 followed to the app shell at /
+    return c
+
+
+def _upload_test_workbook(client):
     with open(DEFAULT_XLSX, "rb") as fh:
         return client.post("/upload", files={"file": ("Test2.xlsx", fh, XLSX_MIME)})
 
@@ -28,12 +36,13 @@ def _upload_test_workbook():
 def test_requires_login():
     anon = TestClient(app)
     assert anon.post("/run", json={"config": {}}).status_code == 401
+    # Wrong password does not establish a session.
     bad = TestClient(app)
-    bad.headers.update(_auth(APP_USERNAME, "wrong"))
+    assert bad.post("/login", data={"username": _ADMIN, "password": "wrong"}).status_code == 401
     assert bad.get("/orders").status_code == 401
 
 
-def test_empty_book_plans_cleanly():
+def test_empty_book_plans_cleanly(client):
     r = client.post("/run", json={"config": {}})
     assert r.status_code == 200
     trace = r.json()["trace"]
@@ -42,8 +51,8 @@ def test_empty_book_plans_cleanly():
     assert r.json()["orders"]["rows"] == []          # nothing uploaded yet
 
 
-def test_upload_merges_then_plans():
-    up = _upload_test_workbook()
+def test_upload_merges_then_plans(client):
+    up = _upload_test_workbook(client)
     assert up.status_code == 200
     body = up.json()
     # 7 distinct SO numbers; the reused 24-25SO121A line is flagged, not added.
@@ -56,15 +65,15 @@ def test_upload_merges_then_plans():
     assert len(r.json()["trace"]["rule1"]["output"]["rows"]) >= 1
 
 
-def test_reupload_same_file_adds_nothing():
-    _upload_test_workbook()
-    again = _upload_test_workbook().json()
+def test_reupload_same_file_adds_nothing(client):
+    _upload_test_workbook(client)
+    again = _upload_test_workbook(client).json()
     assert again["added"] == 0
     assert len(again["flagged"]) >= 7                # every SO# now flagged
 
 
-def test_actual_marks_order_complete():
-    _upload_test_workbook()
+def test_actual_marks_order_complete(client):
+    _upload_test_workbook(client)
     r = client.post("/actuals", json={
         "so_no": "24-25SO214", "item_code": "61240807-01",
         "entry_date": "2025-03-07", "qty_produced": 10, "mark_complete": True,
@@ -78,8 +87,8 @@ def test_actual_marks_order_complete():
     assert so214[sti] == "Complete"
 
 
-def test_delete_selected_and_clear_all():
-    _upload_test_workbook()
+def test_delete_selected_and_clear_all(client):
+    _upload_test_workbook(client)
     assert len(client.get("/orders").json()["orders"]["rows"]) == 7
 
     # Delete one order permanently.
@@ -93,13 +102,13 @@ def test_delete_selected_and_clear_all():
     assert client.get("/orders").json()["orders"]["rows"] == []
 
 
-def test_bad_upload_returns_400():
+def test_bad_upload_returns_400(client):
     bad = client.post("/upload", files={"file": ("x.xlsx", b"not excel", "application/octet-stream")})
     assert bad.status_code == 400
 
 
-def test_report_lists_pending_master_data():
-    _upload_test_workbook()
+def test_report_lists_pending_master_data(client):
+    _upload_test_workbook(client)
     assert "PENDING_MASTER_DATA" in str(client.get("/report").json())
 
 
@@ -116,9 +125,11 @@ def _earliest_start_for(plan, machine):
     return min(starts)
 
 
-def test_downtime_loops_back_into_the_schedule():
-    _upload_test_workbook()
-    off = client.post("/run", json={"config": {"apply_downtime_to_plan": False}}).json()
+def test_downtime_loops_back_into_the_schedule(client):
+    _upload_test_workbook(client)
+    # Admin planning with an explicit config persists it (persist=True).
+    off = client.post("/run", json={"config": {"apply_downtime_to_plan": False},
+                                     "persist": True}).json()
 
     out = off["trace"]["rule6"]["output"]
     ci = {c: i for i, c in enumerate(out["columns"])}
@@ -133,7 +144,8 @@ def test_downtime_loops_back_into_the_schedule():
         "process": process, "machine_breakdown_min": 600,
     })
 
-    on = client.post("/run", json={"config": {"apply_downtime_to_plan": True}}).json()
+    on = client.post("/run", json={"config": {"apply_downtime_to_plan": True},
+                                    "persist": True}).json()
     # That machine's first op is pushed strictly later by the recorded downtime.
     assert _earliest_start_for(on, machine) > base_start
     # Visibility table is present when the feature is on.
@@ -141,5 +153,6 @@ def test_downtime_loops_back_into_the_schedule():
     assert any("Downtime fed back" in t for t in titles)
 
     # Gate is clean: flag OFF again returns to the original timing (downtime ignored).
-    off2 = client.post("/run", json={"config": {"apply_downtime_to_plan": False}}).json()
+    off2 = client.post("/run", json={"config": {"apply_downtime_to_plan": False},
+                                     "persist": True}).json()
     assert _earliest_start_for(off2, machine) == base_start

@@ -129,8 +129,20 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
 - Run tests: `pytest`
 - Regenerate golden trace after an intentional logic change:
   `REGEN_GOLDEN=1 pytest -k golden`
-- **Login:** whole app is behind HTTP Basic Auth — `APP_USERNAME`/`APP_PASSWORD`
-  env vars (defaults `anvitech`/`ppc2025`). Middleware in `api/main.py`.
+- **Login:** whole app is behind an app-owned **session login** with **two roles**
+  (`api/auth.py` + the `gatekeeper` middleware in `api/main.py`). A login page
+  (`web/login.html`) posts to `/login`, which sets a signed HMAC-SHA256 session
+  cookie; `/logout` clears it; `/me` reports the role. **Admin** = full control;
+  **User** = read-only view of every tab + download the Rule 6 allocation CSV +
+  submit Capture Actuals (incl. mark-complete). Admin-only endpoints (`/upload`,
+  `/orders/delete`, `/orders/clear`) enforce the role **server-side** (403), not
+  just in the UI. Credentials are **baked into `api/auth.py`** (admin `anvitech` /
+  `1930rail`, user `anvitech_user` / `anvitech12345678`), each overridable by env
+  vars (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, `USER_USERNAME`/`USER_PASSWORD`; legacy
+  `APP_USERNAME`/`APP_PASSWORD` still override the admin). Hardening: username-keyed
+  login rate limit, CSRF Origin check on unsafe methods, CSP + security headers,
+  interactive docs disabled, upload size cap. The plan config the admin last saved
+  is persisted (`anvitech:plan_config`) so users see the planner's schedule.
 - **Deploy (Render + MongoDB Atlas):** `render.yaml` runs `uvicorn api.main:app`.
   On Render set env vars: `APP_USERNAME`, `APP_PASSWORD`, and the store
   (`MONGODB_URI`, or the Upstash pair). Persistence is **opt-in** via those vars;
@@ -161,11 +173,16 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
 - `engine/rules/ruleN_*.py` — Rules 1–7, one pure `run(...)` each; 4/5 also expose
   the calc helpers Rule 6 imports. (Rule 7 = `rule7_capture_actuals`. There is no
   `rule8` module — Rule 8 is the unified "Plan" over the order book; see `api._plan`.)
-- `api/main.py` — FastAPI: `/upload` (merge), `/run`=`/rerun` (plan the book),
-  `/orders` (+ `/orders/delete`, `/orders/clear`), `/actuals`, `/items`, `/gantt`,
-  `/report`, `/trace/{id}`. Login + no-cache middleware. Helper-tab augmentation.
-- `web/` — `📋 Orders` tab (order book + delete), the per-rule tabs, and a
-  `📊 Gantt` tab; `app.js` renders the trace (no per-rule UI code).
+- `api/auth.py` — accounts (2 roles), `authenticate`, signed-cookie
+  `make_token`/`verify_token`, session secret, login rate limiter. Stdlib only.
+- `api/main.py` — FastAPI: `/login` `/logout` `/me`, `/upload` (merge, admin),
+  `/run`=`/rerun` (plan the book; admin+`persist` saves the config), `/orders`
+  (+ `/orders/delete`, `/orders/clear` — admin), `/actuals`, `/items`, `/gantt`,
+  `/report`, `/trace/{id}`. `gatekeeper` (session + CSRF) + `security_headers`
+  middleware; `require_admin`; helper-tab augmentation.
+- `web/` — `login.html` (self-contained login page), `📋 Orders` tab (order book +
+  delete), the per-rule tabs, and a `📊 Gantt` tab; `app.js` renders the trace and
+  hides admin-only controls for the user role (no per-rule UI code).
 
 ## Resolved design decision (data-confirmed)
 

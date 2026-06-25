@@ -31,17 +31,27 @@ Each numbered rule tab shows that rule's input/output, config, and decision note
 a failing rule shows a red error and marks downstream tabs "not reached". The
 **📊 Gantt** tab is the worker-facing schedule.
 
-## Login (whole app is gated)
+## Login & roles (whole app is gated)
 
-The entire app — UI, API, and static assets — sits behind HTTP Basic Auth (one id
-+ password). Credentials come from env vars; the browser prompts once per session.
+The entire app — UI, API, and static assets — sits behind an **app-owned session
+login** with **two roles**. A login page sets a signed (HMAC-SHA256) session
+cookie; there is a Logout button and a `/me` endpoint.
 
-- `APP_USERNAME` (default `anvitech`)
-- `APP_PASSWORD` (default `ppc2025`)
+- **Admin** — full control.
+- **User** — read-only view of every tab, plus download the machine-allocation CSV
+  and submit Capture Actuals (including marking an order complete). No config bar,
+  Plan, Upload, or Delete. Enforced server-side, not just hidden in the UI.
 
-Change them locally with `APP_USERNAME=… APP_PASSWORD=… uvicorn api.main:app`, and
-set them as env vars on your host (e.g. Render). **Change the defaults before
-exposing the app.**
+Credentials are defined in `api/auth.py` and each can be **overridden by env vars**
+without a code change:
+
+- admin: `ADMIN_USERNAME` / `ADMIN_PASSWORD` (baked default `anvitech` / `1930rail`)
+- user: `USER_USERNAME` / `USER_PASSWORD` (baked default `anvitech_user` / `anvitech12345678`)
+- `SESSION_SECRET` (optional; a random secret is generated + stored if unset)
+
+Hardening built in: username-keyed login rate limiting, CSRF Origin check, CSP +
+security headers, interactive docs disabled, upload size cap. **Change the baked
+credentials (edit `api/auth.py`) or set the env overrides before exposing the app.**
 
 ## Free public deployment (Render + a free database — no credit card)
 
@@ -59,8 +69,9 @@ on **Render + MongoDB Atlas**.
      `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`.
 3. **Create the Render service:** render.com → New → **Blueprint** → pick this repo
    (it reads `render.yaml`). You get a public `…onrender.com` URL.
-4. **Set env vars** on the Render service: `APP_USERNAME`, `APP_PASSWORD`, and the
-   store var(s) from step 2. Save → it redeploys.
+4. **Set env vars** on the Render service: the store var(s) from step 2, and
+   **optionally** the auth overrides (`ADMIN_*`/`USER_*`/`SESSION_SECRET`) — the
+   login works with none set (baked credentials). Save → it redeploys.
 5. Open the URL, log in, **upload your Excel**, click **Plan**. Orders + actuals now
    persist across sessions and devices.
 
@@ -98,7 +109,7 @@ Rule 7 actuals reduce each order's remaining qty; "mark complete" archives it.
 | Layer | What |
 |---|---|
 | `engine/` | Pure Python: `config`, `models`, `loaders`, `worktime`, `pipeline`, `rules/`, the order-book layer (`orderbook`, `book_store`, `storage`), and `gantt` |
-| `api/` | Thin FastAPI: `/upload`, `/run`(=`/rerun`), `/orders` (+ `/orders/delete`, `/orders/clear`), `/actuals`, `/items`, `/gantt`, `/report`, `/trace/{id}`; login + no-cache middleware |
+| `api/` | Thin FastAPI: `/login` `/logout` `/me`, `/upload`, `/run`(=`/rerun`), `/orders` (+ `/orders/delete`, `/orders/clear`), `/actuals`, `/items`, `/gantt`, `/report`, `/trace/{id}`; session gate + role enforcement + security-headers middleware (`api/auth.py`) |
 | `web/` | `📋 Orders`, the per-rule tabs, and `📊 Gantt` — `app.js` renders the trace (no per-rule UI code) |
 | `tests/` | Per-rule, order book, storage, pipeline, golden snapshot, and API |
 

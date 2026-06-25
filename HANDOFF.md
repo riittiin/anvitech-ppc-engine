@@ -3,81 +3,97 @@
 Orientation for a **new Claude Code session** taking over this project. The goal is
 to pick up **exactly where the last session left off — same standards, same way of
 working with the user, same grasp of the domain**, not just the same codebase. Read
-this whole file (especially **"How to pick up where the last session left off"**
-below), then [`CLAUDE.md`](CLAUDE.md) for the technical reference (design principles,
-data flow, code map).
+this whole file (especially **"How to pick up where the last session left off"**),
+then [`CLAUDE.md`](CLAUDE.md) (design principles, data flow, code map) and
+[`RULES.md`](RULES.md) (the rule logic).
 
 ---
 
 ## TL;DR
 
 A **Production Planning & Control (PPC) engine** for Anvitech, a precision-machining
-job shop. **Built, tested, and deployed live.**
+job shop. **Built, tested, deployed live, and actively iterated.**
 
 - **Live app:** https://anvitech-ppc.onrender.com (login-gated).
-- **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0).
+- **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0, 512 MB).
 - **Repo:** GitHub `riittiin/anvitech-ppc-engine` (private). Push to `main` →
-  Render auto-redeploys.
-- **65 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
-  Python engine.
+  Render auto-redeploys (no separate deploy step).
+- **118 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
+  Python engine. Python 3 (run as `python3` locally — there is no `python` alias).
+- **Login is a two-role app-owned session** (admin / user) — see "Login & roles".
+- The engine has **8 business rules** (1–8). A 9th "parallel machine" rule was
+  **removed** this session; rules were renumbered into a clean 1–8.
 
 ## How to pick up where the last session left off (behavioral context)
 
-This project was built across one long, iterative session. To continue smoothly,
-**work the way that session did** — the patterns below are what kept it on track.
-This section matters as much as the architecture.
+This project was built across long, iterative sessions. **Work the way they did** —
+the patterns below are what kept it on track. This matters as much as the architecture.
 
 ### Who the user is
 - The **owner/operator of Anvitech** (a precision-machining job shop) — a domain
   expert on the shop floor, **not a software engineer**. He talks in business terms:
-  sales orders, SO numbers, delivery dates, shifts, downtime, machines.
-- He wants a **real, free, deployed** tool his workers + planner will actually use.
-  Cost must be **$0** (hence free tiers: Render + MongoDB Atlas free).
+  sales orders, SO numbers, delivery dates, shifts, downtime, machines, processes.
+- He wants a **real, free, deployed** tool his workers + planner actually use. Cost
+  must stay **$0** (Render free + MongoDB Atlas free).
 - **Decisive and iterative.** He surfaces edge cases and "loopholes" himself and
-  wants to **understand the *why*** before changing things.
-- He **does the external-service signups himself** (Render, Atlas, etc.) and expects
-  you to do **all the code** and give him **only his manual steps** — one at a time,
-  with exact clicks, marked "do now" vs "after I deploy." He gets understandably
-  frustrated when stuck navigating a dashboard ("where is X?") — be **patient and
-  precise**, point at the exact button, and ask what he sees if unsure.
+  wants to **understand the *why*** before changing things. He asks pointed questions
+  ("why is setup not in downtime?", "both machines busy → what happens?") and expects
+  a precise, honest answer before any code.
+- He **does the external-service signups himself** (Render, Atlas) and expects you to
+  do **all the code** and give him **only his manual steps** — one at a time, exact
+  clicks. Be **patient and precise**; if he can't find something, point at the exact
+  button and ask what he sees.
 
 ### How to behave (the working norms that worked)
-1. **Verify before you claim anything works.** Run `pytest`, do a `curl` smoke of the
-   real flow (upload → plan → actual → mark-complete → delete), load the UI and check
-   the browser console, and hit the live URL (`401` = up). **Evidence before
-   assertions** — never say "it works" without it.
+1. **Verify before you claim anything works.** Run `pytest`; for UI changes, actually
+   drive a real browser (the gstack `/browse` skill was used heavily — start a local
+   `uvicorn` on a spare port, auth via an `Authorization: Basic` header because the
+   page is login-gated, and assert DOM state + check the console). Hit the live URL
+   (`401` = up). **Evidence before assertions** — never say "it works" without it.
 2. **Plain language, business framing.** No jargon. Use **tables** and **short numbered
-   steps**. Explain shop-floor impact, not implementation detail, unless he asks.
-3. **Be honest — including about your own mistakes.** State tradeoffs and caveats up
-   front; correct yourself when wrong (e.g. MongoDB free is **512 MB, not 5 GB** — a
-   real mid-session correction). Never paper over a limitation to sound finished.
+   steps**. Explain shop-floor impact, not implementation, unless he asks.
+3. **Be honest — including about your own mistakes and the system's limits.** State
+   tradeoffs/caveats up front; correct yourself when wrong. Never paper over a
+   limitation to sound finished (e.g. the downtime-attribution approximation is
+   documented openly, not hidden).
 4. **Decide-and-state; ask only when it matters.** Make sensible defaults and say so.
-   Ask a **single focused question** only when genuinely ambiguous AND it changes the
-   outcome (SO# identity, archive-vs-delete, overdue handling were worth asking; most
-   things weren't).
-5. **Plan big features first.** For substantive work use brainstorming → spec → plan:
-   one question at a time, present the design, get approval, write the spec to
-   `docs/superpowers/specs/`, *then* implement. The order book was built exactly this way.
-6. **Protect the live site.** It's deployed and holds real data. Build risky/large
-   changes on a **branch**, merge to `main` only when approved. **Commit/push to `main`
-   only when the user asks** (push = deploy).
-7. **Keep the UI minimal.** He values an uncluttered interface (he had the rule tabs
-   stripped to just input / output / notes). Add nothing that doesn't serve the flow.
-8. **Reuse, never duplicate.** Rules stay pure; the order book is the only stateful
-   layer; "Plan" reuses Rules 1–6.
-9. **Keep tests, the golden snapshot, and docs in lockstep** with every change.
+   Use `AskUserQuestion` for the **one** decision that genuinely changes the outcome
+   (e.g. "downtime delays the whole machine vs only the logged order" was worth
+   asking; most things weren't).
+5. **Plan big features first.** For substantive work: study the data + code, then use
+   **plan mode** (a Plan subagent to validate the design and catch edge cases),
+   present the plan, get approval, *then* implement. The preferred-machine feature was
+   built exactly this way — and the Plan agent caught a real cross-file coupling bug.
+6. **Protect the live site.** It's deployed and holds real data. Build every change on
+   a **branch**; merge to `main` and push **only when the user explicitly says "push
+   to main"** (push = deploy). He approves each push individually.
+7. **Keep the UI minimal and the rules pure.** He values an uncluttered interface.
+   Rules are pure functions; the order book is the only stateful layer; "Plan" reuses
+   Rules 1–6, never re-implements them.
+8. **Keep tests + the golden snapshot + RULES.md/CLAUDE.md in lockstep** with every change.
 
 ### Communication shape
-- Lead with the result/answer, then the detail.
-- Use ✅ / ⚠️ and tables so status is scannable.
+- Lead with the result/answer, then the detail. Use ✅ / ⚠️ and tables.
 - End with a clear next step or **one** focused question — not a wall of options.
+- After committing to a branch, end with a short status table and ask whether to push.
 
-## What it is now (architecture)
+## Architecture (what it is now)
 
-The 9 business rules (see [`RULES.md`](RULES.md)) turn sales orders into a
+The **8 business rules** (see [`RULES.md`](RULES.md)) turn sales orders into a
 machine-by-machine schedule + Gantt, re-planning as actual production comes in. The
 engine is a **persistent, shared Order Book** (keyed by unique SO number) sitting
 **above the unchanged pure Rules 1–6**:
+
+```
+Upload Excel ─▶ MERGE into the Order Book (by SO#)              ┐
+Rule 7 actual ─▶ recorded vs SO# (good qty, downtime, complete?)┘
+                              │
+   Order Book ──▶ active SO-lines (remaining qty) ──▶ R1 consolidate ─▶ R2 sort
+                                                       ─▶ R3 smart priority (slack)
+                                                       ─▶ R6 allocate (R4 setup,
+                                                          R5 overlap; downtime loop-back)
+                                                       ─▶ schedule + Gantt
+```
 
 - **Upload** an Excel → orders **merge** into the book (new SO# → Pending; a
   known/completed/intra-file-duplicate SO# → flagged, never double-counted).
@@ -86,102 +102,256 @@ engine is a **persistent, shared Order Book** (keyed by unique SO number) sittin
 - **Rule 7** daily entry records production; the first actual flips an order
   Pending → Running; ticking **"mark complete"** on an entry → Complete (archived).
 - **Delete** (single / multiple / all) permanently removes from the database.
-- **Login:** HTTP Basic Auth gates the whole app. **Persistence:**
-  `engine/storage.py` picks **MongoDB > Upstash > local file** by env var.
+- **Login:** HTTP Basic Auth gates the whole app. **Persistence:** `engine/storage.py`
+  picks **MongoDB > Upstash > local file** by env var.
+
+### The 8 rules (renumbered this session — IMPORTANT)
+| # | Rule | File |
+|---|---|---|
+| 1 | Consolidate SO lines (same item, 10-day window) | `rule1_consolidate.py` |
+| 2 | Sort by SO delivery date | `rule2_sort_by_date.py` |
+| 3 | Smart priority = least **slack** | `rule3_tiebreak_process_time.py` |
+| 4 | Setup time (cycle×qty + 90 min) — calc, consumed by R6 | `rule4_setup_time.py` |
+| 5 | Overlap mode — calc, consumed by R6 | `rule5_overlap_mode.py` |
+| 6 | Allocate to machines (non-delay scheduler) | `rule6_allocate.py` |
+| 7 | Capture daily actuals | `rule7_capture_actuals.py` |
+| 8 | Plan / Re-run MRP loop | **no module** — it's `api._plan` over the order book |
+
+There is **no `rule8` module** and **no parallel-machine rule** anymore. Trace keys
+are `rule1`…`rule8`. The web tabs read **1–8** with no gap.
+
+## Login & roles (current auth — read this)
+
+The whole app sits behind an **app-owned session login** with **two roles**
+(replaced the old HTTP Basic-Auth popup). Code: `api/auth.py` (accounts, signed
+cookie, rate limiter) + `gatekeeper`/`security_headers` middleware in `api/main.py`
++ `web/login.html`. Spec: `docs/superpowers/specs/2026-06-25-two-role-login-design.md`.
+
+- **Roles:** **Admin** = full control. **User** = read-only view of every tab,
+  PLUS download the Rule 6 allocation CSV and submit Capture Actuals (including
+  "mark complete"). Admin-only: config bar, Plan button, Upload, Delete/Delete-all.
+- **Enforced server-side** (`require_admin` → 403 on `/upload`, `/orders/delete`,
+  `/orders/clear`), not just hidden in the UI. The frontend hides admin controls
+  for the user role via a `body.role-user` CSS class + `/me`.
+- **Credentials are baked into `api/auth.py`** (owner's choice): admin
+  `anvitech` / `1930rail`, user `anvitech_user` / `anvitech12345678`. Each is
+  **overridable by env vars** (`ADMIN_USERNAME`/`ADMIN_PASSWORD`,
+  `USER_USERNAME`/`USER_PASSWORD`; legacy `APP_USERNAME`/`APP_PASSWORD` still
+  override the admin) — so you CAN now read the live creds from the code unless the
+  user set overrides on Render.
+- **Session:** stateless HMAC-SHA256-signed cookie (`anvitech_session`, HttpOnly,
+  SameSite=Lax, Secure on HTTPS, 7-day expiry). Secret = `SESSION_SECRET` env, else
+  a random secret generated + persisted in the store (`anvitech:session_secret`).
+- **Hardening:** username-keyed login rate limit (5/15min → 429), CSRF Origin/
+  Referer check on unsafe methods, CSP + `X-Frame-Options`/`nosniff`/HSTS headers,
+  interactive docs disabled (`/docs`,`/openapi.json` → 404), 10 MB upload cap.
+- **Plan consistency:** the admin's Plan click (`/run` with `persist:true`) saves
+  the config to `anvitech:plan_config`; users (and admin auto-load) plan with that
+  saved config, so everyone sees the planner's schedule.
+- **Tests:** `tests/test_auth_unit.py` (token/creds/rate-limit) + `tests/test_auth_api.py`
+  (login flow, role 403s, CSRF, headers, docs-off, upload cap). `tests/test_api.py`
+  now logs in via a `client` fixture (cookie), not a Basic-Auth header.
+
+## What changed this session (most recent work — read these commits)
+
+All shipped to `main`. Newest first:
+
+0. **Two-role login (admin/user) + security hardening** (branch `two-role-login`) —
+   see "Login & roles" above. Replaced the Basic-Auth popup with a real login page
+   + signed session cookie; user role is view-only + download + capture-actuals;
+   admin-only enforced server-side. 26 new auth tests (92 → 118).
+
+1. **Preferred / alternative machine selection** (`646bb03`) — a routing's "Suggested
+   M/c" cell may list alternatives like `CNC3/CNC6`. The engine now schedules the
+   **earliest-free** of the allowed machines (ties → first-listed = preferred), so work
+   load-balances. New pure helper `loaders.parse_resource_candidates`; `rule6` picks
+   among candidates; `orderbook.machine_lost_minutes` resolves the **same** preferred
+   candidate (cross-file contract — a Plan agent caught this). Schedule shows a note
+   `chose CNC3 of CNC3/CNC6`. **Note:** only appears for orders of items whose recipe
+   uses an alternative — the bundled/Test3 SO lists use single-machine items, so you
+   need an order for an alternative-machine item to see it.
+2. **SO No column** on the Rule 6 schedule + machine-wise view + CSV (`922be82`) —
+   `ScheduleEntry.so_refs`.
+3. **Day-level Gantt** (`365886d`) — removed the 0–23 hour ruler; one column per day,
+   non-working days shaded, date-only tooltips, "Zoom (day width)". `ganttDayWidth` in
+   `app.js`.
+4. **Three UI features** (`8d2293c`): (a) typing **SO No auto-fills Item Code** (via
+   `/items` `so_to_item`); (b) **all dates display DD-MM-YYYY** (datetimes
+   DD-MM-YYYY HH:MM) via `models.fmt_date`/`fmt_datetime` + `pipeline._cell` — sorts
+   that relied on ISO ordering now sort on the date object; **persistence + config
+   round-trips stay ISO** internally; the native `<input type=date>` picker still shows
+   the browser locale; (c) **Download schedule (CSV)** + **machine-wise view** buttons
+   on the Rule 6 tab.
+5. **Plan tab lists every active order** (`227473a`) — including fully-produced-but-not-
+   completed ones (Remaining 0, "In this plan = no — fully produced, mark complete"), so
+   its Running count matches the Orders tab.
+6. **Performance** (`458f5fa`, `36bcf5e`) — `storage.get_store()` now **caches the
+   backend per env** so a single `MongoClient` is reused (was rebuilt ~5× per `/run`);
+   `api._current_masters` caches the parsed workbook in-process (invalidated on upload).
+   A **keep-warm GitHub Action** (`.github/workflows/keep-warm.yml`) pings the live URL
+   every 12 min during work hours (UTC 03:00–14:59 ≈ 08:30–20:29 IST) to dodge Render's
+   15-min idle sleep (~1800 Actions min/mo, under the 2000 free tier).
+7. **Daily-entry form UX** (`eec8576`, `4ee91ad`) — blank safe defaults + today's date;
+   **clears after save**; **warns on exact-duplicate** save; **instant save** (no heavy
+   re-plan — it updates the Rule 7 tab from the `/actuals` response + a light `/orders`
+   refresh; click Plan to refresh the schedule); **mark-complete jumps to the Orders
+   tab** and shows the order Complete; "Saving…" button state.
+8. **Downtime loop-back** (`4b6fab8`) — recorded downtime + actual-setup overrun feed
+   back into Rule 6 as **per-machine availability delays** (the machine's whole queue
+   slips). `orderbook.machine_lost_minutes` → `run_forward(machine_lost_min=…)` →
+   `rule6` seeds `machine_free`. Config flag **`apply_downtime_to_plan`** (engine
+   default **off** for test/golden stability; **UI checkbox default ON**). Rule 6 tab
+   shows a "Downtime fed back" table + an "unattributed" table for typo'd processes.
+   Cumulative across re-plans. Rule 3 priority intentionally unchanged.
+9. **Rule renumber + parallel removal** (`4aec727`, `a58bd90`) — deleted the parallel-
+   machine rule entirely; renumbered to 1–8.
+10. **Rule 5 overlap fix** (`758ccaa`) — overlap % now applies to **cutting time only**
+    (the 90-min setup is excluded; the next machine's setup runs in parallel); **no-cutting
+    steps don't overlap** (successor waits full). The Rule 5 tab shows the **real
+    per-handoff effect** on the actual plan (`rule5_overlap_mode.build_overlap_view`),
+    not a static demo.
 
 ## Run / test / deploy
 
 ```bash
 pip install -r requirements.txt
-pytest                                   # 65 tests
-REGEN_GOLDEN=1 pytest -k golden          # only after an intentional logic change
-uvicorn api.main:app --reload            # http://127.0.0.1:8000
+python3 -m pytest -q                          # 92 tests
+REGEN_GOLDEN=1 python3 -m pytest -k golden    # ONLY after an intentional logic change
+python3 -m uvicorn api.main:app --reload      # http://127.0.0.1:8000  (frontend at /)
 ```
-Locally, with no store env vars set, data goes to `data/store/` (gitignored).
-Default login is `anvitech` / `ppc2025`. **Deploy:** push to `main`.
+Locally, with no store env vars set, data goes to `data/store/` (gitignored). **Local**
+login is the baked admin `anvitech` / `1930rail` (or user `anvitech_user` /
+`anvitech12345678`). **Deploy:** push to `main`.
+
+**Browser-verify a UI change locally** (login is now a cookie session, not Basic Auth):
+```bash
+rm -rf data/store
+STORE_DIR=data/store nohup python3 -m uvicorn api.main:app --port 8011 >/tmp/uv.log 2>&1 &
+# log in (saves the session cookie), then upload as admin:
+curl -s -c /tmp/ck.txt -X POST http://127.0.0.1:8011/login -d "username=anvitech&password=1930rail" >/dev/null
+curl -s -b /tmp/ck.txt -F "file=@Test2.xlsx" http://127.0.0.1:8011/upload >/dev/null
+# drive gstack /browse by signing in through the form (cookie persists in the daemon):
+#   $B goto http://127.0.0.1:8011/login
+#   $B snapshot -i ; $B fill @e1 anvitech ; $B fill @e2 1930rail ; $B click @e3
+#   (use anvitech_user / anvitech12345678 to verify the restricted user view)
+```
 
 ## Git, GitHub & deploy workflow
 
-- This is a **git repo**; `origin` = GitHub **`riittiin/anvitech-ppc-engine`** (private).
-- **`gh` CLI is installed and authenticated** as `riittiin`, and git's author identity
-  is set globally — so a session here can `git commit`, `git push`, and use `gh`
-  (PRs/issues) **without any setup**.
+- `origin` = GitHub **`riittiin/anvitech-ppc-engine`** (private). **`gh` CLI is installed
+  and authed** as `riittiin`; git author identity is set — commit/push/PR with no setup.
 - **Deploy = push to `main`.** Render watches `main` and auto-redeploys from
-  `render.yaml` (runs `uvicorn api.main:app`). There is **no separate deploy step** —
-  pushing IS deploying.
-- **Commit message convention:** end every commit message with
+  `render.yaml` (`uvicorn api.main:app`). **No separate deploy step.**
+- **Commit message convention:** end every message with
   `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
-- **Commit / push to `main` ONLY when the user asks** — it goes straight to the live
-  site. For risky/large work, branch first (`git checkout -b feature`) and merge to
-  `main` once approved (that earlier order-book build was done on a branch first).
-- **Verify a deploy:** Render dashboard → the service's **Events** tab shows the
-  build; or from a shell:
+- **Branch for every change; merge + push to `main` ONLY when the user says so.** The
+  standard flow used all session: `git checkout -b <feature>` → implement test-first →
+  `pytest` → commit → report → on "push to main": `git checkout main && git merge
+  --ff-only <feature> && git push origin main` → `curl` the live URL (expect 401).
+- **Verify a deploy:** Render → service **Events** tab shows the build; or
   `curl -s -o /dev/null -w '%{http_code}\n' https://anvitech-ppc.onrender.com/` →
-  **401** = up & healthy (the login gate); **502/503** = it crashed (check Render **Logs**).
+  **401** = up; **502/503** = crashed (check Render **Logs**).
 
-## Live deployment specifics (no secrets in this file)
+## Live deployment specifics (no secrets here)
 
 - **Render** service `anvitech-ppc` — free web service; **sleeps after ~15 min idle**
-  (first hit after that takes ~30–60s to wake; data is unaffected).
-- **MongoDB Atlas** free **M0 (512 MB)** — database `anvitech`, collections `hash`
-  (orders), `list` (actuals), `kv` (masters). **Atlas Network Access includes
-  `0.0.0.0/0`** (required because Render's free IPs are dynamic).
-- **Env vars set on Render:** `APP_USERNAME`, `APP_PASSWORD`, `MONGODB_URI`. (Upstash
-  vars may also be present but are **ignored** — Mongo takes priority.)
+  (first hit ~30–60s to wake; data unaffected). Keep-warm Action mitigates work hours.
+- **MongoDB Atlas** free **M0 (512 MB)** — db `anvitech`, collections `hash` (orders),
+  `list` (actuals), `kv` (masters). Atlas Network Access includes `0.0.0.0/0`.
+- **Env vars on Render:** `MONGODB_URI` (storage), plus **optional** auth overrides
+  (`ADMIN_USERNAME`/`ADMIN_PASSWORD`, `USER_USERNAME`/`USER_PASSWORD`, `SESSION_SECRET`).
+  Auth works with none set (credentials are baked into `api/auth.py`).
+- **Live login** is now the baked credentials (admin `anvitech` / `1930rail`, user
+  `anvitech_user` / `anvitech12345678`) **unless** the user set the override env vars
+  on Render. If a prior `APP_USERNAME`/`APP_PASSWORD` is still set on Render it
+  overrides the admin login — check the dashboard. To verify live behavior, sign in
+  through the login page (or guide the user).
 
 ## Domain rules to honor (confirmed with the user)
 
-- **SO number is the unique order key** (one SO# = one order line). Repeats are
-  flagged, never double-counted; an order is **never auto-deleted** for being absent
-  from an upload.
+- **SO number is the unique order key.** Repeats flagged, never double-counted; an
+  order is **never auto-deleted** for being absent from an upload.
 - **Status is derived:** Pending (no actuals) → Running (≥1 actual) → Complete
-  (**explicit — only via the Rule 7 "mark complete" tick; the engine NEVER
+  (**explicit only — via the Rule 7 "mark complete" tick; the engine NEVER
   auto-completes**, not even at remaining ≤ 0).
 - **Rule 3 priority = least slack** = (working-time-until-due) − (work-needed); no
-  window by default; on equal dates it reduces to "more process time first." Metric
-  (`slack`/`critical_ratio`/`process_time`) and window are configurable.
-- **Rule 3 "total process time" = sum of per-process _cycle_ times** (data-confirmed
-  against the SO-Remarks oracle).
-- **Rule 6 = non-delay scheduler** — a machine never idles while an operation is
-  ready for it.
-- **Masters** are latest-wins on upload, but kept if a file omits them.
+  window by default; equal dates ⇒ "more work first." Metric + window configurable.
+  **"total process time" = sum of per-process _cycle_ times** (data-confirmed).
+- **Rule 5 overlap** = % of the previous op's **cutting time only** (setup excluded);
+  no-cutting steps don't overlap.
+- **Rule 6 = non-delay scheduler** — a machine never idles while an op is ready. For an
+  **alternative-machine** process it picks the **earliest-free** allowed machine.
+- **Downtime + setup overrun loop back** into Rule 6 as per-machine delays (toggle).
+- **Masters** are latest-wins on upload, kept if a file omits them.
+- **Dates display DD-MM-YYYY** everywhere; storage/config stay ISO internally.
 
 ## Done vs deferred
 
-**Done:** order book + lifecycle, upload-merge + dedup, completion via Rule 7,
-unified Plan, hour-resolution Gantt with status labels, login, Render + MongoDB
-deploy, permanent delete (single/multi/all), append-safe storage.
+**Done:** order book + lifecycle; upload-merge + dedup; completion via Rule 7; unified
+Plan; day-level Gantt; SO No column + CSV download; login; Render + MongoDB deploy;
+permanent delete; append-safe storage; Rule 5 cutting-only overlap; downtime loop-back;
+preferred/alternative machine selection; DD-MM-YYYY dates; daily-entry UX; perf
+(connection reuse + masters cache) + keep-warm.
 
 **Deferred (explicitly, per the user):**
-- Applying **revisions** to existing orders (changed qty/date) — currently **flagged
-  only**, original kept.
+- Applying **revisions** to existing orders (changed qty/date) — currently flagged only.
 - Explicit **cancel** action (orders leave only via complete or delete).
-- Optional **export-then-purge** of completed orders to keep the DB lean — not needed
-  at current scale (512 MB ≈ decades for one shop).
+- **Actual `Actual` "which machine ran" field** — today downtime on an alternative-
+  machine process is attributed to the **preferred** candidate (a documented
+  approximation). Adding a machine field would make it exact.
+- **Plan clock advancing to "today"** — the plan still starts from a fixed
+  `config.plan_start_date` (2025-03-01), so downtime loop-back models "lost so far",
+  not a real calendar. Revisit if he wants the plan to roll forward with the date.
+- Suggested-vs-**allotted** machine override semantics (allotted = locked) — kept
+  suggested-first; not touched.
 
 ## Gotchas / operational notes
 
-- **MongoDB Atlas free is 512 MB** (the 5 GB "Flex" tier is *paid*). At ~10–20 MB/year
-  for one shop, this is decades of room — not a concern.
-- **The bundled `Test2.xlsx` is test-only** and intentionally reuses SO# `24-25SO121A`
-  across two dates (an old consolidation-test artifact) — that's why uploading it
-  shows "1 flagged." Real production data has unique SO#s, so nothing flags.
-- **`requirements.txt` includes `pymongo[srv]`** (needed for the `mongodb+srv://` URI).
-- Local shell is **zsh**: when scripting `curl` with credentials, put
-  `-u user:pass` **literally on each curl** — an unquoted `$VAR` won't word-split.
-- Static assets are served with `Cache-Control: no-cache`; after a deploy a normal
-  refresh picks up new JS/CSS.
+- **Live creds are custom** (see above) — the single biggest "why can't I verify live"
+  gotcha.
+- **`Test2.xlsx` is bundled test data** (the golden trace loads it via `load_all()`).
+  **`Test3.xlsx` is the user's real-data file** — **gitignored**, never commit it. Both
+  have `/`-alternative cells in the process master, but their **Sales Order lists use
+  single-machine items**, so the golden trace is unaffected and the alternative-machine
+  note only shows when an order is for an alternative-machine item.
+- **Golden trace** (`tests/golden_trace.json`) snapshots rule1/2/3/6 **output** for
+  Test2. Date-format / rule-output changes require `REGEN_GOLDEN=1 pytest -k golden`;
+  then eyeball the diff (no merged ids like `CNC3CNC6`).
+- **`apply_downtime_to_plan`** defaults **off in the engine** (so golden/tests stay
+  stable) but the **UI checkbox defaults ON** — an intentional asymmetry. Tests that
+  construct `Config()` directly get the off behavior.
+- **`get_store()` is cached** — one `MongoClient` per process. Don't reintroduce
+  per-call construction (it was the main latency bug).
+- **`requirements.txt` includes `pymongo[srv]`** (for `mongodb+srv://`).
+- Local shell is **zsh**: put `-u user:pass` literally on each `curl`; quote `grep`
+  globs (`--include='*.py'`) or zsh errors; a `grep -c` that finds 0 exits non-zero and
+  breaks `&&` chains (not a failure).
+- Static assets serve `Cache-Control: no-cache`; a normal refresh picks up new JS/CSS,
+  but tell the user to **hard-refresh** after a deploy if they see stale UI.
+- The Render-deploy lag (~1–3 min) is the usual reason "I don't see my change yet."
 
 ## Where to look
 
-- [`CLAUDE.md`](CLAUDE.md) — design principles, data flow, **code map**, commands. **Read first.**
-- [`RULES.md`](RULES.md) — the 9 business rules (source of truth for rule logic).
-- [`docs/superpowers/specs/2026-06-22-order-book-design.md`](docs/superpowers/specs/2026-06-22-order-book-design.md) — **current** architecture design.
-- `docs/superpowers/specs/2026-06-19-…` — original (pre-order-book) design; historical reference.
+- [`CLAUDE.md`](CLAUDE.md) — design principles, data flow, **code map**, commands. Read first.
+- [`RULES.md`](RULES.md) — the rules (source of truth for logic), now 1–8.
+- `engine/` — `loaders.py` (Excel→objects, `parse_resource_candidates`, provisional
+  machines), `models.py` (dataclasses + `fmt_date`/`fmt_datetime` + `as_row`),
+  `pipeline.py` (`run_forward` 1→2→3→6, trace), `rules/ruleN_*.py`, `orderbook.py`
+  (pure book logic + `machine_lost_minutes`), `book_store.py` / `storage.py`
+  (persistence), `worktime.py` (shifts/holidays), `gantt.py`, `config.py`.
+- `api/main.py` — FastAPI: `/upload`, `/run`=`/rerun`, `/orders` (+delete/clear),
+  `/actuals`, `/items`, `/gantt`, `/report`, `/trace/{id}`; login + no-cache middleware;
+  per-rule trace augmentation (`_augment_helpers`); `_plan` is the unified Plan (Rule 8).
+- `web/` — `index.html`, `app.js` (all UI logic; per-rule tabs render the trace),
+  `style.css`. `.github/workflows/keep-warm.yml`.
+- `docs/superpowers/specs/` — original design docs (historical; some predate the
+  order-book + renumber, so trust code/RULES.md over them).
 
 ## Making changes safely
 
-- For substantive logic changes, update `RULES.md` / the relevant spec **first**, then code.
-- Keep the rules **pure**; the order book (`orderbook.py` / `book_store.py`) is the only stateful layer.
-- Run `pytest`; regenerate the golden trace only for **intentional** logic changes.
-- **Commit/push to `main` only when the user asks** — it auto-deploys to the live site.
+1. For substantive logic changes, update `RULES.md` (and CLAUDE.md if structural) **first**, then code.
+2. Keep rules **pure**; the order book (`orderbook.py` / `book_store.py`) is the only stateful layer; reuse Rules 1–6 for planning.
+3. **Test-first** (the repo is TDD-structured: one `test_ruleN.py` per rule). Run
+   `python3 -m pytest`; regenerate the golden trace only for **intentional** logic changes.
+4. For UI changes, **drive a real browser** to verify before claiming done.
+5. **Branch for everything; commit/push to `main` only when the user says "push"** — it auto-deploys.

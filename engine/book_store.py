@@ -17,6 +17,7 @@ ORDERS_KEY = "anvitech:orders"             # hash: so_no -> Order json
 COMPLETED_KEY = "anvitech:orders:completed"  # hash: so_no -> Order json (archive)
 ACTUALS_KEY = "anvitech:actuals"           # list of Actual json
 MASTERS_KEY = "anvitech:masters"           # kv: base64 of the latest workbook
+PLAN_CONFIG_KEY = "anvitech:plan_config"   # kv: json of the admin's saved Config
 
 
 # --- orders --- #
@@ -87,3 +88,12 @@ def save_masters_bytes(raw: bytes) -> None:
 def load_masters_bytes():
     raw = get_store().kv_get(MASTERS_KEY)
     return base64.b64decode(raw) if raw else None
+
+
+# --- plan config (admin's saved scheduling settings) --- #
+def save_plan_config(raw_json: str) -> None:
+    get_store().kv_set(PLAN_CONFIG_KEY, raw_json)
+
+
+def load_plan_config():
+    return get_store().kv_get(PLAN_CONFIG_KEY)

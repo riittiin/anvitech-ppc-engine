@@ -8,10 +8,16 @@
 </head>
 <body>
   <header>
-    <h1>Anvitech PPC Engine</h1>
+    <div class="header-row">
+      <h1>Anvitech PPC Engine</h1>
+      <div class="session-bar">
+        <span id="status" class="status"></span>
+        <span id="session-info"></span>
+      </div>
+    </div>
   </header>
 
-  <section class="controls">
+  <section class="controls admin-only">
     <div class="config">
       <label>Consolidation window (days)
         <input id="cfg-window" type="number" value="10" min="0" />
@@ -50,11 +56,10 @@
     </div>
     <div class="actions">
       <button id="run-btn" class="primary">▶ Plan</button>
-      <span id="status" class="status"></span>
     </div>
   </section>
 
-  <section class="datasource">
+  <section class="datasource admin-only">
     <label class="upload-label">📁 Upload orders (Excel)
       <input id="xlsx-file" type="file" accept=".xlsx" />
     </label>

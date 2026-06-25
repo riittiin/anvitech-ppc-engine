@@ -19,6 +19,7 @@ let currentOrders = null;     // {columns, rows} from /run or /orders
 let ITEMS = null;
 let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour detail)
 let activeTab = "orders";
+let currentRole = "user";   // set from /me; default to the least-privileged role
 
 const $ = (id) => document.getElementById(id);
 const setStatus = (m) => { $("status").textContent = m; };
@@ -36,19 +37,65 @@ function readConfig() {
   };
 }
 
+// ---- Session / role ----
+// Learn who we are. Default to the least-privileged role on any failure, and
+// send the browser to the login page if the session is gone.
+async function initSession() {
+  try {
+    const res = await fetch("/me");
+    if (res.status === 401) { window.location = "/login"; return; }
+    const me = await res.json();
+    currentRole = me.role === "admin" ? "admin" : "user";
+    renderSessionInfo(me.username, currentRole);
+  } catch (e) {
+    currentRole = "user";
+  }
+  document.body.classList.toggle("role-user", currentRole !== "admin");
+}
+
+function renderSessionInfo(username, role) {
+  const el = $("session-info");
+  if (!el) return;
+  const label = role === "admin" ? "Admin" : "User";
+  el.innerHTML = `Signed in as <strong>${escapeHtml(username || "")}</strong> · ${escapeHtml(label)} `
+    + `<form method="post" action="/logout" class="logout-form"><button type="submit">Logout</button></form>`;
+}
+
+// Reflect the (server) effective plan config back into the admin's config bar so
+// it shows the last-saved plan settings.
+function applyConfig(cfg) {
+  if (!cfg) return;
+  const setVal = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
+  const setSel = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
+  setVal("cfg-window", cfg.consolidation_window_days);
+  setVal("cfg-setup", cfg.setup_time_min);
+  setSel("cfg-overlap", cfg.overlap_mode);
+  setVal("cfg-overlap-pct", cfg.overlap_percent);
+  setSel("cfg-priority-metric", cfg.priority_metric);
+  const pw = $("cfg-priority-window");
+  if (pw) pw.value = (cfg.priority_window_days === null || cfg.priority_window_days === undefined)
+    ? "" : String(cfg.priority_window_days);
+  const dt = $("cfg-apply-downtime");
+  if (dt) dt.checked = !!cfg.apply_downtime_to_plan;
+}
+
 // ---- Plan (Run + Rerun unified) ----
-async function runPlan() {
+// persist=true only on the admin's explicit Plan click (saves the config so every
+// login sees the same plan). Auto-load and the user role pass persist=false.
+async function runPlan(persist = false) {
   setStatus("Planning…");
   try {
     const res = await fetch("/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config: readConfig() }),
+      body: JSON.stringify({ config: readConfig(), persist: !!persist }),
     });
+    if (res.status === 401) { window.location = "/login"; return; }
     if (!res.ok) { setStatus("Error: " + (await res.text())); return; }
     const data = await res.json();
     currentTrace = data.trace;
     currentGantt = data.gantt || null;
     currentOrders = data.orders || null;
+    if (currentRole === "admin" && data.config) applyConfig(data.config);
     renderReport(data.report);
     renderTabs();
     renderTab(activeTab);
@@ -208,30 +255,38 @@ async function renderOrders() {
   if (!currentOrders) {
     try { currentOrders = (await (await fetch("/orders")).json()).orders; } catch (e) { currentOrders = null; }
   }
+  const isAdmin = currentRole === "admin";
   let html = '<div class="rule-header"><h2>Order book</h2></div>';
   if (!currentOrders || !currentOrders.rows.length) {
-    html += '<p class="placeholder">No orders yet. Upload your Excel above to add them, then click <strong>Plan</strong>.</p>';
+    html += isAdmin
+      ? '<p class="placeholder">No orders yet. Upload your Excel above to add them, then click <strong>Plan</strong>.</p>'
+      : '<p class="placeholder">No orders yet.</p>';
     root.innerHTML = html; return;
   }
-  html += '<div class="ord-toolbar">'
-    + '<button id="ord-del-sel">🗑 Delete selected</button> '
-    + '<button id="ord-del-all" class="danger">Delete ALL data</button>'
-    + '<span class="muted"> · deletes permanently from the database (and their actuals)</span></div>';
-  html += orderTableHtml(currentOrders);
-  html += '<p class="g-note">Pending = not started · Running = production logged · Complete = you marked it complete on a Rule 8 entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty.</p>';
+  // Delete controls are admin-only (server enforces this too).
+  if (isAdmin) {
+    html += '<div class="ord-toolbar">'
+      + '<button id="ord-del-sel">🗑 Delete selected</button> '
+      + '<button id="ord-del-all" class="danger">Delete ALL data</button>'
+      + '<span class="muted"> · deletes permanently from the database (and their actuals)</span></div>';
+  }
+  html += orderTableHtml(currentOrders, isAdmin);
+  html += '<p class="g-note">Pending = not started · Running = production logged · Complete = marked complete on a Rule 7 entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty.</p>';
   root.innerHTML = html;
-  wireOrdersDelete();
+  if (isAdmin) wireOrdersDelete();
 }
 
-function orderTableHtml(table) {
+function orderTableHtml(table, showSelect) {
   const sIdx = table.columns.indexOf("Status");
   const soIdx = table.columns.indexOf("SO No");
-  let h = '<div class="table-wrap"><table><thead><tr><th><input type="checkbox" id="ord-all-check" title="select all"></th>';
+  let h = '<div class="table-wrap"><table><thead><tr>';
+  if (showSelect) h += '<th><input type="checkbox" id="ord-all-check" title="select all"></th>';
   table.columns.forEach((c) => (h += `<th>${escapeHtml(c)}</th>`));
   h += "</tr></thead><tbody>";
   table.rows.forEach((row) => {
     const so = soIdx >= 0 ? String(row[soIdx]) : "";
-    h += `<tr><td><input type="checkbox" class="ordsel" value="${escapeHtml(so)}"></td>`;
+    h += "<tr>";
+    if (showSelect) h += `<td><input type="checkbox" class="ordsel" value="${escapeHtml(so)}"></td>`;
     row.forEach((cell, i) => {
       const v = cell === null || cell === undefined ? "" : String(cell);
       if (i === sIdx) h += `<td><span class="status-pill status-${v.toLowerCase()}">${escapeHtml(v)}</span></td>`;
@@ -247,7 +302,8 @@ function wireOrdersDelete() {
   if (allCheck) allCheck.onclick = () => {
     document.querySelectorAll(".ordsel").forEach((c) => (c.checked = allCheck.checked));
   };
-  $("ord-del-sel").onclick = async () => {
+  const delSel = $("ord-del-sel");
+  if (delSel) delSel.onclick = async () => {
     const sel = [...document.querySelectorAll(".ordsel:checked")].map((c) => c.value);
     if (!sel.length) { setStatus("No rows selected to delete."); return; }
     if (!confirm(`Permanently delete ${sel.length} order(s) and their production data? This cannot be undone.`)) return;
@@ -258,7 +314,8 @@ function wireOrdersDelete() {
     setStatus(`Deleted ${sel.length} order(s).`);
     currentOrders = null; await runPlan();
   };
-  $("ord-del-all").onclick = async () => {
+  const delAll = $("ord-del-all");
+  if (delAll) delAll.onclick = async () => {
     if (!confirm("Permanently delete ALL orders and production data from the database? This cannot be undone.")) return;
     await fetch("/orders/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     setStatus("All orders deleted.");
@@ -458,8 +515,8 @@ async function wireActualsForm() {
         setStatus(`✓ Saved. Order ${body.so_no} marked complete and archived.`);
         activeTab = "orders"; renderTabs(); renderTab("orders");
       } else {
-        setStatus(`✓ Saved — ${d.saved} entr${d.saved === 1 ? "y" : "ies"} on record.`
-          + " Click ▶ Plan to refresh the schedule.");
+        const hint = currentRole === "admin" ? " Click ▶ Plan to refresh the schedule." : "";
+        setStatus(`✓ Saved — ${d.saved} entr${d.saved === 1 ? "y" : "ies"} on record.` + hint);
         renderTab("rule7");                    // fresh blank form + updated output table
       }
     } catch (e) {
@@ -489,9 +546,17 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-$("run-btn").onclick = runPlan;
-$("upload-btn").onclick = uploadExcel;
+// Wire the admin controls (null-guarded — they're absent/hidden for the user role).
+const _runBtn = $("run-btn");
+if (_runBtn) _runBtn.onclick = () => runPlan(true);   // explicit admin Plan → persist
+const _upBtn = $("upload-btn");
+if (_upBtn) _upBtn.onclick = uploadExcel;
 
-// Show the order book on first load.
-renderTabs();
-renderTab("orders");
+// Boot: learn the role, render the shell, then auto-load the current plan (no
+// persist) so the schedule/Gantt/rule tabs populate without a Plan click.
+(async function boot() {
+  await initSession();
+  renderTabs();
+  renderTab(activeTab);
+  await runPlan(false);
+})();

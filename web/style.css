@@ -26,6 +26,23 @@ header {
   border-bottom: 1px solid var(--border);
 }
 header h1 { margin: 0; font-size: 20px; }
+.header-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  flex-wrap: wrap;
+}
+.session-bar { display: flex; align-items: center; gap: 14px; font-size: 13px; }
+#session-info { color: var(--muted); display: flex; align-items: center; gap: 10px; }
+#session-info strong { color: var(--text); }
+.logout-form { display: inline; margin: 0; }
+.logout-form button {
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+}
+.logout-form button:hover { border-color: var(--accent); }
+
+/* Role gating: hide admin-only controls for the user role. The server still
+   enforces every restriction — this is the UI polish on top. */
+body.role-user .admin-only { display: none !important; }
 
 .controls {
   display: flex;

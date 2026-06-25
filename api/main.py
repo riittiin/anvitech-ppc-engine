@@ -14,17 +14,19 @@ The web/ frontend is served at /.
 """
 from __future__ import annotations
 
-import base64
-import binascii
+import asyncio
 import io
+import json
 import os
-import secrets
 import uuid
+from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -41,42 +43,149 @@ from engine.rules import (
     rule6_allocate as r6,
     rule7_capture_actuals as r7,
 )
+from api import auth
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB cap on uploaded workbooks
+MAX_LOGIN_BYTES = 8 * 1024            # tiny cap on the login form body
 
-app = FastAPI(title="Anvitech PPC Engine")
-
-# --------------------------------------------------------------------------- #
-# Login — the whole app (UI + API + static) sits behind one id + password.
-# --------------------------------------------------------------------------- #
-APP_USERNAME = os.environ.get("APP_USERNAME", "anvitech")
-APP_PASSWORD = os.environ.get("APP_PASSWORD", "ppc2025")
-_AUTH_REALM = 'Basic realm="Anvitech PPC Engine"'
-
-
-def _credentials_ok(auth_header: Optional[str]) -> bool:
-    if not auth_header or not auth_header.startswith("Basic "):
-        return False
+@asynccontextmanager
+async def _lifespan(app):
+    # Resolve the signing secret once at startup (avoids a first-request race /
+    # latency blip). Lazy resolution still covers any path that skips startup.
     try:
-        user, _, pwd = base64.b64decode(auth_header[6:]).decode("utf-8").partition(":")
-    except (binascii.Error, UnicodeDecodeError, ValueError):
-        return False
-    return (secrets.compare_digest(user, APP_USERNAME)
-            and secrets.compare_digest(pwd, APP_PASSWORD))
+        auth.get_secret()
+    except Exception:
+        pass
+    yield
+
+
+# Interactive docs disabled in the deployed app to shrink the attack surface
+# (they were behind auth anyway — this is defense-in-depth).
+app = FastAPI(title="Anvitech PPC Engine", lifespan=_lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
+
+# --------------------------------------------------------------------------- #
+# Login + session gate. The whole app (UI + API + static) sits behind a signed
+# session cookie, with two roles (admin / user). See engine-free api/auth.py.
+# --------------------------------------------------------------------------- #
+# Exact (method, path) allowlist of pages reachable WITHOUT a session. Matched
+# exactly — never by prefix or extension — so no static file leaks past the gate.
+_PUBLIC = {("GET", "/login"), ("POST", "/login"), ("POST", "/logout")}
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _is_https(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    return request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
 
 
 @app.middleware("http")
-async def basic_auth(request, call_next):
-    if not _credentials_ok(request.headers.get("authorization")):
-        return Response(status_code=401, headers={"WWW-Authenticate": _AUTH_REALM})
+async def gatekeeper(request: Request, call_next):
+    method, path = request.method, request.url.path
+
+    # CSRF: reject a state-changing request only when an Origin/Referer is present
+    # AND its host doesn't match ours. Absent (curl / server-to-server) → allowed;
+    # those carry no ambient cookie, so they're not a CSRF vector.
+    if method not in _SAFE_METHODS:
+        origin = request.headers.get("origin") or request.headers.get("referer")
+        if origin:
+            o = urlsplit(origin).netloc
+            if o and o != request.headers.get("host", ""):
+                return Response("cross-origin request rejected", status_code=403)
+
+    if (method, path) in _PUBLIC:
+        return await call_next(request)
+
+    payload = auth.verify_token(request.cookies.get(auth.COOKIE_NAME))
+    if payload is None:
+        # Browser navigation → send to the login page; API/XHR → 401 (no
+        # WWW-Authenticate header, so no browser Basic-Auth popup).
+        if method == "GET" and "text/html" in request.headers.get("accept", ""):
+            return RedirectResponse("/login", status_code=302)
+        return Response("authentication required", status_code=401)
+    request.state.user = payload["u"]
+    request.state.role = payload["role"]
     return await call_next(request)
 
 
 @app.middleware("http")
-async def no_cache(request, call_next):
+async def security_headers(request: Request, call_next):
     response = await call_next(request)
-    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; object-src 'none'; base-uri 'none'; "
+        "frame-ancestors 'none'; form-action 'self'")
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if _is_https(request):
+        response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     return response
+
+
+def require_admin(request: Request):
+    """Raise 403 unless the verified session role is admin. Role comes ONLY from
+    the signed session — never from a request body/header/query."""
+    if getattr(request.state, "role", None) != auth.ADMIN:
+        raise HTTPException(status_code=403, detail="admin only")
+
+
+# --- login / logout / identity ------------------------------------------- #
+def _render_login(error: str = "") -> str:
+    """Login page HTML with a server-controlled (constant, safe) error message."""
+    html = (WEB_DIR / "login.html").read_text(encoding="utf-8")
+    block = f'<div class="err">{error}</div>' if error else ""
+    return html.replace("<!--ERROR-->", block)
+
+
+def _set_session(response: Response, token: str, request: Request):
+    response.set_cookie(
+        auth.COOKIE_NAME, token, max_age=auth.MAX_AGE_SECONDS,
+        httponly=True, samesite="lax", secure=_is_https(request), path="/")
+
+
+@app.get("/login")
+def login_page():
+    return HTMLResponse(_render_login())
+
+
+@app.post("/login")
+async def login_submit(request: Request):
+    if int(request.headers.get("content-length") or 0) > MAX_LOGIN_BYTES:
+        return HTMLResponse(_render_login("Request too large."), status_code=413)
+    form = await request.form()
+    username = (form.get("username") or "").strip()
+    password = form.get("password") or ""
+    if auth.is_rate_limited(username):
+        return HTMLResponse(
+            _render_login("Too many attempts. Please wait a few minutes and try again."),
+            status_code=429)
+    role = auth.authenticate(username, password)
+    if role is None:
+        auth.record_failed_login(username)
+        if auth.FAILED_LOGIN_DELAY:
+            await asyncio.sleep(auth.FAILED_LOGIN_DELAY)
+        return HTMLResponse(_render_login("Incorrect username or password."),
+                            status_code=401)
+    resp = RedirectResponse("/", status_code=303)
+    _set_session(resp, auth.make_token(username, role), request)
+    return resp
+
+
+@app.post("/logout")
+def logout():
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie(auth.COOKIE_NAME, path="/")
+    return resp
+
+
+@app.get("/me")
+def me(request: Request):
+    return {"username": getattr(request.state, "user", None),
+            "role": getattr(request.state, "role", None)}
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +234,7 @@ def _report_table(masters):
 # --------------------------------------------------------------------------- #
 class RunRequest(BaseModel):
     config: Optional[dict] = None
+    persist: bool = False   # admin Plan-click persists; auto-load sends False
 
 
 class DeleteRequest(BaseModel):
@@ -323,18 +433,38 @@ def _plan(config: Config):
                         status_by_so=status_by_so)
     orders = to_table(orderbook.order_rows(active, completed, actuals))
     return {"run_id": run_id, "trace": trace, "report": _report_table(masters),
-            "gantt": gantt, "orders": orders}
+            "gantt": gantt, "orders": orders, "config": config.to_dict()}
+
+
+def _load_plan_config() -> Config:
+    """The admin's last-saved plan config, or defaults. Never raises: a missing,
+    unparseable, or invalid stored value falls back to ``Config()`` so a read
+    endpoint can't be 500'd by a bad stored config."""
+    raw = book_store.load_plan_config()
+    if not raw:
+        return Config()
+    try:
+        cfg = Config.from_dict(json.loads(raw))
+        cfg.validate()
+        return cfg
+    except Exception:
+        return Config()
 
 
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
 @app.post("/upload")
-async def upload(file: UploadFile = File(...)):
+async def upload(request: Request, file: UploadFile = File(...)):
     """Merge an uploaded workbook into the order book. New SO numbers become
     pending orders; known ones are flagged. Masters are updated (latest-wins,
-    kept if the file omits them)."""
+    kept if the file omits them). Admin only."""
+    require_admin(request)
+    if int(request.headers.get("content-length") or 0) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="file too large (max 10 MB)")
     contents = await file.read()
+    if len(contents) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="file too large (max 10 MB)")
     try:
         so_lines, masters = load_all(io.BytesIO(contents))
     except Exception as e:  # noqa: BLE001 — surface parse failures to the user
@@ -363,18 +493,33 @@ async def upload(file: UploadFile = File(...)):
 
 
 @app.post("/run")
-def run(req: Optional[RunRequest] = None):
-    config = Config.from_dict(req.config if req else None)
-    try:
-        config.validate()
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+def run(request: Request, req: Optional[RunRequest] = None):
+    """Plan the order book. Admin may set the config (and persist it on an
+    explicit Plan click); a user always plans with the admin's saved config, so
+    everyone sees one consistent plan."""
+    role = getattr(request.state, "role", auth.USER)
+    sent = req.config if req else None
+    persist = bool(req.persist) if req else False
+
+    # The persist flag is the single switch: an admin's explicit Plan click
+    # (persist=True) applies AND saves the submitted config; everything else — an
+    # admin auto-load on page open, or any user — plans with the saved config
+    # (defaults if none saved). So everyone sees one consistent, planner-set plan.
+    if role == auth.ADMIN and persist:
+        config = Config.from_dict(sent)
+        try:
+            config.validate()
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        book_store.save_plan_config(json.dumps(config.to_dict()))
+    else:
+        config = _load_plan_config()
     return _plan(config)
 
 
 @app.post("/rerun")
-def rerun(req: Optional[RunRequest] = None):
-    return run(req)  # unified — Run and Rerun are the same action now
+def rerun(request: Request, req: Optional[RunRequest] = None):
+    return run(request, req)  # unified — Run and Rerun are the same action now
 
 
 @app.get("/orders")
@@ -386,22 +531,24 @@ def orders():
 
 
 @app.post("/orders/delete")
-def delete_orders(req: DeleteRequest):
-    """Permanently delete the given SO numbers (orders + their actuals)."""
+def delete_orders(req: DeleteRequest, request: Request):
+    """Permanently delete the given SO numbers (orders + their actuals). Admin only."""
+    require_admin(request)
     n = book_store.delete_orders(req.so_nos)
     return {"deleted": n}
 
 
 @app.post("/orders/clear")
-def clear_orders():
-    """Permanently delete ALL orders + actuals (masters are kept)."""
+def clear_orders(request: Request):
+    """Permanently delete ALL orders + actuals (masters are kept). Admin only."""
+    require_admin(request)
     book_store.delete_all()
     return {"cleared": True}
 
 
 @app.get("/gantt")
 def gantt():
-    return _plan(Config())["gantt"]
+    return _plan(_load_plan_config())["gantt"]
 
 
 @app.get("/trace/{run_id}")
