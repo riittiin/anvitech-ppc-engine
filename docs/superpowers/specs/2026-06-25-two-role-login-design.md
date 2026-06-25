@@ -37,8 +37,11 @@ ownership visible (a real login screen + logout) and adds the role split.
 5. **User has no Plan button.** Instead, the user always sees **the admin's
    last-saved plan settings**, so a downloaded sheet matches what the planner set
    up. (Achieved by persisting the plan config — see below.)
-6. **"Mark order complete" is admin-only** — it archives an order (a planning
-   decision), so it is hidden from the user and refused server-side.
+6. **"Mark order complete" is available to BOTH roles** — the floor user marks an
+   SO complete from the Capture Actuals form (it's a shop-floor signal that the SO
+   is done), so the checkbox stays visible for users and is accepted server-side.
+7. **Security is a first-class requirement.** The whole change is hardened against
+   the common ways a small web app gets compromised — see "Security hardening".
 
 ## Permission matrix
 
@@ -51,7 +54,7 @@ ownership visible (a real login screen + logout) and adds the role split.
 | Delete selected / Delete all (`/orders/delete`, `/orders/clear`) | ✅ | ❌ 403 |
 | Download Rule 6 allocation CSV / machine-wise CSV | ✅ | ✅ |
 | Capture Actuals — submit production (`POST /actuals`) | ✅ | ✅ |
-| "Mark order complete" (`mark_complete=true`) | ✅ | ❌ ignored/forced false |
+| "Mark order complete" (`mark_complete=true`) | ✅ | ✅ |
 | Read endpoints (`/orders`, `/gantt`, `/items`, `/report`, `/trace`) | ✅ | ✅ |
 
 **Enforcement is server-side** (not just hidden in the UI). UI hiding is polish on
@@ -110,8 +113,8 @@ secured on Render).
     the front-end's role-aware UI).
 - **Admin-only guard:** a tiny helper `require_admin(request)` raising `403`,
   applied in `/upload`, `/orders/delete`, `/orders/clear`.
-- **`/actuals`:** if the caller is not admin, force `mark_complete = False` before
-  recording (so a user can log production but not archive orders).
+- **`/actuals`:** available to both roles, including `mark_complete` — a user may
+  log production and mark an SO complete (a shop-floor signal). No role stripping.
 - **`/run`, `/rerun`, `/gantt` — persisted plan config:**
   - New store key `anvitech:plan_config` (kv: JSON of the `Config`).
   - On `POST /run`: if the caller is **admin**, use the submitted config and
@@ -135,8 +138,8 @@ via `fetch`; on success redirects to `/`, on failure shows the error.
   - hide the `.datasource` (upload) section,
   - on the Orders tab, hide the per-row select checkboxes and the
     "Delete selected" / "Delete ALL data" buttons,
-  - in the Capture Actuals form, hide the "Mark this order complete" checkbox,
-  - keep the Rule 6 download buttons and the Capture Actuals form.
+  - keep the Rule 6 download buttons and the **full** Capture Actuals form,
+    **including** the "Mark this order complete" checkbox.
 - **Auto-load the current plan on login** for both roles (call `/run` once on
   startup) so the schedule / Gantt / rule tabs are populated without a Plan click.
   For admin, the Plan button still re-runs with the live config.
@@ -168,6 +171,123 @@ Admin-only call by a user (e.g. `POST /orders/delete`) → `require_admin` → `
 - No `SESSION_SECRET` and an empty store → a secret is generated and persisted on
   first need; never fatal.
 
+## Security hardening
+
+This change is treated as a security feature. The goal is that there is **no easy
+loophole** — no way to reach an admin action without being admin, no way to forge
+a session, and no obvious web-app vulnerability class left open. Each item below is
+a concrete, testable control, using only the Python standard library (no new
+dependency = smaller supply-chain surface).
+
+### 1. Session integrity (no forgery)
+- The session cookie is **signed with HMAC-SHA256** over the payload `{u, role,
+  iat}` using the server secret. The server **never trusts an unsigned value** —
+  role is read only from a signature-verified payload. A user cannot flip their own
+  cookie to `role=admin` because they cannot produce a valid HMAC without the
+  secret.
+- Verification uses `hmac.compare_digest` (**constant-time**) to defeat timing
+  attacks; password checks use `secrets.compare_digest`.
+- The secret is **≥32 bytes of CSPRNG output** (`secrets.token_hex(32)`), persisted
+  once and reused. Rotating it (change the env var or the stored value)
+  **invalidates every existing session** automatically (HMAC no longer matches).
+- The secret is **cached in-process** after first resolution (no per-request store
+  round-trip — preserves the latency win from the perf work).
+
+### 2. Cookie flags
+- `HttpOnly` — JavaScript cannot read the cookie, so an XSS bug cannot steal the
+  session.
+- `SameSite=Strict` — the browser will not send the cookie on cross-site requests,
+  which **blocks CSRF** for the cookie-driven flows.
+- `Secure` — set whenever the request is HTTPS (detected via scheme /
+  `X-Forwarded-Proto`, which Render sets), so the cookie never travels over plain
+  HTTP in production. Left off only for `http://localhost` dev so login still works.
+- `Path=/`, and a bounded `Max-Age` (default **7 days**; configurable). The signed
+  `iat` is **also** checked server-side, so an old cookie can't be replayed past
+  expiry even if the client keeps it.
+
+### 3. CSRF defense-in-depth
+Beyond `SameSite=Strict`, every **state-changing** request (`POST`/`PUT`/`PATCH`/
+`DELETE`) is checked for a same-origin **`Origin`/`Referer`** header; a request
+whose `Origin` host doesn't match the app host is rejected (`403`). (Login/logout
+included.) This layers a second, independent CSRF control on top of the cookie
+flag.
+
+### 4. Brute-force / credential-stuffing resistance
+- An **in-memory rate limiter** on `POST /login`, keyed by client IP (from
+  `X-Forwarded-For` first hop on Render, else the socket peer): after **5 failed
+  attempts** within a rolling **15-minute** window, further attempts from that key
+  are refused with `429 Too Many Requests` until the window passes.
+- A **small fixed delay** on every failed login (~0.5 s) to slow automated
+  guessing and flatten timing differences.
+- Failed-login events are logged (IP + username tried, never the password) for
+  visibility. (Single-instance app, so in-memory counters are sufficient; documented
+  as such.)
+
+### 5. Security response headers (applied to every response)
+The current `no_cache` middleware is widened into a `security_headers` middleware
+that adds:
+- `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'
+  'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none';
+  frame-ancestors 'none'; form-action 'self'` — blocks injected/inline **script**
+  execution (the main XSS lever) and framing. (`style-src` keeps `'unsafe-inline'`
+  because the Gantt positions bars with inline `style=` attributes — low risk; the
+  script lock is the important one.)
+- `X-Content-Type-Options: nosniff`
+- `X-Frame-Options: DENY` (clickjacking; pairs with `frame-ancestors`)
+- `Referrer-Policy: no-referrer`
+- `Strict-Transport-Security: max-age=63072000; includeSubDomains` — **only on
+  HTTPS** — forces HTTPS for future visits.
+- The existing `Cache-Control: no-store` is kept (so authed pages aren't cached).
+
+To keep `script-src 'self'` strict (no `'unsafe-inline'`), the **login page uses an
+external `web/login.js`** — no inline `<script>`. The main app already uses an
+external `app.js` and wires handlers in JS (no inline `on*=` handlers), so it is
+CSP-compatible as-is.
+
+### 6. Cross-Site Scripting (stored/reflected)
+- All user-supplied values rendered into the DOM continue to go through
+  `escapeHtml`; the implementation audits the render paths for any value (SO No,
+  item name, remarks, process) inserted without escaping and fixes gaps.
+- The strict `script-src 'self'` CSP is the safety net: even a missed escape cannot
+  execute injected `<script>` or inline `onerror=` handlers.
+
+### 7. Authorization (the core) — no privilege escalation
+- Every admin-only action is enforced **on the server** (`require_admin` → `403`),
+  independent of the UI. A user calling `POST /upload`, `/orders/delete`, or
+  `/orders/clear` directly (e.g. via `curl` with their own valid session) is
+  refused. Hiding the buttons is cosmetic only.
+- The role is taken **only** from the verified session, never from a request body,
+  query param, or header the client controls.
+- An explicit test asserts each admin endpoint returns `403` for a user session.
+
+### 8. Upload safety (admin-only, but still defended)
+- `POST /upload` enforces a **max body size** (e.g. **10 MB**); larger uploads are
+  rejected (`413`) before parsing — a cheap guard against memory-exhaustion DoS and
+  decompression ("zip-bomb") attempts.
+- The workbook is opened **read-only** (already the case) and parse errors return a
+  **generic** message (no stack trace / internal paths leaked to the client).
+- Because upload is now **admin-only**, the realistic attacker surface here is small.
+
+### 9. Information-disclosure hygiene
+- Login failures return a single generic message ("Incorrect username or
+  password") — no hint about which field was wrong or whether a username exists.
+- FastAPI's interactive docs are **disabled in the deployed app**
+  (`docs_url=None`, `redoc_url=None`, `openapi_url=None`) to shrink the surface
+  (they were behind auth anyway — this is defense-in-depth).
+- Error responses avoid echoing internal exception detail to the client.
+
+### 10. Transport
+- Render terminates TLS (HTTPS) already; HSTS (above) pins it. The cookie's
+  `Secure` flag ensures the session is never sent in cleartext in production.
+
+### What is explicitly NOT claimed
+- Passwords are **baked into the code** at the user's request; their presence in
+  the private git history is an accepted residual risk (mitigated: not reused
+  elsewhere; rotatable via env override). This is the one deliberate deviation from
+  "store secrets outside code".
+- This is hardening to a strong, standard baseline for a small single-tenant app —
+  not a formal pentest or compliance certification.
+
 ## Testing (test-first)
 
 New `tests/test_auth.py`:
@@ -180,11 +300,27 @@ New `tests/test_auth.py`:
 - No cookie: a JSON endpoint → `401`; `GET /` (Accept: text/html) → `302 /login`.
 - **User is refused** server-side: `/upload` → `403`, `/orders/delete` → `403`,
   `/orders/clear` → `403`.
-- **User is allowed**: `/actuals` (no mark-complete) → `200`; a user's
-  `mark_complete=true` is ignored (order stays active).
+- **User is allowed**: `/actuals` → `200`; a user's `mark_complete=true` **does
+  archive** the order (allowed for both roles).
 - **User Plan config**: a user `POST /run` ignores submitted config and uses the
   admin-persisted one.
 - `POST /logout` clears the cookie (subsequent protected call → `401`/redirect).
+
+Security-focused tests (`tests/test_auth.py`):
+- **No privilege escalation:** a hand-crafted cookie claiming `role=admin` but
+  signed with the wrong key is rejected (treated as not-signed-in); a user session
+  cannot reach any admin endpoint (`403`).
+- **Tamper/replay:** flipping any byte of a valid token fails verification; a token
+  with an `iat` older than `MAX_AGE` is rejected.
+- **CSRF:** a `POST` with a foreign `Origin` header is rejected (`403`) even with a
+  valid session cookie; a same-origin `POST` passes.
+- **Rate limit:** 6 rapid wrong-password logins from one client → the later ones
+  return `429`.
+- **Security headers:** a normal response carries `Content-Security-Policy`,
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`.
+- **Upload size cap:** an over-limit `/upload` body is rejected (`413`) before
+  parsing.
+- **Docs disabled:** `GET /openapi.json` / `/docs` are not served (`404`).
 
 Update `tests/test_api.py`:
 - Replace the Basic-Auth header with a login helper (POST `/login` as admin once;
