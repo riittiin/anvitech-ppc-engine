@@ -84,31 +84,50 @@ A small, focused module — the only place that knows about accounts and session
   3. generate a random one (`secrets.token_hex`), persist it, and use it.
   This keeps sessions stable across restarts with **zero required env vars** — no
   third-party dependency — while allowing an explicit override.
+- `authenticate` is **constant-time even for an unknown username** — it compares
+  against a fixed dummy hash when the user doesn't exist, so response timing never
+  reveals whether a username is valid.
 - `make_token(username, role) -> str` — base64 of `{u, role, iat}` + an
   HMAC-SHA256 signature, joined by `.`.
 - `verify_token(token) -> {u, role} | None` — re-computes the HMAC
-  (constant-time), rejects tampered/garbage tokens and tokens older than
-  `MAX_AGE_DAYS` (default 30). Returns the payload or `None`.
+  (constant-time), rejects tampered/garbage tokens, tokens with a missing/garbled
+  payload, and tokens older than `MAX_AGE_DAYS` (**7**, the single authoritative
+  expiry). Returns the payload or `None`.
+- The secret is resolved **once at startup** (FastAPI startup event), cached
+  in-process keyed by store-config (so per-test `STORE_DIR` swaps stay isolated),
+  avoiding both a per-request store round-trip and a first-request generate race.
 
-The cookie is named `anvitech_session`, set `HttpOnly`, `SameSite=Lax`, and
-`Secure` when the request is HTTPS (so it works on http://localhost in dev and is
-secured on Render).
+The cookie is named `anvitech_session`, set `HttpOnly`, `SameSite=Lax`,
+`Secure` when the request is HTTPS, `Path=/`, and `Max-Age = 7 days` (matching the
+server-side `iat` check, which is authoritative). `Lax` (not `Strict`) avoids the
+"appears logged-out on first click from a bookmark/link" surprise while still not
+sending the cookie on cross-site POSTs; CSRF is further covered by the Origin
+check below.
 
 ### Changed: `api/main.py`
 
 - **Replace** the `basic_auth` middleware with a `session_auth` middleware:
-  - Public paths (no session needed): `GET /login`, `POST /login`, `POST /logout`,
-    and the login page's own assets (the page is self-contained, so none extra).
+  - Public paths are an **exact `(method, path)` allowlist** — exactly
+    `{(GET, /login), (POST, /login), (POST, /logout)}`. **Never** matched by prefix
+    or file extension. The login page is fully self-contained (inline CSS, no JS),
+    so no static asset needs to be public. Everything else — `/`, `/index.html`,
+    `/app.js`, `/style.css`, every other static path and API route — requires a
+    valid session.
   - Otherwise: read + verify the session cookie.
     - Invalid/missing **and** it's a browser navigation (`GET` with
       `Accept: text/html`) → `302` redirect to `/login`.
     - Invalid/missing otherwise (API/XHR) → `401`.
     - Valid → stash `request.state.user` / `request.state.role` and continue.
-- **New routes** (declared before the static mount so they take precedence):
+- **New routes** (declared before the static mount so they take precedence; the
+  static mount must stay last so `/login` etc. resolve, avoiding a redirect loop):
   - `GET  /login` → serve `web/login.html`.
-  - `POST /login` (form: `username`, `password`) → on success set cookie + `200`
-    (the page redirects); on failure `401` with a short message.
-  - `POST /logout` → clear the cookie, `200`.
+  - `POST /login` (HTML form post: `username`, `password`) → on success set cookie
+    + `303` redirect to `/`; on failure re-serve the login page with a generic
+    error. **Native form post — no JavaScript on the login page** (keeps CSP
+    `script-src 'self'` strict with no extra allowlisted asset). The login flow
+    **never** reflects a user-supplied `next`/return URL — the redirect target is
+    the hardcoded `/` (no open-redirect).
+  - `POST /logout` → clear the cookie (same attributes), `303` redirect to `/login`.
   - `GET  /me` → `{ "username": ..., "role": ... }` for the signed-in user (drives
     the front-end's role-aware UI).
 - **Admin-only guard:** a tiny helper `require_admin(request)` raising `403`,
@@ -116,33 +135,54 @@ secured on Render).
 - **`/actuals`:** available to both roles, including `mark_complete` — a user may
   log production and mark an SO complete (a shop-floor signal). No role stripping.
 - **`/run`, `/rerun`, `/gantt` — persisted plan config:**
-  - New store key `anvitech:plan_config` (kv: JSON of the `Config`).
-  - On `POST /run`: if the caller is **admin**, use the submitted config and
-    **persist it**; if the caller is **user**, ignore any submitted config and use
-    the persisted one (falling back to defaults if none saved yet).
-  - `GET /gantt` uses the persisted config instead of a bare `Config()`.
+  - New store key `anvitech:plan_config` (kv: `json.dumps(config.to_dict())`).
+  - `load_plan_config()` returns a validated `Config`, **falling back to `Config()`
+    on a missing, unparseable, or invalid stored value** (try/except + `validate()`)
+    — a corrupt stored config must never 500 a read endpoint.
+  - `RunRequest` gains an explicit `persist: bool = False` flag.
+  - On `POST /run`:
+    - effective config = (caller is **admin** and a config was sent) ?
+      `Config.from_dict(sent)` : `load_plan_config()`.
+    - **persist only when caller is admin AND `persist is True`** (the admin's
+      explicit Plan-button click). The **auto-load on page open sends
+      `persist=False`**, so merely opening the app never overwrites the saved plan.
+      Users never persist, regardless of the flag.
+  - The `/run` response includes the **effective config** so the admin's config bar
+    can reflect the last-saved plan.
+  - `GET /gantt` uses `load_plan_config()` instead of a bare `Config()`.
   - Net effect: a single shared "current plan" everyone sees — the worker
-    downloads exactly what the planner planned.
+    downloads exactly what the planner planned, and it isn't clobbered by page loads.
 
 ### New: `web/login.html`
-Self-contained page (inline CSS in the app's visual style): title, username +
-password fields, a Sign-in button, and an error line. Submits to `POST /login`
-via `fetch`; on success redirects to `/`, on failure shows the error.
+Self-contained page (inline CSS in the app's visual style, **no JavaScript**): a
+native `<form method="post" action="/login">` with username + password fields, a
+Sign-in button, and (on failure) a generic error line rendered by the server. The
+browser does the post; the server sets the cookie and `303`-redirects to `/`. No
+inline script, so CSP `script-src 'self'` stays strict.
 
 ### Changed: `web/app.js` + `web/index.html`
-- On load: `GET /me`. Store `currentRole`.
+- On load: `GET /me`. Store `currentRole`. **If `/me` is non-200 or the role is
+  missing/garbled, default to `"user"`** (least privilege) — never default to admin.
+  (Server enforcement is the real gate; this just avoids accidentally showing admin
+  controls.)
 - Add a top **session bar**: "Signed in as `<username>` · `<role>`" + a **Logout**
-  button (`POST /logout` → redirect to `/login`).
-- If `currentRole === "user"`:
-  - hide the entire `.controls` config block **and** the Plan button,
+  button (posts to `/logout`).
+- Role gating is done by **hiding, not removing** elements — add a
+  `class="role-user"` to `<body>` for the user role and hide admin-only controls via
+  CSS. The existing handler wiring (`$("run-btn").onclick`, `$("upload-btn")`, the
+  Orders delete buttons) must be **null-guarded** so nothing throws if an element is
+  hidden/absent. For the user role:
+  - hide the `.controls` config block **and** the Plan button,
   - hide the `.datasource` (upload) section,
-  - on the Orders tab, hide the per-row select checkboxes and the
-    "Delete selected" / "Delete ALL data" buttons,
+  - hide the Orders per-row select checkboxes and the "Delete selected" / "Delete
+    ALL data" buttons (gate both the HTML emission **and** the wiring),
   - keep the Rule 6 download buttons and the **full** Capture Actuals form,
     **including** the "Mark this order complete" checkbox.
 - **Auto-load the current plan on login** for both roles (call `/run` once on
-  startup) so the schedule / Gantt / rule tabs are populated without a Plan click.
-  For admin, the Plan button still re-runs with the live config.
+  startup **with `persist:false`**) so the schedule / Gantt / rule tabs populate
+  without a Plan click and **without overwriting the saved plan**. The admin Plan
+  button sends **`persist:true`**. On load, the admin's config bar is populated from
+  the effective config returned by `/run`.
 
 ## Data flow
 
@@ -196,32 +236,49 @@ dependency = smaller supply-chain surface).
 ### 2. Cookie flags
 - `HttpOnly` — JavaScript cannot read the cookie, so an XSS bug cannot steal the
   session.
-- `SameSite=Strict` — the browser will not send the cookie on cross-site requests,
-  which **blocks CSRF** for the cookie-driven flows.
+- `SameSite=Lax` — the browser will not send the cookie on cross-site **POST**
+  requests (the state-changing ones), which blocks the main CSRF vector while
+  avoiding the "first click from a bookmark looks logged-out" surprise of `Strict`.
+  The Origin/Referer check (§3) is the second, independent CSRF layer.
 - `Secure` — set whenever the request is HTTPS (detected via scheme /
   `X-Forwarded-Proto`, which Render sets), so the cookie never travels over plain
   HTTP in production. Left off only for `http://localhost` dev so login still works.
-- `Path=/`, and a bounded `Max-Age` (default **7 days**; configurable). The signed
-  `iat` is **also** checked server-side, so an old cookie can't be replayed past
-  expiry even if the client keeps it.
+- `Path=/`, and `Max-Age = 7 days` — **the same 7 days as the authoritative
+  server-side `iat` check**, so the cookie and the server agree on expiry (no
+  longer-lived server acceptance of a captured cookie).
 
 ### 3. CSRF defense-in-depth
-Beyond `SameSite=Strict`, every **state-changing** request (`POST`/`PUT`/`PATCH`/
-`DELETE`) is checked for a same-origin **`Origin`/`Referer`** header; a request
-whose `Origin` host doesn't match the app host is rejected (`403`). (Login/logout
-included.) This layers a second, independent CSRF control on top of the cookie
-flag.
+Beyond `SameSite=Lax`, every **state-changing** request (`POST`/`PUT`/`PATCH`/
+`DELETE`) is checked against the app's own host using `Origin` (falling back to
+`Referer`): **reject (`403`) only when the header is present AND its host does not
+match**; when **both are absent, allow**. This is the correct posture because CSRF
+is a browser-only attack — browsers always attach `Origin` on cross-site POSTs, so
+a foreign `Origin` is caught, while header-less non-browser clients (`curl`, the
+test client, server-to-server) carry no ambient session cookie to abuse and so are
+not a CSRF vector. The app host is taken from the request's own `Host`/forwarded
+host (which a real CSRF attacker cannot align with their foreign `Origin`). This
+layers a second, independent CSRF control on top of the cookie flag, and keeps the
+test client and same-origin XHR working.
 
 ### 4. Brute-force / credential-stuffing resistance
-- An **in-memory rate limiter** on `POST /login`, keyed by client IP (from
-  `X-Forwarded-For` first hop on Render, else the socket peer): after **5 failed
-  attempts** within a rolling **15-minute** window, further attempts from that key
-  are refused with `429 Too Many Requests` until the window passes.
-- A **small fixed delay** on every failed login (~0.5 s) to slow automated
-  guessing and flatten timing differences.
-- Failed-login events are logged (IP + username tried, never the password) for
-  visibility. (Single-instance app, so in-memory counters are sufficient; documented
-  as such.)
+- An **in-memory rate limiter** on `POST /login`, **keyed by the attempted
+  username** (not client IP): after **5 failed attempts** within a rolling
+  **15-minute** window, further attempts for that username are refused with `429
+  Too Many Requests` until the window passes.
+  - *Why username, not IP:* `X-Forwarded-For` is fully client-controlled, so an
+    IP-keyed limiter is both **bypassable** (rotate the header) and a **memory-DoS**
+    (unbounded keys). Keying on the username is spoof-proof and naturally bounded to
+    the two real accounts, so the limiter dict can never grow. An unknown username
+    is bucketed under a single `"<unknown>"` key (also bounded).
+  - *Accepted tradeoff:* an attacker hammering a real username can temporarily
+    `429` the legitimate shared user for that 15-minute window. Acceptable: it's a
+    throttle, not a permanent lock, and it stops brute force. Documented.
+- A **small async delay** on failed login (~0.4 s, via `asyncio.sleep` so it never
+  blocks the worker) to slow automated guessing; applied **uniformly** whether the
+  username is unknown or the password is wrong (no timing oracle).
+- Failed-login events are logged (sanitized username, never the password) for
+  visibility. Single-instance app → in-memory counters suffice (documented). A
+  test-only `reset_auth_state()` clears the limiter between tests.
 
 ### 5. Security response headers (applied to every response)
 The current `no_cache` middleware is widened into a `security_headers` middleware
@@ -239,10 +296,11 @@ that adds:
   HTTPS** — forces HTTPS for future visits.
 - The existing `Cache-Control: no-store` is kept (so authed pages aren't cached).
 
-To keep `script-src 'self'` strict (no `'unsafe-inline'`), the **login page uses an
-external `web/login.js`** — no inline `<script>`. The main app already uses an
-external `app.js` and wires handlers in JS (no inline `on*=` handlers), so it is
-CSP-compatible as-is.
+To keep `script-src 'self'` strict (no `'unsafe-inline'`), the **login page uses a
+native HTML form and has no JavaScript at all** — no inline `<script>`, no extra
+allowlisted asset. The main app already uses an external `app.js` and wires
+handlers in JS (no inline `on*=` handlers), so it is CSP-compatible as-is. CSP also
+sets `form-action 'self'` so the login form can only post back to this origin.
 
 ### 6. Cross-Site Scripting (stored/reflected)
 - All user-supplied values rendered into the DOM continue to go through
@@ -267,6 +325,8 @@ CSP-compatible as-is.
 - The workbook is opened **read-only** (already the case) and parse errors return a
   **generic** message (no stack trace / internal paths leaked to the client).
 - Because upload is now **admin-only**, the realistic attacker surface here is small.
+- `POST /login` also caps its request body small (a few KB) so the unauthenticated
+  login endpoint can't be used to buffer large bodies.
 
 ### 9. Information-disclosure hygiene
 - Login failures return a single generic message ("Incorrect username or
@@ -287,6 +347,13 @@ CSP-compatible as-is.
   "store secrets outside code".
 - This is hardening to a strong, standard baseline for a small single-tenant app —
   not a formal pentest or compliance certification.
+- **Logout is best-effort:** because sessions are stateless signed cookies (no
+  server-side session store, to avoid a per-request store round-trip), a previously
+  captured cookie remains valid until its 7-day `iat` expiry even after logout.
+  Acceptable for this app; rotating the secret invalidates everything immediately.
+- `/trace/{run_id}` exposes the full plan (schedule, utilization, downtime) to any
+  logged-in user — consistent with "user sees everything read-only." Run IDs are
+  not treated as secrets.
 
 ## Testing (test-first)
 
