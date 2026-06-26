@@ -159,6 +159,16 @@ class Machine:
     machine_type: str
     hr_rate: Optional[float] = None
     provisional: bool = False
+    available_hrs_per_day: Optional[float] = None  # from the master; drives the
+                                                   # working window (>=threshold → two-shift)
+
+    def is_two_shift(self, threshold: float = 12.0) -> bool:
+        """A machine runs both shifts when its Available Hrs/Day is large (CNC/VMC
+        ≈19.5). A small value (≈9.5) means single-shift 9am-6pm. Blank/None →
+        two-shift (back-compat); explicit 0 stays single-shift."""
+        if self.available_hrs_per_day is None:
+            return True
+        return self.available_hrs_per_day >= threshold
 
     def as_row(self):
         return {
@@ -166,6 +176,7 @@ class Machine:
             "Canonical": self.machine_no,
             "Type": self.machine_type,
             "Hr Rate (Rs)": self.hr_rate,
+            "Available Hrs/Day": self.available_hrs_per_day,
             "Provisional": self.provisional,
         }
 
@@ -175,11 +186,13 @@ class Operator:
     name: str
     preferred_machines_raw: str = ""
     machines: list = field(default_factory=list)  # best-effort canonical ids
+    shift: str = ""                                # "First shift" / "Second shift" / ""
 
     def as_row(self):
         return {
             "Operator": self.name,
             "Preferred Machines": self.preferred_machines_raw,
+            "Shift": self.shift,
             "Parsed": _fmt(self.machines),
         }
 

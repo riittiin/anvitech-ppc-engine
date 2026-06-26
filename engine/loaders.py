@@ -185,6 +185,9 @@ def _load_machines(wb, masters: Masters):
         masters.add_report("MISSING_SHEET", "Machine master",
                            "header row (Machine Type / Machine No / Hr Rate) not found")
         return
+    # Available Hrs/Day is optional — locate it within the header row if present.
+    avail_col = next((ci for ci, c in enumerate(rows[hdr])
+                      if "availablehrs" in _norm_header(c)), None)
     for row in rows[hdr + 1:]:
         machine_no = _cell(row, col["no"])
         if not machine_no or str(machine_no).strip() == "":
@@ -199,6 +202,7 @@ def _load_machines(wb, masters: Masters):
             machine_type=str(machine_type).strip() if machine_type else "",
             hr_rate=_num(_cell(row, col["rate"])),
             provisional=False,
+            available_hrs_per_day=(_num(_cell(row, avail_col)) if avail_col is not None else None),
         )
 
 
@@ -210,6 +214,12 @@ def _load_operators(wb, masters: Masters):
     hdr, col = _locate_table(rows, {"name": "operatorname", "pref": "preferredmachine"})
     if hdr is None:
         return  # no operators table (non-blocking)
+    # The operator's own Shift column sits immediately after Preferred Machines.
+    # (A separate shift-definitions table further right also has a "Shift" header —
+    # bind only the adjacent one so the two don't collide.)
+    shift_col = col["pref"] + 1
+    if "shift" not in _norm_header(_cell(rows[hdr], shift_col)):
+        shift_col = None
     for row in rows[hdr + 1:]:
         name = _cell(row, col["name"])
         if not name or str(name).strip() == "":
@@ -217,9 +227,11 @@ def _load_operators(wb, masters: Masters):
         pref = _cell(row, col["pref"])
         parsed = [normalize_resource_id(t) for t in re.split(r"[/&,]| or ", str(pref or ""))]
         parsed = [p for p in parsed if p]
+        shift = _cell(row, shift_col) if shift_col is not None else None
         masters.operators.append(
             Operator(name=str(name).strip(),
-                     preferred_machines_raw=str(pref or "").strip(), machines=parsed)
+                     preferred_machines_raw=str(pref or "").strip(), machines=parsed,
+                     shift=str(shift).strip() if shift else "")
         )
 
 

@@ -53,18 +53,25 @@ def build_workbook():
     for r in MACHINES:
         ws.append(list(r))
 
-    # --- Operator & shift Master (operators A:B, shifts D:G side by side) --- #
+    # --- Operator & shift Master (operators A:B:C, shift defs E:H side by side) --- #
     ws = wb.create_sheet("Operator & shift Master")
-    ws.append(["Operator Name", "Preferred Machines", None, "Shift", "Start", "End", "Notes"])
-    ops = [("Operator One", "CNC 1, CNC 2"), ("Operator Two", "CNC 1, CNC 2")]
+    ws.append(["Operator Name", "Preferred Machines", "Shift", None,
+               "Shift", "Start", "End", "Notes"])
+    # CNC1: covered First (One) + Second (Two) -> both shifts. CNC2: First only.
+    # BS1 (a 9.5 machine): covered First (Three) -> runs the manual 9-6 window.
+    ops = [
+        ("Operator One", "CNC 1, CNC 2", "First shift"),
+        ("Operator Two", "CNC 1", "Second shift"),
+        ("Operator Three", "BS1", "First shift"),
+    ]
     shifts = [("First shift", "08:00", "19:00", ""),
               ("Second shift", "19:00", "05:00", "next day")]
     for i in range(max(len(ops), len(shifts))):
-        row = [None] * 7
+        row = [None] * 8
         if i < len(ops):
-            row[0], row[1] = ops[i]
+            row[0], row[1], row[2] = ops[i]
         if i < len(shifts):
-            row[3], row[4], row[5], row[6] = shifts[i]
+            row[4], row[5], row[6], row[7] = shifts[i]
         ws.append(row)
 
     # --- Weekly off & holiday master (Category | Name | Day / Date) --- #

@@ -61,6 +61,24 @@ class Config:
     # Shift windows (24h clock). 1st shift 08:00-19:00, 2nd 19:00-05:00 (next day).
     first_shift_start_hour: int = 8
     second_shift_end_hour: int = 5  # on the following calendar day
+    first_shift_end_hour: int = 19  # 1st/2nd boundary
+
+    # Operator logic. A machine runs both shifts when its Available Hrs/Day is at
+    # least this threshold (CNC/VMC ≈19.5); otherwise it is a single-shift resource
+    # working only the manual window below (the shop's "treat 9.5 as 9am-6pm").
+    two_shift_threshold_hours: float = 12.0
+    manual_start_hour: int = 9      # single-shift / manual window start (09:00)
+    manual_end_hour: int = 18       # single-shift / manual window end (18:00)
+
+    # When True, the full operator/shift model applies in Rule 6:
+    #   * each machine uses a per-availability working window (≥threshold → two
+    #     shifts 08:00-05:00; else single-shift manual 09:00-18:00), AND
+    #   * an op may only run during a shift that has a qualified operator
+    #     (specialty + that shift); uncovered machines are reported, not scheduled.
+    # Engine default OFF (legacy single window, no coverage → keeps the golden trace
+    # + existing rule tests stable); the web UI defaults it ON. Mirrors
+    # apply_downtime_to_plan.
+    apply_operator_logic: bool = False
 
     def validate(self) -> None:
         """Fail loud on a bad config (Design spec §8 — config validation)."""
@@ -85,6 +103,16 @@ class Config:
             errs.append("first_shift_start_hour must be within 0..23")
         if not (0 <= self.second_shift_end_hour <= 23):
             errs.append("second_shift_end_hour must be within 0..23")
+        if not (0 <= self.manual_start_hour <= 23):
+            errs.append("manual_start_hour must be within 0..23")
+        if not (0 < self.manual_end_hour <= 24):
+            errs.append("manual_end_hour must be within 1..24")
+        if self.manual_end_hour <= self.manual_start_hour:
+            errs.append("manual_end_hour must be after manual_start_hour")
+        if self.two_shift_threshold_hours < 0:
+            errs.append("two_shift_threshold_hours must be >= 0")
+        if not isinstance(self.apply_operator_logic, bool):
+            errs.append("apply_operator_logic must be true or false")
         if errs:
             raise ValueError("Invalid config: " + "; ".join(errs))
 
