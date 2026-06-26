@@ -67,6 +67,28 @@ def _resolve_candidates(proc):
     return parse_resource_candidates(raw) or [normalize_resource_id(proc.name)]
 
 
+def _free_at(proc, start, ready, machine_free, plan_start, clock_for):
+    """This op's candidate machines that can begin right at ``start`` (i.e. are free
+    that moment). In candidate order; uncovered machines (no window) are excluded.
+    Used to decide a parallel split."""
+    out = []
+    for cand in _resolve_candidates(proc):
+        try:
+            feasible = clock_for(cand).advance(max(ready, machine_free.get(cand, plan_start)), 0)
+        except NoWorkingWindow:
+            continue
+        if feasible == start:
+            out.append(cand)
+    return out
+
+
+def _split_qty(qty, n):
+    """Split ``qty`` into ``n`` whole-piece shares, remainder to the first shares.
+    e.g. (50, 2) -> [25, 25]; (51, 2) -> [26, 25]; (5, 2) -> [3, 2]."""
+    base, rem = divmod(int(qty), n)
+    return [base + (1 if i < rem else 0) for i in range(n)]
+
+
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, **kw):
     # Imported lazily to avoid a circular import (pipeline imports this module).
     from ..pipeline import RuleError
@@ -177,25 +199,60 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             break
         _, s, proc, resource, occ, note = best
         start = best[0][0]
-        mclock = clock_for(resource)
-        end = mclock.advance(start, occ)
-        machine_free[resource] = end
-        operator = op_for(resource, start, masters, config) if op_for else ""
-        schedule.append(ScheduleEntry(
-            batch_id=s["batch"].batch_id, item_code=s["batch"].item_code,
-            process_seq=proc.seq, process_name=proc.name, machine=resource,
-            qty=s["batch"].qty, occupancy_min=occ, start=start, end=end, notes=note,
-            so_refs=list(s["batch"].source_so_refs), operator=operator,
-        ))
+        batch = s["batch"]
+        cyc = proc.cycle_time or 0.0
+        setup = config.setup_time_min
 
-        # Advance this batch and set when its next process may start (Rule 5).
-        # Overlap measures the previous process's CUTTING time only (setup excluded);
-        # the wait is walked on the PRODUCER machine's clock (the machine cutting).
-        s["next"] += 1
-        if s["next"] < len(s["routing"].processes):
-            run_min = (proc.cycle_time or 0.0) * (s["batch"].qty or 0.0)
-            elapsed = r5.elapsed_before_next(occ, run_min, config)
-            s["ready"] = mclock.advance(start, elapsed)
+        # Parallel split: if enabled and 2+ of this op's machines are FREE the moment
+        # it can start, split the quantity across them to run in parallel.
+        free = _free_at(proc, start, s["ready"], machine_free, plan_start, clock_for) \
+            if getattr(config, "split_parallel", False) else []
+        do_split = (len(free) >= 2 and (batch.qty or 0) >= getattr(config, "split_min_qty", 2))
+
+        if do_split:
+            subs = _split_qty(int(batch.qty), len(free))
+            cand_str = "/".join(_resolve_candidates(proc))
+            slow_end, slow_clock, slow_run, slow_occ = start, clock_for(free[0]), 0.0, 0.0
+            for cand, sq in zip(free, subs):
+                if sq <= 0:
+                    continue
+                occ_i = cyc * sq + setup
+                cclock = clock_for(cand)
+                end_i = cclock.advance(start, occ_i)
+                machine_free[cand] = end_i
+                schedule.append(ScheduleEntry(
+                    batch_id=batch.batch_id, item_code=batch.item_code,
+                    process_seq=proc.seq, process_name=proc.name, machine=cand,
+                    qty=sq, occupancy_min=occ_i, start=start, end=end_i,
+                    notes=f"parallel split: {sq} of {int(batch.qty)} on {cand} ({cand_str})",
+                    so_refs=list(batch.source_so_refs),
+                    operator=(op_for(cand, start, masters, config) if op_for else ""),
+                ))
+                if end_i > slow_end:   # the slowest half decides when the batch recombines
+                    slow_end, slow_clock, slow_run, slow_occ = end_i, cclock, cyc * sq, occ_i
+            s["next"] += 1
+            if s["next"] < len(s["routing"].processes):
+                elapsed = r5.elapsed_before_next(slow_occ, slow_run, config)
+                s["ready"] = slow_clock.advance(start, elapsed)
+        else:
+            mclock = clock_for(resource)
+            end = mclock.advance(start, occ)
+            machine_free[resource] = end
+            operator = op_for(resource, start, masters, config) if op_for else ""
+            schedule.append(ScheduleEntry(
+                batch_id=batch.batch_id, item_code=batch.item_code,
+                process_seq=proc.seq, process_name=proc.name, machine=resource,
+                qty=batch.qty, occupancy_min=occ, start=start, end=end, notes=note,
+                so_refs=list(batch.source_so_refs), operator=operator,
+            ))
+            # Advance this batch and set when its next process may start (Rule 5).
+            # Overlap measures the previous process's CUTTING time only (setup
+            # excluded); the wait is walked on the PRODUCER machine's clock.
+            s["next"] += 1
+            if s["next"] < len(s["routing"].processes):
+                run_min = cyc * (batch.qty or 0.0)
+                elapsed = r5.elapsed_before_next(occ, run_min, config)
+                s["ready"] = mclock.advance(start, elapsed)
 
     # Decision notes: prove machines ran continuously.
     _timeline, summary = build_machine_view(schedule, masters, config)

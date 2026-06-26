@@ -51,7 +51,14 @@ def build_overlap_view(schedule, config):
 
     rows = []
     for bid, ops in by_batch.items():
-        ops = sorted(ops, key=lambda e: e.process_seq)
+        # Collapse a parallel-split step (two entries, same seq) to its slowest half
+        # so the handoff view pairs distinct process steps, not the two split halves.
+        by_seq = {}
+        for e in ops:
+            cur = by_seq.get(e.process_seq)
+            if cur is None or e.end > cur.end:
+                by_seq[e.process_seq] = e
+        ops = sorted(by_seq.values(), key=lambda e: e.process_seq)
         for prev, nxt in zip(ops, ops[1:]):
             cutting = max(prev.occupancy_min - setup, 0.0)
             seq_gap = prev.occupancy_min                       # full wait (sequential)

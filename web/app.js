@@ -35,6 +35,7 @@ function readConfig() {
     priority_window_days: $("cfg-priority-window").value,
     apply_downtime_to_plan: $("cfg-apply-downtime").checked,
     apply_operator_logic: $("cfg-operator-logic").checked,
+    split_parallel: $("cfg-split-parallel").checked,
   };
 }
 
@@ -79,6 +80,8 @@ function applyConfig(cfg) {
   if (dt) dt.checked = !!cfg.apply_downtime_to_plan;
   const ol = $("cfg-operator-logic");
   if (ol) ol.checked = !!cfg.apply_operator_logic;
+  const sp = $("cfg-split-parallel");
+  if (sp) sp.checked = !!cfg.split_parallel;
 }
 
 // ---- Plan (Run + Rerun unified) ----

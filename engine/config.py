@@ -70,6 +70,15 @@ class Config:
     manual_start_hour: int = 9      # single-shift / manual window start (09:00)
     manual_end_hour: int = 18       # single-shift / manual window end (18:00)
 
+    # Parallel split — when a process lists alternative machines ("CNC3/CNC7") and
+    # 2+ of them are free when the op can start, split the quantity evenly across
+    # the free ones to run in parallel and finish faster (each pays its own setup;
+    # the next process waits for the slowest half — split-then-recombine). Only
+    # quantities >= split_min_qty are split. Engine default OFF (golden/tests stay
+    # stable); the web UI defaults it ON.
+    split_parallel: bool = False
+    split_min_qty: int = 2
+
     # When True, the full operator/shift model applies in Rule 6:
     #   * each machine uses a per-availability working window (≥threshold → two
     #     shifts 08:00-05:00; else single-shift manual 09:00-18:00), AND
@@ -113,6 +122,10 @@ class Config:
             errs.append("two_shift_threshold_hours must be >= 0")
         if not isinstance(self.apply_operator_logic, bool):
             errs.append("apply_operator_logic must be true or false")
+        if not isinstance(self.split_parallel, bool):
+            errs.append("split_parallel must be true or false")
+        if self.split_min_qty < 1:
+            errs.append("split_min_qty must be >= 1")
         if errs:
             raise ValueError("Invalid config: " + "; ".join(errs))
 
