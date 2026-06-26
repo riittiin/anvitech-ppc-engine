@@ -48,6 +48,33 @@ def _qualifies(operator, machine) -> bool:
     return bool(set(operator.machines) & _machine_keys(machine))
 
 
+def _shift_of(start_dt, config) -> str:
+    """Which shift a start time falls in: first (08:00–19:00, incl. the manual
+    09:00–18:00 window) vs second (19:00–05:00, incl. early morning)."""
+    h = start_dt.hour + start_dt.minute / 60.0
+    if config.first_shift_start_hour <= h < config.first_shift_end_hour:
+        return "first"
+    return "second"
+
+
+def operator_for(machine_id, start_dt, masters, config) -> str:
+    """Name of a qualified operator running ``machine_id`` at ``start_dt``, or ''.
+
+    Picks the first operator (sheet order) whose Shift covers the op's start time
+    and whose specialty matches the machine (by machine no OR type). With Model A
+    (coverage gate) this is the representative operator shown on the schedule —
+    operators are not consumed one-at-a-time."""
+    machine = masters.machines.get(machine_id)
+    keys = {machine_id}
+    if machine is not None:
+        keys.add(normalize_resource_id(machine.machine_type))
+    want = _shift_of(start_dt, config)
+    for o in masters.operators:
+        if _shift_kind(o) == want and (set(o.machines) & keys):
+            return o.name
+    return ""
+
+
 def machine_windows(masters, config):
     """Return ``(windows, report)``.
 

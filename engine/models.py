@@ -232,21 +232,27 @@ class ScheduleEntry:
     end: datetime
     notes: str = ""
     so_refs: list = field(default_factory=list)   # SO number(s) this batch came from
+    operator: str = ""                            # assigned operator (operator logic on)
 
     def as_row(self):
-        return {
+        row = {
             "SO No": _fmt(self.so_refs),
             "Batch ID": self.batch_id,
             "Item Code": self.item_code,
             "Seq": self.process_seq,
             "Process": self.process_name,
             "Machine": self.machine,
+        }
+        if self.operator:
+            row["Operator"] = self.operator   # column appears only when assigned
+        row.update({
             "Qty": self.qty,
             "Occupancy (min)": round(self.occupancy_min, 2),
             "Start": _fmt(self.start),
             "End": _fmt(self.end),
             "Notes": self.notes,
-        }
+        })
+        return row
 
 
 @dataclass

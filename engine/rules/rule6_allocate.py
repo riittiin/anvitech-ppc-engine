@@ -76,6 +76,9 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         raise RuleError("rule6", "-", "masters are required to allocate")
 
     clock_for, cov_report = _clock_factory(masters, config)
+    op_for = None
+    if getattr(config, "apply_operator_logic", False):
+        from ..operator_coverage import operator_for as op_for
     plan_start = datetime(
         config.plan_start_date.year,
         config.plan_start_date.month,
@@ -177,11 +180,12 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         mclock = clock_for(resource)
         end = mclock.advance(start, occ)
         machine_free[resource] = end
+        operator = op_for(resource, start, masters, config) if op_for else ""
         schedule.append(ScheduleEntry(
             batch_id=s["batch"].batch_id, item_code=s["batch"].item_code,
             process_seq=proc.seq, process_name=proc.name, machine=resource,
             qty=s["batch"].qty, occupancy_min=occ, start=start, end=end, notes=note,
-            so_refs=list(s["batch"].source_so_refs),
+            so_refs=list(s["batch"].source_so_refs), operator=operator,
         ))
 
         # Advance this batch and set when its next process may start (Rule 5).
@@ -256,7 +260,7 @@ def build_machine_view(schedule, masters, config):
         busy = 0.0
         for e in ops:
             idle = clock.working_minutes_between(prev_end, e.start) if prev_end else 0.0
-            timeline.append({
+            trow = {
                 "Machine": display(mid),
                 "SO No": ", ".join(e.so_refs),
                 "Batch": e.batch_id,
@@ -266,7 +270,10 @@ def build_machine_view(schedule, masters, config):
                 "End": e.end,
                 "Busy (min)": round(e.occupancy_min, 1),
                 "Idle before (min)": round(idle, 1),
-            })
+            }
+            if e.operator:
+                trow["Operator"] = e.operator
+            timeline.append(trow)
             busy += e.occupancy_min
             prev_end = e.end
 

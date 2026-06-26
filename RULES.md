@@ -182,7 +182,9 @@ covered shift** is **not scheduled** and is listed in a "needs operator" report
 (never fatal); operator specialties that match no machine are reported too. All of
 this is **Excel-driven** — edit the three master sheets, re-upload, and it reflects.
 Provisional machines (referenced by a routing but not yet in the master) bypass the
-coverage gate and keep a two-shift window.
+coverage gate and keep a two-shift window. Each scheduled operation also shows the
+**operator** running it — the first qualified operator on the shift the op falls in
+(an `Operator` column on the Rule 6 schedule, present only when operator logic is on).
 
 While running, Rule 6 consumes: ⚙️ Rule 4 (setup time) and ⚙️ Rule 5 (overlap mode).
 
@@ -251,7 +253,7 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 |---|---|---|
 | Consolidation window | 10 days | Rule 1 |
 | Setup time per process | 90 min | Rule 4 |
-| Operation overlap mode | Sequential / 50% overlap | Rule 5 |
+| Operation overlap | always on, 50% (configurable) | Rule 5 |
 | Apply downtime to plan | on (UI) | Rule 6 ← Rule 7 |
 | Apply operator & shift logic | on (UI) | Rule 6 ← masters |
 | Two-shift threshold | 12 hrs (Available Hrs/Day) | Rule 6 |

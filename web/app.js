@@ -29,7 +29,7 @@ function readConfig() {
   return {
     consolidation_window_days: Number($("cfg-window").value),
     setup_time_min: Number($("cfg-setup").value),
-    overlap_mode: $("cfg-overlap").value,
+    overlap_mode: "overlap",   // sequential mode retired — always overlap
     overlap_percent: Number($("cfg-overlap-pct").value),
     priority_metric: $("cfg-priority-metric").value,
     priority_window_days: $("cfg-priority-window").value,
@@ -70,7 +70,6 @@ function applyConfig(cfg) {
   const setSel = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
   setVal("cfg-window", cfg.consolidation_window_days);
   setVal("cfg-setup", cfg.setup_time_min);
-  setSel("cfg-overlap", cfg.overlap_mode);
   setVal("cfg-overlap-pct", cfg.overlap_percent);
   setSel("cfg-priority-metric", cfg.priority_metric);
   const pw = $("cfg-priority-window");

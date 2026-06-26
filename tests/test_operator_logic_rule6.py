@@ -39,6 +39,25 @@ def test_off_by_default_schedules_everything(loaded):
     assert "MI1" in used and "MW1" in used   # no coverage gate → all run
 
 
+def test_operator_name_is_assigned_on_schedule(loaded):
+    _, masters = loaded
+    sched = rule6_allocate.run([_batch(ITEM_A, "A")],
+                               config=_cfg(apply_operator_logic=True), masters=masters)
+    bs1 = next(e for e in sched if e.machine == "BS1")   # first-shift manual
+    assert bs1.operator == "Operator Three"              # the BS1 first-shift operator
+    cnc = next(e for e in sched if e.machine in ("CNC1", "CNC2"))
+    assert cnc.operator == "Operator One"                # first-shift CNC operator
+    # The schedule table exposes an Operator column when assigned.
+    assert "Operator" in bs1.as_row()
+
+
+def test_no_operator_column_when_logic_off(loaded):
+    _, masters = loaded
+    sched = rule6_allocate.run([_batch(ITEM_A, "A")], config=_cfg(), masters=masters)
+    assert all(e.operator == "" for e in sched)
+    assert "Operator" not in sched[0].as_row()   # column hidden → golden unchanged
+
+
 def test_manual_resource_runs_in_9_to_6_window(loaded):
     _, masters = loaded
     sched = rule6_allocate.run([_batch(ITEM_A, "A")],
