@@ -34,6 +34,7 @@ function readConfig() {
     priority_metric: $("cfg-priority-metric").value,
     priority_window_days: $("cfg-priority-window").value,
     apply_downtime_to_plan: $("cfg-apply-downtime").checked,
+    apply_operator_logic: $("cfg-operator-logic").checked,
   };
 }
 
@@ -77,6 +78,8 @@ function applyConfig(cfg) {
     ? "" : String(cfg.priority_window_days);
   const dt = $("cfg-apply-downtime");
   if (dt) dt.checked = !!cfg.apply_downtime_to_plan;
+  const ol = $("cfg-operator-logic");
+  if (ol) ol.checked = !!cfg.apply_operator_logic;
 }
 
 // ---- Plan (Run + Rerun unified) ----

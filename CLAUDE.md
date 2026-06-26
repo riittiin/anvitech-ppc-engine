@@ -159,7 +159,13 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
 - `engine/loaders.py` — read the uploaded workbook (Test3 format) → typed objects +
   non-blocking report. The 3 master sheets are read **header-driven** (`_locate_table`);
   resource-name normalization (`CNC 4` ≡ `CNC4`) and provisional-machine handling live here.
-- `engine/worktime.py` — `WorkClock`: shifts + Thursday/holiday skip for Rule 6.
+- `engine/worktime.py` — `WorkClock`: a list of day-relative working **intervals**
+  (per-machine windows) + Thursday/holiday skip; `from_config` = legacy two-shift
+  window; empty intervals raise `NoWorkingWindow`.
+- `engine/operator_coverage.py` — pure `machine_windows(masters, config)`: each
+  machine's working window from Available Hrs/Day + operator shift coverage (two-shift
+  vs 09:00–18:00 manual); blocked + unmatched-specialty report. Consumed by Rule 6
+  when `apply_operator_logic` is on.
 - `engine/pipeline.py` — `run_rule` (snapshots in/out/config/notes), `run_forward`
   (1→2→3→6), `RuleError`, `to_table`.
 - `engine/orderbook.py` — **order-book logic (pure)**: `merge_upload` (add new /

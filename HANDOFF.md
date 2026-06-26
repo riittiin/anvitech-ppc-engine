@@ -156,6 +156,21 @@ cookie, rate limiter) + `gatekeeper`/`security_headers` middleware in `api/main.
 
 All shipped to `main`. Newest first:
 
+000. **Operator & shift logic + full master ingestion** (branch `operator-logic`) —
+     ingests Available Hrs/Day + per-operator Shift + shift times. Rule 6 now gives
+     each machine its own working window: Available Hrs/Day ≥ 12 → two-shift
+     (08:00–05:00), else single-shift **09:00–18:00**; and an activity runs only
+     during a shift that has a **qualified operator** (specialty matched by machine
+     no OR type; manual needs a first-shift op). Uncovered machines → "needs operator"
+     report (not fatal); unmatched specialties (e.g. `CNC2`) reported. Behind
+     `config.apply_operator_logic` (engine **OFF** → golden/tests byte-identical; web
+     UI **ON**). New: `engine/operator_coverage.py`, `WorkClock` interval refactor
+     (`NoWorkingWindow`), Rule 6 per-machine clocks + producer-clock handoff + blocked
+     skip, coverage table on the Rule 6 tab, UI checkbox. Verified on real Test3
+     (CNC1/3/4 both shifts, CNC5/6 first, CNC7 second, 16 machines need operators).
+     Spec: `docs/superpowers/specs/2026-06-26-operator-logic-design.md`. Deferred:
+     Model B (operator as one-at-a-time scarce resource) + applying operator **leaves**.
+
 00. **Moved to Test3 format + deleted Test2.xlsx** (branch `drop-test2`) — the loader
     now reads the 3 reorganized master sheets **header-driven** (`_locate_table` in
     `loaders.py`; SO list + process master unchanged). `load_all` requires a source

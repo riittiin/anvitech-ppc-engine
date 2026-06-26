@@ -286,6 +286,44 @@ def _augment_helpers(trace, plan_run, config, masters, lost=None, unattributed=N
              "table": to_table(timeline)},
             {"title": "Machine utilization", "table": to_table(summary)},
         ]
+        # Operator/shift coverage: when each machine can run, and unmatched specialties.
+        if config.apply_operator_logic:
+            from engine.operator_coverage import machine_windows
+            windows, cov = machine_windows(masters, config)
+            first = (config.first_shift_start_hour * 60, config.first_shift_end_hour * 60)
+            second = (config.first_shift_end_hour * 60, (24 + config.second_shift_end_hour) * 60)
+            manual = (config.manual_start_hour * 60, config.manual_end_hour * 60)
+
+            def _cov_label(mid):
+                iv = windows.get(mid)
+                if iv is None:
+                    return "—"
+                if not iv:
+                    return "⚠ needs operator"
+                parts = []
+                if first in iv:
+                    parts.append("1st shift")
+                if second in iv:
+                    parts.append("2nd shift")
+                if manual in iv:
+                    parts.append(f"manual {config.manual_start_hour:02d}:00–{config.manual_end_hour:02d}:00")
+                return " + ".join(parts) or "—"
+
+            cov_rows = [{"Machine": m.display_name,
+                         "Available Hrs/Day": m.available_hrs_per_day,
+                         "Runs": _cov_label(mid) + (" (provisional)" if m.provisional else "")}
+                        for mid, m in sorted(masters.machines.items())]
+            trace["rule6"]["tables"].append({
+                "title": "Operator coverage — when each machine can run (from Available "
+                         "Hrs/Day + which shifts have a qualified operator)",
+                "table": to_table(cov_rows)})
+            if cov.get("unmatched_specialties"):
+                trace["rule6"]["tables"].append({
+                    "title": "Operator specialties that match no machine — check the "
+                             "spelling/name in Excel",
+                    "table": to_table([{"Operator": u["operator"], "Specialty": u["specialty"]}
+                                       for u in cov["unmatched_specialties"]])})
+
         # Downtime loop-back: show the lost time fed into each machine's availability.
         if config.apply_downtime_to_plan:
             lost_rows = [{"Machine": _machine_display(masters, mid),
@@ -514,8 +552,18 @@ def run(request: Request, req: Optional[RunRequest] = None):
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         book_store.save_plan_config(json.dumps(config.to_dict()))
+    elif book_store.load_plan_config():
+        config = _load_plan_config()   # a saved plan exists → everyone sees it
+    elif sent is not None:
+        # No saved plan yet → honor the caller's config (the web UI defaults, e.g.
+        # operator logic / downtime ON), falling back to defaults if it's invalid.
+        config = Config.from_dict(sent)
+        try:
+            config.validate()
+        except ValueError:
+            config = Config()
     else:
-        config = _load_plan_config()
+        config = _load_plan_config()   # engine defaults
     return _plan(config)
 
 

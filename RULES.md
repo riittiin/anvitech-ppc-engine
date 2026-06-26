@@ -167,6 +167,23 @@ next contending operation grabs the other). On a tie the **first-listed** machin
 wins (it's the preferred one), keeping plans deterministic. A listed machine not
 yet in the Machine master is registered as a provisional machine and still used.
 
+**Operator & shift logic (`apply_operator_logic`, default on in the UI).** Each
+machine's working window is driven by its **Available Hrs/Day** and by operator
+coverage: a machine with Available Hrs/Day ≥ 12 (CNC/VMC ≈19.5) is a **two-shift**
+machine (08:00–19:00 + 19:00–05:00); a smaller value (≈9.5 — saws, milling,
+drilling, all manual stations) is a **single-shift** resource running **09:00–18:00
+only**. An activity may run on a machine **only during a shift that has a qualified
+operator** — an operator whose specialty (Preferred Machines, matched by machine
+number *or* type, e.g. `CNC 1` or `Milling M/c`) includes that machine and whose
+**Shift** (First/Second) covers it (manual work needs a **first-shift** operator).
+So a machine runs the union of its operator-covered shifts: e.g. a CNC with only
+second-shift operators runs second shift only. An operation whose machine has **no
+covered shift** is **not scheduled** and is listed in a "needs operator" report
+(never fatal); operator specialties that match no machine are reported too. All of
+this is **Excel-driven** — edit the three master sheets, re-upload, and it reflects.
+Provisional machines (referenced by a routing but not yet in the master) bypass the
+coverage gate and keep a two-shift window.
+
 While running, Rule 6 consumes: ⚙️ Rule 4 (setup time) and ⚙️ Rule 5 (overlap mode).
 
 - **Source:** original Rule 4 + `Machine master` + `Operator & shift Master` +
@@ -236,3 +253,6 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 | Setup time per process | 90 min | Rule 4 |
 | Operation overlap mode | Sequential / 50% overlap | Rule 5 |
 | Apply downtime to plan | on (UI) | Rule 6 ← Rule 7 |
+| Apply operator & shift logic | on (UI) | Rule 6 ← masters |
+| Two-shift threshold | 12 hrs (Available Hrs/Day) | Rule 6 |
+| Manual / single-shift window | 09:00–18:00 | Rule 6 |
