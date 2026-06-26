@@ -25,10 +25,36 @@ from __future__ import annotations
 from datetime import datetime
 
 from ..models import ScheduleEntry
-from ..worktime import WorkClock
+from ..worktime import WorkClock, NoWorkingWindow
 from ..loaders import normalize_resource_id, parse_resource_candidates
 from . import rule4_setup_time as r4
 from . import rule5_overlap_mode as r5
+
+
+def _clock_factory(masters, config):
+    """A memoized ``clock_for(machine_id)``. With operator logic ON, each machine
+    gets its own working window (per Available Hrs/Day + operator coverage; an
+    uncovered machine gets an EMPTY clock → ``advance`` raises ``NoWorkingWindow``).
+    With it OFF, every machine shares the legacy two-shift window (current behaviour).
+    A resource not in the master (a generic station from a process name) defaults to
+    the legacy two-shift window. Returns ``(clock_for, cov_report)``."""
+    if getattr(config, "apply_operator_logic", False):
+        from ..operator_coverage import machine_windows
+        windows, cov_report = machine_windows(masters, config)
+    else:
+        windows, cov_report = None, None
+    legacy = WorkClock.from_config(masters.calendar, config)
+    cache = {}
+
+    def clock_for(mid):
+        if windows is None:
+            return legacy
+        if mid not in cache:
+            iv = windows.get(mid)
+            cache[mid] = legacy if iv is None else WorkClock(masters.calendar, iv)
+        return cache[mid]
+
+    return clock_for, cov_report
 
 
 def _resolve_candidates(proc):
@@ -49,7 +75,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
     if masters is None:
         raise RuleError("rule6", "-", "masters are required to allocate")
 
-    clock = WorkClock(masters.calendar, config)
+    clock_for, cov_report = _clock_factory(masters, config)
     plan_start = datetime(
         config.plan_start_date.year,
         config.plan_start_date.month,
@@ -59,7 +85,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
 
     # One state record per batch. ``ready`` is the earliest its NEXT process may
     # start (precedence constraint from the previous process); ``next`` indexes
-    # the next unscheduled process.
+    # the next unscheduled process. ``blocked`` = an op had no covered machine.
     states = []
     for prio, batch in enumerate(batches):
         routing = masters.routings.get(batch.item_code)
@@ -76,50 +102,70 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             "routing": routing,
             "next": 0,
             "ready": plan_start,
+            "blocked": False,
         })
 
     total_ops = sum(len(s["routing"].processes) for s in states)
     machine_free: dict[str, datetime] = {}
     schedule: list[ScheduleEntry] = []
+    blocked_ops: list[dict] = []
 
     # Downtime loop-back: a machine that lost time in the actuals is treated as
     # unavailable for that many WORKING minutes from the plan start, so its whole
-    # queue slips later (non-delay scheduling then handles the rest).
+    # queue slips later (non-delay scheduling then handles the rest). Uses the
+    # machine's own working window.
     if machine_lost_min:
         seeded = []
         for mid, mins in machine_lost_min.items():
             if mins and mins > 0:
-                machine_free[mid] = clock.advance(plan_start, mins)
-                seeded.append(f"{mid} +{round(mins)} min")
+                try:
+                    machine_free[mid] = clock_for(mid).advance(plan_start, mins)
+                    seeded.append(f"{mid} +{round(mins)} min")
+                except NoWorkingWindow:
+                    pass  # an uncovered machine has no window to delay
         if seeded:
             notes.append(
                 "Downtime loop-back: seeded recorded lost time into machine "
                 "availability — " + ", ".join(sorted(seeded)) + "."
             )
 
-    scheduled = 0
-    guard = 0
-    while scheduled < total_ops and guard <= total_ops + 5:
+    guard, guard_cap = 0, total_ops + len(states) + 5
+    while guard <= guard_cap:
         guard += 1
         best = None  # (sort_key, state, proc, resource, occ, note)
         for s in states:
-            if s["next"] >= len(s["routing"].processes):
+            if s["blocked"] or s["next"] >= len(s["routing"].processes):
                 continue
             proc = s["routing"].processes[s["next"]]
             candidates = _resolve_candidates(proc)
             occ = r4.occupancy_minutes(proc.cycle_time, s["batch"].qty, config)
 
-            # Among the allowed machines, pick the one that can start earliest. Strict
-            # '<' keeps the first-listed (preferred) machine on a tie -> deterministic.
+            # Among the allowed machines, pick the one that can start earliest. A
+            # candidate with no working window (no operator coverage) is skipped.
+            # Strict '<' keeps the first-listed (preferred) machine on a tie.
             resource, feasible = None, None
             for cand in candidates:
-                cand_feasible = clock.advance(
-                    max(s["ready"], machine_free.get(cand, plan_start)), 0)
+                try:
+                    cand_feasible = clock_for(cand).advance(
+                        max(s["ready"], machine_free.get(cand, plan_start)), 0)
+                except NoWorkingWindow:
+                    continue   # candidate uncovered — not usable
                 if feasible is None or cand_feasible < feasible:
                     resource, feasible = cand, cand_feasible
-            note = f"chose {resource} of {'/'.join(candidates)}" if len(candidates) > 1 else ""
 
-            # Non-delay: earliest feasible start wins; priority breaks ties.
+            if resource is None:
+                # No candidate has a working window → block this op (and its batch's
+                # downstream). Surfaced as "needs operator", never fatal.
+                s["blocked"] = True
+                blocked_ops.append({
+                    "SO No": ", ".join(s["batch"].source_so_refs),
+                    "Batch": s["batch"].batch_id, "Item Code": s["batch"].item_code,
+                    "Process": f"{proc.seq}. {proc.name}",
+                    "Machine(s)": "/".join(candidates),
+                })
+                continue
+
+            note = f"chose {resource} of {'/'.join(candidates)}" if len(candidates) > 1 else ""
             key = (feasible, s["prio"], s["batch"].batch_id, proc.seq)
             if best is None or key < best[0]:
                 best = (key, s, proc, resource, occ, note)
@@ -128,7 +174,8 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             break
         _, s, proc, resource, occ, note = best
         start = best[0][0]
-        end = clock.advance(start, occ)
+        mclock = clock_for(resource)
+        end = mclock.advance(start, occ)
         machine_free[resource] = end
         schedule.append(ScheduleEntry(
             batch_id=s["batch"].batch_id, item_code=s["batch"].item_code,
@@ -138,14 +185,13 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         ))
 
         # Advance this batch and set when its next process may start (Rule 5).
-        # Overlap measures the previous process's CUTTING time only (setup
-        # excluded); a no-cutting step does not overlap.
+        # Overlap measures the previous process's CUTTING time only (setup excluded);
+        # the wait is walked on the PRODUCER machine's clock (the machine cutting).
         s["next"] += 1
         if s["next"] < len(s["routing"].processes):
             run_min = (proc.cycle_time or 0.0) * (s["batch"].qty or 0.0)
             elapsed = r5.elapsed_before_next(occ, run_min, config)
-            s["ready"] = clock.advance(start, elapsed)
-        scheduled += 1
+            s["ready"] = mclock.advance(start, elapsed)
 
     # Decision notes: prove machines ran continuously.
     _timeline, summary = build_machine_view(schedule, masters, config)
@@ -155,6 +201,23 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         f"Non-delay scheduling: {len(summary)} resources used; {zero_idle} ran with "
         f"zero idle inside their active span; total idle within spans = {round(total_idle, 1)} min."
     )
+    if getattr(config, "apply_operator_logic", False):
+        notes.append(
+            f"Operator/shift logic ON: machines use per-availability windows "
+            f"(≥{config.two_shift_threshold_hours:g} hrs → both shifts 08:00–05:00; "
+            f"else single-shift {config.manual_start_hour:02d}:00–{config.manual_end_hour:02d}:00), "
+            f"and only run shifts that have a qualified operator."
+        )
+        if blocked_ops:
+            notes.append(
+                f"{len(blocked_ops)} operation(s) NOT scheduled — no qualified operator "
+                f"on a valid shift for the machine (see the 'needs operator' table)."
+            )
+        if cov_report and cov_report.get("unmatched_specialties"):
+            notes.append(
+                f"{len(cov_report['unmatched_specialties'])} operator specialty entr(ies) "
+                f"match no machine — check naming (see the table)."
+            )
 
     return schedule
 
@@ -168,7 +231,7 @@ def build_machine_view(schedule, masters, config):
     * ``summary`` — per machine: op count, busy minutes, idle-within-span, and
       utilization %.
     """
-    clock = WorkClock(masters.calendar, config)
+    clock_for, _ = _clock_factory(masters, config)
 
     by_machine: dict[str, list] = {}
     for e in schedule:
@@ -187,6 +250,7 @@ def build_machine_view(schedule, masters, config):
 
     timeline, summary = [], []
     for mid in order:
+        clock = clock_for(mid)   # this machine's own working window
         ops = sorted(by_machine[mid], key=lambda e: e.start)
         prev_end = None
         busy = 0.0
