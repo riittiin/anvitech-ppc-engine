@@ -14,21 +14,24 @@ machines following 9 business rules, then re-plans as actual production comes in
   order, with input/output for each.
 - **Design spec (original 9 rules):** [`docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md`](docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md)
 - **Order-book design (current architecture):** [`docs/superpowers/specs/2026-06-22-order-book-design.md`](docs/superpowers/specs/2026-06-22-order-book-design.md)
-- **Original data + requirements:** `Test2.xlsx` (12 sheets).
+- **Data format:** the user's `Test3.xlsx` (gitignored real data) — the 3 master
+  sheets use a clean header-driven layout the loader reads dynamically.
 
 ## Stack
 
 - **Backend:** Python + FastAPI. The engine is plain Python; FastAPI is a thin layer.
 - **Frontend:** lightweight HTML/JS with **per-rule tabs**.
-- **Data source:** `Test2.xlsx`, read **read-only** via openpyxl — the **test/demo
-  default** only. In production the user **uploads** their masters/SO Excel via
-  `POST /upload`, which **merges the orders into a persistent order book** (keyed by
-  unique SO number) and stores the workbook's masters. `load_all` accepts a path or
-  a BytesIO.
+- **Data source:** the user **uploads** their masters/SO Excel (the **Test3
+  format**) via `POST /upload`, read **read-only** via openpyxl. Upload **merges the
+  orders into a persistent order book** (keyed by unique SO number) and stores the
+  workbook's masters. `load_all(source)` requires a path or BytesIO — there is **no
+  bundled default** (pre-upload the app shows empty masters). Tests + the golden
+  trace use a **code-generated sample** in the Test3 format (`tests/sample_workbook.py`);
+  the real-data file `Test3.xlsx` is gitignored and used only by uploading it.
 - **Persistent state (the order book):** orders, their actuals, and the latest
   masters live in a durable key/value store. `engine/storage.py` selects the backend:
   **MongoDB Atlas (`MONGODB_URI`) > Upstash Redis > local file (`data/store/`)**.
-  This store is the only thing the app writes; `Test2.xlsx` is never modified.
+  This store is the only thing the app writes; uploaded workbooks are read-only.
 
 ## Non-negotiable design principles
 
@@ -46,7 +49,7 @@ violate them without the user's explicit say-so.
 3. **The pipeline snapshots every rule's input and output into a trace.** This is
    what powers the per-rule tabs. Don't add per-rule UI code — visibility comes
    from the trace. See `pipeline.py` `run_rule()`.
-4. **`Test2.xlsx` is read-only.** The only thing the app writes is the durable
+4. **Uploaded workbooks are read-only.** The only thing the app writes is the durable
    store (order book + actuals, via `engine/storage.py`). Keep source data clean.
 5. **Fail loud, fail localized — two distinct layers:**
    - **(a) Loader-level data gaps** (`PENDING_MASTER_DATA`, `NO_ROUTING`) are
@@ -78,7 +81,7 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
   **Running** → *(user ticks "mark complete" on a Rule 7 entry)* → **Complete**
   (archived, excluded from planning).
 
-## Known data quirks in Test2.xlsx (handle in the loader)
+## Known data quirks in the uploaded workbook (handle in the loader)
 
 - **Exact sheet names (loader gotcha):** several sheet names have **trailing spaces**
   (`'PPC logics '`, `'Planning status monitoring '`, `'Machinewise '`, `'Weekly
@@ -105,7 +108,7 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
   that one order, record it in the report, and keep scheduling every other order.
   Non-blocking and fail-localized; the run does not stop. (Unlike a missing machine,
   a missing routing can't be made provisional — you can't invent a recipe.) In the
-  current `Test2.xlsx` there are 0 such cases; this is a future safety net.
+  the current Test3/sample data there are 0 such cases; this is a future safety net.
 - **Time-unit inconsistency:** cycle/total times are in minutes in the Process
   Master but appear as tiny decimals in `Planning status monitoring`. Normalize
   to one unit in the loader and log coercions.
@@ -117,7 +120,7 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
 - One rule per file under `engine/rules/`, named `ruleN_<purpose>.py`, each
   exposing `run(...)`.
 - One test file per rule under `tests/`, named `test_ruleN.py`. Seed tests with
-  the worked examples annotated in `Test2.xlsx` (see spec §9).
+  the generated sample workbook (`tests/sample_workbook.py`) or self-contained data.
 - Configurable params live in `engine/config.py` with validation: consolidation
   window (10d), setup time (90min), overlap mode (50%).
 - Keep files focused; if a rule file grows large it's probably doing too much.
@@ -153,9 +156,9 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
 
 - `engine/config.py` — tunable params + validation.
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
-- `engine/loaders.py` — read `Test2.xlsx` → typed objects + non-blocking report.
-  Resource-name normalization (`CNC 4` ≡ `CNC4`) and provisional-machine handling
-  live here.
+- `engine/loaders.py` — read the uploaded workbook (Test3 format) → typed objects +
+  non-blocking report. The 3 master sheets are read **header-driven** (`_locate_table`);
+  resource-name normalization (`CNC 4` ≡ `CNC4`) and provisional-machine handling live here.
 - `engine/worktime.py` — `WorkClock`: shifts + Thursday/holiday skip for Rule 6.
 - `engine/pipeline.py` — `run_rule` (snapshots in/out/config/notes), `run_forward`
   (1→2→3→6), `RuleError`, `to_table`.

@@ -7,9 +7,10 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api.main import app  # noqa: E402
 from api import auth  # noqa: E402
-from engine.loaders import DEFAULT_XLSX  # noqa: E402
+from tests.sample_workbook import build_sample_bytes, SO1, ITEM_A  # noqa: E402
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_SAMPLE = build_sample_bytes()
 
 _ACCTS = auth._accounts()
 _ADMIN = next(u for u, a in _ACCTS.items() if a["role"] == auth.ADMIN)
@@ -40,8 +41,7 @@ def _user():
 
 
 def _upload(client):
-    with open(DEFAULT_XLSX, "rb") as fh:
-        return client.post("/upload", files={"file": ("Test2.xlsx", fh, XLSX_MIME)})
+    return client.post("/upload", files={"file": ("sample.xlsx", _SAMPLE, XLSX_MIME)})
 
 
 # --- login flow + identity --- #
@@ -117,8 +117,8 @@ def test_user_can_capture_actuals_and_mark_complete():
     _upload(admin)
     user = _user()
     r = user.post("/actuals", json={
-        "so_no": "24-25SO214", "item_code": "61240807-01",
-        "entry_date": "2025-03-07", "qty_produced": 5, "mark_complete": True,
+        "so_no": SO1, "item_code": ITEM_A,
+        "entry_date": "2025-03-10", "qty_produced": 5, "mark_complete": True,
     })
     assert r.status_code == 200 and r.json()["completed_order"] is True
 

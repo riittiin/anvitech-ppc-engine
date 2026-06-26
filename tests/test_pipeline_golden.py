@@ -1,6 +1,6 @@
-"""Golden snapshot — run all forward rules on the real Test2.xlsx and compare
-the per-rule output tables to a committed expected trace. Any logic change shows
-as a diff. Regenerate intentionally with:  REGEN_GOLDEN=1 pytest -k golden
+"""Golden snapshot — run all forward rules on the generated sample workbook and
+compare the per-rule output tables to a committed expected trace. Any logic change
+shows as a diff. Regenerate intentionally with:  REGEN_GOLDEN=1 pytest -k golden
 """
 import json
 import os

@@ -1,8 +1,8 @@
 # Anvitech PPC Engine
 
 A Production Planning & Control engine for Anvitech, a precision-machining job
-shop. It reads customer sales orders and the shop's masters from `Test2.xlsx`,
-runs **9 sequenced rules** to produce a machine-by-machine schedule, then
+shop. It reads customer sales orders and the shop's masters from an uploaded Excel
+workbook, runs **sequenced rules** to produce a machine-by-machine schedule, then
 re-plans (MRP re-run) as daily actuals come in.
 
 The defining feature: **everything is testable and debuggable rule-by-rule.**
@@ -115,10 +115,11 @@ Rule 7 actuals reduce each order's remaining qty; "mark complete" archives it.
 
 ## Key design facts
 
-- **`Test2.xlsx` is read-only** and is the **test/demo default**. In production the
-  user **uploads** their masters/SO Excel; the orders merge into the **persistent
-  order book** (keyed by SO#) and the masters are stored. The only thing the app
-  writes is the durable store (`engine/storage.py`: MongoDB > Upstash > local file).
+- The user **uploads** their masters/SO Excel (read-only); the orders merge into the
+  **persistent order book** (keyed by SO#) and the masters are stored. There is no
+  bundled data file — tests + the golden snapshot use a code-generated sample
+  (`tests/sample_workbook.py`). The only thing the app writes is the durable store
+  (`engine/storage.py`: MongoDB > Upstash > local file).
 - **"Total process time" (Rule 3) = sum of per-process _cycle_ times.** This was
   confirmed against the SO Remarks oracle in the sheet — it reproduces the
   documented priorities (item `61240807-01` highest, `61247047-01` lowest); the

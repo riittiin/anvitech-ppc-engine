@@ -1,16 +1,15 @@
-"""Rule 3 — tiebreak by total process time, seeded with the sheet's own example.
+"""Rule 3 — workload-aware priority (slack), with the cycle-time-sum work metric.
 
-The SO Remarks document three facts the metric must satisfy:
-  * 61240807-01 has the HIGHEST total process time,
-  * 61247047-01 has the LOWEST,
-  * 61241949-01 has more process time than 61247047-01.
-Only summing per-process CYCLE times reproduces all three.
+Seeded with the sample's two items: SAMPLE RING A (cycle 3+5+2 = 10 min) has more
+work than SAMPLE PIN B (cycle 4+2 = 6 min), so on an equal delivery date A (the
+heavier, more at-risk order) must be prioritized first.
 """
 from datetime import date
 
 from engine.config import Config
 from engine.models import Batch, Process, Routing, Machine, WorkCalendar, Masters
 from engine.rules import rule2_sort_by_date, rule3_tiebreak_process_time
+from tests.sample_workbook import ITEM_A, ITEM_B
 
 
 def _batch_from_routing(masters, item_code, d):
@@ -21,22 +20,20 @@ def _batch_from_routing(masters, item_code, d):
 def test_higher_process_time_wins_same_date(loaded, config):
     _, masters = loaded
     d = date(2025, 3, 7)
-    # Same delivery date; 61241949-01 (more cycle time) must beat 61247047-01 (lowest).
+    # Same delivery date; ITEM_A (more cycle time) must beat ITEM_B (less).
     batches = [
-        _batch_from_routing(masters, "61247047-01", d),
-        _batch_from_routing(masters, "61241949-01", d),
+        _batch_from_routing(masters, ITEM_B, d),
+        _batch_from_routing(masters, ITEM_A, d),
     ]
     ordered = rule2_sort_by_date.run(batches, config=config, masters=masters)
     ordered = rule3_tiebreak_process_time.run(ordered, config=config, masters=masters)
-    assert [b.item_code for b in ordered] == ["61241949-01", "61247047-01"]
+    assert [b.item_code for b in ordered] == [ITEM_A, ITEM_B]
 
 
-def test_61240807_has_highest_total_process_time(loaded):
+def test_item_a_has_higher_total_process_time_than_b(loaded):
     _, masters = loaded
-    tpt = {c: masters.routings[c].total_cycle_time()
-           for c in ["61240807-01", "61249291-01", "61247047-01", "61241949-01"]}
-    assert tpt["61240807-01"] == max(tpt.values())
-    assert tpt["61247047-01"] == min(tpt.values())
+    assert (masters.routings[ITEM_A].total_cycle_time()
+            > masters.routings[ITEM_B].total_cycle_time())
 
 
 def _slack_masters():

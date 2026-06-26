@@ -392,7 +392,7 @@ class Order:
 
 @dataclass
 class Masters:
-    """Everything loaded from Test2.xlsx, plus the loader validation report."""
+    """Everything loaded from the uploaded workbook, plus the loader report."""
 
     machines: dict = field(default_factory=dict)    # canonical id -> Machine
     routings: dict = field(default_factory=dict)     # item_code -> Routing

@@ -12,7 +12,8 @@ data/actuals.json
 .gstack/
 
 # Local-only / real-data workbooks (never commit — Test2.xlsx is the only tracked one)
-Test3.xlsx
+# Test3* covers Test3.xlsx plus any backups (Test3.backup.xlsx, Test3.original.xlsx, …)
+Test3*.xlsx
 
 # macOS
 .DS_Store

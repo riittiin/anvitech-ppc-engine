@@ -1,10 +1,14 @@
-"""Shared fixtures: load the real Test2.xlsx once per session, and isolate the
-durable store to a fresh temp dir per test (so the order book / actuals don't
-leak between tests or touch the real ./data/store)."""
+"""Shared fixtures: build the generated sample workbook once per session (Test3
+format — there is no bundled Test2 anymore), and isolate the durable store to a
+fresh temp dir per test (so the order book / actuals don't leak between tests or
+touch the real ./data/store)."""
+import io
+
 import pytest
 
 from engine.loaders import load_all
 from engine.config import Config
+from tests.sample_workbook import build_sample_bytes
 
 
 @pytest.fixture(autouse=True)
@@ -24,8 +28,14 @@ def _isolate_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(scope="session")
-def loaded():
-    so_lines, masters = load_all()
+def sample_bytes():
+    """The generated sample workbook as .xlsx bytes (for upload tests)."""
+    return build_sample_bytes()
+
+
+@pytest.fixture(scope="session")
+def loaded(sample_bytes):
+    so_lines, masters = load_all(io.BytesIO(sample_bytes))
     return so_lines, masters
 
 

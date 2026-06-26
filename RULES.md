@@ -1,7 +1,7 @@
 # Anvitech PPC Engine — Rules in Execution Sequence
 
 > Source of truth for the Production Planning & Control engine.
-> Rules are reordered from the `PPC logics` sheet of `Test2.xlsx` into the
+> Rules are reordered from the `PPC logics` sheet of the source workbook into the
 > sequence in which the engine actually executes them. Each rule maps back to
 > its original number for traceability.
 

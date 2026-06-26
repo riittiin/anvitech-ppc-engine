@@ -1,7 +1,12 @@
-"""Read Test2.xlsx (read-only) into typed Python objects + a validation report.
+"""Read a workbook (Test3 format, read-only) into typed Python objects + a report.
+
+The 3 master sheets (Machine / Operator & shift / Weekly off & holiday) are read
+**header-driven** (columns located by heading, every row to the end) so Excel edits
+flow in on re-upload with no code change. The SO list + process master keep their
+column layout.
 
 Design principles honoured here (CLAUDE.md):
-  * Test2.xlsx is opened read-only; nothing is ever written back.
+  * The workbook is opened read-only; nothing is ever written back.
   * Loader-level data gaps are NON-BLOCKING: collect every problem into
     ``masters.report`` and keep going (PENDING_MASTER_DATA, NO_ROUTING, time
     coercions). The pipeline never stops here.
@@ -13,7 +18,6 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from pathlib import Path
 
 import openpyxl
 
@@ -26,8 +30,6 @@ from .models import (
     WorkCalendar,
     Masters,
 )
-
-DEFAULT_XLSX = Path(__file__).resolve().parent.parent / "Test2.xlsx"
 
 # Number of process blocks in the routing sheet, and the 5 columns per block.
 MAX_PROCESSES = 12
@@ -119,6 +121,57 @@ def _num(value, masters: Masters = None, ref: str = ""):
 
 
 # --------------------------------------------------------------------------- #
+# Header-driven table location (Test3 format)
+# --------------------------------------------------------------------------- #
+# The three master sheets are clean tables: a header row, then one row per record,
+# open-ended. We locate columns by HEADING (not fixed positions) and read every
+# row to the end — so adding/editing/removing rows in Excel "just works" on the
+# next upload (no code change). See the master-data design note.
+WEEKDAY_NAMES = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
+
+
+def _norm_header(value) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower()) if value is not None else ""
+
+
+def _locate_table(rows, needed: dict):
+    """Find the header row and map each canonical key to its column index.
+
+    ``needed`` maps key -> a token that must appear in the normalized header cell
+    (e.g. ``{"no": "machineno"}``). Position-independent. Returns
+    ``(header_index, {key: col_index})`` or ``(None, {})`` if not all found."""
+    for idx, row in enumerate(rows):
+        colmap = {}
+        for ci, cell in enumerate(row):
+            h = _norm_header(cell)
+            if not h:
+                continue
+            for key, token in needed.items():
+                if key not in colmap and token in h:
+                    colmap[key] = ci
+        if len(colmap) == len(needed):
+            return idx, colmap
+    return None, {}
+
+
+def _cell(row, idx):
+    return row[idx] if idx is not None and idx < len(row) else None
+
+
+def _weekday_from_text(value):
+    if value is None:
+        return None
+    low = str(value).lower()
+    for name, wd in WEEKDAY_NAMES.items():
+        if name in low:
+            return wd
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Individual sheet loaders
 # --------------------------------------------------------------------------- #
 def _load_machines(wb, masters: Masters):
@@ -126,19 +179,25 @@ def _load_machines(wb, masters: Masters):
     if ws is None:
         masters.add_report("MISSING_SHEET", "Machine master", "sheet not found")
         return
-    for row in ws.iter_rows(min_row=4, values_only=True):
-        # Layout: (None, Machine Type, Machine No., Hr rate)
-        machine_type, machine_no, hr_rate = row[1], row[2], row[3]
-        if not machine_no:
-            continue  # blank separator row
+    rows = list(ws.iter_rows(values_only=True))
+    hdr, col = _locate_table(rows, {"type": "machinetype", "no": "machineno", "rate": "hrrate"})
+    if hdr is None:
+        masters.add_report("MISSING_SHEET", "Machine master",
+                           "header row (Machine Type / Machine No / Hr Rate) not found")
+        return
+    for row in rows[hdr + 1:]:
+        machine_no = _cell(row, col["no"])
+        if not machine_no or str(machine_no).strip() == "":
+            continue  # skip blank rows (open-ended table)
         canonical = normalize_resource_id(machine_no)
         if not canonical:
             continue
+        machine_type = _cell(row, col["type"])
         masters.machines[canonical] = Machine(
             machine_no=canonical,
             display_name=str(machine_no).strip(),
             machine_type=str(machine_type).strip() if machine_type else "",
-            hr_rate=_num(hr_rate),
+            hr_rate=_num(_cell(row, col["rate"])),
             provisional=False,
         )
 
@@ -147,17 +206,20 @@ def _load_operators(wb, masters: Masters):
     ws = _find_sheet(wb, "Operator & shift Master")
     if ws is None:
         return
-    for row in ws.iter_rows(min_row=4, values_only=True):
-        name, pref = row[1], row[2]
-        if not name:
-            continue
-        label = str(name).strip()
-        if label.lower().startswith("shift master"):
-            break  # reached the shift section
+    rows = list(ws.iter_rows(values_only=True))
+    hdr, col = _locate_table(rows, {"name": "operatorname", "pref": "preferredmachine"})
+    if hdr is None:
+        return  # no operators table (non-blocking)
+    for row in rows[hdr + 1:]:
+        name = _cell(row, col["name"])
+        if not name or str(name).strip() == "":
+            continue  # blank row (the side-by-side shift table has no operator name)
+        pref = _cell(row, col["pref"])
         parsed = [normalize_resource_id(t) for t in re.split(r"[/&,]| or ", str(pref or ""))]
         parsed = [p for p in parsed if p]
         masters.operators.append(
-            Operator(name=label, preferred_machines_raw=str(pref or "").strip(), machines=parsed)
+            Operator(name=str(name).strip(),
+                     preferred_machines_raw=str(pref or "").strip(), machines=parsed)
         )
 
 
@@ -167,24 +229,35 @@ def _load_calendar(wb, masters: Masters):
     if ws is None:
         masters.calendar = cal
         return
-    section = None
-    for row in ws.iter_rows(values_only=True):
-        label, when = row[1], row[2]
-        if isinstance(label, str):
-            low = label.strip().lower()
-            if low.startswith("weekly off"):
-                section = "weekly"
-            elif low.startswith("holiday"):
-                section = "holiday"
-            elif low.startswith("leave"):
-                section = "leave"
-        d = parse_date(when)
-        if d is None:
+    rows = list(ws.iter_rows(values_only=True))
+    hdr, col = _locate_table(rows, {"cat": "category", "name": "name", "date": "date"})
+    if hdr is None:
+        masters.add_report("MISSING_SHEET", "Weekly off & holiday master",
+                           "header row (Category / Name / Day-Date) not found")
+        masters.calendar = cal
+        return
+    for row in rows[hdr + 1:]:
+        cat = _cell(row, col["cat"])
+        if not cat or str(cat).strip() == "":
             continue
-        if section == "holiday":
-            cal.holidays.append(d)
-        elif section == "leave":
-            cal.leaves.append((str(label).strip() if label else "", d))
+        category = str(cat).strip().lower()
+        name = _cell(row, col["name"])
+        when = _cell(row, col["date"])
+        if category.startswith("weekly"):
+            # Weekly off day comes from the date cell ("Every Thursday") or the name.
+            wd = _weekday_from_text(when)
+            if wd is None:
+                wd = _weekday_from_text(name)
+            if wd is not None:
+                cal.weekly_off_weekday = wd
+        elif category.startswith("holiday"):
+            d = parse_date(when)
+            if d is not None:
+                cal.holidays.append(d)
+        elif category.startswith("leave"):
+            d = parse_date(when)
+            if d is not None:
+                cal.leaves.append((str(name).strip() if name else "", d))
     masters.calendar = cal
 
 
@@ -308,8 +381,12 @@ def _validate(masters: Masters, so_lines):
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
-def load_all(xlsx_path=DEFAULT_XLSX):
-    """Load masters + SO lines from Test2.xlsx.
+def load_all(xlsx_path):
+    """Load masters + SO lines from a workbook in the Test3 format.
+
+    ``xlsx_path`` is a path or a file-like object (e.g. an uploaded BytesIO) — there
+    is no bundled default; callers always supply the source (an uploaded workbook,
+    or the generated test sample).
 
     Returns ``(so_lines, masters)``. ``masters.report`` holds all non-blocking
     issues. SO lines whose item has no routing are dropped from the returned

@@ -32,7 +32,7 @@ from pydantic import BaseModel
 
 from engine.config import Config, OVERLAP_SEQUENTIAL, OVERLAP_PERCENT
 from engine.loaders import load_all
-from engine.models import PlanRun, Actual, fmt_date
+from engine.models import PlanRun, Actual, Masters, fmt_date
 from engine.pipeline import run_forward, to_table
 from engine.gantt import build_gantt
 from engine import book_store, orderbook
@@ -215,7 +215,9 @@ def _current_masters():
         return _MASTERS_CACHE["masters"]
     raw = book_store.load_masters_bytes()
     if raw is None:
-        _, masters = load_all()  # bundled Test2.xlsx (so the app works pre-upload)
+        # No workbook uploaded yet → empty masters; the UI prompts to upload.
+        # (There is no bundled demo file anymore — production runs on uploads.)
+        masters = Masters()
     else:
         _, masters = load_all(io.BytesIO(raw))
     _MASTERS_CACHE.update(key=key, masters=masters)

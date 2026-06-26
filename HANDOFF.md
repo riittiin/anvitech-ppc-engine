@@ -156,6 +156,16 @@ cookie, rate limiter) + `gatekeeper`/`security_headers` middleware in `api/main.
 
 All shipped to `main`. Newest first:
 
+00. **Moved to Test3 format + deleted Test2.xlsx** (branch `drop-test2`) — the loader
+    now reads the 3 reorganized master sheets **header-driven** (`_locate_table` in
+    `loaders.py`; SO list + process master unchanged). `load_all` requires a source
+    (no bundled default); pre-upload masters are empty. `Test2.xlsx` is **deleted** —
+    tests + the golden trace use a **code-generated sample** in Test3 format
+    (`tests/sample_workbook.py`); golden regenerated. Verified end-to-end by uploading
+    the real `Test3.xlsx` (9 orders, 85 items, 27 machines, 71 scheduled ops). Loader
+    reads but does **not yet act on** the new columns (Available Hrs/Day, shift times,
+    leaves) — that's the next decision. `.gitignore` widened to `Test3*.xlsx`.
+
 0. **Two-role login (admin/user) + security hardening** (branch `two-role-login`) —
    see "Login & roles" above. Replaced the Basic-Auth popup with a real login page
    + signed session cookie; user role is view-only + download + capture-actuals;
@@ -168,8 +178,8 @@ All shipped to `main`. Newest first:
    among candidates; `orderbook.machine_lost_minutes` resolves the **same** preferred
    candidate (cross-file contract — a Plan agent caught this). Schedule shows a note
    `chose CNC3 of CNC3/CNC6`. **Note:** only appears for orders of items whose recipe
-   uses an alternative — the bundled/Test3 SO lists use single-machine items, so you
-   need an order for an alternative-machine item to see it.
+   uses an alternative — the generated sample's SAMP-A item exercises `CNC1/CNC2`, so
+   you need an order for an alternative-machine item to see the note.
 2. **SO No column** on the Rule 6 schedule + machine-wise view + CSV (`922be82`) —
    `ScheduleEntry.so_refs`.
 3. **Day-level Gantt** (`365886d`) — removed the 0–23 hour ruler; one column per day,
@@ -229,7 +239,7 @@ rm -rf data/store
 STORE_DIR=data/store nohup python3 -m uvicorn api.main:app --port 8011 >/tmp/uv.log 2>&1 &
 # log in (saves the session cookie), then upload as admin:
 curl -s -c /tmp/ck.txt -X POST http://127.0.0.1:8011/login -d "username=anvitech&password=1930rail" >/dev/null
-curl -s -b /tmp/ck.txt -F "file=@Test2.xlsx" http://127.0.0.1:8011/upload >/dev/null
+curl -s -b /tmp/ck.txt -F "file=@Test3.xlsx" http://127.0.0.1:8011/upload >/dev/null  # your real data (Test3 format)
 # drive gstack /browse by signing in through the form (cookie persists in the daemon):
 #   $B goto http://127.0.0.1:8011/login
 #   $B snapshot -i ; $B fill @e1 anvitech ; $B fill @e2 1930rail ; $B click @e3
@@ -309,14 +319,14 @@ preferred/alternative machine selection; DD-MM-YYYY dates; daily-entry UX; perf
 
 - **Live creds are custom** (see above) — the single biggest "why can't I verify live"
   gotcha.
-- **`Test2.xlsx` is bundled test data** (the golden trace loads it via `load_all()`).
-  **`Test3.xlsx` is the user's real-data file** — **gitignored**, never commit it. Both
-  have `/`-alternative cells in the process master, but their **Sales Order lists use
-  single-machine items**, so the golden trace is unaffected and the alternative-machine
-  note only shows when an order is for an alternative-machine item.
+- **There is no bundled data file anymore.** `Test2.xlsx` was deleted; the app reads
+  the **Test3 format**. Tests + the golden trace use a **code-generated sample**
+  (`tests/sample_workbook.py`, in Test3 format). **`Test3.xlsx` is the user's
+  real-data file** — **gitignored** (`Test3*.xlsx`), never commit it. Pre-upload the
+  app shows empty masters ("please upload").
 - **Golden trace** (`tests/golden_trace.json`) snapshots rule1/2/3/6 **output** for
-  Test2. Date-format / rule-output changes require `REGEN_GOLDEN=1 pytest -k golden`;
-  then eyeball the diff (no merged ids like `CNC3CNC6`).
+  the generated sample. Date-format / rule-output changes require
+  `REGEN_GOLDEN=1 pytest -k golden`; then eyeball the diff (no merged ids like `CNC1CNC2`).
 - **`apply_downtime_to_plan`** defaults **off in the engine** (so golden/tests stay
   stable) but the **UI checkbox defaults ON** — an intentional asymmetry. Tests that
   construct `Config()` directly get the off behavior.

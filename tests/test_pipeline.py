@@ -35,7 +35,7 @@ def test_failing_rule_records_error_and_stops_chain():
     assert trace["ruleX"]["error"]["record_id"] == "rec1"
 
 
-def test_run_forward_marks_downstream_not_reached(monkeypatch):
+def test_run_forward_marks_downstream_not_reached(monkeypatch, loaded):
     # Force Rule 2 to fail; Rules 3/6 must be marked not reached, Rule 1 ok.
     from engine.rules import rule2_sort_by_date
 
@@ -44,8 +44,7 @@ def test_run_forward_marks_downstream_not_reached(monkeypatch):
 
     monkeypatch.setattr(rule2_sort_by_date, "run", boom)
 
-    from engine.loaders import load_all
-    so_lines, masters = load_all()
+    so_lines, masters = loaded
     trace = pipeline.run_forward(PlanRun(so_lines=so_lines), Config(), masters)
 
     assert trace["rule1"]["reached"] is True

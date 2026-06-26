@@ -6,6 +6,7 @@ from engine.models import (
     Batch, Process, Routing, Machine, WorkCalendar, Masters,
 )
 from engine.rules import rule6_allocate
+from tests.sample_workbook import ITEM_A
 
 
 def _batch(masters, item_code, qty=10):
@@ -16,16 +17,16 @@ def _batch(masters, item_code, qty=10):
 def test_first_process_starts_at_plan_start(loaded):
     _, masters = loaded
     cfg = Config(plan_start_date=date(2025, 3, 5))  # Wednesday
-    sched = rule6_allocate.run([_batch(masters, "61240807-01")], config=cfg, masters=masters)
+    sched = rule6_allocate.run([_batch(masters, ITEM_A)], config=cfg, masters=masters)
     assert sched[0].start == datetime(2025, 3, 5, 8, 0)
-    # 61240807-01 P1: cycle 40 x 10 + 90 = 490 min occupancy.
-    assert sched[0].occupancy_min == 490
+    # ITEM_A P1 (BANDSAW): cycle 3 x 10 + 90 setup = 120 min occupancy.
+    assert sched[0].occupancy_min == 120
 
 
 def test_processes_are_sequenced_within_batch(loaded):
     _, masters = loaded
     cfg = Config(plan_start_date=date(2025, 3, 5))
-    sched = rule6_allocate.run([_batch(masters, "61240807-01")], config=cfg, masters=masters)
+    sched = rule6_allocate.run([_batch(masters, ITEM_A)], config=cfg, masters=masters)
     for prev, nxt in zip(sched, sched[1:]):
         assert nxt.start >= prev.start  # later processes start no earlier
 
@@ -33,11 +34,11 @@ def test_processes_are_sequenced_within_batch(loaded):
 def test_overlap_starts_next_earlier_than_sequential(loaded):
     _, masters = loaded
     seq = rule6_allocate.run(
-        [_batch(masters, "61240807-01")],
+        [_batch(masters, ITEM_A)],
         config=Config(plan_start_date=date(2025, 3, 5)), masters=masters,
     )
     ov = rule6_allocate.run(
-        [_batch(masters, "61240807-01")],
+        [_batch(masters, ITEM_A)],
         config=Config(plan_start_date=date(2025, 3, 5), overlap_mode=OVERLAP_PERCENT, overlap_percent=50),
         masters=masters,
     )

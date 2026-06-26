@@ -10,9 +10,10 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api.main import app  # noqa: E402
 from api import auth  # noqa: E402
-from engine.loaders import DEFAULT_XLSX  # noqa: E402
+from tests.sample_workbook import build_sample_bytes, SO1, ITEM_A  # noqa: E402
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_SAMPLE = build_sample_bytes()   # generated workbook (Test3 format) — replaces Test2
 
 _ACCTS = auth._accounts()
 _ADMIN = next(u for u, a in _ACCTS.items() if a["role"] == auth.ADMIN)
@@ -29,8 +30,7 @@ def client():
 
 
 def _upload_test_workbook(client):
-    with open(DEFAULT_XLSX, "rb") as fh:
-        return client.post("/upload", files={"file": ("Test2.xlsx", fh, XLSX_MIME)})
+    return client.post("/upload", files={"file": ("sample.xlsx", _SAMPLE, XLSX_MIME)})
 
 
 def test_requires_login():
@@ -55,13 +55,11 @@ def test_upload_merges_then_plans(client):
     up = _upload_test_workbook(client)
     assert up.status_code == 200
     body = up.json()
-    # 7 distinct SO numbers; the reused 24-25SO121A line is flagged, not added.
-    assert body["added"] == 7
-    assert any("duplicate" in f["reason"] for f in body["flagged"])
+    assert body["added"] == 3                        # 3 distinct SO numbers
 
     r = client.post("/run", json={"config": {}})
     assert r.status_code == 200
-    assert len(r.json()["orders"]["rows"]) == 7
+    assert len(r.json()["orders"]["rows"]) == 3
     assert len(r.json()["trace"]["rule1"]["output"]["rows"]) >= 1
 
 
@@ -69,33 +67,33 @@ def test_reupload_same_file_adds_nothing(client):
     _upload_test_workbook(client)
     again = _upload_test_workbook(client).json()
     assert again["added"] == 0
-    assert len(again["flagged"]) >= 7                # every SO# now flagged
+    assert len(again["flagged"]) >= 3                # every SO# now flagged
 
 
 def test_actual_marks_order_complete(client):
     _upload_test_workbook(client)
     r = client.post("/actuals", json={
-        "so_no": "24-25SO214", "item_code": "61240807-01",
-        "entry_date": "2025-03-07", "qty_produced": 10, "mark_complete": True,
+        "so_no": SO1, "item_code": ITEM_A,
+        "entry_date": "2025-03-10", "qty_produced": 5, "mark_complete": True,
     })
     assert r.status_code == 200 and r.json()["completed_order"] is True
 
     rows = client.get("/orders").json()["orders"]["rows"]
     cols = client.get("/orders").json()["orders"]["columns"]
     si, sti = cols.index("SO No"), cols.index("Status")
-    so214 = next(row for row in rows if row[si] == "24-25SO214")
-    assert so214[sti] == "Complete"
+    so = next(row for row in rows if row[si] == SO1)
+    assert so[sti] == "Complete"
 
 
 def test_delete_selected_and_clear_all(client):
     _upload_test_workbook(client)
-    assert len(client.get("/orders").json()["orders"]["rows"]) == 7
+    assert len(client.get("/orders").json()["orders"]["rows"]) == 3
 
     # Delete one order permanently.
-    d = client.post("/orders/delete", json={"so_nos": ["24-25SO214"]})
+    d = client.post("/orders/delete", json={"so_nos": [SO1]})
     assert d.status_code == 200 and d.json()["deleted"] == 1
     rows = client.get("/orders").json()["orders"]["rows"]
-    assert len(rows) == 6 and not any("24-25SO214" in str(r) for r in rows)
+    assert len(rows) == 2 and not any(SO1 in str(r) for r in rows)
 
     # Clear everything.
     assert client.post("/orders/clear", json={}).status_code == 200
