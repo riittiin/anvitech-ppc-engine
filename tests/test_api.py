@@ -89,15 +89,24 @@ def test_delete_selected_and_clear_all(client):
     _upload_test_workbook(client)
     assert len(client.get("/orders").json()["orders"]["rows"]) == 3
 
-    # Delete one order permanently.
-    d = client.post("/orders/delete", json={"so_nos": [SO1]})
+    # Delete one order permanently (admin password required to confirm).
+    d = client.post("/orders/delete", json={"so_nos": [SO1], "password": _ADMIN_PWD})
     assert d.status_code == 200 and d.json()["deleted"] == 1
     rows = client.get("/orders").json()["orders"]["rows"]
     assert len(rows) == 2 and not any(SO1 in str(r) for r in rows)
 
     # Clear everything.
-    assert client.post("/orders/clear", json={}).status_code == 200
+    assert client.post("/orders/clear", json={"password": _ADMIN_PWD}).status_code == 200
     assert client.get("/orders").json()["orders"]["rows"] == []
+
+
+def test_delete_rejected_without_correct_password(client):
+    _upload_test_workbook(client)
+    # Wrong / missing password → 403, nothing deleted.
+    assert client.post("/orders/delete", json={"so_nos": [SO1], "password": "wrong"}).status_code == 403
+    assert client.post("/orders/delete", json={"so_nos": [SO1]}).status_code == 403
+    assert client.post("/orders/clear", json={"password": "wrong"}).status_code == 403
+    assert len(client.get("/orders").json()["orders"]["rows"]) == 3   # all still there
 
 
 def test_bad_upload_returns_400(client):

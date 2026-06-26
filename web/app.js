@@ -306,6 +306,53 @@ function orderTableHtml(table, showSelect) {
   return h + "</tbody></table></div>";
 }
 
+// A destructive action guarded by re-entering the admin password. ``doFetch(pw)``
+// must return the fetch Response; on 403 the modal stays open with an error and
+// lets the user retry; Cancel/Escape aborts. Resolves to true on success.
+function deleteWithPassword(message, doFetch) {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    ov.innerHTML = `
+      <div class="modal">
+        <h3>⚠ Confirm deletion</h3>
+        <p>${escapeHtml(message)}</p>
+        <p class="muted">This cannot be undone. Enter your password to continue.</p>
+        <input id="pw-confirm" type="password" placeholder="Password" autocomplete="off" />
+        <div class="modal-err" id="pw-err"></div>
+        <div class="modal-actions">
+          <button id="pw-cancel">Cancel</button>
+          <button id="pw-ok" class="danger">Delete</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    const input = ov.querySelector("#pw-confirm");
+    const err = ov.querySelector("#pw-err");
+    const ok = ov.querySelector("#pw-ok");
+    const done = (v) => { ov.remove(); resolve(v); };
+    setTimeout(() => input.focus(), 0);
+
+    const submit = async () => {
+      const pw = input.value;
+      if (!pw) { err.textContent = "Enter your password."; return; }
+      ok.disabled = true; err.textContent = "Checking…";
+      try {
+        const res = await doFetch(pw);
+        if (res.status === 403) { err.textContent = "Password incorrect — try again."; ok.disabled = false; input.select(); return; }
+        if (!res.ok) { err.textContent = "Failed: " + (await res.text()); ok.disabled = false; return; }
+        done(true);
+      } catch (e) { err.textContent = "Error: " + e.message; ok.disabled = false; }
+    };
+    ov.querySelector("#pw-cancel").onclick = () => done(false);
+    ok.onclick = submit;
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") submit();
+      if (e.key === "Escape") done(false);
+    });
+    ov.addEventListener("click", (e) => { if (e.target === ov) done(false); });
+  });
+}
+
 function wireOrdersDelete() {
   const allCheck = $("ord-all-check");
   if (allCheck) allCheck.onclick = () => {
@@ -315,18 +362,25 @@ function wireOrdersDelete() {
   if (delSel) delSel.onclick = async () => {
     const sel = [...document.querySelectorAll(".ordsel:checked")].map((c) => c.value);
     if (!sel.length) { setStatus("No rows selected to delete."); return; }
-    if (!confirm(`Permanently delete ${sel.length} order(s) and their production data? This cannot be undone.`)) return;
-    await fetch("/orders/delete", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ so_nos: sel }),
-    });
+    const okd = await deleteWithPassword(
+      `Permanently delete ${sel.length} order(s) and their production data?`,
+      (pw) => fetch("/orders/delete", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ so_nos: sel, password: pw }),
+      }));
+    if (!okd) { setStatus("Delete cancelled."); return; }
     setStatus(`Deleted ${sel.length} order(s).`);
     currentOrders = null; await runPlan();
   };
   const delAll = $("ord-del-all");
   if (delAll) delAll.onclick = async () => {
-    if (!confirm("Permanently delete ALL orders and production data from the database? This cannot be undone.")) return;
-    await fetch("/orders/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    const okd = await deleteWithPassword(
+      "Permanently delete ALL orders and production data from the database?",
+      (pw) => fetch("/orders/clear", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pw }),
+      }));
+    if (!okd) { setStatus("Delete cancelled."); return; }
     setStatus("All orders deleted.");
     currentOrders = null; await runPlan();
   };

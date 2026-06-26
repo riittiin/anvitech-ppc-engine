@@ -133,6 +133,14 @@ def require_admin(request: Request):
         raise HTTPException(status_code=403, detail="admin only")
 
 
+def require_password(request: Request, password: str):
+    """Re-authenticate the signed-in admin by their password (a deliberate guard on
+    destructive actions). Raises 403 if it doesn't match. Constant-time via auth."""
+    user = getattr(request.state, "user", "")
+    if auth.authenticate(user, password) != auth.ADMIN:
+        raise HTTPException(status_code=403, detail="password confirmation failed")
+
+
 # --- login / logout / identity ------------------------------------------- #
 def _render_login(error: str = "") -> str:
     """Login page HTML with a server-controlled (constant, safe) error message."""
@@ -241,6 +249,11 @@ class RunRequest(BaseModel):
 
 class DeleteRequest(BaseModel):
     so_nos: List[str] = []
+    password: str = ""    # admin re-enters their password to confirm a delete
+
+
+class ClearRequest(BaseModel):
+    password: str = ""
 
 
 class ActualRequest(BaseModel):
@@ -582,16 +595,20 @@ def orders():
 
 @app.post("/orders/delete")
 def delete_orders(req: DeleteRequest, request: Request):
-    """Permanently delete the given SO numbers (orders + their actuals). Admin only."""
+    """Permanently delete the given SO numbers (orders + their actuals). Admin only,
+    and guarded by re-entering the admin password."""
     require_admin(request)
+    require_password(request, req.password)
     n = book_store.delete_orders(req.so_nos)
     return {"deleted": n}
 
 
 @app.post("/orders/clear")
-def clear_orders(request: Request):
-    """Permanently delete ALL orders + actuals (masters are kept). Admin only."""
+def clear_orders(req: ClearRequest, request: Request):
+    """Permanently delete ALL orders + actuals (masters are kept). Admin only, and
+    guarded by re-entering the admin password."""
     require_admin(request)
+    require_password(request, req.password)
     book_store.delete_all()
     return {"cleared": True}
 

@@ -44,6 +44,32 @@ header h1 { margin: 0; font-size: 20px; }
    enforces every restriction — this is the UI polish on top. */
 body.role-user .admin-only { display: none !important; }
 
+/* Password-confirm modal for destructive deletes. */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.55);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.modal {
+  width: 100%; max-width: 380px; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 10px; padding: 22px 24px;
+  box-shadow: 0 10px 40px rgba(0,0,0,.5);
+}
+.modal h3 { margin: 0 0 10px; font-size: 16px; color: var(--bad); }
+.modal p { margin: 0 0 10px; }
+.modal input {
+  width: 100%; padding: 9px 11px; margin-top: 4px; background: #0f1218;
+  color: var(--text); border: 1px solid var(--border); border-radius: 6px; font-size: 14px;
+}
+.modal input:focus { outline: none; border-color: var(--accent); }
+.modal-err { color: var(--bad); font-size: 13px; min-height: 18px; margin-top: 8px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+.modal-actions button {
+  padding: 8px 16px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text); cursor: pointer; font-size: 14px;
+}
+.modal-actions button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+.modal-actions button:hover { filter: brightness(1.08); }
+
 .controls {
   display: flex;
   flex-wrap: wrap;

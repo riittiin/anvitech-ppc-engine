@@ -100,8 +100,10 @@ def test_user_is_refused_on_admin_endpoints():
 def test_admin_allowed_on_admin_endpoints():
     admin = _admin()
     assert _upload(admin).status_code == 200
-    assert admin.post("/orders/delete", json={"so_nos": ["nope"]}).status_code == 200
-    assert admin.post("/orders/clear", json={}).status_code == 200
+    # Deletes also require the admin to re-enter their password.
+    assert admin.post("/orders/delete",
+                      json={"so_nos": ["nope"], "password": _ADMIN_PWD}).status_code == 200
+    assert admin.post("/orders/clear", json={"password": _ADMIN_PWD}).status_code == 200
 
 
 def test_role_in_body_does_not_escalate():
