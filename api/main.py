@@ -397,7 +397,7 @@ def _augment_helpers(trace, plan_run, config, masters, lost=None, unattributed=N
     total_down = sum(a.total_downtime_min() for a in actuals)
     trace["rule7"] = {
         "input": to_table([{"Source": "Daily Production Entry form → durable store"}]),
-        "output": to_table(actuals), "config": None,
+        "output": to_table(actuals), "actuals_ids": [a.id for a in actuals], "config": None,
         "notes": [
             f"{len(actuals)} actual(s) on record; total downtime {total_down:g} min.",
             "Good qty (produced − rejected) drives each order's remaining qty; "
@@ -653,7 +653,42 @@ def post_actuals(req: ActualRequest):
         "saved": len(all_actuals),
         "completed_order": completed,
         "actuals": to_table(all_actuals),
+        "actuals_ids": [a.id for a in all_actuals],
         "by_item": to_table(r7.aggregate_by_item(all_actuals)),
+    }
+
+
+class RollbackRequest(BaseModel):
+    id: str
+
+
+@app.post("/actuals/rollback")
+def rollback_actual(req: RollbackRequest):
+    """Roll back ONE saved actual (a mis-punched entry), returning that order to
+    normal. If the rolled-back entry was the one that marked the order complete,
+    the order is un-archived back to active — unless another remaining entry still
+    marks it complete. Available to both roles (it fixes a capture mistake)."""
+    removed = book_store.delete_actual(req.id)
+    if removed is None:
+        raise HTTPException(status_code=404, detail="entry not found (already rolled back?)")
+
+    uncompleted = False
+    if removed.mark_complete and removed.so_no:
+        remaining = book_store.load_actuals()
+        still_complete = any(a.so_no == removed.so_no and a.mark_complete for a in remaining)
+        if not still_complete and removed.so_no in book_store.load_completed_orders():
+            uncompleted = book_store.uncomplete_order(removed.so_no)
+
+    all_actuals = book_store.load_actuals()
+    active = book_store.load_active_orders()
+    completed = book_store.load_completed_orders()
+    return {
+        "removed": True,
+        "uncompleted_order": uncompleted,
+        "actuals": to_table(all_actuals),
+        "actuals_ids": [a.id for a in all_actuals],
+        "by_item": to_table(r7.aggregate_by_item(all_actuals)),
+        "orders": to_table(orderbook.order_rows(active, completed, all_actuals)),
     }
 
 

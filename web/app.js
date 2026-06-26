@@ -206,7 +206,11 @@ function renderTab(key) {
 
   html += '<div class="io">';
   html += `<div class="panel"><h3>Input</h3>${tableHtml(entry.input)}</div>`;
-  html += `<div class="panel"><h3>Output</h3>${tableHtml(entry.output)}</div>`;
+  if (key === "rule7") {
+    html += `<div class="panel"><h3>Saved entries</h3>${actualsOutputHtml(entry.output, entry.actuals_ids)}</div>`;
+  } else {
+    html += `<div class="panel"><h3>Output</h3>${tableHtml(entry.output)}</div>`;
+  }
   html += "</div>";
   if (entry.tables && entry.tables.length) {
     entry.tables.forEach((t) => {
@@ -219,7 +223,7 @@ function renderTab(key) {
     html += "</ul></div>";
   }
   root.innerHTML = html;
-  if (key === "rule7") wireActualsForm();
+  if (key === "rule7") { wireActualsForm(); wireRollback(); }
   if (key === "rule6") {
     const sched = $("dl-schedule");
     if (sched) sched.onclick = () => downloadCsv(`anvitech-schedule-${todayStamp()}.csv`, entry.output);
@@ -528,6 +532,54 @@ async function wireActualsForm() {
       setStatus("Save error: " + e.message); btn.disabled = false; btn.textContent = label;
     }
   };
+}
+
+// Capture-actuals table with a per-row Rollback button (uses the parallel ids).
+function actualsOutputHtml(table, ids) {
+  if (!table || !table.columns || !table.columns.length) return '<div class="empty">— no entries —</div>';
+  let h = '<div class="table-wrap"><table><thead><tr>';
+  table.columns.forEach((c) => (h += `<th>${escapeHtml(c)}</th>`));
+  h += "<th>Rollback</th></tr></thead><tbody>";
+  table.rows.forEach((row, i) => {
+    h += "<tr>";
+    row.forEach((cell) => (h += `<td>${cell === null || cell === undefined ? "" : escapeHtml(String(cell))}</td>`));
+    const id = ids && ids[i] ? ids[i] : "";
+    h += id
+      ? `<td><button class="rollback-btn danger" data-id="${escapeHtml(id)}" title="Delete this entry and return the order to normal">↺ Rollback</button></td>`
+      : "<td></td>";
+    h += "</tr>";
+  });
+  return h + "</tbody></table></div>";
+}
+
+// Roll back one saved actual: delete it and return that order to normal.
+function wireRollback() {
+  document.querySelectorAll(".rollback-btn").forEach((b) => {
+    b.onclick = async () => {
+      const id = b.getAttribute("data-id");
+      if (!id) return;
+      if (!confirm("Roll back this entry? It will be permanently deleted and the order returns to normal (if it was marked complete, it reopens).")) return;
+      b.disabled = true; setStatus("Rolling back…");
+      try {
+        const res = await fetch("/actuals/rollback", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }),
+        });
+        if (!res.ok) { setStatus("Rollback failed: " + (await res.text())); b.disabled = false; return; }
+        const d = await res.json();
+        if (currentTrace && currentTrace.rule7) {
+          currentTrace.rule7.output = d.actuals;
+          currentTrace.rule7.actuals_ids = d.actuals_ids;
+          currentTrace.rule7.tables = [{
+            title: "Per item code — output & downtime rollup (minutes summed across entries)",
+            table: d.by_item,
+          }];
+        }
+        if (d.orders) currentOrders = d.orders;
+        setStatus("✓ Entry rolled back." + (d.uncompleted_order ? " Order reopened (it was marked complete)." : "") + " Click ▶ Plan to refresh the schedule.");
+        renderTab("rule7");
+      } catch (e) { setStatus("Rollback error: " + e.message); b.disabled = false; }
+    };
+  });
 }
 
 function tableHtml(table, withClasses) {

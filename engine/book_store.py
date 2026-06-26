@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import json
+import uuid
 
 from .models import Order, Actual
 from .storage import get_store
@@ -71,13 +72,49 @@ def complete_order(so_no: str) -> bool:
     return True
 
 
+def uncomplete_order(so_no: str) -> bool:
+    """Move a completed order BACK to active (un-archive). Returns False if it
+    isn't in the completed archive. Used when a 'mark complete' entry is rolled back."""
+    s = get_store()
+    o = load_completed_orders().get(so_no)
+    if o is None:
+        return False
+    o.completed = False
+    s.hset(ORDERS_KEY, so_no, json.dumps(o.to_json()))
+    s.hdel(COMPLETED_KEY, so_no)
+    return True
+
+
 # --- actuals (append-safe) --- #
 def load_actuals() -> list:
-    return [Actual.from_json(json.loads(v)) for v in get_store().list_all(ACTUALS_KEY)]
+    """Load all actuals. Backfills a stable id on any legacy entry that lacks one
+    (one-time persist) so rollback can target an exact entry."""
+    raw = get_store().list_all(ACTUALS_KEY)
+    actuals = [Actual.from_json(json.loads(v)) for v in raw]
+    if any(not a.id for a in actuals):
+        for a in actuals:
+            if not a.id:
+                a.id = uuid.uuid4().hex
+        get_store().list_set(ACTUALS_KEY, [json.dumps(a.to_json()) for a in actuals])
+    return actuals
 
 
 def append_actual(actual: Actual) -> None:
+    if not actual.id:
+        actual.id = uuid.uuid4().hex
     get_store().list_append(ACTUALS_KEY, json.dumps(actual.to_json()))
+
+
+def delete_actual(actual_id: str):
+    """Remove the actual with ``actual_id``. Returns the removed Actual, or None
+    if no entry matched."""
+    actuals = load_actuals()
+    target = next((a for a in actuals if a.id == actual_id), None)
+    if target is None:
+        return None
+    remaining = [a for a in actuals if a.id != actual_id]
+    get_store().list_set(ACTUALS_KEY, [json.dumps(a.to_json()) for a in remaining])
+    return target
 
 
 # --- masters workbook --- #

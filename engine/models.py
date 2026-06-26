@@ -273,6 +273,7 @@ class Actual:
     shift: str = ""
     item_name: str = ""      # auto-prompted from the routing (display only)
     process: str = ""        # which routing process this entry reports
+    id: str = ""             # stable unique id (for targeted rollback)
     # --- actual setup time (planned default lives in config.setup_time_min) -- #
     actual_setup_min: float = 0.0
     # --- downtime / loss categories (minutes) ------------------------------- #
@@ -326,6 +327,7 @@ class Actual:
 
     def to_json(self):
         return {
+            "id": self.id,
             "so_no": self.so_no,
             "item_code": self.item_code,
             "entry_date": self.entry_date.isoformat(),
@@ -348,6 +350,7 @@ class Actual:
     @classmethod
     def from_json(cls, d: dict) -> "Actual":
         return cls(
+            id=d.get("id", ""),
             so_no=d.get("so_no", ""),
             item_code=d.get("item_code", ""),
             entry_date=date.fromisoformat(d["entry_date"]),
