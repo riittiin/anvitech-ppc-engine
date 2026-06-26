@@ -22,7 +22,7 @@ Raises RuleError on a contract violation (e.g. a batch with no routing).
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..models import ScheduleEntry
 from ..worktime import WorkClock, NoWorkingWindow
@@ -67,26 +67,83 @@ def _resolve_candidates(proc):
     return parse_resource_candidates(raw) or [normalize_resource_id(proc.name)]
 
 
-def _free_at(proc, start, ready, machine_free, plan_start, clock_for):
-    """This op's candidate machines that can begin right at ``start`` (i.e. are free
-    that moment). In candidate order; uncovered machines (no window) are excluded.
-    Used to decide a parallel split."""
-    out = []
-    for cand in _resolve_candidates(proc):
+def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_for, config):
+    """Decide how to run one operation. Returns ``(entries, blocked)`` where
+    ``entries`` is a list of ``(machine, qty, start, end)``:
+
+    * a SINGLE entry = run the whole quantity on the earliest-free machine
+      (today's behaviour), OR
+    * MULTIPLE entries = a parallel split. When the step lists alternative machines
+      and ``split_parallel`` is on, the quantity is shared across them to **minimise
+      when the step finishes** — each machine gets the load it can complete by a
+      common target finish time T, starting from when IT becomes free. So a machine
+      that's busy now but frees soon (low load) still takes a share sized to its
+      later start, and a faster machine (more available hours) takes more. We only
+      split when the result finishes strictly sooner than the best single machine.
+
+    ``blocked`` is True only if no candidate machine has a working window (uncovered)."""
+    qty = int(qty or 0)
+    listed = _resolve_candidates(proc)
+    cands = []  # (machine, clock, earliest_free)
+    for m in listed:
+        clk = clock_for(m)
         try:
-            feasible = clock_for(cand).advance(max(ready, machine_free.get(cand, plan_start)), 0)
+            f = clk.advance(max(ready, machine_free.get(m, plan_start)), 0)
         except NoWorkingWindow:
-            continue
-        if feasible == start:
-            out.append(cand)
-    return out
+            continue   # uncovered machine — can't run here
+        cands.append((m, clk, f))
+    if not cands:
+        return [], True
+    cands.sort(key=lambda c: (c[2], listed.index(c[0])))  # earliest free, first-listed tiebreak
 
+    def end_of(clk, f, q):
+        return clk.advance(f, cyc * q + setup)
 
-def _split_qty(qty, n):
-    """Split ``qty`` into ``n`` whole-piece shares, remainder to the first shares.
-    e.g. (50, 2) -> [25, 25]; (51, 2) -> [26, 25]; (5, 2) -> [3, 2]."""
-    base, rem = divmod(int(qty), n)
-    return [base + (1 if i < rem else 0) for i in range(n)]
+    bm, bclk, bf = cands[0]
+    single = [(bm, qty, bf, end_of(bclk, bf, qty))]
+    if (not getattr(config, "split_parallel", False) or len(cands) < 2
+            or qty < getattr(config, "split_min_qty", 2) or cyc <= 0):
+        return single, False
+    single_end = single[0][3]
+
+    def capacities(T):
+        """Whole pieces each machine can finish by time T (from its free time, incl.
+        its own setup)."""
+        out = []
+        for _m, clk, f in cands:
+            if T <= f:
+                out.append(0); continue
+            wm = clk.working_minutes_between(f, T)
+            out.append(int((wm - setup) // cyc) if wm > setup else 0)
+        return out
+
+    # Binary-search the smallest finish time T (in (bf, single_end]) whose combined
+    # capacity covers the quantity. working_minutes is monotonic in T, so capacity is.
+    span = (single_end - bf).total_seconds() / 60.0
+    lo, hi, bestT = 0.0, span, None
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if sum(capacities(bf + timedelta(minutes=mid))) >= qty:
+            bestT = bf + timedelta(minutes=mid); hi = mid
+        else:
+            lo = mid
+    if bestT is None:
+        return single, False
+
+    per = capacities(bestT)
+    shares, rem = [0] * len(cands), qty
+    for i in range(len(cands)):
+        take = min(per[i], rem); shares[i] = take; rem -= take
+        if rem <= 0:
+            break
+    if rem > 0:
+        return single, False
+    entries = [(cands[i][0], shares[i], cands[i][2], end_of(cands[i][1], cands[i][2], shares[i]))
+               for i in range(len(cands)) if shares[i] > 0]
+    # Split only if it genuinely beats one machine and uses 2+ machines.
+    if len(entries) < 2 or max(e[3] for e in entries) >= single_end:
+        return single, False
+    return entries, False
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, **kw):
@@ -198,61 +255,39 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         if best is None:
             break
         _, s, proc, resource, occ, note = best
-        start = best[0][0]
         batch = s["batch"]
         cyc = proc.cycle_time or 0.0
         setup = config.setup_time_min
+        cands_list = _resolve_candidates(proc)
 
-        # Parallel split: if enabled and 2+ of this op's machines are FREE the moment
-        # it can start, split the quantity across them to run in parallel.
-        free = _free_at(proc, start, s["ready"], machine_free, plan_start, clock_for) \
-            if getattr(config, "split_parallel", False) else []
-        do_split = (len(free) >= 2 and (batch.qty or 0) >= getattr(config, "split_min_qty", 2))
+        entries, _blk = _allocate_op(proc, batch.qty, cyc, setup, s["ready"],
+                                     machine_free, plan_start, clock_for, config)
+        split = len(entries) > 1
 
-        if do_split:
-            subs = _split_qty(int(batch.qty), len(free))
-            cand_str = "/".join(_resolve_candidates(proc))
-            slow_end, slow_clock, slow_run, slow_occ = start, clock_for(free[0]), 0.0, 0.0
-            for cand, sq in zip(free, subs):
-                if sq <= 0:
-                    continue
-                occ_i = cyc * sq + setup
-                cclock = clock_for(cand)
-                end_i = cclock.advance(start, occ_i)
-                machine_free[cand] = end_i
-                schedule.append(ScheduleEntry(
-                    batch_id=batch.batch_id, item_code=batch.item_code,
-                    process_seq=proc.seq, process_name=proc.name, machine=cand,
-                    qty=sq, occupancy_min=occ_i, start=start, end=end_i,
-                    notes=f"parallel split: {sq} of {int(batch.qty)} on {cand} ({cand_str})",
-                    so_refs=list(batch.source_so_refs),
-                    operator=(op_for(cand, start, masters, config) if op_for else ""),
-                ))
-                if end_i > slow_end:   # the slowest half decides when the batch recombines
-                    slow_end, slow_clock, slow_run, slow_occ = end_i, cclock, cyc * sq, occ_i
-            s["next"] += 1
-            if s["next"] < len(s["routing"].processes):
-                elapsed = r5.elapsed_before_next(slow_occ, slow_run, config)
-                s["ready"] = slow_clock.advance(start, elapsed)
-        else:
-            mclock = clock_for(resource)
-            end = mclock.advance(start, occ)
-            machine_free[resource] = end
-            operator = op_for(resource, start, masters, config) if op_for else ""
+        # Emit an entry per machine; track the slowest portion (it decides recombine).
+        slow = None  # (end, clock, start, run_min, occ)
+        for m, q, st, en in entries:
+            machine_free[m] = en
+            if split:
+                e_note = f"parallel split: {q} of {int(batch.qty)} on {m} ({'/'.join(cands_list)})"
+            else:
+                e_note = f"chose {m} of {'/'.join(cands_list)}" if len(cands_list) > 1 else ""
             schedule.append(ScheduleEntry(
                 batch_id=batch.batch_id, item_code=batch.item_code,
-                process_seq=proc.seq, process_name=proc.name, machine=resource,
-                qty=batch.qty, occupancy_min=occ, start=start, end=end, notes=note,
-                so_refs=list(batch.source_so_refs), operator=operator,
+                process_seq=proc.seq, process_name=proc.name, machine=m,
+                qty=q, occupancy_min=cyc * q + setup, start=st, end=en, notes=e_note,
+                so_refs=list(batch.source_so_refs),
+                operator=(op_for(m, st, masters, config) if op_for else ""),
             ))
-            # Advance this batch and set when its next process may start (Rule 5).
-            # Overlap measures the previous process's CUTTING time only (setup
-            # excluded); the wait is walked on the PRODUCER machine's clock.
-            s["next"] += 1
-            if s["next"] < len(s["routing"].processes):
-                run_min = cyc * (batch.qty or 0.0)
-                elapsed = r5.elapsed_before_next(occ, run_min, config)
-                s["ready"] = mclock.advance(start, elapsed)
+            if slow is None or en > slow[0]:
+                slow = (en, clock_for(m), st, cyc * q, cyc * q + setup)
+
+        # Advance this batch; the next process may start after the slowest portion
+        # (Rule 5 overlap measured on that machine's clock — split-then-recombine).
+        s["next"] += 1
+        if s["next"] < len(s["routing"].processes):
+            elapsed = r5.elapsed_before_next(slow[4], slow[3], config)
+            s["ready"] = slow[1].advance(slow[2], elapsed)
 
     # Decision notes: prove machines ran continuously.
     _timeline, summary = build_machine_view(schedule, masters, config)

@@ -2,7 +2,7 @@
 from datetime import date
 
 from engine.config import Config
-from engine.models import Batch, Process, Routing, Machine, WorkCalendar, Masters
+from engine.models import Batch, Process, Routing, Machine, WorkCalendar, Masters, Operator
 from engine.rules import rule6_allocate
 
 
@@ -58,12 +58,47 @@ def test_no_split_below_min_qty():
     assert len(sched) == 1                                   # 8 < 10 → not split
 
 
-def test_no_split_when_second_machine_busy():
-    # Seed N as busy well past the op's start → only M is free → no split.
-    masters = _masters("M/N")
+def test_no_split_when_second_machine_free_too_late():
+    # N is busy 600 min — it can't finish any share before M would finish alone
+    # (50*10+90 = 590) → no split.
     sched = rule6_allocate.run([_batch(50)], config=_cfg(split_parallel=True),
-                               masters=masters, machine_lost_min={"N": 600})
+                               masters=_masters("M/N"), machine_lost_min={"N": 600})
     assert len(sched) == 1 and sched[0].machine == "M"
+
+
+def test_splits_even_when_second_machine_frees_soon():
+    # N is busy only 100 min. It frees soon and has low load → it still takes a
+    # (smaller) share so the step finishes sooner; M (free now) takes more.
+    sched = rule6_allocate.run([_batch(50)], config=_cfg(split_parallel=True),
+                               masters=_masters("M/N"), machine_lost_min={"N": 100})
+    assert len(sched) == 2                       # split happened
+    bym = {e.machine: e.qty for e in sched}
+    assert bym["M"] > bym["N"]                   # M (free now) gets the larger share
+    assert bym["M"] + bym["N"] == 50
+    # And it finishes sooner than running all 50 on M.
+    single = rule6_allocate.run([_batch(50)], config=_cfg(), masters=_masters("M"))
+    assert max(e.end for e in sched) < single[0].end
+
+
+def test_faster_machine_gets_the_larger_share():
+    # M = two-shift (more hours/day), N = single-shift manual (9-6); both free +
+    # operator-covered → the faster machine takes more so both finish together.
+    machines = {"M": Machine("M", "M", "CNC lathe", available_hrs_per_day=19.5),
+                "N": Machine("N", "N", "Manual Inspection", available_hrs_per_day=9.5)}
+    masters = Masters(machines=machines, calendar=WorkCalendar())
+    masters.routings["X"] = Routing(
+        item_code="X", description="", customer="", rm_type="", moq=None,
+        processes=[Process(1, "OP", 10, None, "M/N", None)])
+    ops = [Operator("om", "M", machines=["M"], shift="First shift"),
+           Operator("om2", "M", machines=["M"], shift="Second shift"),
+           Operator("on", "N", machines=["N"], shift="First shift")]
+    masters.operators = ops
+    sched = rule6_allocate.run([_batch(50)],
+                               config=_cfg(split_parallel=True, apply_operator_logic=True),
+                               masters=masters)
+    assert len(sched) == 2
+    bym = {e.machine: e.qty for e in sched}
+    assert bym["M"] > bym["N"]                   # two-shift machine takes the bigger load
 
 
 def test_split_finishes_sooner_than_single():
