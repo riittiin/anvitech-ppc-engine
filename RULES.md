@@ -146,7 +146,12 @@ complete** (as in sequential mode). Overlap only compresses real machining steps
 Allot each process to the **earliest-available machine from its
 preferred/suggested list** — respecting:
 - the working calendar (**Thursdays off**, holidays, operator leaves), and
-- **shift timings** (1st: 8am–7pm, 2nd: 7pm–5am; operators swap shifts every Friday).
+- **shift timings** (1st: 8am–7pm, 2nd: 7pm–5am). Each operator's shift is set by a
+  **Shift column** in the Operator & shift Master (First/Second) — there is no
+  swap-every-Friday rule.
+
+**Time basis.** A process's machine time = **cycle time × qty** (+ the 90-min setup,
+Rule 4). The Process "Total time" column in the master is **never** used.
 
 **Non-delay scheduling (keep machines running).** The engine schedules at the
 *operation* level, not batch-by-batch: at every step it considers the next ready
@@ -166,6 +171,23 @@ The scheduler picks the **earliest-available** of the allowed machines, so work
 next contending operation grabs the other). On a tie the **first-listed** machine
 wins (it's the preferred one), keeping plans deterministic. A listed machine not
 yet in the Machine master is registered as a provisional machine and still used.
+This applies to **any** alternative cell — CNC, inspection (`MI1/MI2/MI3`), etc.
+
+**Parallel split (`split_parallel`, default on in the UI).** When a step lists
+alternatives, the engine can **split the quantity across them to finish the step as
+early as possible** instead of running it all on one machine. Each candidate gets the
+load it can complete by a common target finish time, counted **from when it becomes
+free** — so a machine that's busy now but frees soon still takes a (smaller) share, and
+a faster machine (more available hours) takes more, so both halves finish together. It
+splits **only when that beats the single best machine**. The next process waits for the
+slowest half (split-then-recombine). Same logic for any alternative cell.
+
+**Non-production steps — DISPATCH / OS (passed over).** A process with **no machine
+assigned and no cycle time** is treated as a non-production pass-through and **skipped**
+— no machine, no operator, no time: **DISPATCH** is the final "consider it done" step,
+and an **OS** step (e.g. `BANDSAW OS`) is outsourced, so the next process becomes the
+effective first step. (A blank machine *with* a real cycle time is **not** skipped — it
+still surfaces as "needs machine", so genuinely missing data fails loud.)
 
 **Operator & shift logic (`apply_operator_logic`, default on in the UI).** Each
 machine's working window is driven by its **Available Hrs/Day** and by operator
@@ -258,3 +280,4 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 | Apply operator & shift logic | on (UI) | Rule 6 ← masters |
 | Two-shift threshold | 12 hrs (Available Hrs/Day) | Rule 6 |
 | Manual / single-shift window | 09:00–18:00 | Rule 6 |
+| Split alternative machines in parallel | on (UI) | Rule 6 |

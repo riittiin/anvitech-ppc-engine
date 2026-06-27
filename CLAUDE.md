@@ -174,24 +174,34 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
   `order_rows` (dashboard).
 - `engine/book_store.py` — durable persistence of the book: active orders + the
   completed archive (hashes by SO#), actuals (append-only list), masters workbook.
-  `delete_orders` / `delete_all` for permanent deletes.
+  `delete_orders` / `delete_all` (permanent deletes); `delete_actual` + `uncomplete_order`
+  (per-entry **rollback**: each `Actual` has a uuid `id`, legacy backfilled).
 - `engine/storage.py` — the store interface (kv/hash/list) + backends:
   `MongoStore` / `UpstashStore` / `LocalStore`; `get_store()` picks by env.
 - `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
-  (per-order rows, hour axis, time-positioned bars by machine, Pending/Running label).
+  (per-order rows, time-positioned bars by machine, **operator** on each bar, split
+  halves as separate bars, Pending/Running label).
 - `engine/rules/ruleN_*.py` — Rules 1–7, one pure `run(...)` each; 4/5 also expose
   the calc helpers Rule 6 imports. (Rule 7 = `rule7_capture_actuals`. There is no
   `rule8` module — Rule 8 is the unified "Plan" over the order book; see `api._plan`.)
+  Rule 6 (`rule6_allocate.py`) also has: `_allocate_op` (smart **parallel split** of
+  alternative-machine steps — split the qty to finish soonest, only when faster; flag
+  `split_parallel`), and `_is_passthrough` (**DISPATCH/OS** steps — no machine + no
+  cycle time → skipped, "consider it done").
 - `api/auth.py` — accounts (2 roles), `authenticate`, signed-cookie
   `make_token`/`verify_token`, session secret, login rate limiter. Stdlib only.
 - `api/main.py` — FastAPI: `/login` `/logout` `/me`, `/upload` (merge, admin),
   `/run`=`/rerun` (plan the book; admin+`persist` saves the config), `/orders`
-  (+ `/orders/delete`, `/orders/clear` — admin), `/actuals`, `/items`, `/gantt`,
+  (+ `/orders/delete`, `/orders/clear` — admin, **password-confirmed**), `/actuals`
+  (+ `/actuals/rollback`), `/items` (`so_nos` for the SO dropdown), `/gantt`,
   `/report`, `/trace/{id}`. `gatekeeper` (session + CSRF) + `security_headers`
-  middleware; `require_admin`; helper-tab augmentation.
+  middleware; `require_admin`; `require_password` (re-auth on destructive deletes);
+  helper-tab augmentation.
 - `web/` — `login.html` (self-contained login page), `📋 Orders` tab (order book +
-  delete), the per-rule tabs, and a `📊 Gantt` tab; `app.js` renders the trace and
-  hides admin-only controls for the user role (no per-rule UI code).
+  delete, with a **password-confirm modal**), the per-rule tabs (Rule 7 = Capture
+  Actuals, with an **SO No dropdown** + per-entry **↺ Rollback** button), and a
+  `📊 Gantt` tab; `app.js` renders the trace and hides admin-only controls for the
+  user role (no per-rule UI code).
 
 ## Resolved design decision (data-confirmed)
 

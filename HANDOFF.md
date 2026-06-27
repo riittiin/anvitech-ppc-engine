@@ -18,11 +18,15 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0, 512 MB).
 - **Repo:** GitHub `riittiin/anvitech-ppc-engine` (private). Push to `main` →
   Render auto-redeploys (no separate deploy step).
-- **118 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
+- **157 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
   Python engine. Python 3 (run as `python3` locally — there is no `python` alias).
 - **Login is a two-role app-owned session** (admin / user) — see "Login & roles".
 - The engine has **8 business rules** (1–8). A 9th "parallel machine" rule was
-  **removed** this session; rules were renumbered into a clean 1–8.
+  removed earlier; rules are a clean 1–8. (Rule 8 = the Plan over the order book —
+  there is no `rule8` module.)
+- **Most recent work** is the "Latest session" block below: smart parallel split,
+  DISPATCH/OS pass-through, Capture-Actuals rollback, delete password re-auth, SO No
+  dropdown, Gantt operator, and a restructured operator/machine master (data).
 
 ## How to pick up where the last session left off (behavioral context)
 
@@ -154,7 +158,55 @@ cookie, rate limiter) + `gatekeeper`/`security_headers` middleware in `api/main.
 
 ## What changed this session (most recent work — read these commits)
 
-All shipped to `main`. Newest first:
+All shipped to `main`. Newest first.
+
+### Latest session — data restructure + scheduling polish (all live)
+
+Code commits `2bce847…ed9d33c`. The first three are **data edits to the user's real
+`Test3.xlsx`** (gitignored — NOT in git); the rest are code on `main`.
+
+- **DATA — machine master standardized** (in `Test3.xlsx`): helper machines renamed to
+  codes (`MD1` deburring, `MP1` punching, `MPK1` packing, `MW1` washing, `MA1` assembly),
+  the person-named ones (Anturam/Sanjay/Murali) gone; `Q INSPECTOR` deleted and folded
+  into the inspection pool `MI1/MI2/MI3`; current machines = CNC 1,3,4,5,6,7 · VMC 1,2,3 ·
+  BS2 · MD1/MP1/MPK1/MW1/MA1 · MI1/MI2/MI3 · CMM · M LATHE · DTC2.
+- **DATA — operator & shift master has 3 roles** (Name · **Role** · Preferred Machines ·
+  Shift): **Operators** = the named people (run CNC/VMC/BS2/CMM/M LATHE/DTC2, both shifts
+  where two-shift); **Helpers** = `HP1–HP4` (run the ₹80 machines, first shift);
+  **Inspectors** = `MI1/MI2/MI3` (each its own station, first shift). The dummies A/B/C/D
+  are gone. Loader reads it header-driven (Shift column must stay immediately right of
+  Preferred Machines; Role is ignored by the loader).
+- **DATA — focus items**: 7 active-order item codes are highlighted **green** in the
+  Item's process Master and filled in: `61247047-01, 61241949-01, 61242130-01,
+  61241989-01, 61249291-01, 61240807-01, 9611416360`. They plan cleanly (every step has an
+  operator). The **rest of the process-master items are intentionally ignored for now.**
+- **Smart parallel split** (`split_parallel`, UI toggle ON) — when a step lists alternative
+  machines (`CNC7/CNC3`, `MI1/MI2/MI3`, …) the qty is split to **finish the step as early
+  as possible**: each machine gets the load it can complete by a common target time, from
+  when IT frees up (handles a busy-but-soon-free machine and unequal speeds), and it only
+  splits when that beats one machine. `rule6._allocate_op`. **Generic** — any alternative
+  cell, not just CNC.
+- **DISPATCH / OS pass-through** (`rule6._is_passthrough`) — a step with **no machine AND
+  no cycle time** is a non-production pass-through (`DISPATCH` = "consider it done"; an
+  outside-service `OS` step like `BANDSAW OS`): no machine, no operator, no time, the batch
+  skips it. A blank machine **with** a cycle time still fails loud ("needs machine"), so
+  forgotten data isn't silently dropped. (Cycle-time × qty is the only time basis — the
+  "Total time" column is never used; alternatives + split apply everywhere.)
+- **Capture Actuals — per-entry rollback** — every saved entry has a **↺ Rollback** button
+  (first column). It deletes that one mis-punched entry and returns the order to normal; if
+  the entry had marked the order **complete**, the order is **un-archived** back to active
+  (unless another entry still marks it complete). `Actual.id` (uuid, legacy backfilled),
+  `book_store.delete_actual`/`uncomplete_order`, `POST /actuals/rollback`. Both roles.
+- **Delete password re-auth** — *Delete selected* and *Delete ALL data* now pop a modal
+  requiring the admin to **re-enter their password**, verified **server-side**
+  (`require_password` → 403 on mismatch). Prevents an accidental click wiping the book.
+- **Capture Actuals — SO No is a dropdown** (from `/items` `so_nos` = active+completed
+  orders); picking one auto-fills the (read-only) Item Code, Item Name, Process list.
+- **Gantt shows the operator** — each bar carries the operator (hover tooltip:
+  process · machine · 👤 operator · time · qty). Split halves are separate bars; DISPATCH/OS
+  never appear. Operator visibility is now complete: Rule 6 tab + CSV + Gantt.
+
+### Earlier session — operator logic + Test3 migration + two-role login
 
 000. **Operator & shift logic + full master ingestion** (branch `operator-logic`) —
      ingests Available Hrs/Day + per-operator Shift + shift times. Rule 6 now gives
@@ -240,7 +292,7 @@ All shipped to `main`. Newest first:
 
 ```bash
 pip install -r requirements.txt
-python3 -m pytest -q                          # 92 tests
+python3 -m pytest -q                          # 157 tests
 REGEN_GOLDEN=1 python3 -m pytest -k golden    # ONLY after an intentional logic change
 python3 -m uvicorn api.main:app --reload      # http://127.0.0.1:8000  (frontend at /)
 ```
@@ -305,7 +357,16 @@ curl -s -b /tmp/ck.txt -F "file=@Test3.xlsx" http://127.0.0.1:8011/upload >/dev/
 - **Rule 5 overlap** = % of the previous op's **cutting time only** (setup excluded);
   no-cutting steps don't overlap.
 - **Rule 6 = non-delay scheduler** — a machine never idles while an op is ready. For an
-  **alternative-machine** process it picks the **earliest-free** allowed machine.
+  **alternative-machine** process it picks the **earliest-free** allowed machine, and with
+  **`split_parallel`** on it **splits the qty** across them to finish the step soonest
+  (load-balanced by free-time + speed; only when faster). Same logic for ANY alternative
+  cell (CNC, inspection, …), not just CNC.
+- **DISPATCH / OS = pass-through.** A step with no machine AND no cycle time is skipped
+  (no machine/operator/time) — `DISPATCH` is "consider it done"; `OS` = outsourced.
+- **Time basis = cycle time × qty** (+ 90-min setup). The Process "Total time" column is
+  **never** used.
+- **Operator/shift logic** (toggle) — each machine runs only shifts that have a qualified
+  operator; manual/₹80 + inspection are single-shift (09:00–18:00), CNC/VMC two-shift.
 - **Downtime + setup overrun loop back** into Rule 6 as per-machine delays (toggle).
 - **Masters** are latest-wins on upload, kept if a file omits them.
 - **Dates display DD-MM-YYYY** everywhere; storage/config stay ISO internally.
@@ -313,12 +374,21 @@ curl -s -b /tmp/ck.txt -F "file=@Test3.xlsx" http://127.0.0.1:8011/upload >/dev/
 ## Done vs deferred
 
 **Done:** order book + lifecycle; upload-merge + dedup; completion via Rule 7; unified
-Plan; day-level Gantt; SO No column + CSV download; login; Render + MongoDB deploy;
-permanent delete; append-safe storage; Rule 5 cutting-only overlap; downtime loop-back;
-preferred/alternative machine selection; DD-MM-YYYY dates; daily-entry UX; perf
-(connection reuse + masters cache) + keep-warm.
+Plan; day-level Gantt (now with operator on bars); SO No column + CSV download; two-role
+login + hardening; Render + MongoDB deploy; permanent delete (now password-confirmed);
+append-safe storage; Rule 5 cutting-only overlap; downtime loop-back; preferred/alternative
+machine selection **+ smart parallel split**; **DISPATCH/OS pass-through**; **operator &
+shift logic** (per-machine windows + coverage gate, operator on the schedule);
+**Capture-Actuals rollback**; **SO No dropdown**; DD-MM-YYYY dates; daily-entry UX; perf
+(connection reuse + masters cache) + keep-warm. **Data:** Test3 format, standardized
+machine master + 3-role operator master, 7 focus items filled in.
 
 **Deferred (explicitly, per the user):**
+- **Remaining process-master items** — only the **7 green focus items** are filled in /
+  verified; the other ~80 items in the Item's process Master are intentionally left for
+  later. This is the most likely **next task**.
+- **Outside-service (OS) lead time** — OS steps are currently skipped as zero in-house time
+  (correct for scheduling machines), but a vendor turnaround/lead time isn't modelled.
 - Applying **revisions** to existing orders (changed qty/date) — currently flagged only.
 - Explicit **cancel** action (orders leave only via complete or delete).
 - **Actual `Actual` "which machine ran" field** — today downtime on an alternative-
