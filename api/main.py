@@ -635,6 +635,9 @@ def items():
     """Item metadata for the Daily Production Entry form."""
     masters = _current_masters()
     active = book_store.load_active_orders()
+    completed = book_store.load_completed_orders()
+    # Every SO from the orders tab (active + completed) for the SO No dropdown.
+    all_orders = {**completed, **active}   # active wins on any conflict
     items_map = {
         code: {"item_name": routing.description,
                "processes": [p.name for p in routing.processes]}
@@ -643,7 +646,8 @@ def items():
     return {
         "items": items_map,
         "shifts": ["1st shift", "2nd shift"],
-        "so_to_item": {o.so_no: o.item_code for o in active.values()},
+        "so_to_item": {o.so_no: o.item_code for o in all_orders.values()},
+        "so_nos": sorted(all_orders.keys()),       # for the dropdown
         "open_so_nos": sorted(active.keys()),
     }
 

@@ -453,8 +453,8 @@ function actualsFormHtml() {
   const left =
     fy("Date", `<input id="a-date" type="date" value="${today}" />`) +
     fy("Shift", `<input id="a-shift" value="1st shift" />`) +
-    fy("SO No", `<input id="a-so" value="" placeholder="e.g. 24-25SO209" />`) +
-    fr("Item Code <span class=auto>(auto from SO No)</span>", `<input id="a-item" value="" placeholder="auto-fills from SO No" />`) +
+    fr("SO No <span class=auto>(pick from orders)</span>", `<select id="a-so"><option value="">— select SO No —</option></select>`) +
+    fr("Item Code <span class=auto>(auto from SO No)</span>", `<input id="a-item" value="" placeholder="auto-fills from SO No" readonly />`) +
     fr("Item Name <span class=auto>(auto)</span>", `<input id="a-itemname" readonly />`) +
     fr("Process <span class=auto>(dropdown)</span>", `<select id="a-process"></select>`);
   const right =
@@ -475,12 +475,21 @@ function actualsFormHtml() {
     <button id="a-save" class="primary">Save daily entry</button>`;
 }
 
-// Task 1: typing the SO No auto-fills its Item Code (from the order book), then
-// the item name + process dropdown follow.
+// Populate the SO No dropdown with every SO from the orders tab.
+function fillSoDropdown() {
+  const sel = $("a-so");
+  if (!sel) return;
+  const list = (ITEMS && ITEMS.so_nos) ? ITEMS.so_nos : [];
+  sel.innerHTML = `<option value="">— select SO No —</option>`
+    + list.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+}
+
+// Selecting an SO No auto-fills its Item Code (from the order book), then the
+// item name + process dropdown follow.
 function fillItemFromSO() {
   const so = $("a-so").value.trim();
   const map = ITEMS && ITEMS.so_to_item ? ITEMS.so_to_item : {};
-  if (map[so]) { $("a-item").value = map[so]; }
+  $("a-item").value = map[so] || "";
   fillItemMeta();
 }
 
@@ -521,9 +530,10 @@ function actualIsDuplicate(body) {
 }
 
 async function wireActualsForm() {
+  ITEMS = null;                 // refetch so the SO dropdown reflects the latest orders
   await ensureItems();
-  $("a-so").addEventListener("input", fillItemFromSO);   // SO No -> Item Code (auto)
-  $("a-item").addEventListener("input", fillItemMeta);
+  fillSoDropdown();
+  $("a-so").addEventListener("change", fillItemFromSO);  // pick SO No -> Item Code (auto)
   fillItemMeta();
   $("a-save").onclick = async () => {
     const btn = $("a-save");
