@@ -105,9 +105,11 @@ Rule 7 actual ─▶ recorded vs SO# (good qty, downtime, complete?)┘
   *active* order at its **remaining** qty (ordered − good produced) through Rules 1–6.
 - **Rule 7** daily entry records production; the first actual flips an order
   Pending → Running; ticking **"mark complete"** on an entry → Complete (archived).
-- **Delete** (single / multiple / all) permanently removes from the database.
-- **Login:** HTTP Basic Auth gates the whole app. **Persistence:** `engine/storage.py`
-  picks **MongoDB > Upstash > local file** by env var.
+- **Delete** (single / multiple / all) permanently removes from the database
+  (admin re-enters their password to confirm).
+- **Login:** a two-role app-owned **session cookie** gates the whole app (see "Login &
+  roles"). **Persistence:** `engine/storage.py` picks **MongoDB > Upstash > local file**
+  by env var.
 
 ### The 8 rules (renumbered this session — IMPORTANT)
 | # | Rule | File |

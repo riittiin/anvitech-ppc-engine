@@ -109,7 +109,7 @@ Rule 7 actuals reduce each order's remaining qty; "mark complete" archives it.
 | Layer | What |
 |---|---|
 | `engine/` | Pure Python: `config`, `models`, `loaders`, `worktime`, `pipeline`, `rules/`, the order-book layer (`orderbook`, `book_store`, `storage`), and `gantt` |
-| `api/` | Thin FastAPI: `/login` `/logout` `/me`, `/upload`, `/run`(=`/rerun`), `/orders` (+ `/orders/delete`, `/orders/clear`), `/actuals`, `/items`, `/gantt`, `/report`, `/trace/{id}`; session gate + role enforcement + security-headers middleware (`api/auth.py`) |
+| `api/` | Thin FastAPI: `/login` `/logout` `/me`, `/upload`, `/run`(=`/rerun`), `/orders` (+ `/orders/delete`, `/orders/clear` — password-confirmed), `/actuals` (+ `/actuals/rollback`), `/items`, `/gantt`, `/report`, `/trace/{id}`; session gate + role enforcement + password re-auth on deletes + security-headers middleware (`api/auth.py`) |
 | `web/` | `📋 Orders`, the per-rule tabs, and `📊 Gantt` — `app.js` renders the trace (no per-rule UI code) |
 | `tests/` | Per-rule, order book, storage, pipeline, golden snapshot, and API |
 
