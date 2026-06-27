@@ -77,8 +77,11 @@ def parse_resource_candidates(raw) -> list:
 
 
 def parse_date(value):
-    """Coerce a cell to a ``date``. Handles datetime cells and 'dd/mm/yyyy'
-    strings (the SO sheet mixes both). Returns None if unparseable."""
+    """Coerce a cell to a ``date``. Real date/datetime cells are read by value
+    (any Excel display format is fine). Text cells are parsed **strictly day-first**
+    (DD/MM/YYYY, DD-MM-YYYY) or ISO — matching the app-wide DD-MM-YYYY policy, so an
+    ambiguous string like '03/04/2025' is always 3 April, never 4 March. A
+    month-first US string is rejected (returns None) rather than silently coerced."""
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
@@ -86,7 +89,7 @@ def parse_date(value):
     if isinstance(value, date):
         return value
     s = str(value).strip()
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"):
+    for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):   # day-first + ISO; no %m/%d/%Y
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:

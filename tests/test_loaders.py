@@ -49,6 +49,16 @@ def test_parse_date_handles_string_and_datetime():
     assert parse_date(datetime(2025, 3, 28)) == date(2025, 3, 28)
 
 
+def test_parse_date_is_strictly_day_first():
+    # Day-first slash/dash + ISO are accepted; an ambiguous date is read DAY-first.
+    assert parse_date("03/04/2025") == date(2025, 4, 3)     # 3 April, not 4 March
+    assert parse_date("03-04-2025") == date(2025, 4, 3)
+    assert parse_date("2025-04-03") == date(2025, 4, 3)
+    # A month-first-only US string (day > 12 in the 2nd slot) is now REJECTED,
+    # not silently coerced — the parser is strictly day-first.
+    assert parse_date("12/25/2025") is None
+
+
 # --------------------------------------------------------------------------- #
 # Alternative ("preferred") machines: a cell like "CNC3/CNC6" = either machine
 # --------------------------------------------------------------------------- #

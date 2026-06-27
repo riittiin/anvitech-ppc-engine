@@ -452,7 +452,7 @@ function fr(label, inner) { return `<label class="efield fr">${label}${inner}</l
 function actualsFormHtml() {
   const today = new Date().toISOString().slice(0, 10);
   const left =
-    fy("Date", `<input id="a-date" type="date" value="${today}" />`) +
+    fy("Date", `<input id="a-date" type="date" value="${today}" /> <span id="a-date-echo" class="date-echo"></span>`) +
     fy("Shift", `<input id="a-shift" value="1st shift" />`) +
     fr("SO No <span class=auto>(pick from orders)</span>", `<select id="a-so"><option value="">— select SO No —</option></select>`) +
     fr("Item Code <span class=auto>(auto from SO No)</span>", `<input id="a-item" value="" placeholder="auto-fills from SO No" readonly />`) +
@@ -536,6 +536,15 @@ async function wireActualsForm() {
   fillSoDropdown();
   $("a-so").addEventListener("change", fillItemFromSO);  // pick SO No -> Item Code (auto)
   fillItemMeta();
+  // The native date picker shows the browser locale (MM/DD/YYYY on US machines);
+  // echo the chosen date in DD-MM-YYYY so it always matches the rest of the app.
+  const dateEcho = () => {
+    const e = $("a-date-echo"), v = $("a-date") && $("a-date").value;
+    if (e) e.textContent = v ? "= " + isoToDdmmyyyy(v) : "";
+  };
+  dateEcho();
+  $("a-date").addEventListener("change", dateEcho);
+  $("a-date").addEventListener("input", dateEcho);
   $("a-save").onclick = async () => {
     const btn = $("a-save");
     const num = (id) => Number($(id).value) || 0;
