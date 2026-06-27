@@ -67,6 +67,20 @@ def _resolve_candidates(proc):
     return parse_resource_candidates(raw) or [normalize_resource_id(proc.name)]
 
 
+def _is_passthrough(proc):
+    """A non-production step the scheduler passes straight over: NO machine assigned
+    AND no cycle time — e.g. DISPATCH (the final step, no time allotted: "consider it
+    done") or an outside-service OS step. Takes no machine, no operator, no time.
+
+    Keyed on *both* (no machine AND no time) on purpose: a step you merely forgot to
+    fill in (blank machine but a real cycle time) is NOT a pass-through — it still
+    surfaces as 'needs machine/operator' so missing data fails loud."""
+    raw = proc.suggested_machine or proc.allotted_machine or ""
+    has_machine = bool(parse_resource_candidates(raw))
+    has_time = bool(proc.cycle_time) and proc.cycle_time > 0
+    return not has_machine and not has_time
+
+
 def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_for, config):
     """Decide how to run one operation. Returns ``(entries, blocked)`` where
     ``entries`` is a list of ``(machine, qty, start, end)``:
@@ -211,9 +225,20 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
                 "availability — " + ", ".join(sorted(seeded)) + "."
             )
 
+    passthrough: list = []   # (item_code, seq, name) of skipped DISPATCH/OS steps
+
     guard, guard_cap = 0, total_ops + len(states) + 5
     while guard <= guard_cap:
         guard += 1
+        # Pass over non-production steps (DISPATCH / OS — no machine, no time):
+        # advance the batch past them without scheduling. "Consider it done."
+        for s in states:
+            while (not s["blocked"] and s["next"] < len(s["routing"].processes)
+                   and _is_passthrough(s["routing"].processes[s["next"]])):
+                sk = s["routing"].processes[s["next"]]
+                passthrough.append((s["batch"].item_code, sk.seq, sk.name))
+                s["next"] += 1
+
         best = None  # (sort_key, state, proc, resource, occ, note)
         for s in states:
             if s["blocked"] or s["next"] >= len(s["routing"].processes):
@@ -288,6 +313,13 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         if s["next"] < len(s["routing"].processes):
             elapsed = r5.elapsed_before_next(slow[4], slow[3], config)
             s["ready"] = slow[1].advance(slow[2], elapsed)
+
+    if passthrough:
+        names = sorted({nm for _, _, nm in passthrough})
+        notes.append(
+            f"Passed over {len(passthrough)} non-production step(s) — no machine/time, "
+            f"treated as done (e.g. {', '.join(names[:5])})."
+        )
 
     # Decision notes: prove machines ran continuously.
     _timeline, summary = build_machine_view(schedule, masters, config)
