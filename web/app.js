@@ -574,25 +574,18 @@ async function wireActualsForm() {
         btn.disabled = false; btn.textContent = label; return;
       }
       const d = await res.json();
-      // Update the actuals table + rollup straight from the response — no heavy
-      // re-plan, so the save feels instant. The schedule refreshes on next Plan.
-      if (currentTrace && currentTrace.rule7) {
-        currentTrace.rule7.output = d.actuals;
-        currentTrace.rule7.actuals_ids = d.actuals_ids;   // so the new row gets a Rollback button
-        currentTrace.rule7.tables = [{
-          title: "Per item code — output & downtime rollup (minutes summed across entries)",
-          table: d.by_item,
-        }];
-      }
-      try { currentOrders = (await (await fetch("/orders")).json()).orders; } catch (e) {}
+      // Close the feedback loop on the punch: immediately re-plan so the schedule,
+      // machine allotment, Gantt and Orders all reflect what the floor just reported
+      // (per-process remaining + downtime). This is what makes the plan dynamic.
+      setStatus("✓ Saved — re-planning from the new actuals…");
+      await runPlan(false);                    // refreshes currentTrace/gantt/orders/report
       if (d.completed_order) {
-        // Show the result where it actually changed: the Orders tab.
-        setStatus(`✓ Saved. Order ${body.so_no} marked complete and archived.`);
+        // The order was archived — show the result on the Orders tab.
+        setStatus(`✓ Saved & re-planned. Order ${body.so_no} marked complete and archived.`);
         activeTab = "orders"; renderTabs(); renderTab("orders");
       } else {
-        const hint = currentRole === "admin" ? " Click ▶ Plan to refresh the schedule." : "";
-        setStatus(`✓ Saved — ${d.saved} entr${d.saved === 1 ? "y" : "ies"} on record.` + hint);
-        renderTab("rule7");                    // fresh blank form + updated output table
+        setStatus(`✓ Saved & re-planned — schedule, Gantt and Orders updated from the new actuals.`);
+        activeTab = "rule7"; renderTabs(); renderTab("rule7");   // fresh blank form + updated output
       }
     } catch (e) {
       setStatus("Save error: " + e.message); btn.disabled = false; btn.textContent = label;
