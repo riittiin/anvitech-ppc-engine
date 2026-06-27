@@ -577,6 +577,7 @@ async function wireActualsForm() {
       // re-plan, so the save feels instant. The schedule refreshes on next Plan.
       if (currentTrace && currentTrace.rule7) {
         currentTrace.rule7.output = d.actuals;
+        currentTrace.rule7.actuals_ids = d.actuals_ids;   // so the new row gets a Rollback button
         currentTrace.rule7.tables = [{
           title: "Per item code — output & downtime rollup (minutes summed across entries)",
           table: d.by_item,
@@ -601,16 +602,17 @@ async function wireActualsForm() {
 // Capture-actuals table with a per-row Rollback button (uses the parallel ids).
 function actualsOutputHtml(table, ids) {
   if (!table || !table.columns || !table.columns.length) return '<div class="empty">— no entries —</div>';
-  let h = '<div class="table-wrap"><table><thead><tr>';
+  // Rollback is the FIRST column so it's always visible (the table is wide).
+  let h = '<div class="table-wrap"><table><thead><tr><th>Rollback</th>';
   table.columns.forEach((c) => (h += `<th>${escapeHtml(c)}</th>`));
-  h += "<th>Rollback</th></tr></thead><tbody>";
+  h += "</tr></thead><tbody>";
   table.rows.forEach((row, i) => {
-    h += "<tr>";
-    row.forEach((cell) => (h += `<td>${cell === null || cell === undefined ? "" : escapeHtml(String(cell))}</td>`));
     const id = ids && ids[i] ? ids[i] : "";
+    h += "<tr>";
     h += id
       ? `<td><button class="rollback-btn danger" data-id="${escapeHtml(id)}" title="Delete this entry and return the order to normal">↺ Rollback</button></td>`
       : "<td></td>";
+    row.forEach((cell) => (h += `<td>${cell === null || cell === undefined ? "" : escapeHtml(String(cell))}</td>`));
     h += "</tr>";
   });
   return h + "</tbody></table></div>";
