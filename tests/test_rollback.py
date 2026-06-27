@@ -25,7 +25,10 @@ def client():
 
 
 def _post(client, **kw):
-    body = {"so_no": SO1, "item_code": ITEM_A, "entry_date": "2025-03-10"}
+    # ITEM_A's routing ends at INSP (no DISPATCH) — its finished-goods gate. Posting
+    # there means the entry actually fulfils the order, so remaining drops (and is
+    # restored on rollback); intermediate-process production would not count.
+    body = {"so_no": SO1, "item_code": ITEM_A, "entry_date": "2025-03-10", "process": "INSP"}
     body.update(kw)
     r = client.post("/actuals", json=body)
     assert r.status_code == 200

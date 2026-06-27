@@ -408,16 +408,24 @@ def _augment_helpers(trace, plan_run, config, masters, lost=None, unattributed=N
     if actuals is None:
         actuals = book_store.load_actuals()
     total_down = sum(a.total_downtime_min() for a in actuals)
+    progress = orderbook.process_progress_rows(book_store.load_active_orders(), actuals, masters)
+    tables = [{"title": "Per item code — output & downtime rollup (minutes summed across entries)",
+               "table": to_table(r7.aggregate_by_item(actuals))}]
+    if progress:
+        tables.insert(0, {
+            "title": "Per-process progress — pieces cleared at each step (the floor's reality; "
+                     "drives the next Plan's per-process schedule)",
+            "table": to_table(progress)})
     trace["rule7"] = {
         "input": to_table([{"Source": "Daily Production Entry form → durable store"}]),
         "output": to_table(actuals), "actuals_ids": [a.id for a in actuals], "config": None,
         "notes": [
             f"{len(actuals)} actual(s) on record; total downtime {total_down:g} min.",
-            "Good qty (produced − rejected) drives each order's remaining qty; "
-            "marking complete on an entry archives that order.",
+            "Good at the DISPATCH/last-step gate fulfils the order (remaining qty); "
+            "good at each earlier step lets the next Plan skip that finished work. "
+            "Marking complete on an entry archives that order.",
         ],
-        "tables": [{"title": "Per item code — output & downtime rollup (minutes summed across entries)",
-                    "table": to_table(r7.aggregate_by_item(actuals))}],
+        "tables": tables,
         "error": None, "reached": True,
     }
     return trace
@@ -432,7 +440,7 @@ def _plan(config: Config):
     completed = book_store.load_completed_orders()
     actuals = book_store.load_actuals()
 
-    so_lines = orderbook.active_so_lines(active, actuals)        # remaining qty per order
+    so_lines = orderbook.active_so_lines(active, actuals, masters)   # remaining = ordered − finished good
 
     # Downtime loop-back (opt-in): recorded downtime + setup overrun → per-machine
     # availability delays fed into Rule 6.
@@ -450,11 +458,12 @@ def _plan(config: Config):
     # so the count matches the Orders tab; flag the ones with nothing left to make
     # (fully produced but not yet marked complete) — they aren't scheduled, which
     # is why they don't appear in the schedule/Gantt.
-    good = orderbook.produced_good_by_so(actuals)
-    status_by_so = {sn: orderbook.derive_status(o, good) for sn, o in active.items()}
+    finished = orderbook.finished_good_by_so(actuals, masters)
+    started = orderbook.so_nos_with_actuals(actuals)
+    status_by_so = {sn: orderbook.derive_status(o, started) for sn, o in active.items()}
 
     def _r8_row(o):
-        remaining = max(o.ordered_qty - good.get(o.so_no, 0.0), 0.0)
+        remaining = max(o.ordered_qty - finished.get(o.so_no, 0.0), 0.0)
         return {"SO No": o.so_no, "Item Code": o.item_code, "Remaining Qty": remaining,
                 "SO Delivery Date": fmt_date(o.delivery_date),
                 "Status": status_by_so[o.so_no],
@@ -472,7 +481,8 @@ def _plan(config: Config):
         "config": config.to_dict(),
         "notes": [
             "Unified Plan: every active order is listed at its remaining qty "
-            "(ordered − good produced). Completed orders are excluded.",
+            "(ordered − finished good at the DISPATCH/last-step gate). Production "
+            "still mid-routing (WIP) does not reduce it. Completed orders are excluded.",
             "An order fully produced but not yet marked complete shows Remaining 0 "
             "and 'In this plan = no' — it isn't scheduled until you tick 'mark "
             "complete' on a Rule 7 entry to archive it.",
@@ -484,7 +494,7 @@ def _plan(config: Config):
     _RUNS[run_id] = trace
     gantt = build_gantt(plan_run.schedule, plan_run.batches_prioritized, masters,
                         status_by_so=status_by_so)
-    orders = to_table(orderbook.order_rows(active, completed, actuals))
+    orders = to_table(orderbook.order_rows(active, completed, actuals, masters))
     return {"run_id": run_id, "trace": trace, "report": _report_table(masters),
             "gantt": gantt, "orders": orders, "config": config.to_dict()}
 
@@ -590,7 +600,7 @@ def orders():
     active = book_store.load_active_orders()
     completed = book_store.load_completed_orders()
     actuals = book_store.load_actuals()
-    return {"orders": to_table(orderbook.order_rows(active, completed, actuals))}
+    return {"orders": to_table(orderbook.order_rows(active, completed, actuals, _current_masters()))}
 
 
 @app.post("/orders/delete")
@@ -709,7 +719,7 @@ def rollback_actual(req: RollbackRequest):
         "actuals": to_table(all_actuals),
         "actuals_ids": [a.id for a in all_actuals],
         "by_item": to_table(r7.aggregate_by_item(all_actuals)),
-        "orders": to_table(orderbook.order_rows(active, completed, all_actuals)),
+        "orders": to_table(orderbook.order_rows(active, completed, all_actuals, _current_masters())),
     }
 
 

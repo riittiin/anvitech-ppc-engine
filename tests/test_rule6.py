@@ -50,6 +50,50 @@ def _machine(mid):
     return Machine(machine_no=mid, display_name=mid, machine_type="t")
 
 
+# --------------------------------------------------------------------------- #
+# Per-process remaining: re-plan each process at ordered − done-at-that-step.
+# --------------------------------------------------------------------------- #
+def _multi_masters():
+    procs = [Process(seq=i + 1, name=n, cycle_time=1, total_time=None,
+                     suggested_machine=m, allotted_machine=None)
+             for i, (n, m) in enumerate([("P1", "M1"), ("P2", "M2"), ("P3", "M3")])]
+    routing = Routing(item_code="X", description="", customer="", rm_type="", moq=None,
+                      processes=procs)
+    return Masters(routings={"X": routing},
+                   machines={m: _machine(m) for m in ("M1", "M2", "M3")},
+                   calendar=WorkCalendar())
+
+
+def _pq_batch(process_qty, qty=500):
+    return Batch(batch_id="B1", item_code="X", item_name="X", qty=qty,
+                 so_delivery_date=date(2025, 3, 7), source_so_refs=["SO"],
+                 process_qty=process_qty)
+
+
+def test_rule6_schedules_each_process_at_its_remaining():
+    masters = _multi_masters()
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    b = _pq_batch({"P1": 450, "P2": 480, "P3": 500})
+    sched = rule6_allocate.run([b], config=cfg, masters=masters)
+    assert {e.process_name: e.qty for e in sched} == {"P1": 450, "P2": 480, "P3": 500}
+
+
+def test_rule6_skips_fully_done_process():
+    masters = _multi_masters()
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    b = _pq_batch({"P1": 0, "P2": 500, "P3": 500})     # first step already complete
+    sched = rule6_allocate.run([b], config=cfg, masters=masters)
+    assert "P1" not in [e.process_name for e in sched]
+    assert {e.process_name: e.qty for e in sched} == {"P2": 500, "P3": 500}
+
+
+def test_rule6_without_process_qty_uses_full_batch_qty():
+    masters = _multi_masters()
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    sched = rule6_allocate.run([_pq_batch(None)], config=cfg, masters=masters)
+    assert all(e.qty == 500 for e in sched)            # unchanged behaviour
+
+
 def _synthetic_masters():
     """Two machines (M, N) and two routings that contend for M.
 

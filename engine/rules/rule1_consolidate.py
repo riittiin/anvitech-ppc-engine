@@ -44,10 +44,12 @@ def run(so_lines, config=None, notes=None, masters=None, **kw):
                     "so_date": line.delivery_date,
                     "qty": line.qty,
                     "so_refs": [line.so_no],
+                    "lines": [line],
                 }
             else:
                 current["qty"] += line.qty
                 current["so_refs"].append(line.so_no)
+                current["lines"].append(line)
                 gap = (line.delivery_date - current["so_date"]).days
                 notes.append(
                     f"{item_code}: SO {line.so_no} (SO delivery date "
@@ -70,6 +72,20 @@ def run(so_lines, config=None, notes=None, masters=None, **kw):
     return batches
 
 
+def _merge_process_qty(lines):
+    """Sum the per-process remaining vectors of the clubbed lines. A line with no
+    progress (process_qty None) contributes its full qty to every process. If no
+    line carries progress, return None (run the full batch qty everywhere)."""
+    if all(getattr(l, "process_qty", None) is None for l in lines):
+        return None
+    keys = set()
+    for l in lines:
+        if l.process_qty:
+            keys |= set(l.process_qty)
+    return {k: sum((l.process_qty.get(k, l.qty) if l.process_qty else l.qty) for l in lines)
+            for k in keys}
+
+
 def _finalize(cur, idx) -> Batch:
     return Batch(
         batch_id=f"B{idx + 1:03d}",
@@ -78,4 +94,5 @@ def _finalize(cur, idx) -> Batch:
         qty=cur["qty"],
         so_delivery_date=cur["so_date"],
         source_so_refs=list(cur["so_refs"]),
+        process_qty=_merge_process_qty(cur["lines"]),
     )

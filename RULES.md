@@ -208,6 +208,19 @@ coverage gate and keep a two-shift window. Each scheduled operation also shows t
 **operator** running it — the first qualified operator on the shift the op falls in
 (an `Operator` column on the Rule 6 schedule, present only when operator logic is on).
 
+**Continue from reality — per-process remaining (the feedback loop).** Every ordered
+piece must pass through every process, so a piece has *cleared* a step once it is
+punched as good there (Rule 7). When a re-plan runs, each process is scheduled for
+its **own** remaining = **ordered − pieces already done at that step** (not the whole
+order through every step). Earlier steps have more done, so they schedule fewer
+pieces; the finished-goods gate (last/DISPATCH step) has the most. A step already
+**fully** produced (remaining 0) is **skipped** — finished work is never re-run, and
+its pieces are ready for the next step. So after a day's punching, the plan picks up
+**where the floor actually is** instead of restarting the routing. (With no recorded
+progress, every step runs the full order qty — today's behaviour, byte-identical.)
+This is the order book's `process_qty` carried through Rule 1's consolidation into
+Rule 6; the finished-goods gate is just this rule applied to the **last** process.
+
 While running, Rule 6 consumes: ⚙️ Rule 4 (setup time) and ⚙️ Rule 5 (overlap mode).
 
 - **Source:** original Rule 4 + `Machine master` + `Operator & shift Master` +
@@ -242,9 +255,14 @@ the **Daily Production Entry** form. Fields captured:
 
 - *Identity (manual):* Date, Shift, SO No, Item Code. *Auto/dropdown:* Item Name
   (auto-prompted from the routing) and Process (dropdown of the item's routing).
-- *Output (manual):* Qty Produced, Qty Rejected. **Good qty = produced − rejected**
-  is what fulfils the order and drives Rule 8's balance (rejected pieces stay to
-  be remade).
+- *Output (manual):* Qty Produced, Qty Rejected, **at the named Process**. **Good qty
+  = produced − rejected** for that step. Good at the **finished-goods gate** (the
+  DISPATCH step, or the last step if the routing has no DISPATCH) is what **fulfils
+  the order** and reduces its remaining qty. Good at an **earlier** step is
+  **work-in-progress**: it is recorded (and lets the next Plan skip that finished
+  work — see Rule 6 "continue from reality"), but it does **not** reduce the order's
+  remaining qty — those pieces still owe every later step. (This fixed a bug where
+  any step's production was wrongly counted as finished goods.)
 - *Actual setting time (manual):* the real setup vs the planned `setup_time_min`.
 - *Downtime/loss categories (manual, minutes):* No Power, No Operator, Tool
   Problem, Machine Breakdown, No Load, Other Work — summed per item code into a
@@ -263,9 +281,12 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 - **Input:** actuals (Rule 7) + balance remaining
 - **Output:** triggers a fresh run starting at Rule 1
 - **Implementation note:** realized as the unified **"Plan"** over the persistent
-  order book — it emits every active order at its remaining qty (ordered − good
-  produced) and re-runs Rules 1–6. "Run" and "Rerun MRP" are one action; there is no
-  dedicated rule module for it (the engine's `orderbook.active_so_lines` does this).
+  order book — it emits every active order at its remaining qty (ordered − **finished**
+  good at the gate) **plus its per-process remaining** (`process_qty`), and re-runs
+  Rules 1–6. So the re-plan is **dynamic**: it reflects exactly what the floor punched
+  in (per-step progress + downtime/time), continues from there, and refreshes the
+  schedule, machine allotment, Gantt and Orders tab everywhere. "Run" and "Rerun MRP"
+  are one action; there is no dedicated rule module (`orderbook.active_so_lines` does this).
 
 ---
 

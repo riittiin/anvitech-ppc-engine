@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 
 from ..models import ScheduleEntry
 from ..worktime import WorkClock, NoWorkingWindow
-from ..loaders import normalize_resource_id, parse_resource_candidates
+from ..loaders import normalize_resource_id, parse_resource_candidates, normalize_process_name
 from . import rule4_setup_time as r4
 from . import rule5_overlap_mode as r5
 
@@ -65,6 +65,17 @@ def _resolve_candidates(proc):
     station named after the process when no machine is given."""
     raw = proc.suggested_machine or proc.allotted_machine or proc.name
     return parse_resource_candidates(raw) or [normalize_resource_id(proc.name)]
+
+
+def _qty_for(batch, proc):
+    """Pieces still to run at THIS process. With per-process progress known
+    (``batch.process_qty``) it's ordered − done-at-this-step, so finished work isn't
+    re-scheduled ("continue from reality"). Without it, the full batch qty (today's
+    behaviour)."""
+    pq = getattr(batch, "process_qty", None)
+    if pq is None:
+        return batch.qty
+    return pq.get(normalize_process_name(proc.name), batch.qty)
 
 
 def _is_passthrough(proc):
@@ -226,18 +237,26 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             )
 
     passthrough: list = []   # (item_code, seq, name) of skipped DISPATCH/OS steps
+    done_steps: list = []    # (item_code, seq, name) of steps already fully produced
 
     guard, guard_cap = 0, total_ops + len(states) + 5
     while guard <= guard_cap:
         guard += 1
-        # Pass over non-production steps (DISPATCH / OS — no machine, no time):
-        # advance the batch past them without scheduling. "Consider it done."
+        # Advance each batch past steps that need no scheduling:
+        #  * DISPATCH / OS pass-throughs (no machine, no time) — "consider it done";
+        #  * steps already fully produced on the floor (per-process remaining 0) —
+        #    don't re-run finished work; the pieces are ready for the next step.
         for s in states:
-            while (not s["blocked"] and s["next"] < len(s["routing"].processes)
-                   and _is_passthrough(s["routing"].processes[s["next"]])):
-                sk = s["routing"].processes[s["next"]]
-                passthrough.append((s["batch"].item_code, sk.seq, sk.name))
-                s["next"] += 1
+            while not s["blocked"] and s["next"] < len(s["routing"].processes):
+                p = s["routing"].processes[s["next"]]
+                if _is_passthrough(p):
+                    passthrough.append((s["batch"].item_code, p.seq, p.name))
+                    s["next"] += 1
+                elif _qty_for(s["batch"], p) <= 0:
+                    done_steps.append((s["batch"].item_code, p.seq, p.name))
+                    s["next"] += 1
+                else:
+                    break
 
         best = None  # (sort_key, state, proc, resource, occ, note)
         for s in states:
@@ -245,7 +264,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
                 continue
             proc = s["routing"].processes[s["next"]]
             candidates = _resolve_candidates(proc)
-            occ = r4.occupancy_minutes(proc.cycle_time, s["batch"].qty, config)
+            occ = r4.occupancy_minutes(proc.cycle_time, _qty_for(s["batch"], proc), config)
 
             # Among the allowed machines, pick the one that can start earliest. A
             # candidate with no working window (no operator coverage) is skipped.
@@ -284,8 +303,9 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         cyc = proc.cycle_time or 0.0
         setup = config.setup_time_min
         cands_list = _resolve_candidates(proc)
+        proc_qty = _qty_for(batch, proc)   # this step's remaining (= batch qty if no progress)
 
-        entries, _blk = _allocate_op(proc, batch.qty, cyc, setup, s["ready"],
+        entries, _blk = _allocate_op(proc, proc_qty, cyc, setup, s["ready"],
                                      machine_free, plan_start, clock_for, config)
         split = len(entries) > 1
 
@@ -294,7 +314,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         for m, q, st, en in entries:
             machine_free[m] = en
             if split:
-                e_note = f"parallel split: {q} of {int(batch.qty)} on {m} ({'/'.join(cands_list)})"
+                e_note = f"parallel split: {q} of {int(proc_qty)} on {m} ({'/'.join(cands_list)})"
             else:
                 e_note = f"chose {m} of {'/'.join(cands_list)}" if len(cands_list) > 1 else ""
             schedule.append(ScheduleEntry(
@@ -319,6 +339,13 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         notes.append(
             f"Passed over {len(passthrough)} non-production step(s) — no machine/time, "
             f"treated as done (e.g. {', '.join(names[:5])})."
+        )
+    if done_steps:
+        names = sorted({nm for _, _, nm in done_steps})
+        notes.append(
+            f"Skipped {len(done_steps)} step(s) already fully produced on the floor "
+            f"(per-process remaining 0) — work continues from there (e.g. "
+            f"{', '.join(names[:5])})."
         )
 
     # Decision notes: prove machines ran continuously.

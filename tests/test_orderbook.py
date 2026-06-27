@@ -39,10 +39,10 @@ def test_merge_flags_changed_order_without_modifying():
 
 def test_status_derivation():
     o = _order("SO1", "A", 10, D)
-    assert orderbook.derive_status(o, {}) == orderbook.PENDING
-    assert orderbook.derive_status(o, {"SO1": 4}) == orderbook.RUNNING
+    assert orderbook.derive_status(o, set()) == orderbook.PENDING
+    assert orderbook.derive_status(o, {"SO1"}) == orderbook.RUNNING       # has an actual
     o.completed = True
-    assert orderbook.derive_status(o, {"SO1": 4}) == orderbook.COMPLETE
+    assert orderbook.derive_status(o, {"SO1"}) == orderbook.COMPLETE
 
 
 def test_active_so_lines_use_remaining_and_skip_done():
@@ -113,6 +113,140 @@ def _masters(*routings):
 
 def _actual(item, process, **kw):
     return Actual(so_no="SO1", item_code=item, entry_date=D, process=process, **kw)
+
+
+# --------------------------------------------------------------------------- #
+# Finished-goods gate: WIP (intermediate-process good) must NOT fulfil the order.
+# Only good qty at the DISPATCH step (or the last step if no DISPATCH) counts.
+# --------------------------------------------------------------------------- #
+# A routing whose last step is a DISPATCH pass-through (5 of the 7 focus items).
+_DISPATCH_ROUTING = _routing(
+    "A", [("CNC FIRST SIDE", "CNC4"), ("WASHING", None), ("DISPATCH", None)]
+)
+# A routing whose last real step is PACKING and has NO DISPATCH (the other 2 items).
+_PACKING_ROUTING = _routing(
+    "B", [("CNC FIRST SIDE", "CNC4"), ("PACKING", "MPK1")]
+)
+
+
+def test_finished_gate_is_dispatch_when_present():
+    assert orderbook.finished_gate(_DISPATCH_ROUTING) == "DISPATCH"
+
+
+def test_finished_gate_falls_back_to_last_step_without_dispatch():
+    assert orderbook.finished_gate(_PACKING_ROUTING) == "PACKING"
+
+
+def test_finished_good_ignores_intermediate_process():
+    masters = _masters(_DISPATCH_ROUTING)
+    # 5 good produced at the FIRST process -> WIP, fulfils nothing.
+    wip = _actual("A", "CNC FIRST SIDE", qty_produced=5)
+    assert orderbook.finished_good_by_so([wip], masters) == {}
+
+
+def test_finished_good_counts_at_dispatch():
+    masters = _masters(_DISPATCH_ROUTING)
+    done = _actual("A", "DISPATCH", qty_produced=5)
+    assert orderbook.finished_good_by_so([done], masters) == {"SO1": 5.0}
+
+
+def test_finished_good_counts_at_packing_when_no_dispatch():
+    masters = _masters(_PACKING_ROUTING)
+    done = Actual(so_no="SO2", item_code="B", entry_date=D, process="PACKING",
+                  qty_produced=8, qty_rejected=1)        # good = 7
+    assert orderbook.finished_good_by_so([done], masters) == {"SO2": 7.0}
+
+
+def test_finished_gate_match_is_normalized():
+    masters = _masters(_DISPATCH_ROUTING)
+    # operator typed it lower-case with stray spaces — must still match.
+    done = _actual("A", "  dispatch ", qty_produced=3)
+    assert orderbook.finished_good_by_so([done], masters) == {"SO1": 3.0}
+
+
+def test_active_so_lines_ignore_wip_keep_full_qty():
+    """The user's bug: 5 good at the first process must NOT shrink the order."""
+    active = {"SO1": _order("SO1", "A", 500, D)}
+    masters = _masters(_DISPATCH_ROUTING)
+    wip = _actual("A", "CNC FIRST SIDE", qty_produced=5)
+    lines = orderbook.active_so_lines(active, [wip], masters)
+    assert {l.so_no: l.qty for l in lines} == {"SO1": 500.0}     # full 500 still planned
+
+
+def test_active_so_lines_reduce_only_on_dispatch():
+    active = {"SO1": _order("SO1", "A", 500, D)}
+    masters = _masters(_DISPATCH_ROUTING)
+    done = _actual("A", "DISPATCH", qty_produced=5)
+    lines = orderbook.active_so_lines(active, [done], masters)
+    assert {l.so_no: l.qty for l in lines} == {"SO1": 495.0}
+
+
+def test_status_running_on_any_actual_even_if_only_wip():
+    """Work has started (first process) -> Running, even though nothing is finished."""
+    o = _order("SO1", "A", 500, D)
+    with_actuals = orderbook.so_nos_with_actuals(
+        [_actual("A", "CNC FIRST SIDE", qty_produced=5)]
+    )
+    assert orderbook.derive_status(o, with_actuals) == orderbook.RUNNING
+    o.completed = True
+    assert orderbook.derive_status(o, with_actuals) == orderbook.COMPLETE
+
+
+def test_status_pending_with_no_actuals():
+    o = _order("SO1", "A", 500, D)
+    assert orderbook.derive_status(o, orderbook.so_nos_with_actuals([])) == orderbook.PENDING
+
+
+# --------------------------------------------------------------------------- #
+# Per-process progress: each process must be re-planned at ordered − done-at-that
+# -process, so finished steps aren't redone ("continue from reality").
+# --------------------------------------------------------------------------- #
+def test_completed_by_process_sums_good_per_step():
+    acts = [_actual("A", "CNC FIRST SIDE", qty_produced=50),
+            _actual("A", "cnc first side ", qty_produced=10),   # normalized -> same step
+            _actual("A", "WASHING", qty_produced=20, qty_rejected=2)]
+    cbp = orderbook.completed_by_process(acts)
+    assert cbp[("SO1", "CNC FIRST SIDE")] == 60.0
+    assert cbp[("SO1", "WASHING")] == 18.0                       # good = 20 − 2
+
+
+def test_active_so_lines_carry_per_process_remaining():
+    active = {"SO1": _order("SO1", "A", 500, D)}      # routing: CNC FIRST SIDE, WASHING, DISPATCH
+    masters = _masters(_DISPATCH_ROUTING)
+    acts = [_actual("A", "CNC FIRST SIDE", qty_produced=50),
+            _actual("A", "WASHING", qty_produced=20)]
+    line = orderbook.active_so_lines(active, acts, masters)[0]
+    assert line.qty == 500                            # order remaining (nothing at DISPATCH gate yet)
+    assert line.process_qty["CNC FIRST SIDE"] == 450  # 500 − 50 already cut
+    assert line.process_qty["WASHING"] == 480         # 500 − 20
+    assert line.process_qty["DISPATCH"] == 500        # gate: 0 done
+
+
+def test_active_so_lines_no_actuals_leave_process_qty_none():
+    # No actuals -> no per-process override -> Rule 6 keeps today's behaviour (golden stable).
+    active = {"SO1": _order("SO1", "A", 500, D)}
+    masters = _masters(_DISPATCH_ROUTING)
+    line = orderbook.active_so_lines(active, [], masters)[0]
+    assert line.process_qty is None
+
+
+def test_process_progress_rows_show_done_and_remaining_per_step():
+    active = {"SO1": _order("SO1", "A", 500, D)}     # routing: CNC FIRST SIDE, WASHING, DISPATCH
+    masters = _masters(_DISPATCH_ROUTING)
+    acts = [_actual("A", "CNC FIRST SIDE", qty_produced=50),
+            _actual("A", "WASHING", qty_produced=20)]
+    rows = orderbook.process_progress_rows(active, acts, masters)
+    # one row per process of each order that has started; ordered by seq.
+    first = next(r for r in rows if r["Process"] == "CNC FIRST SIDE")
+    assert first["SO No"] == "SO1" and first["Completed"] == 50 and first["Remaining"] == 450
+    wash = next(r for r in rows if r["Process"] == "WASHING")
+    assert wash["Completed"] == 20 and wash["Remaining"] == 480
+
+
+def test_process_progress_rows_empty_without_actuals():
+    active = {"SO1": _order("SO1", "A", 500, D)}
+    masters = _masters(_DISPATCH_ROUTING)
+    assert orderbook.process_progress_rows(active, [], masters) == []
 
 
 def test_lost_minutes_downtime_plus_setup_overrun_per_machine():

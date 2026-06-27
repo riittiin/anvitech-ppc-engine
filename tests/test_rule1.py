@@ -17,6 +17,35 @@ def _lines():
     ]
 
 
+def test_process_qty_sums_across_clubbed_lines():
+    # Two clubbed lines, each carrying per-process remaining -> batch sums them.
+    lines = [
+        SOLine(so_no="L1", item_code="X", item_name="X", qty=5, delivery_date=date(2025, 3, 21),
+               process_qty={"P1": 4, "P2": 5}),
+        SOLine(so_no="L2", item_code="X", item_name="X", qty=10, delivery_date=date(2025, 3, 28),
+               process_qty={"P1": 10, "P2": 8}),
+    ]
+    batch = rule1_consolidate.run(lines, config=Config())[0]
+    assert batch.qty == 15
+    assert batch.process_qty == {"P1": 14, "P2": 13}
+
+
+def test_process_qty_none_when_no_line_has_progress():
+    batch = rule1_consolidate.run(_lines(), config=Config())[0]
+    assert batch.process_qty is None
+
+
+def test_process_qty_mixes_progress_and_fresh_line():
+    # One line has progress, the other is fresh (None) -> fresh contributes full qty.
+    lines = [
+        SOLine(so_no="L1", item_code="X", item_name="X", qty=5, delivery_date=date(2025, 3, 21),
+               process_qty={"P1": 4, "P2": 5}),
+        SOLine(so_no="L2", item_code="X", item_name="X", qty=10, delivery_date=date(2025, 3, 28)),
+    ]
+    batch = rule1_consolidate.run(lines, config=Config())[0]
+    assert batch.process_qty == {"P1": 14, "P2": 15}     # P1: 4+10, P2: 5+10
+
+
 def test_club_within_window_and_split_outside():
     batches = rule1_consolidate.run(_lines(), config=Config())
     assert len(batches) == 2

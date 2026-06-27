@@ -50,6 +50,10 @@ class SOLine:
     pending_qty: Optional[float] = None
     customer: str = ""
     remarks: str = ""
+    # Per-process remaining {normalized process name -> qty still to run there} =
+    # ordered − already done at that step. None = no progress (run the full qty at
+    # every step, today's behaviour). Internal scheduling input — not serialized.
+    process_qty: Optional[dict] = None
 
     def as_row(self):
         return {
@@ -76,6 +80,10 @@ class Batch:
                                    # (earliest SO delivery date of the merged lines)
     source_so_refs: list = field(default_factory=list)
     total_process_time: Optional[float] = None  # filled by Rule 3 (cycle-time sum)
+    # Per-process remaining {normalized process name -> qty}, summed across the
+    # merged lines (Rule 1). None = run the full batch qty at every step. Internal
+    # scheduling input consumed by Rule 6 — not serialized into the trace.
+    process_qty: Optional[dict] = None
 
     def as_row(self):
         return {

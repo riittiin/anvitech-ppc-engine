@@ -10,26 +10,90 @@ from __future__ import annotations
 from collections import defaultdict
 
 from .models import Order, SOLine, fmt_date
-from .loaders import normalize_resource_id, parse_resource_candidates
+from .loaders import normalize_resource_id, parse_resource_candidates, normalize_process_name
 
 PENDING = "Pending"
 RUNNING = "Running"
 COMPLETE = "Complete"
 
+DISPATCH = "DISPATCH"   # the "consider it done / shipped" finished-goods gate
+
+
+_norm = normalize_process_name   # shared canonical process-name key (see loaders)
+
+
+def finished_gate(routing) -> str:
+    """The process whose good qty actually fulfils the order (finished goods).
+
+    A piece is finished only when it clears the **DISPATCH** step ('consider it
+    done / shipped'). A routing without a DISPATCH step (e.g. one ending in
+    PACKING) uses its **last** step instead. Returns the gate's process name as
+    written in the routing, or '' if the routing has no processes.
+
+    Earlier (intermediate) steps are work-in-progress: recorded for output and
+    downtime, but they do NOT reduce the order — that was the WIP-counted-as-
+    finished bug this guards against."""
+    if routing is None or not routing.processes:
+        return ""
+    for p in routing.processes:
+        if _norm(p.name) == DISPATCH:
+            return p.name
+    return routing.processes[-1].name
+
 
 def produced_good_by_so(actuals) -> dict:
-    """Sum good qty (produced − rejected) per SO number from actuals."""
+    """Sum good qty (produced − rejected) per SO across ALL processes — the total
+    output, including work-in-progress. NOT order fulfilment; use
+    ``finished_good_by_so`` for remaining-qty / completion logic."""
     good = defaultdict(float)
     for a in actuals:
         good[a.so_no] += a.good_qty()
     return good
 
 
-def derive_status(order: Order, good_by_so: dict) -> str:
-    """Status is derived, never stored (except the explicit ``completed`` flag)."""
+def finished_good_by_so(actuals, masters) -> dict:
+    """Good qty that actually fulfils each order = good produced at the item's
+    **finished-goods gate** (DISPATCH, or the last step if there is no DISPATCH).
+    Intermediate-process production is ignored here (it is WIP, not finished).
+
+    Matching is normalized (case/space-insensitive). An item with no routing has
+    no gate to check, so its good qty is counted as-is (best effort — such items
+    are not schedulable anyway)."""
+    routings = masters.routings if masters else {}
+    good = defaultdict(float)
+    for a in actuals:
+        routing = routings.get(a.item_code)
+        if routing is None:
+            good[a.so_no] += a.good_qty()          # no recipe -> nothing to gate on
+            continue
+        if _norm(a.process) == _norm(finished_gate(routing)):
+            good[a.so_no] += a.good_qty()
+    return dict(good)
+
+
+def completed_by_process(actuals) -> dict:
+    """Good qty completed per (SO number, normalized process) across all entries —
+    the per-step progress the floor punches in. Drives 'continue from reality'
+    re-planning: each process is re-scheduled at ordered − its completed qty."""
+    done = defaultdict(float)
+    for a in actuals:
+        done[(a.so_no, _norm(a.process))] += a.good_qty()
+    return dict(done)
+
+
+def so_nos_with_actuals(actuals) -> set:
+    """SO numbers that have at least one recorded actual — i.e. work has started.
+    Drives the Running status independently of how much is *finished*."""
+    return {a.so_no for a in actuals}
+
+
+def derive_status(order: Order, so_with_actuals: set) -> str:
+    """Status is derived, never stored (except the explicit ``completed`` flag).
+    An order is Running once it has ANY actual (work started) — even if every
+    piece is still mid-routing — and only Complete when the user ticks it."""
     if order.completed:
         return COMPLETE
-    return RUNNING if good_by_so.get(order.so_no, 0.0) > 0 else PENDING
+    return RUNNING if order.so_no in so_with_actuals else PENDING
 
 
 def merge_upload(so_lines, active_orders: dict, completed_orders: dict, first_seen: str = ""):
@@ -69,10 +133,21 @@ def merge_upload(so_lines, active_orders: dict, completed_orders: dict, first_se
     return new_orders, flags
 
 
-def active_so_lines(active_orders: dict, actuals) -> list:
-    """SO-lines to plan: each non-completed order with qty = ordered − good
-    produced, excluding any with nothing left to make (remaining <= 0)."""
-    good = produced_good_by_so(actuals)
+def active_so_lines(active_orders: dict, actuals, masters=None) -> list:
+    """SO-lines to plan. Each non-completed order is emitted with:
+
+    * ``qty`` = ordered − **finished** good (good at the DISPATCH/last-step gate) —
+      the order's headline remaining; WIP does not reduce it; and
+    * ``process_qty`` = {process -> ordered − done at THAT step} so Rule 6 re-plans
+      each process at its own remaining ("continue from reality"). Only set when the
+      order has recorded progress — otherwise None, so a fresh plan is byte-identical
+      to today.
+
+    Orders with nothing left to finish (remaining <= 0) are skipped."""
+    good = finished_good_by_so(actuals, masters)
+    done = completed_by_process(actuals)
+    routings = masters.routings if masters else {}
+    started = so_nos_with_actuals(actuals)
     lines = []
     for o in active_orders.values():
         if o.completed:
@@ -80,9 +155,14 @@ def active_so_lines(active_orders: dict, actuals) -> list:
         remaining = max(o.ordered_qty - good.get(o.so_no, 0.0), 0.0)
         if remaining <= 0:
             continue
+        pq = None
+        routing = routings.get(o.item_code)
+        if o.so_no in started and routing is not None:
+            pq = {_norm(p.name): max(o.ordered_qty - done.get((o.so_no, _norm(p.name)), 0.0), 0.0)
+                  for p in routing.processes}
         lines.append(SOLine(
             so_no=o.so_no, item_code=o.item_code, item_name=o.item_name,
-            qty=remaining, delivery_date=o.delivery_date,
+            qty=remaining, delivery_date=o.delivery_date, process_qty=pq,
         ))
     return lines
 
@@ -108,8 +188,8 @@ def machine_lost_minutes(actuals, masters, planned_setup_min):
         routing = masters.routings.get(a.item_code)
         proc = None
         if routing is not None:
-            want = (a.process or "").strip()
-            proc = next((p for p in routing.processes if p.name.strip() == want), None)
+            want = _norm(a.process)
+            proc = next((p for p in routing.processes if _norm(p.name) == want), None)
         if proc is None:
             unattributed.append({"so_no": a.so_no, "item_code": a.item_code,
                                  "process": a.process, "lost": loss})
@@ -120,19 +200,53 @@ def machine_lost_minutes(actuals, masters, planned_setup_min):
     return dict(lost), unattributed
 
 
-def order_rows(active_orders: dict, completed_orders: dict, actuals) -> list:
-    """Rows for the Orders dashboard (active first by delivery date, completed last)."""
-    good = produced_good_by_so(actuals)
+def process_progress_rows(active_orders: dict, actuals, masters=None) -> list:
+    """Per-(order, process) progress so the floor can see reality: how many pieces
+    have cleared each step and how many remain (ordered − done). One row per process
+    for each active order that has started (has at least one actual). This is the
+    correct per-step WIP view — not a sum of good across steps, which double-counts."""
+    done = completed_by_process(actuals)
+    routings = masters.routings if masters else {}
+    started = so_nos_with_actuals(actuals)
+    rows = []
+    for o in active_orders.values():
+        if o.completed or o.so_no not in started:
+            continue
+        routing = routings.get(o.item_code)
+        if routing is None:
+            continue
+        for p in routing.processes:
+            c = done.get((o.so_no, _norm(p.name)), 0.0)
+            rows.append({
+                "SO No": o.so_no,
+                "Item Code": o.item_code,
+                "Seq": p.seq,
+                "Process": p.name,
+                "Completed": c,
+                "Remaining": max(o.ordered_qty - c, 0.0),
+            })
+    return rows
+
+
+def order_rows(active_orders: dict, completed_orders: dict, actuals, masters=None) -> list:
+    """Rows for the Orders dashboard (active first by delivery date, completed last).
+
+    'Finished (good)' / 'Remaining' count only good at the finished-goods gate
+    (DISPATCH / last step). Per-process WIP is NOT shown here — it can't be derived
+    by summing good across processes (the same pieces flow through every step, so
+    that double-counts); proper per-process progress is tracked separately."""
+    finished = finished_good_by_so(actuals, masters)
+    started = so_nos_with_actuals(actuals)
 
     def row(o: Order, status: str):
-        prod = good.get(o.so_no, 0.0)
-        remaining = max(o.ordered_qty - prod, 0.0)
+        done = finished.get(o.so_no, 0.0)
+        remaining = max(o.ordered_qty - done, 0.0)
         return {
             "SO No": o.so_no,
             "Item Code": o.item_code,
             "Item Name": o.item_name,
             "Ordered": o.ordered_qty,
-            "Produced (good)": prod,
+            "Finished (good)": done,
             "Remaining": remaining,
             "SO Delivery Date": fmt_date(o.delivery_date),
             "Status": status,
@@ -141,7 +255,7 @@ def order_rows(active_orders: dict, completed_orders: dict, actuals) -> list:
 
     # Sort by the real delivery date (not the DD-MM-YYYY display string, which
     # wouldn't sort chronologically). Active first, then completed.
-    items = ([(o, derive_status(o, good)) for o in active_orders.values()]
+    items = ([(o, derive_status(o, started)) for o in active_orders.values()]
              + [(o, COMPLETE) for o in completed_orders.values()])
     items.sort(key=lambda t: (t[1] == COMPLETE, t[0].delivery_date, t[0].so_no))
     return [row(o, status) for o, status in items]

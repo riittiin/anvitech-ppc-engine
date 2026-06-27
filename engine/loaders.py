@@ -51,6 +51,15 @@ def normalize_resource_id(raw) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(raw).upper())
 
 
+def normalize_process_name(raw) -> str:
+    """Canonical process-name key: collapse internal/leading/trailing whitespace and
+    uppercase, but KEEP word breaks ('cnc  first side ' -> 'CNC FIRST SIDE'). Used to
+    match a punched-in process to its routing step and finished-goods gate without
+    being tripped by spacing/case (unlike ``normalize_resource_id``, which strips
+    spaces entirely for machine ids)."""
+    return " ".join(str(raw or "").split()).upper()
+
+
 def parse_resource_candidates(raw) -> list:
     """Canonical machine ids a routing cell allows, in order (first = preferred).
 
