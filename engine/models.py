@@ -79,7 +79,9 @@ class Batch:
     so_delivery_date: date         # the SO Delivery Date that governs the batch
                                    # (earliest SO delivery date of the merged lines)
     source_so_refs: list = field(default_factory=list)
-    total_process_time: Optional[float] = None  # filled by Rule 3 (cycle-time sum)
+    total_process_time: Optional[float] = None  # filled by Rule 3: per-piece
+                                                 # cycle-time sum (NOT x qty — that
+                                                 # is "work needed" in the breakdown)
     # Per-process remaining {normalized process name -> qty}, summed across the
     # merged lines (Rule 1). None = run the full batch qty at every step. Internal
     # scheduling input consumed by Rule 6 — not serialized into the trace.
@@ -93,7 +95,7 @@ class Batch:
             "Qty": self.qty,
             "SO Delivery Date": _fmt(self.so_delivery_date),
             "Source SOs": _fmt(self.source_so_refs),
-            "Total Process Time (min)": self.total_process_time,
+            "Cycle time per piece (min)": self.total_process_time,
         }
 
 
