@@ -87,6 +87,7 @@ def build_gantt(schedule, batches, masters, status_by_so=None):
             bars.append({
                 "process": e.process_name,
                 "machine": disp(e.machine),
+                "operator": e.operator or "",
                 "color": color_by_id[e.machine],
                 "offset_days": round(offset, 4),
                 "duration_days": round(duration, 4),

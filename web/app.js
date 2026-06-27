@@ -409,7 +409,8 @@ function renderGantt() {
     const bars = r.bars.map((b) => {
       const left = b.offset_days * DAYW, w = Math.max(b.duration_days * DAYW, 8);
       const d0 = dateOnly(b.start), d1 = dateOnly(b.end);
-      const tip = `${b.process} · ${b.machine} · ${d0}${d1 !== d0 ? " → " + d1 : ""} · qty ${b.qty}`;
+      const op = b.operator ? ` · 👤 ${b.operator}` : "";
+      const tip = `${b.process} · ${b.machine}${op} · ${d0}${d1 !== d0 ? " → " + d1 : ""} · qty ${b.qty}`;
       return `<div class="g-bar" style="left:${left}px;width:${w}px;background:${b.color}" title="${escapeHtml(tip)}">${escapeHtml(b.process)}</div>`;
     }).join("");
     const st = r.status || "";
@@ -434,7 +435,7 @@ function renderGantt() {
           <th class="g-axis"><div class="g-band" style="width:${axisW}px"></div></th></tr>
     </thead><tbody>${rowsHtml}</tbody></table></div>
     <div class="g-legend"><strong>Machines (bar colour):</strong> ${legend}</div>
-    <p class="g-note">Each bar = one process, coloured by machine, placed on the day(s) it runs. Status = Pending/Running per order.</p>`;
+    <p class="g-note">Each bar = one process, coloured by machine, placed on the day(s) it runs. Hover a bar for machine · operator · time · qty. Status = Pending/Running per order.</p>`;
   $("g-zoom-in").onclick = () => { ganttDayWidth = Math.min(ganttDayWidth + 40, 560); renderGantt(); };
   $("g-zoom-out").onclick = () => { ganttDayWidth = Math.max(ganttDayWidth - 40, 80); renderGantt(); };
 }

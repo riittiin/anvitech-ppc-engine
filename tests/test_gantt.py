@@ -28,12 +28,32 @@ def test_gantt_from_real_run(loaded):
     assert len(g["days"]) == g["num_days"]
     assert sum(m["days"] for m in g["months"]) == g["num_days"]
 
-    # Every bar references a coloured machine and a non-negative position.
+    # Every bar references a coloured machine, a non-negative position, and carries
+    # the operator field (so the Gantt can show who runs each step).
     for row in g["rows"]:
         for bar in row["bars"]:
             assert bar["machine"] in g["machine_colors"]
             assert bar["offset_days"] >= 0
             assert bar["duration_days"] >= 0
+            assert "operator" in bar
+
+
+def test_gantt_bars_carry_operator_when_logic_on():
+    # With operator logic on, every scheduled bar names its operator.
+    from engine.models import Batch, Process, Routing, Machine, WorkCalendar, Masters, Operator
+    import datetime
+    machines = {"CNC1": Machine("CNC1", "CNC 1", "CNC lathe", available_hrs_per_day=19.5)}
+    masters = Masters(machines=machines, calendar=WorkCalendar())
+    masters.routings["X"] = Routing(item_code="X", description="", customer="", rm_type="",
+                                    moq=None, processes=[Process(1, "OP", 10, 10, "CNC1", None)])
+    masters.operators = [Operator("Asha", "CNC1", machines=["CNC1"], shift="First shift")]
+    cfg = Config(plan_start_date=datetime.date(2025, 3, 5), apply_operator_logic=True)
+    from engine.rules import rule6_allocate
+    b = Batch(batch_id="B", item_code="X", item_name="x", qty=5,
+              so_delivery_date=datetime.date(2025, 3, 20), source_so_refs=["S"])
+    sched = rule6_allocate.run([b], config=cfg, masters=masters)
+    g = build_gantt(sched, [b], masters)
+    assert g["rows"][0]["bars"][0]["operator"] == "Asha"
 
 
 def test_bar_offsets_are_time_accurate(loaded):
