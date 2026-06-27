@@ -2,7 +2,7 @@
 from datetime import date
 
 from engine.config import Config
-from engine.models import Batch
+from engine.models import Batch, Operator, Machine, Masters, WorkCalendar, Routing, Process
 from engine.rules import rule6_allocate
 from tests.sample_workbook import ITEM_A, ITEM_B
 
@@ -10,6 +10,55 @@ from tests.sample_workbook import ITEM_A, ITEM_B
 def _batch(item, bid, qty=10):
     return Batch(batch_id=bid, item_code=item, item_name=item, qty=qty,
                  so_delivery_date=date(2025, 3, 7), source_so_refs=[bid])
+
+
+# --------------------------------------------------------------------------- #
+# Operators as one-at-a-time resources: load-balanced earliest-free assignment,
+# concurrency capped by headcount (the HP1-everywhere fix).
+# --------------------------------------------------------------------------- #
+def _manual_masters(n_machines, n_helpers):
+    """n manual machines (MD1..MDn) + n interchangeable first-shift helpers (HP1..HPk)
+    that each qualify for every machine."""
+    machines = {f"MD{i}": Machine(machine_no=f"MD{i}", display_name=f"MD{i}",
+                                  machine_type="Manual deburring", available_hrs_per_day=9.5)
+                for i in range(1, n_machines + 1)}
+    all_ids = list(machines)
+    helpers = [Operator(name=f"HP{i}", preferred_machines_raw=",".join(all_ids),
+                        machines=list(all_ids), shift="First shift")
+               for i in range(1, n_helpers + 1)]
+    routings = {f"X{i}": Routing(item_code=f"X{i}", description="", customer="", rm_type="",
+                                 moq=None,
+                                 processes=[Process(seq=1, name="DEBUR", cycle_time=10,
+                                                    total_time=None, suggested_machine=f"MD{i}",
+                                                    allotted_machine=None)])
+                for i in range(1, n_machines + 1)}
+    return Masters(machines=machines, operators=helpers, calendar=WorkCalendar(),
+                   routings=routings)
+
+
+def test_concurrent_helper_ops_get_different_helpers():
+    masters = _manual_masters(n_machines=2, n_helpers=4)
+    sched = rule6_allocate.run([_batch("X1", "B1", 1), _batch("X2", "B2", 1)],
+                               config=_cfg(apply_operator_logic=True), masters=masters)
+    ops = sorted(e.operator for e in sched)
+    assert ops == ["HP1", "HP2"]        # NOT ["HP1", "HP1"] — load-balanced
+
+
+def test_helper_concurrency_capped_at_headcount():
+    # 5 machines but only 4 helpers: 4 ops start together, the 5th must wait for a
+    # helper to free. Exactly 4 distinct helpers are used.
+    masters = _manual_masters(n_machines=5, n_helpers=4)
+    batches = [_batch(f"X{i}", f"B{i}", 1) for i in range(1, 6)]
+    sched = rule6_allocate.run(batches, config=_cfg(apply_operator_logic=True), masters=masters)
+    assert len({e.operator for e in sched}) == 4          # only 4 people exist
+    starts = sorted(e.start for e in sched)
+    assert starts[-1] > starts[0]                          # the 5th op waited for a free helper
+
+
+def test_off_logic_assigns_no_operator():
+    masters = _manual_masters(n_machines=2, n_helpers=4)
+    sched = rule6_allocate.run([_batch("X1", "B1", 1)], config=_cfg(), masters=masters)
+    assert all(e.operator == "" for e in sched)
 
 
 def _cfg(**kw):

@@ -92,31 +92,49 @@ def _is_passthrough(proc):
     return not has_machine and not has_time
 
 
-def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_for, config):
+def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_for, config,
+                 operator_free=None, op_lookup=None):
     """Decide how to run one operation. Returns ``(entries, blocked)`` where
-    ``entries`` is a list of ``(machine, qty, start, end)``:
+    ``entries`` is a list of ``(machine, qty, start, end, operator)``:
 
     * a SINGLE entry = run the whole quantity on the earliest-free machine
       (today's behaviour), OR
     * MULTIPLE entries = a parallel split. When the step lists alternative machines
       and ``split_parallel`` is on, the quantity is shared across them to **minimise
       when the step finishes** — each machine gets the load it can complete by a
-      common target finish time T, starting from when IT becomes free. So a machine
-      that's busy now but frees soon (low load) still takes a share sized to its
-      later start, and a faster machine (more available hours) takes more. We only
-      split when the result finishes strictly sooner than the best single machine.
+      common target finish time T, starting from when IT becomes free.
+
+    **Operators are one-at-a-time resources.** A candidate machine's free time also
+    waits for its **earliest-free qualified operator** (``op_lookup`` + ``operator_free``);
+    split siblings get **distinct** operators (a person can't run two machines at once),
+    so work spreads across the crew and concurrency is capped by headcount. With
+    operator logic off (or a provisional machine with no listed crew) there's no
+    operator constraint and the operator is ''.
 
     ``blocked`` is True only if no candidate machine has a working window (uncovered)."""
     qty = int(qty or 0)
     listed = _resolve_candidates(proc)
-    cands = []  # (machine, clock, earliest_free)
+    operator_free = operator_free if operator_free is not None else {}
+    op_lookup = op_lookup or (lambda m, t: [])
+    reserved = set()        # operators tentatively taken by earlier (split-sibling) candidates
+    cands = []  # (machine, clock, earliest_free, operator)
     for m in listed:
         clk = clock_for(m)
         try:
-            f = clk.advance(max(ready, machine_free.get(m, plan_start)), 0)
+            mf = clk.advance(max(ready, machine_free.get(m, plan_start)), 0)
         except NoWorkingWindow:
             continue   # uncovered machine — can't run here
-        cands.append((m, clk, f))
+        names = op_lookup(m, mf)
+        if names:                       # operator logic on for this machine
+            avail = [o for o in names if o not in reserved]
+            if not avail:
+                continue                # every qualified operator already taken by a sibling
+            op = min(avail, key=lambda o: operator_free.get(o, plan_start))
+            reserved.add(op)
+            f = clk.advance(max(mf, operator_free.get(op, plan_start)), 0)
+            cands.append((m, clk, f, op))
+        else:                           # no operator constraint (logic off / provisional)
+            cands.append((m, clk, mf, ""))
     if not cands:
         return [], True
     cands.sort(key=lambda c: (c[2], listed.index(c[0])))  # earliest free, first-listed tiebreak
@@ -124,8 +142,8 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
     def end_of(clk, f, q):
         return clk.advance(f, cyc * q + setup)
 
-    bm, bclk, bf = cands[0]
-    single = [(bm, qty, bf, end_of(bclk, bf, qty))]
+    bm, bclk, bf, bop = cands[0]
+    single = [(bm, qty, bf, end_of(bclk, bf, qty), bop)]
     if (not getattr(config, "split_parallel", False) or len(cands) < 2
             or qty < getattr(config, "split_min_qty", 2) or cyc <= 0):
         return single, False
@@ -135,7 +153,7 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
         """Whole pieces each machine can finish by time T (from its free time, incl.
         its own setup)."""
         out = []
-        for _m, clk, f in cands:
+        for _m, clk, f, _op in cands:
             if T <= f:
                 out.append(0); continue
             wm = clk.working_minutes_between(f, T)
@@ -163,7 +181,8 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
             break
     if rem > 0:
         return single, False
-    entries = [(cands[i][0], shares[i], cands[i][2], end_of(cands[i][1], cands[i][2], shares[i]))
+    entries = [(cands[i][0], shares[i], cands[i][2], end_of(cands[i][1], cands[i][2], shares[i]),
+                cands[i][3])
                for i in range(len(cands)) if shares[i] > 0]
     # Split only if it genuinely beats one machine and uses 2+ machines.
     if len(entries) < 2 or max(e[3] for e in entries) >= single_end:
@@ -180,9 +199,16 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         raise RuleError("rule6", "-", "masters are required to allocate")
 
     clock_for, cov_report = _clock_factory(masters, config)
-    op_for = None
+    # Operators as one-at-a-time resources: op_lookup(m, t) = qualified operators for
+    # machine m at time t (empty when logic off → no operator constraint, no label).
     if getattr(config, "apply_operator_logic", False):
-        from ..operator_coverage import operator_for as op_for
+        from ..operator_coverage import qualified_operators
+        def op_lookup(m, t):
+            return qualified_operators(m, t, masters, config)
+    else:
+        def op_lookup(m, t):
+            return []
+    operator_free: dict[str, datetime] = {}   # operator name → when they next free up
     plan_start = datetime(
         config.plan_start_date.year,
         config.plan_start_date.month,
@@ -271,11 +297,19 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             # Strict '<' keeps the first-listed (preferred) machine on a tie.
             resource, feasible = None, None
             for cand in candidates:
+                clk = clock_for(cand)
                 try:
-                    cand_feasible = clock_for(cand).advance(
-                        max(s["ready"], machine_free.get(cand, plan_start)), 0)
+                    base = clk.advance(max(s["ready"], machine_free.get(cand, plan_start)), 0)
                 except NoWorkingWindow:
                     continue   # candidate uncovered — not usable
+                # Also wait for the earliest-free qualified operator (one-at-a-time),
+                # so ordering reflects real availability, not just machine free time.
+                names = op_lookup(cand, base)
+                if names:
+                    op_free = min(operator_free.get(o, plan_start) for o in names)
+                    cand_feasible = clk.advance(max(base, op_free), 0)
+                else:
+                    cand_feasible = base
                 if feasible is None or cand_feasible < feasible:
                     resource, feasible = cand, cand_feasible
 
@@ -306,13 +340,16 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         proc_qty = _qty_for(batch, proc)   # this step's remaining (= batch qty if no progress)
 
         entries, _blk = _allocate_op(proc, proc_qty, cyc, setup, s["ready"],
-                                     machine_free, plan_start, clock_for, config)
+                                     machine_free, plan_start, clock_for, config,
+                                     operator_free, op_lookup)
         split = len(entries) > 1
 
         # Emit an entry per machine; track the slowest portion (it decides recombine).
         slow = None  # (end, clock, start, run_min, occ)
-        for m, q, st, en in entries:
+        for m, q, st, en, op in entries:
             machine_free[m] = en
+            if op:
+                operator_free[op] = en          # this person is busy until the op ends
             if split:
                 e_note = f"parallel split: {q} of {int(proc_qty)} on {m} ({'/'.join(cands_list)})"
             else:
@@ -322,7 +359,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
                 process_seq=proc.seq, process_name=proc.name, machine=m,
                 qty=q, occupancy_min=cyc * q + setup, start=st, end=en, notes=e_note,
                 so_refs=list(batch.source_so_refs),
-                operator=(op_for(m, st, masters, config) if op_for else ""),
+                operator=op,
             ))
             if slow is None or en > slow[0]:
                 slow = (en, clock_for(m), st, cyc * q, cyc * q + setup)

@@ -204,9 +204,21 @@ covered shift** is **not scheduled** and is listed in a "needs operator" report
 (never fatal); operator specialties that match no machine are reported too. All of
 this is **Excel-driven** — edit the three master sheets, re-upload, and it reflects.
 Provisional machines (referenced by a routing but not yet in the master) bypass the
-coverage gate and keep a two-shift window. Each scheduled operation also shows the
-**operator** running it — the first qualified operator on the shift the op falls in
-(an `Operator` column on the Rule 6 schedule, present only when operator logic is on).
+coverage gate and keep a two-shift window.
+
+**Operators are one-at-a-time resources (load-balanced).** Each scheduled operation is
+assigned a specific person — the **earliest-free** qualified operator for that machine
+and shift — and that person is then busy until the op ends. So work **spreads across the
+whole crew** instead of always landing on the first-listed name: with four interchangeable
+helpers (HP1–HP4) the load divides four ways, and an operation **waits for a free person**
+when all qualified operators are busy, capping concurrency at the real headcount (e.g. at
+most 4 helper jobs at once, not 5). On a tie (everyone free) the first-listed operator
+wins, keeping plans deterministic. Parallel-split siblings get **distinct** people (one
+person can't run two machines at once). Inspectors (MI1/MI2/MI3, one per station) are
+naturally balanced; CNC/VMC operators and helpers now share load. The assigned person
+shows in the `Operator` column on the Rule 6 schedule (present only when operator logic is
+on). With operator logic **off**, no person is assigned and concurrency is machine-limited
+(unchanged).
 
 **Continue from reality — per-process remaining (the feedback loop).** Every ordered
 piece must pass through every process, so a piece has *cleared* a step once it is

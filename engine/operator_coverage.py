@@ -57,22 +57,25 @@ def _shift_of(start_dt, config) -> str:
     return "second"
 
 
-def operator_for(machine_id, start_dt, masters, config) -> str:
-    """Name of a qualified operator running ``machine_id`` at ``start_dt``, or ''.
-
-    Picks the first operator (sheet order) whose Shift covers the op's start time
-    and whose specialty matches the machine (by machine no OR type). With Model A
-    (coverage gate) this is the representative operator shown on the schedule —
-    operators are not consumed one-at-a-time."""
+def qualified_operators(machine_id, start_dt, masters, config) -> list:
+    """All operators (names, sheet order) able to run ``machine_id`` at ``start_dt``:
+    their Shift covers the op's start time and their specialty matches the machine
+    (by machine no OR type). Rule 6 assigns the **earliest-free** of these so people
+    load-balance and concurrency is capped by headcount."""
     machine = masters.machines.get(machine_id)
     keys = {machine_id}
     if machine is not None:
         keys.add(normalize_resource_id(machine.machine_type))
     want = _shift_of(start_dt, config)
-    for o in masters.operators:
-        if _shift_kind(o) == want and (set(o.machines) & keys):
-            return o.name
-    return ""
+    return [o.name for o in masters.operators
+            if _shift_kind(o) == want and (set(o.machines) & keys)]
+
+
+def operator_for(machine_id, start_dt, masters, config) -> str:
+    """First qualified operator for ``machine_id`` at ``start_dt`` (sheet order), or ''.
+    A display helper; Rule 6 does the real earliest-free assignment."""
+    ops = qualified_operators(machine_id, start_dt, masters, config)
+    return ops[0] if ops else ""
 
 
 def machine_windows(masters, config):
