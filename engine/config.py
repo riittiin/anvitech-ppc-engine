@@ -37,11 +37,9 @@ class Config:
     overlap_mode: str = OVERLAP_SEQUENTIAL
     overlap_percent: int = 50  # only used when overlap_mode == OVERLAP_PERCENT
 
-    # Downtime loop-back — when True, recorded downtime + actual-setup overrun
-    # (Rule 7 actuals) is fed back into Rule 6 as per-machine availability delays,
-    # so lost time pushes the plan later. Engine default OFF (keeps the golden trace
-    # and existing scheduling tests stable); the web UI defaults it ON.
-    apply_downtime_to_plan: bool = False
+    # NOTE: recorded times (downtime categories, actual setup) are captured for the
+    # record ONLY and never affect the schedule — the feedback loop is driven purely
+    # by quantity produced/rejected per process (per the director's spec).
 
     # Rule 3 — smart priority. The metric folds due date + workload into urgency.
     #   slack          = (working time until SO delivery date) − (work needed)
@@ -85,8 +83,7 @@ class Config:
     #   * an op may only run during a shift that has a qualified operator
     #     (specialty + that shift); uncovered machines are reported, not scheduled.
     # Engine default OFF (legacy single window, no coverage → keeps the golden trace
-    # + existing rule tests stable); the web UI defaults it ON. Mirrors
-    # apply_downtime_to_plan.
+    # + existing rule tests stable); the web UI defaults it ON.
     apply_operator_logic: bool = False
 
     def validate(self) -> None:
@@ -102,8 +99,6 @@ class Config:
             )
         if not (0 <= self.overlap_percent <= 100):
             errs.append("overlap_percent must be within 0..100")
-        if not isinstance(self.apply_downtime_to_plan, bool):
-            errs.append("apply_downtime_to_plan must be true or false")
         if self.priority_metric not in PRIORITY_METRICS:
             errs.append(f"priority_metric must be one of {PRIORITY_METRICS}")
         if self.priority_window_days is not None and self.priority_window_days < 0:

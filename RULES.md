@@ -246,16 +246,12 @@ While running, Rule 6 consumes: ⚙️ Rule 4 (setup time) and ⚙️ Rule 5 (ov
     how you see that machines run continuously.
   - Drives `Planning status monitoring`, `Machinewise`, `Weekly Production plan`.
 
-**Downtime loop-back (`apply_downtime_to_plan`, default on in the UI).** Recorded
-Rule 7 actuals feed lost machine time back into this allocation: for each entry,
-`lost = max(actual setup − planned setup, 0) + total downtime` is attributed to the
-machine that entry's process runs on (resolved by the same id Rule 6 schedules on),
-**accumulated per machine**, and seeded as that machine's *unavailable* time at the
-start of the plan. The machine's whole queue then slips by its lost time — so a power
-cut / breakdown / over-long setup pushes the plan later instead of being ignored. The
-loss is cumulative across re-plans (total lost so far). Entries whose `process` can't
-be matched to a routing step are reported as *unattributed* (not fed in), never fatal.
-This affects **placement only** — Rule 3 priority is intentionally unchanged in v1.
+**Recorded times are NOT fed into the plan.** The downtime categories (No Power, No
+Operator, Tool Problem, Breakdown, …) and the actual setup time are captured and
+stored **for the record only** (shown in the Rule 7 rollup). They never affect the
+schedule — the feedback loop is driven **purely by quantity produced/rejected per
+process** (the director's spec). A power cut or over-long setup is logged for
+analysis but does not move the plan.
 
 ---
 
@@ -295,8 +291,8 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 - **Implementation note:** realized as the unified **"Plan"** over the persistent
   order book — it emits every active order at its remaining qty (ordered − **finished**
   good at the gate) **plus its per-process remaining** (`process_qty`), and re-runs
-  Rules 1–6. So the re-plan is **dynamic**: it reflects exactly what the floor punched
-  in (per-step progress + downtime/time), continues from there, and refreshes the
+  Rules 1–6. So the re-plan is **dynamic**: it reflects exactly the quantity the floor
+  punched in per process, continues from there, and refreshes the
   schedule, machine allotment, Gantt and Orders tab everywhere. "Run" and "Rerun MRP"
   are one action; there is no dedicated rule module (`orderbook.active_so_lines` does this).
 
@@ -309,7 +305,6 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 | Consolidation window | 10 days | Rule 1 |
 | Setup time per process | 90 min | Rule 4 |
 | Operation overlap | always on, 50% (configurable) | Rule 5 |
-| Apply downtime to plan | on (UI) | Rule 6 ← Rule 7 |
 | Apply operator & shift logic | on (UI) | Rule 6 ← masters |
 | Two-shift threshold | 12 hrs (Available Hrs/Day) | Rule 6 |
 | Manual / single-shift window | 09:00–18:00 | Rule 6 |

@@ -284,7 +284,7 @@ def _machine_display(masters, mid):
     return m.display_name if m else mid
 
 
-def _augment_helpers(trace, plan_run, config, masters, lost=None, unattributed=None, actuals=None):
+def _augment_helpers(trace, plan_run, config, masters, actuals=None):
     if "rule3" in trace and trace["rule3"].get("reached", True) and plan_run.batches_prioritized:
         breakdown = r3.build_priority_breakdown(plan_run.batches_prioritized, config, masters)
         trace["rule3"]["tables"] = [
@@ -336,26 +336,6 @@ def _augment_helpers(trace, plan_run, config, masters, lost=None, unattributed=N
                              "spelling/name in Excel",
                     "table": to_table([{"Operator": u["operator"], "Specialty": u["specialty"]}
                                        for u in cov["unmatched_specialties"]])})
-
-        # Downtime loop-back: show the lost time fed into each machine's availability.
-        if config.apply_downtime_to_plan:
-            lost_rows = [{"Machine": _machine_display(masters, mid),
-                          "Lost time fed to plan (min)": round(mins, 1)}
-                         for mid, mins in sorted((lost or {}).items())]
-            trace["rule6"]["tables"].append({
-                "title": "Downtime fed back into the plan — recorded downtime + setup "
-                         "overrun delays each machine's availability (per machine)",
-                "table": to_table(lost_rows or [{"Machine": "—", "Lost time fed to plan (min)": 0}]),
-            })
-            if unattributed:
-                trace["rule6"]["tables"].append({
-                    "title": "Unattributed downtime — could not match the Process to a "
-                             "machine (check the process name); NOT fed into the plan",
-                    "table": to_table([
-                        {"SO No": u["so_no"], "Item Code": u["item_code"],
-                         "Process": u["process"], "Lost (min)": round(u["lost"], 1)}
-                        for u in unattributed]),
-                })
 
     if plan_run.schedule:
         e = plan_run.schedule[0]
@@ -442,17 +422,11 @@ def _plan(config: Config):
 
     so_lines = orderbook.active_so_lines(active, actuals, masters)   # remaining = ordered − finished good
 
-    # Downtime loop-back (opt-in): recorded downtime + setup overrun → per-machine
-    # availability delays fed into Rule 6.
-    if config.apply_downtime_to_plan:
-        lost, unattributed = orderbook.machine_lost_minutes(actuals, masters, config.setup_time_min)
-    else:
-        lost, unattributed = {}, []
-
+    # The feedback loop is quantity-only: recorded times (downtime, actual setup) are
+    # stored for the record and never affect the schedule.
     plan_run = PlanRun(so_lines=so_lines)
-    trace = run_forward(plan_run, config, masters, machine_lost_min=lost)
-    _augment_helpers(trace, plan_run, config, masters, lost=lost,
-                     unattributed=unattributed, actuals=actuals)
+    trace = run_forward(plan_run, config, masters)
+    _augment_helpers(trace, plan_run, config, masters, actuals=actuals)
 
     # Rule 8 tab: the active order book by remaining qty. List EVERY active order
     # so the count matches the Orders tab; flag the ones with nothing left to make

@@ -87,11 +87,11 @@ def test_rollback_unknown_id_is_404(client):
     assert client.post("/actuals/rollback", json={"id": "nope"}).status_code == 404
 
 
-def test_rolled_back_downtime_drops_out_of_plan(client):
-    # An entry's downtime feeds the plan; rolling it back removes that effect.
+def test_rolled_back_entry_drops_out_of_the_record(client):
+    # A rolled-back entry disappears from the actuals record (and so from any plan).
     eid = _post(client, qty_produced=1, machine_breakdown_min=600)
-    on = client.post("/run", json={"config": {"apply_downtime_to_plan": True}}).json()
+    on = client.post("/run", json={}).json()
     assert any(a != "" for row in on["trace"]["rule7"]["output"]["rows"] for a in row)
     client.post("/actuals/rollback", json={"id": eid})
-    after = client.post("/run", json={"config": {"apply_downtime_to_plan": True}}).json()
+    after = client.post("/run", json={}).json()
     assert after["trace"]["rule7"]["output"]["rows"] == []   # no actuals left

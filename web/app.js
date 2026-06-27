@@ -33,7 +33,6 @@ function readConfig() {
     overlap_percent: Number($("cfg-overlap-pct").value),
     priority_metric: $("cfg-priority-metric").value,
     priority_window_days: $("cfg-priority-window").value,
-    apply_downtime_to_plan: $("cfg-apply-downtime").checked,
     apply_operator_logic: $("cfg-operator-logic").checked,
     split_parallel: $("cfg-split-parallel").checked,
   };
@@ -76,8 +75,6 @@ function applyConfig(cfg) {
   const pw = $("cfg-priority-window");
   if (pw) pw.value = (cfg.priority_window_days === null || cfg.priority_window_days === undefined)
     ? "" : String(cfg.priority_window_days);
-  const dt = $("cfg-apply-downtime");
-  if (dt) dt.checked = !!cfg.apply_downtime_to_plan;
   const ol = $("cfg-operator-logic");
   if (ol) ol.checked = !!cfg.apply_operator_logic;
   const sp = $("cfg-split-parallel");
@@ -585,7 +582,7 @@ async function wireActualsForm() {
       const d = await res.json();
       // Close the feedback loop on the punch: immediately re-plan so the schedule,
       // machine allotment, Gantt and Orders all reflect what the floor just reported
-      // (per-process remaining + downtime). This is what makes the plan dynamic.
+      // (per-process quantity produced/rejected). This is what makes the plan dynamic.
       setStatus("✓ Saved — re-planning from the new actuals…");
       await runPlan(false);                    // refreshes currentTrace/gantt/orders/report
       if (d.completed_order) {

@@ -132,34 +132,28 @@ def _earliest_start_for(plan, machine):
     return min(starts)
 
 
-def test_downtime_loops_back_into_the_schedule(client):
+def test_recorded_downtime_does_not_affect_the_schedule(client):
+    """Recorded times (downtime, actual setup) are for the record only — the feedback
+    loop is quantity-only, so logging a huge breakdown must NOT move the schedule."""
     _upload_test_workbook(client)
-    # Admin planning with an explicit config persists it (persist=True).
-    off = client.post("/run", json={"config": {"apply_downtime_to_plan": False},
-                                     "persist": True}).json()
+    base = client.post("/run", json={"persist": True}).json()
 
-    out = off["trace"]["rule6"]["output"]
+    out = base["trace"]["rule6"]["output"]
     ci = {c: i for i, c in enumerate(out["columns"])}
     first = min(out["rows"], key=lambda r: _parse_dt(r[ci["Start"]]))   # earliest op overall
     machine, item, process = first[ci["Machine"]], first[ci["Item Code"]], first[ci["Process"]]
-    base_start = _earliest_start_for(off, machine)
+    base_start = _earliest_start_for(base, machine)
 
-    # Log a big machine breakdown against that machine's process.
+    # Log a huge breakdown + setup overrun against that process (zero qty produced).
     so = next((s for s, it in client.get("/items").json()["so_to_item"].items() if it == item), "X")
     client.post("/actuals", json={
         "so_no": so, "item_code": item, "entry_date": "2025-03-07",
-        "process": process, "machine_breakdown_min": 600,
+        "process": process, "machine_breakdown_min": 600, "actual_setup_min": 999,
     })
 
-    on = client.post("/run", json={"config": {"apply_downtime_to_plan": True},
-                                    "persist": True}).json()
-    # That machine's first op is pushed strictly later by the recorded downtime.
-    assert _earliest_start_for(on, machine) > base_start
-    # Visibility table is present when the feature is on.
-    titles = [t["title"] for t in on["trace"]["rule6"].get("tables", [])]
-    assert any("Downtime fed back" in t for t in titles)
-
-    # Gate is clean: flag OFF again returns to the original timing (downtime ignored).
-    off2 = client.post("/run", json={"config": {"apply_downtime_to_plan": False},
-                                     "persist": True}).json()
-    assert _earliest_start_for(off2, machine) == base_start
+    after = client.post("/run", json={"persist": True}).json()
+    # Timing is UNCHANGED — recorded time never feeds the plan.
+    assert _earliest_start_for(after, machine) == base_start
+    # And there is no downtime-feedback table anymore.
+    titles = [t["title"] for t in after["trace"]["rule6"].get("tables", [])]
+    assert not any("Downtime fed back" in t for t in titles)

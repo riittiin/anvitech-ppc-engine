@@ -243,10 +243,9 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
     schedule: list[ScheduleEntry] = []
     blocked_ops: list[dict] = []
 
-    # Downtime loop-back: a machine that lost time in the actuals is treated as
-    # unavailable for that many WORKING minutes from the plan start, so its whole
-    # queue slips later (non-delay scheduling then handles the rest). Uses the
-    # machine's own working window.
+    # Optional: seed a machine as unavailable for N working-minutes from the plan
+    # start (a low-level scheduling primitive — the app does NOT use it; recorded
+    # downtime never affects the schedule). Its whole queue then slips later.
     if machine_lost_min:
         seeded = []
         for mid, mins in machine_lost_min.items():
@@ -258,8 +257,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
                     pass  # an uncovered machine has no window to delay
         if seeded:
             notes.append(
-                "Downtime loop-back: seeded recorded lost time into machine "
-                "availability — " + ", ".join(sorted(seeded)) + "."
+                "Seeded machine-unavailable time — " + ", ".join(sorted(seeded)) + "."
             )
 
     passthrough: list = []   # (item_code, seq, name) of skipped DISPATCH/OS steps

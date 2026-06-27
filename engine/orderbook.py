@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from .models import Order, SOLine, fmt_date
-from .loaders import normalize_resource_id, parse_resource_candidates, normalize_process_name
+from .loaders import normalize_process_name
 
 PENDING = "Pending"
 RUNNING = "Running"
@@ -165,39 +165,6 @@ def active_so_lines(active_orders: dict, actuals, masters=None) -> list:
             qty=remaining, delivery_date=o.delivery_date, process_qty=pq,
         ))
     return lines
-
-
-def machine_lost_minutes(actuals, masters, planned_setup_min):
-    """Lost machine time recorded in actuals, attributed per machine — for feeding
-    back into Rule 6 as availability delays. Pure (no storage/IO).
-
-    For each actual: ``lost = setup overrun (actual − planned, if positive) + total
-    downtime``. The machine is resolved from ``(item_code, process)`` via the routing
-    using the SAME candidates Rule 6 schedules on. When the process allows alternatives
-    ('CNC3/CNC6'), the loss is attributed to the **preferred** (first) candidate — an
-    approximation, since the Daily-entry Actual has no "which machine ran" field yet
-    (a noted future enhancement). Returns ``(lost_by_machine, unattributed)``;
-    ``unattributed`` lists entries whose process/routing could not be matched
-    (free-text typos, missing routing) so the loss is surfaced, never silently dropped."""
-    lost = defaultdict(float)
-    unattributed = []
-    for a in actuals:
-        loss = max((a.actual_setup_min or 0.0) - planned_setup_min, 0.0) + a.total_downtime_min()
-        if loss <= 0:
-            continue
-        routing = masters.routings.get(a.item_code)
-        proc = None
-        if routing is not None:
-            want = _norm(a.process)
-            proc = next((p for p in routing.processes if _norm(p.name) == want), None)
-        if proc is None:
-            unattributed.append({"so_no": a.so_no, "item_code": a.item_code,
-                                 "process": a.process, "lost": loss})
-            continue
-        cands = parse_resource_candidates(proc.suggested_machine or proc.allotted_machine or proc.name)
-        mid = cands[0] if cands else normalize_resource_id(proc.name)
-        lost[mid] += loss
-    return dict(lost), unattributed
 
 
 def process_progress_rows(active_orders: dict, actuals, masters=None) -> list:
