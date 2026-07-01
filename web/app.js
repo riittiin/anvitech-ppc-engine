@@ -12,6 +12,11 @@ const RULES = {
   rule8: { n: 8, title: "Plan (book → remaining qty)" },
 };
 const ORDER = ["rule1","rule2","rule3","rule4","rule5","rule6","rule7","rule8"];
+// Rules 1–5 (consolidate, sort, smart priority, setup, overlap) still run in the
+// backend — the trace computes them and they feed Rule 6 — but they are HIDDEN from
+// the UI; the user only needs the schedule, capture, and plan. Add a key back here to
+// re-show its tab. (Frontend-only abstraction; no backend/wiring change.)
+const VISIBLE_TABS = ["rule6", "rule7", "rule8"];
 
 let currentTrace = null;
 let currentGantt = null;
@@ -156,7 +161,7 @@ function renderTabs() {
   ot.onclick = () => { activeTab = "orders"; renderTabs(); renderTab("orders"); };
   nav.appendChild(ot);
 
-  ORDER.forEach((key) => {
+  VISIBLE_TABS.forEach((key) => {
     const entry = (currentTrace && currentTrace[key]) || {};
     const meta = RULES[key];
     const el = document.createElement("div");
