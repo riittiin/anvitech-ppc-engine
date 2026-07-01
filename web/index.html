@@ -7,62 +7,79 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header>
-    <div class="header-row">
-      <h1>Anvitech PPC Engine</h1>
-      <div class="session-bar">
-        <span id="status" class="status"></span>
-        <span id="session-info"></span>
-      </div>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark">A</span>
+      <span class="brand-text">
+        <span class="brand-name">Anvitech <span class="brand-accent">PPC</span></span>
+        <span class="brand-sub">Production Planning &amp; Control</span>
+      </span>
+    </div>
+    <div class="session-bar">
+      <span id="status" class="status"></span>
+      <span id="session-info"></span>
     </div>
   </header>
 
-  <section class="controls admin-only">
-    <div class="config">
-      <label>Consolidation window (days)
-        <input id="cfg-window" type="number" value="10" min="0" />
+  <section class="toolbar admin-only">
+    <div class="toolbar-group">
+      <label class="file-field">
+        <span class="file-ico">📁</span>
+        <input id="xlsx-file" type="file" accept=".xlsx" />
       </label>
-      <label>Setup time (min)
-        <input id="cfg-setup" type="number" value="90" min="0" />
-      </label>
-      <label>Overlap % <span class="muted">(always on)</span>
-        <input id="cfg-overlap-pct" type="number" value="50" min="0" max="100" />
-      </label>
-      <label>Priority metric (Rule 3)
-        <select id="cfg-priority-metric">
-          <option value="slack">Least slack</option>
-          <option value="critical_ratio">Critical ratio</option>
-          <option value="process_time">Process time (legacy)</option>
-        </select>
-      </label>
-      <label>Priority window
-        <select id="cfg-priority-window">
-          <option value="">No limit</option>
-          <option value="3">Within 3 days</option>
-          <option value="10">Within 10 days</option>
-          <option value="0">Exact date only</option>
-        </select>
-      </label>
-      <label class="cfg-check">
-        <input id="cfg-operator-logic" type="checkbox" checked />
-        Apply operator &amp; shift logic
-      </label>
-      <label class="cfg-check">
-        <input id="cfg-split-parallel" type="checkbox" checked />
-        Split alternative machines in parallel
-      </label>
+      <button id="upload-btn">Upload &amp; merge</button>
+      <span id="dataset-status" class="status">No orders yet — upload your Excel to add them to the order book.</span>
     </div>
-    <div class="actions">
-      <button id="run-btn" class="primary">▶ Plan</button>
+    <div class="toolbar-group toolbar-actions">
+      <button id="settings-toggle" class="ghost-btn" type="button" aria-expanded="false">⚙ Settings</button>
+      <button id="run-btn" class="primary big">▶ Plan</button>
     </div>
   </section>
 
-  <section class="datasource admin-only">
-    <label class="upload-label">📁 Upload orders (Excel)
-      <input id="xlsx-file" type="file" accept=".xlsx" />
-    </label>
-    <button id="upload-btn">Upload &amp; merge</button>
-    <span id="dataset-status" class="status">No orders yet — upload your Excel to add them to the order book.</span>
+  <section id="settings-panel" class="settings-panel admin-only hidden">
+    <div class="settings-grid">
+      <fieldset class="settings-group">
+        <legend>Scheduling</legend>
+        <label>Consolidation window (days)
+          <input id="cfg-window" type="number" value="10" min="0" />
+        </label>
+        <label>Setup time (min)
+          <input id="cfg-setup" type="number" value="90" min="0" />
+        </label>
+        <label>Overlap % <span class="muted">(always on)</span>
+          <input id="cfg-overlap-pct" type="number" value="50" min="0" max="100" />
+        </label>
+      </fieldset>
+      <fieldset class="settings-group">
+        <legend>Priority (Rule 3)</legend>
+        <label>Metric
+          <select id="cfg-priority-metric">
+            <option value="slack">Least slack</option>
+            <option value="critical_ratio">Critical ratio</option>
+            <option value="process_time">Process time (legacy)</option>
+          </select>
+        </label>
+        <label>Window
+          <select id="cfg-priority-window">
+            <option value="">No limit</option>
+            <option value="3">Within 3 days</option>
+            <option value="10">Within 10 days</option>
+            <option value="0">Exact date only</option>
+          </select>
+        </label>
+      </fieldset>
+      <fieldset class="settings-group">
+        <legend>Options</legend>
+        <label class="cfg-check">
+          <input id="cfg-operator-logic" type="checkbox" checked />
+          Apply operator &amp; shift logic
+        </label>
+        <label class="cfg-check">
+          <input id="cfg-split-parallel" type="checkbox" checked />
+          Split alternative machines in parallel
+        </label>
+      </fieldset>
+    </div>
   </section>
 
   <section id="report-panel" class="report hidden">

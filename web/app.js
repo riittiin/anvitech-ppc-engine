@@ -682,6 +682,14 @@ const _runBtn = $("run-btn");
 if (_runBtn) _runBtn.onclick = () => runPlan(true);   // explicit admin Plan → persist
 const _upBtn = $("upload-btn");
 if (_upBtn) _upBtn.onclick = uploadExcel;
+// Settings disclosure: reveal/hide the advanced planner knobs (hidden by default).
+const _setBtn = $("settings-toggle");
+if (_setBtn) _setBtn.onclick = () => {
+  const panel = $("settings-panel");
+  const open = panel.classList.toggle("hidden") === false;
+  _setBtn.classList.toggle("open", open);
+  _setBtn.setAttribute("aria-expanded", String(open));
+};
 
 // Boot: learn the role, render the shell, then auto-load the current plan (no
 // persist) so the schedule/Gantt/rule tabs populate without a Plan click.
