@@ -15,7 +15,7 @@ const ORDER = ["rule1","rule2","rule3","rule4","rule5","rule6","rule7","rule8"];
 // Only two per-rule tabs are shown: Rule 6 (Allocate to machines — where the user
 // downloads the schedule) and Rule 7 (Capture actuals — the feedback entry). Rules
 // 1–5 and Rule 8 still run in the backend (the trace computes them; Rule 8 = the Plan
-// over the order book, also shown on the Orders tab + triggered by the ▶ Plan button)
+// over the order book, also shown on the Orders tab + triggered by the Plan button)
 // but are HIDDEN from the UI. Add a key back here to re-show its tab. Frontend-only.
 const VISIBLE_TABS = ["rule6", "rule7"];
 
@@ -158,7 +158,7 @@ function renderTabs() {
   // Orders tab first — the order book is the home view.
   const ot = document.createElement("div");
   ot.className = "tab tab-orders" + (activeTab === "orders" ? " active" : "");
-  ot.textContent = "📋 Orders";
+  ot.textContent = "Orders";
   ot.onclick = () => { activeTab = "orders"; renderTabs(); renderTab("orders"); };
   nav.appendChild(ot);
 
@@ -175,7 +175,7 @@ function renderTabs() {
 
   const g = document.createElement("div");
   g.className = "tab tab-gantt" + (activeTab === "gantt" ? " active" : "");
-  g.textContent = "📊 Gantt";
+  g.textContent = "Gantt";
   g.onclick = () => { activeTab = "gantt"; renderTabs(); renderTab("gantt"); };
   nav.appendChild(g);
 }
@@ -278,7 +278,7 @@ async function renderOrders() {
   // Delete controls are admin-only (server enforces this too).
   if (isAdmin) {
     html += '<div class="ord-toolbar">'
-      + '<button id="ord-del-sel">🗑 Delete selected</button> '
+      + '<button id="ord-del-sel">Delete selected</button> '
       + '<button id="ord-del-all" class="danger">Delete ALL data</button>'
       + '<span class="muted"> · deletes permanently from the database (and their actuals)</span></div>';
   }
@@ -412,7 +412,7 @@ function renderGantt() {
     const bars = r.bars.map((b) => {
       const left = b.offset_days * DAYW, w = Math.max(b.duration_days * DAYW, 8);
       const d0 = dateOnly(b.start), d1 = dateOnly(b.end);
-      const op = b.operator ? ` · 👤 ${b.operator}` : "";
+      const op = b.operator ? ` · ${b.operator}` : "";
       const tip = `${b.process} · ${b.machine}${op} · ${d0}${d1 !== d0 ? " → " + d1 : ""} · qty ${b.qty}`;
       return `<div class="g-bar" style="left:${left}px;width:${w}px;background:${b.color}" title="${escapeHtml(tip)}">${escapeHtml(b.process)}</div>`;
     }).join("");
@@ -619,7 +619,7 @@ function actualsOutputHtml(table, ids) {
     const id = ids && ids[i] ? ids[i] : "";
     h += "<tr>";
     h += id
-      ? `<td><button class="rollback-btn danger" data-id="${escapeHtml(id)}" title="Delete this entry and return the order to normal">↺ Rollback</button></td>`
+      ? `<td><button class="rollback-btn danger" data-id="${escapeHtml(id)}" title="Delete this entry and return the order to normal">Rollback</button></td>`
       : "<td></td>";
     row.forEach((cell) => (h += `<td>${cell === null || cell === undefined ? "" : escapeHtml(String(cell))}</td>`));
     h += "</tr>";
@@ -650,7 +650,7 @@ function wireRollback() {
           }];
         }
         if (d.orders) currentOrders = d.orders;
-        setStatus("✓ Entry rolled back." + (d.uncompleted_order ? " Order reopened (it was marked complete)." : "") + " Click ▶ Plan to refresh the schedule.");
+        setStatus("✓ Entry rolled back." + (d.uncompleted_order ? " Order reopened (it was marked complete)." : "") + " Click Plan to refresh the schedule.");
         renderTab("rule7");
       } catch (e) { setStatus("Rollback error: " + e.message); b.disabled = false; }
     };
