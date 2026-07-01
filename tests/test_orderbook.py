@@ -308,3 +308,30 @@ def test_latest_actual_date_and_filter_to_latest():
 def test_latest_actual_helpers_empty():
     assert orderbook.latest_actual_date([]) is None
     assert orderbook.actuals_on_latest_date([]) == []
+
+
+# --------------------------------------------------------------------------- #
+# Rejection accounting: rejects must reduce the cumulative good, so rejected
+# pieces stay to be REDONE (director's spec). Net is summed then clamped >= 0.
+# --------------------------------------------------------------------------- #
+def test_completed_by_process_nets_rejections_across_entries():
+    a1 = Actual(so_no="SO1", item_code="A", entry_date=date(2025, 3, 1),
+                process="CNC", qty_produced=100, qty_rejected=0)
+    a2 = Actual(so_no="SO1", item_code="A", entry_date=date(2025, 3, 2),
+                process="CNC", qty_produced=0, qty_rejected=20)   # rework scrap next day
+    assert orderbook.completed_by_process([a1, a2]) == {("SO1", "CNC"): 80.0}
+
+
+def test_completed_by_process_clamps_net_negative_to_zero():
+    a = Actual(so_no="SO1", item_code="A", entry_date=date(2025, 3, 1),
+               process="CNC", qty_produced=5, qty_rejected=8)
+    assert orderbook.completed_by_process([a]).get(("SO1", "CNC"), 0) == 0.0
+
+
+def test_finished_good_nets_rejections_across_entries():
+    masters = _masters(_routing("A", [("CNC", "M1"), ("PACKING", "MPK1")]))   # gate = PACKING
+    acts = [Actual(so_no="SO1", item_code="A", entry_date=date(2025, 3, 1),
+                   process="PACKING", qty_produced=50),
+            Actual(so_no="SO1", item_code="A", entry_date=date(2025, 3, 2),
+                   process="PACKING", qty_produced=0, qty_rejected=10)]
+    assert orderbook.finished_good_by_so(acts, masters) == {"SO1": 40.0}

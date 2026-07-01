@@ -19,6 +19,7 @@ import io
 import json
 import os
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import date
@@ -29,7 +30,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from engine.config import Config, OVERLAP_SEQUENTIAL, OVERLAP_PERCENT
 from engine.loaders import load_all
@@ -201,8 +202,17 @@ def me(request: Request):
 # Masters: from the latest uploaded workbook, else the bundled test file.
 # Cached in-process, keyed by the workbook's content hash.
 # --------------------------------------------------------------------------- #
-_RUNS: dict = {}
+# Recent plan traces, keyed by run_id, for the /trace/{id} endpoint. Bounded so it
+# can't grow without limit (every save auto-re-plans) and leak memory on the worker.
+_RUNS: "OrderedDict[str, dict]" = OrderedDict()
+_RUNS_MAX = 40
 _MASTERS_CACHE: dict = {"key": None, "masters": None}
+
+
+def _store_run(run_id: str, trace: dict) -> None:
+    _RUNS[run_id] = trace
+    while len(_RUNS) > _RUNS_MAX:
+        _RUNS.popitem(last=False)   # evict the oldest
 
 
 def _store_env_key():
@@ -264,15 +274,17 @@ class ActualRequest(BaseModel):
     shift: str = ""
     item_name: str = ""
     process: str = ""
-    qty_produced: float = 0.0
-    qty_rejected: float = 0.0
-    actual_setup_min: float = 0.0
-    no_power_min: float = 0.0
-    no_operator_min: float = 0.0
-    tool_problem_min: float = 0.0
-    machine_breakdown_min: float = 0.0
-    no_load_min: float = 0.0
-    other_work_min: float = 0.0
+    # Quantities/times can never be negative — a negative would corrupt the
+    # produced/rejected math and the plan. Rejected server-side (422), not just the UI.
+    qty_produced: float = Field(default=0.0, ge=0)
+    qty_rejected: float = Field(default=0.0, ge=0)
+    actual_setup_min: float = Field(default=0.0, ge=0)
+    no_power_min: float = Field(default=0.0, ge=0)
+    no_operator_min: float = Field(default=0.0, ge=0)
+    tool_problem_min: float = Field(default=0.0, ge=0)
+    machine_breakdown_min: float = Field(default=0.0, ge=0)
+    no_load_min: float = Field(default=0.0, ge=0)
+    other_work_min: float = Field(default=0.0, ge=0)
     remarks: str = ""
     mark_complete: bool = False
 
@@ -482,7 +494,7 @@ def _plan(config: Config):
     }
 
     run_id = uuid.uuid4().hex[:8]
-    _RUNS[run_id] = trace
+    _store_run(run_id, trace)
     gantt = build_gantt(plan_run.schedule, plan_run.batches_prioritized, masters,
                         status_by_so=status_by_so)
     orders = to_table(orderbook.order_rows(active, completed, actuals, masters))
@@ -560,11 +572,11 @@ def run(request: Request, req: Optional[RunRequest] = None):
     # admin auto-load on page open, or any user — plans with the saved config
     # (defaults if none saved). So everyone sees one consistent, planner-set plan.
     if role == auth.ADMIN and persist:
-        config = Config.from_dict(sent)
         try:
+            config = Config.from_dict(sent)   # bad date/type raises here
             config.validate()
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=400, detail=f"invalid config: {e}")
         book_store.save_plan_config(json.dumps(config.to_dict()))
     elif book_store.load_plan_config():
         config = _load_plan_config()   # a saved plan exists → everyone sees it
@@ -655,9 +667,13 @@ def items():
 
 @app.post("/actuals")
 def post_actuals(req: ActualRequest):
+    try:
+        entry_date = date.fromisoformat(req.entry_date)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="entry_date must be YYYY-MM-DD")
     actual = Actual(
         so_no=req.so_no, item_code=req.item_code,
-        entry_date=date.fromisoformat(req.entry_date),
+        entry_date=entry_date,
         qty_produced=req.qty_produced, qty_rejected=req.qty_rejected,
         shift=req.shift, item_name=req.item_name, process=req.process,
         actual_setup_min=req.actual_setup_min,

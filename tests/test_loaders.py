@@ -1,8 +1,19 @@
 """Loader tests — expected counts and the known non-blocking data quirks."""
 from engine.loaders import (
-    load_all, normalize_resource_id, parse_date, parse_resource_candidates,
+    load_all, normalize_resource_id, parse_date, parse_resource_candidates, _num,
 )
 from datetime import date
+
+
+def test_num_rejects_non_finite_values():
+    # A cell typed 'nan'/'inf' (or a NaN/inf float) would make occupancy non-finite
+    # and hang the scheduler — the loader must drop it to None.
+    assert _num("nan") is None
+    assert _num("inf") is None
+    assert _num("infinity") is None
+    assert _num(float("nan")) is None
+    assert _num("5.5") == 5.5
+    assert _num(10) == 10.0
 
 
 def test_counts(loaded):

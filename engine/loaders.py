@@ -16,6 +16,7 @@ by ``_find_sheet`` which matches on a normalized name.
 """
 from __future__ import annotations
 
+import math
 import re
 from datetime import date, datetime
 
@@ -116,20 +117,22 @@ def _find_sheet(wb, wanted: str):
 
 
 def _num(value, masters: Masters = None, ref: str = ""):
-    """Coerce a time/number cell to float; log a coercion if it was a string."""
+    """Coerce a time/number cell to a FINITE float; log a coercion if it was a string.
+    Non-finite values (a cell typed 'nan'/'inf', or a NaN/inf float) are rejected as
+    None — a non-finite cycle time would make occupancy NaN/inf and hang the scheduler."""
     if value is None or value == "":
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        return float(value) if math.isfinite(value) else None
     try:
         coerced = float(str(value).strip())
-        if masters is not None:
-            masters.add_report(
-                "TIME_COERCION", ref, f"coerced {value!r} -> {coerced}"
-            )
-        return coerced
     except (ValueError, TypeError):
         return None
+    if not math.isfinite(coerced):
+        return None
+    if masters is not None:
+        masters.add_report("TIME_COERCION", ref, f"coerced {value!r} -> {coerced}")
+    return coerced
 
 
 # --------------------------------------------------------------------------- #
@@ -291,32 +294,33 @@ def _load_routings(wb, masters: Masters):
         masters.add_report("MISSING_SHEET", "Item's process Master", "sheet not found")
         return
     for row in ws.iter_rows(min_row=3, values_only=True):
-        item_code = row[3]
+        item_code = _cell(row, 3)
         if item_code is None or str(item_code).strip() == "":
             continue  # blank / separator row
         code = str(item_code).strip()
         processes = []
         for p in range(MAX_PROCESSES):
             base = ROUTING_FIRST_PROCESS_COL + p * 5
-            name = row[base] if base < len(row) else None
+            name = _cell(row, base)
             if not name or str(name).strip() == "":
                 continue
+            sm, am = _cell(row, base + 3), _cell(row, base + 4)
             processes.append(
                 Process(
                     seq=p + 1,
                     name=str(name).strip(),
-                    cycle_time=_num(row[base + 1], masters, f"{code} P{p+1} cycle"),
-                    total_time=_num(row[base + 2], masters, f"{code} P{p+1} total"),
-                    suggested_machine=(str(row[base + 3]).strip() if row[base + 3] else None),
-                    allotted_machine=(str(row[base + 4]).strip() if row[base + 4] else None),
+                    cycle_time=_num(_cell(row, base + 1), masters, f"{code} P{p+1} cycle"),
+                    total_time=_num(_cell(row, base + 2), masters, f"{code} P{p+1} total"),
+                    suggested_machine=(str(sm).strip() if sm else None),
+                    allotted_machine=(str(am).strip() if am else None),
                 )
             )
         masters.routings[code] = Routing(
             item_code=code,
-            description=str(row[2]).strip() if row[2] else "",
-            customer=str(row[1]).strip() if row[1] else "",
-            rm_type=str(row[6]).strip() if row[6] else "",
-            moq=_num(row[10]),
+            description=str(_cell(row, 2)).strip() if _cell(row, 2) else "",
+            customer=str(_cell(row, 1)).strip() if _cell(row, 1) else "",
+            rm_type=str(_cell(row, 6)).strip() if _cell(row, 6) else "",
+            moq=_num(_cell(row, 10)),
             processes=processes,
         )
 
@@ -328,25 +332,27 @@ def _load_so_lines(wb, masters: Masters):
         return []
     so_lines = []
     for row in ws.iter_rows(min_row=2, values_only=True):
-        item_code = row[19]
+        item_code = _cell(row, 19)
         if item_code is None or str(item_code).strip() == "":
             continue
-        delivery = parse_date(row[23])
+        so_no = _cell(row, 5)
+        delivery = parse_date(_cell(row, 23))
         if delivery is None:
             masters.add_report(
-                "BAD_DELIVERY_DATE", str(row[5]), f"unparseable delivery date {row[23]!r}"
+                "BAD_DELIVERY_DATE", str(so_no), f"unparseable delivery date {_cell(row, 23)!r}"
             )
             continue
+        item_name, customer, remarks = _cell(row, 20), _cell(row, 8), _cell(row, 24)
         so_lines.append(
             SOLine(
-                so_no=str(row[5]).strip() if row[5] else "",
+                so_no=str(so_no).strip() if so_no else "",
                 item_code=str(item_code).strip(),
-                item_name=str(row[20]).strip() if row[20] else "",
-                qty=_num(row[21]) or 0.0,
+                item_name=str(item_name).strip() if item_name else "",
+                qty=_num(_cell(row, 21)) or 0.0,
                 delivery_date=delivery,
-                pending_qty=_num(row[27]),
-                customer=str(row[8]).strip() if row[8] else "",
-                remarks=str(row[24]).strip() if row[24] else "",
+                pending_qty=_num(_cell(row, 27)),
+                customer=str(customer).strip() if customer else "",
+                remarks=str(remarks).strip() if remarks else "",
             )
         )
     return so_lines

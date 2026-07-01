@@ -22,6 +22,7 @@ single two-shift window, identical to the old behaviour.
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 
 
@@ -81,16 +82,22 @@ class WorkClock:
     def advance(self, start: datetime, minutes: float) -> datetime:
         cursor = start
         remaining = float(minutes)
+        # A non-finite duration (NaN/inf) would spin forever — fail loud instead.
+        if not math.isfinite(remaining):
+            raise ValueError(f"advance() got a non-finite duration: {minutes!r}")
         win_start, win_end = self._next_window(cursor)  # raises NoWorkingWindow
         if cursor < win_start:
             cursor = win_start
-        while True:
+        guard = 0
+        while guard < 100000:
+            guard += 1
             avail = (win_end - cursor).total_seconds() / 60.0
             if remaining <= avail + 1e-9:
                 return cursor + timedelta(minutes=remaining)
             remaining -= avail
             win_start, win_end = self._next_window(win_end)
             cursor = win_start
+        raise ValueError("advance() exceeded its window guard — duration too large")
 
     def working_minutes_between(self, a: datetime, b: datetime) -> float:
         """Working minutes in [a, b] — time a machine was available between two

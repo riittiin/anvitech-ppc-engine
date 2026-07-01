@@ -87,6 +87,18 @@ def test_rollback_unknown_id_is_404(client):
     assert client.post("/actuals/rollback", json={"id": "nope"}).status_code == 404
 
 
+def test_negative_quantity_is_rejected(client):
+    r = client.post("/actuals", json={"so_no": SO1, "item_code": ITEM_A,
+                                      "entry_date": "2025-03-10", "qty_produced": -5})
+    assert r.status_code == 422                       # pydantic ge=0 guard
+
+
+def test_malformed_entry_date_is_400(client):
+    r = client.post("/actuals", json={"so_no": SO1, "item_code": ITEM_A,
+                                      "entry_date": "03/10/2025", "qty_produced": 1})
+    assert r.status_code == 400
+
+
 def test_only_latest_date_entries_are_shown_and_rollback_able(client):
     old = {"so_no": SO1, "item_code": ITEM_A, "process": "INSP",
            "entry_date": "2025-03-01", "qty_produced": 1}

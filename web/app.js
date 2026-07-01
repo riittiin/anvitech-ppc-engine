@@ -477,7 +477,10 @@ function actualsFormHtml() {
 function fillSoDropdown() {
   const sel = $("a-so");
   if (!sel) return;
-  const list = (ITEMS && ITEMS.so_nos) ? ITEMS.so_nos : [];
+  // Only ACTIVE (open) orders — you don't punch production for a completed/archived
+  // order (and a stray punch on one would wrongly advance the plan clock).
+  const list = (ITEMS && ITEMS.open_so_nos) ? ITEMS.open_so_nos
+             : (ITEMS && ITEMS.so_nos) ? ITEMS.so_nos : [];
   sel.innerHTML = `<option value="">— select SO No —</option>`
     + list.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
 }

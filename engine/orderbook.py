@@ -43,13 +43,13 @@ def finished_gate(routing) -> str:
 
 
 def produced_good_by_so(actuals) -> dict:
-    """Sum good qty (produced − rejected) per SO across ALL processes — the total
-    output, including work-in-progress. NOT order fulfilment; use
-    ``finished_good_by_so`` for remaining-qty / completion logic."""
+    """Sum net good qty (produced − rejected, summed then clamped ≥ 0) per SO across
+    ALL processes — the total output, including work-in-progress. NOT order
+    fulfilment; use ``finished_good_by_so`` for remaining-qty / completion logic."""
     good = defaultdict(float)
     for a in actuals:
-        good[a.so_no] += a.good_qty()
-    return good
+        good[a.so_no] += (a.qty_produced - a.qty_rejected)
+    return {k: max(v, 0.0) for k, v in good.items()}
 
 
 def finished_good_by_so(actuals, masters) -> dict:
@@ -65,21 +65,25 @@ def finished_good_by_so(actuals, masters) -> dict:
     for a in actuals:
         routing = routings.get(a.item_code)
         if routing is None:
-            good[a.so_no] += a.good_qty()          # no recipe -> nothing to gate on
+            good[a.so_no] += (a.qty_produced - a.qty_rejected)   # no recipe to gate on
             continue
         if _norm(a.process) == _norm(finished_gate(routing)):
-            good[a.so_no] += a.good_qty()
-    return dict(good)
+            good[a.so_no] += (a.qty_produced - a.qty_rejected)
+    return {k: max(v, 0.0) for k, v in good.items()}   # net rejections, clamp ≥ 0
 
 
 def completed_by_process(actuals) -> dict:
     """Good qty completed per (SO number, normalized process) across all entries —
     the per-step progress the floor punches in. Drives 'continue from reality'
-    re-planning: each process is re-scheduled at ordered − its completed qty."""
+    re-planning: each process is re-scheduled at ordered − its completed qty.
+
+    Rejections are netted across ALL entries then clamped at ≥ 0 (NOT per entry) —
+    so 100 produced then 20 rejected later nets 80 done, and the 20 rejects stay to
+    be redone. (Per-entry clamping would have over-counted and shipped shortages.)"""
     done = defaultdict(float)
     for a in actuals:
-        done[(a.so_no, _norm(a.process))] += a.good_qty()
-    return dict(done)
+        done[(a.so_no, _norm(a.process))] += (a.qty_produced - a.qty_rejected)
+    return {k: max(v, 0.0) for k, v in done.items()}
 
 
 def latest_actual_date(actuals):
