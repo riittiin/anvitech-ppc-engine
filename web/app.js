@@ -168,7 +168,7 @@ function renderTabs() {
     const el = document.createElement("div");
     el.className = "tab" + (key === activeTab ? " active" : "")
       + (entry.error ? " error" : "") + (entry.reached === false ? " not-reached" : "");
-    el.textContent = `${meta.n}. ${meta.title}` + (entry.error ? " ⚠" : "");
+    el.textContent = meta.title + (entry.error ? " ⚠" : "");   // no rule-number prefix
     el.onclick = () => { activeTab = key; renderTabs(); renderTab(key); };
     nav.appendChild(el);
   });
