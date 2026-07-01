@@ -417,9 +417,14 @@ function renderGantt() {
       return `<div class="g-bar" style="left:${left}px;width:${w}px;background:${b.color}" title="${escapeHtml(tip)}">${escapeHtml(b.process)}</div>`;
     }).join("");
     const st = r.status || "";
+    // Flag orders whose expected completion falls after the SO delivery date (late).
+    const toDate = (s) => { const p = String(s).split("-"); return p.length === 3 ? new Date(+p[2], +p[1] - 1, +p[0]) : null; };
+    const dd = toDate(r.so_delivery_date), cc = toDate(r.completion);
+    const late = dd && cc && cc > dd;
     return `<tr>
       <td>${escapeHtml(r.item_name)}</td><td>${escapeHtml(r.item_code)}</td>
       <td>${escapeHtml(r.so_no)}</td><td>${r.so_qty}</td><td>${escapeHtml(r.so_delivery_date)}</td>
+      <td class="${late ? "g-late" : ""}" title="${late ? "Finishes after the SO delivery date" : "On time"}">${escapeHtml(r.completion || "")}</td>
       <td>${st ? `<span class="status-pill status-${st.toLowerCase()}">${escapeHtml(st)}</span>` : ""}</td>
       <td class="g-timeline"><div class="g-track" style="width:${axisW}px;background-image:${grid}">${offDays}${bars}</div></td>
     </tr>`;
@@ -431,10 +436,10 @@ function renderGantt() {
     <div class="g-toolbar">Zoom (day width) <button id="g-zoom-out">−</button> <button id="g-zoom-in">+</button>
       <span class="muted">· one column per day; shaded = non-working day</span></div>
     <div class="g-scroll"><table class="g-table"><thead>
-      <tr><th class="g-corner" colspan="6" rowspan="2">Dates →</th>
+      <tr><th class="g-corner" colspan="7" rowspan="2">Dates →</th>
           <th class="g-axis"><div class="g-band" style="width:${axisW}px">${monthCells}</div></th></tr>
       <tr><th class="g-axis"><div class="g-band" style="width:${axisW}px">${dayCells}</div></th></tr>
-      <tr><th>Item name</th><th>Item Code</th><th>SO No</th><th>SO Qty</th><th>SO Del date</th><th>Status</th>
+      <tr><th>Item name</th><th>Item Code</th><th>SO No</th><th>SO Qty</th><th>SO Del date</th><th>Expected completion</th><th>Status</th>
           <th class="g-axis"><div class="g-band" style="width:${axisW}px"></div></th></tr>
     </thead><tbody>${rowsHtml}</tbody></table></div>
     <div class="g-legend"><strong>Machines (bar colour):</strong> ${legend}</div>

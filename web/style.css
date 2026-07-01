@@ -251,6 +251,7 @@ button.danger:hover { opacity: 0.9; }
   white-space: nowrap; vertical-align: middle; background: var(--panel);
 }
 .g-table thead th { position: sticky; top: 0; z-index: 1; }
+.g-table td.g-late { color: var(--bad); font-weight: 600; }   /* completes after SO delivery date */
 .g-corner { text-align: right; color: var(--muted); }
 .g-axis { padding: 0 !important; }
 .g-band { display: flex; }

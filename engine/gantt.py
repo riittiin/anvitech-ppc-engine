@@ -95,6 +95,9 @@ def build_gantt(schedule, batches, masters, status_by_so=None):
                 "end": e.end.strftime("%d-%m-%Y %H:%M"),
                 "qty": e.qty,
             })
+        # Expected completion = when the LAST process of this order finishes (the
+        # latest end across all its bars — not entries[-1], which is sorted by start).
+        completion = max(e.end for e in entries)
         rows.append({
             "batch_id": bid,
             "item_name": (b.item_name if b else ""),
@@ -102,6 +105,7 @@ def build_gantt(schedule, batches, masters, status_by_so=None):
             "so_no": (", ".join(b.source_so_refs) if b else ""),
             "so_qty": (b.qty if b else ""),
             "so_delivery_date": (b.so_delivery_date.strftime("%d-%m-%Y") if b else ""),
+            "completion": completion.strftime("%d-%m-%Y"),
             "status": _row_status(b.source_so_refs if b else [], status_by_so),
             "bars": bars,
         })

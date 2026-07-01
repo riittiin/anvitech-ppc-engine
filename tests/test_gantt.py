@@ -19,9 +19,15 @@ def test_gantt_from_real_run(loaded):
     # One row per consolidated batch, each carrying the SO identity columns.
     assert len(g["rows"]) == len(pr.batches_prioritized)
     r0 = g["rows"][0]
-    for key in ("item_name", "item_code", "so_no", "so_qty", "so_delivery_date", "bars"):
+    for key in ("item_name", "item_code", "so_no", "so_qty", "so_delivery_date", "completion", "bars"):
         assert key in r0
     assert r0["bars"], "first row should have process bars"
+
+    # 'completion' = the date the LAST process of that order finishes (max bar end).
+    import datetime as _dt
+    for row in g["rows"]:
+        latest = max(_dt.datetime.strptime(b["end"], "%d-%m-%Y %H:%M") for b in row["bars"])
+        assert row["completion"] == latest.strftime("%d-%m-%Y")
 
     # Day axis covers the full schedule span.
     assert g["num_days"] >= 1
