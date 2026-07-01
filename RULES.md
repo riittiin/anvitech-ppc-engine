@@ -280,6 +280,12 @@ the **Daily Production Entry** form. Fields captured:
 - **Input:** the schedule (Rule 6) + manual entry via the Daily Production Entry form
 - **Output:** actuals data (durable store) + a per-item-code output/downtime
   rollup shown on the Rule 7 tab
+- **One day at a time:** the "Saved entries" list shows only the **latest punched
+  date's** entries, and **only those can be rolled back** (server-enforced); once a
+  newer date is punched the previous day locks and drops off the list. This keeps the
+  list from growing without bound across 20–50 SOs × processes × days. Every entry
+  stays permanently in the record and in the per-item rollup (which sums **all**
+  entries) — only the editable *list* is scoped to the current day.
 
 ### 🔁 Rule 8 — Re-run MRP and regenerate the plan  *(Loop)*
 After actuals are entered, **re-run MRP/refresh**: regenerate the plan from

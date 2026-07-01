@@ -82,6 +82,20 @@ def completed_by_process(actuals) -> dict:
     return dict(done)
 
 
+def latest_actual_date(actuals):
+    """The most recent date any production was punched, or None if no actuals."""
+    return max((a.entry_date for a in actuals), default=None)
+
+
+def actuals_on_latest_date(actuals) -> list:
+    """Only the entries on the latest punched date. The Capture-Actuals 'Saved
+    entries' list shows just these (and only these are rollback-able), so the list
+    stays one day long instead of growing without bound; earlier days are locked but
+    remain in the record + the per-item rollup."""
+    d = latest_actual_date(actuals)
+    return [a for a in actuals if a.entry_date == d] if d is not None else []
+
+
 def effective_plan_start_date(actuals, config_start_date, calendar):
     """The date the plan should start from.
 
@@ -92,7 +106,7 @@ def effective_plan_start_date(actuals, config_start_date, calendar):
     completed days were 'forgotten' and the remaining work was squeezed too early).
     Never moves earlier than the configured start (an old actual can't drag it back).
     Non-working days (weekly off / holidays) are skipped."""
-    latest = max((a.entry_date for a in actuals), default=None)
+    latest = latest_actual_date(actuals)
     if latest is None:
         return config_start_date
     nxt = latest + timedelta(days=1)

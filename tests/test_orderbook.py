@@ -290,3 +290,21 @@ def test_plan_start_never_goes_before_the_config_date():
     # An old actual must not drag the plan earlier than its configured start.
     assert orderbook.effective_plan_start_date([_act(date(2025, 3, 1))],
                                                date(2025, 3, 10), _CAL) == date(2025, 3, 10)
+
+
+# --------------------------------------------------------------------------- #
+# Capture-actuals list stays small: only the latest punched date's entries are
+# shown / rollback-able; earlier days are locked (kept in the record).
+# --------------------------------------------------------------------------- #
+def test_latest_actual_date_and_filter_to_latest():
+    a1 = Actual(so_no="SO1", item_code="A", entry_date=date(2025, 3, 1), qty_produced=1)
+    a2 = Actual(so_no="SO2", item_code="B", entry_date=date(2025, 3, 2), qty_produced=1)
+    a3 = Actual(so_no="SO3", item_code="C", entry_date=date(2025, 3, 2), qty_produced=1)
+    assert orderbook.latest_actual_date([a1, a2, a3]) == date(2025, 3, 2)
+    latest = orderbook.actuals_on_latest_date([a1, a2, a3])
+    assert {a.so_no for a in latest} == {"SO2", "SO3"}     # only 2 March, not SO1
+
+
+def test_latest_actual_helpers_empty():
+    assert orderbook.latest_actual_date([]) is None
+    assert orderbook.actuals_on_latest_date([]) == []

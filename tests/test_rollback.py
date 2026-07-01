@@ -87,6 +87,25 @@ def test_rollback_unknown_id_is_404(client):
     assert client.post("/actuals/rollback", json={"id": "nope"}).status_code == 404
 
 
+def test_only_latest_date_entries_are_shown_and_rollback_able(client):
+    old = {"so_no": SO1, "item_code": ITEM_A, "process": "INSP",
+           "entry_date": "2025-03-01", "qty_produced": 1}
+    e_old = client.post("/actuals", json=old).json()["actuals_ids"][-1]
+    new = {"so_no": SO1, "item_code": ITEM_A, "process": "INSP",
+           "entry_date": "2025-03-02", "qty_produced": 1}
+    resp = client.post("/actuals", json=new).json()
+    e_new = resp["actuals_ids"][-1]
+
+    # The Saved-entries list shows ONLY the latest day (2 March) — one row.
+    assert resp["actuals_ids"] == [e_new]
+    assert len(resp["actuals"]["rows"]) == 1
+
+    # The older day (1 March) is locked — rollback refused.
+    assert client.post("/actuals/rollback", json={"id": e_old}).status_code == 400
+    # The latest day (2 March) can still be rolled back.
+    assert client.post("/actuals/rollback", json={"id": e_new}).status_code == 200
+
+
 def test_rolled_back_entry_drops_out_of_the_record(client):
     # A rolled-back entry disappears from the actuals record (and so from any plan).
     eid = _post(client, qty_produced=1, machine_breakdown_min=600)

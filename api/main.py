@@ -389,19 +389,27 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
     if actuals is None:
         actuals = book_store.load_actuals()
     total_down = sum(a.total_downtime_min() for a in actuals)
+    # The 'Saved entries' list shows only the latest punched date (kept small +
+    # rollback-able); the rollup + progress still cover ALL recorded actuals.
+    visible = orderbook.actuals_on_latest_date(actuals)
+    latest = orderbook.latest_actual_date(actuals)
     progress = orderbook.process_progress_rows(book_store.load_active_orders(), actuals, masters)
-    tables = [{"title": "Per item code — output & downtime rollup (minutes summed across entries)",
+    tables = [{"title": "Per item code — output & downtime rollup (minutes summed across ALL entries)",
                "table": to_table(r7.aggregate_by_item(actuals))}]
     if progress:
         tables.insert(0, {
             "title": "Per-process progress — pieces cleared at each step (the floor's reality; "
                      "drives the next Plan's per-process schedule)",
             "table": to_table(progress)})
+    list_note = (f"Showing the {fmt_date(latest)} entries (the latest day) — only these can be "
+                 f"rolled back; earlier days are locked and kept in the rollup below."
+                 if latest else "No entries yet.")
     trace["rule7"] = {
         "input": to_table([{"Source": "Daily Production Entry form → durable store"}]),
-        "output": to_table(actuals), "actuals_ids": [a.id for a in actuals], "config": None,
+        "output": to_table(visible), "actuals_ids": [a.id for a in visible], "config": None,
         "notes": [
             f"{len(actuals)} actual(s) on record; total downtime {total_down:g} min.",
+            list_note,
             "Good at the DISPATCH/last-step gate fulfils the order (remaining qty); "
             "good at each earlier step lets the next Plan skip that finished work. "
             "Marking complete on an entry archives that order.",
@@ -663,11 +671,12 @@ def post_actuals(req: ActualRequest):
     completed = False
     if req.mark_complete:
         completed = book_store.complete_order(req.so_no)
+    visible = orderbook.actuals_on_latest_date(all_actuals)   # show only the latest day
     return {
         "saved": len(all_actuals),
         "completed_order": completed,
-        "actuals": to_table(all_actuals),
-        "actuals_ids": [a.id for a in all_actuals],
+        "actuals": to_table(visible),
+        "actuals_ids": [a.id for a in visible],
         "by_item": to_table(r7.aggregate_by_item(all_actuals)),
     }
 
@@ -681,7 +690,19 @@ def rollback_actual(req: RollbackRequest):
     """Roll back ONE saved actual (a mis-punched entry), returning that order to
     normal. If the rolled-back entry was the one that marked the order complete,
     the order is un-archived back to active — unless another remaining entry still
-    marks it complete. Available to both roles (it fixes a capture mistake)."""
+    marks it complete. Available to both roles (it fixes a capture mistake).
+
+    Only the LATEST punched date's entries can be rolled back — earlier days are
+    locked (keeps the list small; a completed day stays committed)."""
+    before = book_store.load_actuals()
+    target = next((a for a in before if a.id == req.id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="entry not found (already rolled back?)")
+    if target.entry_date != orderbook.latest_actual_date(before):
+        raise HTTPException(
+            status_code=400,
+            detail="only the latest day's entries can be rolled back; earlier days are locked",
+        )
     removed = book_store.delete_actual(req.id)
     if removed is None:
         raise HTTPException(status_code=404, detail="entry not found (already rolled back?)")
@@ -696,11 +717,12 @@ def rollback_actual(req: RollbackRequest):
     all_actuals = book_store.load_actuals()
     active = book_store.load_active_orders()
     completed = book_store.load_completed_orders()
+    visible = orderbook.actuals_on_latest_date(all_actuals)   # show only the latest day
     return {
         "removed": True,
         "uncompleted_order": uncompleted,
-        "actuals": to_table(all_actuals),
-        "actuals_ids": [a.id for a in all_actuals],
+        "actuals": to_table(visible),
+        "actuals_ids": [a.id for a in visible],
         "by_item": to_table(r7.aggregate_by_item(all_actuals)),
         "orders": to_table(orderbook.order_rows(active, completed, all_actuals, _current_masters())),
     }
