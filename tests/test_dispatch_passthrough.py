@@ -58,12 +58,14 @@ def test_dispatch_does_not_block_under_operator_logic():
     assert any(e.process_seq == 1 for e in sched)      # planned, not blocked
 
 
-def test_blank_machine_with_cycle_time_is_NOT_passed_over():
-    # Missing-data guard: a blank machine but a real cycle time must still appear
-    # (here it falls back to a process-named station) — not silently dropped.
+def test_blank_machine_with_cycle_time_fails_loud():
+    # Missing-data guard: a blank machine but a real cycle time is NOT scheduled on an
+    # invented station — it fails loud (batch held + flagged) so the gap surfaces.
     procs = [Process(1, "MYSTERY", 30, 30, None, None)]   # blank machine, HAS time
-    sched = rule6_allocate.run([_batch()], config=_cfg(), masters=_masters(procs))
-    assert any(e.process_seq == 1 for e in sched)
+    notes = []
+    sched = rule6_allocate.run([_batch()], config=_cfg(), masters=_masters(procs), notes=notes)
+    assert all(e.process_seq != 1 for e in sched)          # NOT scheduled on a phantom
+    assert any("MYSTERY" in n and "machine" in n.lower() for n in notes)   # flagged loudly
 
 
 def test_inspection_alternatives_split_in_parallel():

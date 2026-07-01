@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 
 from ..models import ScheduleEntry
 from ..worktime import WorkClock, NoWorkingWindow
-from ..loaders import normalize_resource_id, parse_resource_candidates, normalize_process_name
+from ..loaders import parse_resource_candidates, normalize_process_name
 from . import rule4_setup_time as r4
 from . import rule5_overlap_mode as r5
 
@@ -58,13 +58,15 @@ def _clock_factory(masters, config):
 
 
 def _resolve_candidates(proc):
-    """Ordered candidate machine ids for a process (first = preferred).
+    """Ordered REAL machine ids for a process (first = preferred), or [] if the process
+    has no machine assigned.
 
-    A "Suggested M/c" cell may list ALTERNATIVES ('CNC3/CNC6') — the process may run
-    on any of them, and the scheduler picks the earliest-free. Falls back to a generic
-    station named after the process when no machine is given."""
-    raw = proc.suggested_machine or proc.allotted_machine or proc.name
-    return parse_resource_candidates(raw) or [normalize_resource_id(proc.name)]
+    A "Suggested M/c" cell may list ALTERNATIVES ('CNC3/CNC6') — the process may run on
+    any of them, and the scheduler picks the earliest-free. A blank cell returns [] —
+    the step is NOT invented onto a station named after the process. If such a step also
+    has no cycle time it is a DISPATCH/OS passthrough (skipped); if it has a cycle time
+    it is a data gap surfaced as 'needs machine' and never scheduled."""
+    return parse_resource_candidates(proc.suggested_machine or proc.allotted_machine or "")
 
 
 def _qty_for(batch, proc):
@@ -262,6 +264,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
 
     passthrough: list = []   # (item_code, seq, name) of skipped DISPATCH/OS steps
     done_steps: list = []    # (item_code, seq, name) of steps already fully produced
+    needs_machine: list = []  # steps with a cycle time but NO machine — a data gap
 
     guard, guard_cap = 0, total_ops + len(states) + 5
     while guard <= guard_cap:
@@ -288,6 +291,16 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
                 continue
             proc = s["routing"].processes[s["next"]]
             candidates = _resolve_candidates(proc)
+            if not candidates:
+                # No machine assigned but it survived the passthrough skip → it has a
+                # cycle time. Fail loud: block the batch, never invent a phantom station.
+                s["blocked"] = True
+                needs_machine.append({
+                    "SO No": ", ".join(s["batch"].source_so_refs),
+                    "Batch": s["batch"].batch_id, "Item Code": s["batch"].item_code,
+                    "Process": f"{proc.seq}. {proc.name}",
+                })
+                continue
             occ = r4.occupancy_minutes(proc.cycle_time, _qty_for(s["batch"], proc), config)
 
             # Among the allowed machines, pick the one that can start earliest. A
@@ -381,6 +394,13 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             f"Skipped {len(done_steps)} step(s) already fully produced on the floor "
             f"(per-process remaining 0) — work continues from there (e.g. "
             f"{', '.join(names[:5])})."
+        )
+    if needs_machine:
+        names = sorted({r["Process"] for r in needs_machine})
+        notes.append(
+            f"⚠ {len(needs_machine)} step(s) have a cycle time but NO machine assigned — "
+            f"NOT scheduled (their batch is held). Fix the Machine column in the process "
+            f"master (e.g. {', '.join(names[:5])})."
         )
 
     # Decision notes: prove machines ran continuously.

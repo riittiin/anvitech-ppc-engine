@@ -94,6 +94,25 @@ def test_rule6_without_process_qty_uses_full_batch_qty():
     assert all(e.qty == 500 for e in sched)            # unchanged behaviour
 
 
+def test_step_with_no_machine_but_cycle_time_fails_loud_not_phantom():
+    # A step with a BLANK machine but a real cycle time is a data gap — it must NOT be
+    # scheduled on an invented station named after the process; it fails loud instead.
+    procs = [Process(seq=1, name="CNC", cycle_time=1, total_time=None,
+                     suggested_machine="M1", allotted_machine=None),
+             Process(seq=2, name="MYSTERY", cycle_time=5, total_time=None,
+                     suggested_machine=None, allotted_machine=None)]
+    masters = Masters(routings={"X": Routing("X", "", "", "", None, processes=procs)},
+                      machines={"M1": _machine("M1")}, calendar=WorkCalendar())
+    b = Batch(batch_id="B1", item_code="X", item_name="X", qty=10,
+              so_delivery_date=date(2025, 3, 7), source_so_refs=["SO"])
+    notes = []
+    sched = rule6_allocate.run([b], config=Config(plan_start_date=date(2025, 3, 5)),
+                               masters=masters, notes=notes)
+    used = {e.machine for e in sched}
+    assert "MYSTERY" not in used and "M1" in used          # real step runs; gap does NOT
+    assert any("MYSTERY" in n and "machine" in n.lower() for n in notes)   # flagged loudly
+
+
 def _synthetic_masters():
     """Two machines (M, N) and two routings that contend for M.
 
