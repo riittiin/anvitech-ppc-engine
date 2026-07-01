@@ -134,26 +134,33 @@ def _earliest_start_for(plan, machine):
 
 def test_recorded_downtime_does_not_affect_the_schedule(client):
     """Recorded times (downtime, actual setup) are for the record only — the feedback
-    loop is quantity-only, so logging a huge breakdown must NOT move the schedule."""
+    loop is quantity-only. Compared against the SAME punch (same date + qty) with no
+    downtime, adding a huge breakdown must NOT change the schedule. (Both punches
+    advance the plan clock equally — that's a separate, intended effect.)"""
     _upload_test_workbook(client)
     base = client.post("/run", json={"persist": True}).json()
-
     out = base["trace"]["rule6"]["output"]
     ci = {c: i for i, c in enumerate(out["columns"])}
-    first = min(out["rows"], key=lambda r: _parse_dt(r[ci["Start"]]))   # earliest op overall
+    first = min(out["rows"], key=lambda r: _parse_dt(r[ci["Start"]]))
     machine, item, process = first[ci["Machine"]], first[ci["Item Code"]], first[ci["Process"]]
-    base_start = _earliest_start_for(base, machine)
-
-    # Log a huge breakdown + setup overrun against that process (zero qty produced).
     so = next((s for s, it in client.get("/items").json()["so_to_item"].items() if it == item), "X")
-    client.post("/actuals", json={
-        "so_no": so, "item_code": item, "entry_date": "2025-03-07",
-        "process": process, "machine_breakdown_min": 600, "actual_setup_min": 999,
-    })
 
+    def punch(**extra):
+        body = {"so_no": so, "item_code": item, "entry_date": "2025-03-07",
+                "process": process, "qty_produced": 1}
+        body.update(extra)
+        return client.post("/actuals", json=body).json()["actuals_ids"][-1]
+
+    # Same date + qty, NO downtime.
+    eid = punch()
+    no_downtime = _earliest_start_for(client.post("/run", json={"persist": True}).json(), machine)
+    client.post("/actuals/rollback", json={"id": eid})
+
+    # Same date + qty, huge breakdown + setup overrun.
+    punch(machine_breakdown_min=600, actual_setup_min=999)
     after = client.post("/run", json={"persist": True}).json()
-    # Timing is UNCHANGED — recorded time never feeds the plan.
-    assert _earliest_start_for(after, machine) == base_start
-    # And there is no downtime-feedback table anymore.
+    with_downtime = _earliest_start_for(after, machine)
+
+    assert with_downtime == no_downtime                 # downtime made zero difference
     titles = [t["title"] for t in after["trace"]["rule6"].get("tables", [])]
-    assert not any("Downtime fed back" in t for t in titles)
+    assert not any("Downtime fed back" in t for t in titles)   # feature is gone

@@ -20,6 +20,7 @@ import json
 import os
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import List, Optional
@@ -421,6 +422,14 @@ def _plan(config: Config):
     actuals = book_store.load_actuals()
 
     so_lines = orderbook.active_so_lines(active, actuals, masters)   # remaining = ordered − finished good
+
+    # Advance the plan clock past days already worked: once a day's production is
+    # punched, the re-plan starts from the NEXT working day's first shift, not the
+    # original date (a config COPY so the persisted config keeps its base date).
+    eff_start = orderbook.effective_plan_start_date(actuals, config.plan_start_date,
+                                                    masters.calendar)
+    if eff_start != config.plan_start_date:
+        config = replace(config, plan_start_date=eff_start)
 
     # The feedback loop is quantity-only: recorded times (downtime, actual setup) are
     # stored for the record and never affect the schedule.

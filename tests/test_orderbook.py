@@ -1,7 +1,7 @@
 """Order-book pure logic: merge, status derivation, active lines, persistence."""
 from datetime import date
 
-from engine.models import SOLine, Order, Actual, Masters, Routing, Process
+from engine.models import SOLine, Order, Actual, Masters, Routing, Process, WorkCalendar
 from engine import orderbook, book_store
 
 
@@ -252,3 +252,41 @@ def test_process_progress_rows_empty_without_actuals():
 # Recorded downtime / setup time is captured for the record only and never affects
 # the schedule (the feedback loop is quantity-only), so there is no downtime→plan
 # attribution to test here.
+
+
+# --------------------------------------------------------------------------- #
+# effective_plan_start_date: the plan clock advances past days already worked, so a
+# re-plan continues from the next working day's first shift (not the original date).
+# --------------------------------------------------------------------------- #
+_CAL = WorkCalendar()   # Thursday (weekday 3) off, no holidays
+
+
+def _act(entry):
+    return Actual(so_no="SO1", item_code="A", entry_date=entry, qty_produced=1)
+
+
+def test_plan_start_no_actuals_is_the_config_date():
+    assert orderbook.effective_plan_start_date([], date(2025, 3, 1), _CAL) == date(2025, 3, 1)
+
+
+def test_plan_start_advances_to_day_after_latest_actual():
+    # Punch dated 1 Mar (Sat) → plan continues 2 Mar (Sun is a working day; only Thu off).
+    assert orderbook.effective_plan_start_date([_act(date(2025, 3, 1))],
+                                               date(2025, 3, 1), _CAL) == date(2025, 3, 2)
+
+
+def test_plan_start_skips_the_weekly_off_day():
+    # Punch dated 5 Mar (Wed) → next is 6 Mar (Thursday, off) → lands on 7 Mar (Fri).
+    assert orderbook.effective_plan_start_date([_act(date(2025, 3, 5))],
+                                               date(2025, 3, 1), _CAL) == date(2025, 3, 7)
+
+
+def test_plan_start_uses_the_latest_of_many_actuals():
+    acts = [_act(date(2025, 3, 1)), _act(date(2025, 3, 3)), _act(date(2025, 3, 2))]
+    assert orderbook.effective_plan_start_date(acts, date(2025, 3, 1), _CAL) == date(2025, 3, 4)
+
+
+def test_plan_start_never_goes_before_the_config_date():
+    # An old actual must not drag the plan earlier than its configured start.
+    assert orderbook.effective_plan_start_date([_act(date(2025, 3, 1))],
+                                               date(2025, 3, 10), _CAL) == date(2025, 3, 10)

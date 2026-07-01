@@ -295,6 +295,13 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
   punched in per process, continues from there, and refreshes the
   schedule, machine allotment, Gantt and Orders tab everywhere. "Run" and "Rerun MRP"
   are one action; there is no dedicated rule module (`orderbook.active_so_lines` does this).
+- **Plan clock advances past completed days** (`orderbook.effective_plan_start_date`):
+  once a day's production is punched, the re-plan starts from the **next working day's
+  first shift** after the latest actual's date — that day is done and over. So punching
+  1 March's output makes the remaining work start **2 March 08:00**, not restart from
+  1 March. It never moves earlier than the configured `plan_start_date`, and skips
+  weekly-off/holiday days. With no actuals recorded, the plan starts from the configured
+  date exactly as before (golden trace unchanged).
 
 ---
 

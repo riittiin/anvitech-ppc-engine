@@ -8,6 +8,7 @@ in isolation; persistence lives in ``book_store``.
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import timedelta
 
 from .models import Order, SOLine, fmt_date
 from .loaders import normalize_process_name
@@ -79,6 +80,25 @@ def completed_by_process(actuals) -> dict:
     for a in actuals:
         done[(a.so_no, _norm(a.process))] += a.good_qty()
     return dict(done)
+
+
+def effective_plan_start_date(actuals, config_start_date, calendar):
+    """The date the plan should start from.
+
+    Normally the configured start (``config_start_date``). Once production has been
+    punched, it advances to the **next working day after the latest actual's date** —
+    that day's work is done and over, so the re-plan continues from the next day's
+    first shift instead of restarting from the original date (fixing the bug where
+    completed days were 'forgotten' and the remaining work was squeezed too early).
+    Never moves earlier than the configured start (an old actual can't drag it back).
+    Non-working days (weekly off / holidays) are skipped."""
+    latest = max((a.entry_date for a in actuals), default=None)
+    if latest is None:
+        return config_start_date
+    nxt = latest + timedelta(days=1)
+    while not calendar.is_working_day(nxt):
+        nxt += timedelta(days=1)
+    return max(config_start_date, nxt)
 
 
 def so_nos_with_actuals(actuals) -> set:
