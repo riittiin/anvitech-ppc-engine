@@ -32,7 +32,7 @@ const setStatus = (m) => { $("status").textContent = m; };
 const setDatasetStatus = (m) => { $("dataset-status").innerHTML = m; };
 
 function readConfig() {
-  return {
+  const cfgObj = {
     consolidation_window_days: Number($("cfg-window").value),
     setup_time_min: Number($("cfg-setup").value),
     overlap_mode: "overlap",   // sequential mode retired — always overlap
@@ -42,6 +42,16 @@ function readConfig() {
     apply_operator_logic: $("cfg-operator-logic").checked,
     split_parallel: $("cfg-split-parallel").checked,
   };
+  // Plan start date (the day scheduling begins). Sent as ISO; omitted if blank so
+  // the saved/default date is kept. Daily punches still advance the clock past it.
+  const ps = $("cfg-plan-start") && $("cfg-plan-start").value;
+  if (ps) cfgObj.plan_start_date = ps;
+  return cfgObj;
+}
+
+function updatePlanStartEcho() {
+  const e = $("cfg-plan-start-echo"), v = $("cfg-plan-start") && $("cfg-plan-start").value;
+  if (e) e.textContent = v ? "= " + isoToDdmmyyyy(v) : "";
 }
 
 // ---- Session / role ----
@@ -74,6 +84,8 @@ function applyConfig(cfg) {
   if (!cfg) return;
   const setVal = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
   const setSel = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
+  setVal("cfg-plan-start", cfg.plan_start_date);   // ISO YYYY-MM-DD from the server
+  updatePlanStartEcho();
   setVal("cfg-window", cfg.consolidation_window_days);
   setVal("cfg-setup", cfg.setup_time_min);
   setVal("cfg-overlap-pct", cfg.overlap_percent);
@@ -688,6 +700,9 @@ const _runBtn = $("run-btn");
 if (_runBtn) _runBtn.onclick = () => runPlan(true);   // explicit admin Plan → persist
 const _upBtn = $("upload-btn");
 if (_upBtn) _upBtn.onclick = uploadExcel;
+// Plan-start date: keep the DD-MM-YYYY echo in sync as the admin changes it.
+const _psField = $("cfg-plan-start");
+if (_psField) { _psField.addEventListener("change", updatePlanStartEcho); updatePlanStartEcho(); }
 // Settings disclosure: reveal/hide the advanced planner knobs (hidden by default).
 const _setBtn = $("settings-toggle");
 if (_setBtn) _setBtn.onclick = () => {
