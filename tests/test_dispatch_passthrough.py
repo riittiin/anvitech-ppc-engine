@@ -78,7 +78,7 @@ def test_inspection_alternatives_split_in_parallel():
                                     processes=[Process(1, "INSPECTION", 10, 10, "MI1/MI2/MI3", None)])
     masters.operators = [Operator(m, m, machines=[m], shift="First shift") for m in ("MI1", "MI2", "MI3")]
     sched = rule6_allocate.run([_batch(60)],
-                               config=_cfg(apply_operator_logic=True, split_parallel=True),
+                               config=_cfg(apply_operator_logic=True, split_parallel=True, split_min_qty=2),
                                masters=masters)
     used = {e.machine for e in sched}
     assert len(sched) >= 2                              # split happened

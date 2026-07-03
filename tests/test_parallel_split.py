@@ -23,6 +23,9 @@ def _batch(qty):
 
 
 def _cfg(**kw):
+    # These tests exercise the split MECHANISM at small quantities, so pin a low
+    # threshold (the production default is 401 — only batches over 400 split).
+    kw.setdefault("split_min_qty", 2)
     return Config(plan_start_date=date(2025, 3, 5), **kw)
 
 
@@ -56,6 +59,23 @@ def test_no_split_below_min_qty():
     cfg = _cfg(split_parallel=True, split_min_qty=10)
     sched = rule6_allocate.run([_batch(8)], config=cfg, masters=_masters("M/N"))
     assert len(sched) == 1                                   # 8 < 10 → not split
+
+
+def test_split_only_above_400_by_default_else_single_least_queued():
+    # Business rule: parallel split only for batches OVER 400; smaller batches go
+    # entirely to the least-queued alternative. Uses the REAL default threshold.
+    base = dict(plan_start_date=date(2025, 3, 5), split_parallel=True)   # default split_min_qty=401
+    # 400 -> NOT split (400 is not "more than 400").
+    s400 = rule6_allocate.run([_batch(400)], config=Config(**base), masters=_masters("M/N"))
+    assert len(s400) == 1 and s400[0].qty == 400
+    # 401 -> split across the alternatives.
+    s401 = rule6_allocate.run([_batch(401)], config=Config(**base), masters=_masters("M/N"))
+    assert len(s401) == 2 and {e.machine for e in s401} == {"M", "N"}
+    # Below the threshold with one machine busy, the whole batch goes to the
+    # LEAST-queued machine (M is free; N is loaded).
+    s = rule6_allocate.run([_batch(300)], config=Config(**base),
+                           masters=_masters("M/N"), machine_lost_min={"N": 500})
+    assert len(s) == 1 and s[0].machine == "M"
 
 
 def test_no_split_when_second_machine_free_too_late():

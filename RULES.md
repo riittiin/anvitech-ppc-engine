@@ -173,14 +173,20 @@ wins (it's the preferred one), keeping plans deterministic. A listed machine not
 yet in the Machine master is registered as a provisional machine and still used.
 This applies to **any** alternative cell — CNC, inspection (`MI1/MI2/MI3`), etc.
 
-**Parallel split (`split_parallel`, default on in the UI).** When a step lists
-alternatives, the engine can **split the quantity across them to finish the step as
-early as possible** instead of running it all on one machine. Each candidate gets the
-load it can complete by a common target finish time, counted **from when it becomes
-free** — so a machine that's busy now but frees soon still takes a (smaller) share, and
-a faster machine (more available hours) takes more, so both halves finish together. It
-splits **only when that beats the single best machine**. The next process waits for the
-slowest half (split-then-recombine). Same logic for any alternative cell.
+**Parallel split (`split_parallel`, default on in the UI) — LARGE batches only.**
+When a step lists alternatives, the engine **splits the quantity across them to finish
+the step as early as possible** — but **only for batches over 400 pieces**
+(`split_min_qty = 401`). Each candidate gets the load it can complete by a common target
+finish time, counted **from when it becomes free** — so a machine that's busy now but
+frees soon still takes a (smaller) share, and a faster machine takes more, so both halves
+finish together. It splits **only when that beats the single best machine**. The next
+process waits for the slowest half (split-then-recombine). Same logic for any alternative cell.
+
+A batch of **400 or fewer** is **not split** — splitting a small job would waste a second
+90-min setup for little gain. Instead the whole batch runs on the **single least-queued
+(earliest-free) alternative**, so small jobs still load-balance across the alternatives
+(e.g. two 10-piece inspection lots land on MI1 and MI2 by whoever's free), just without
+the extra setup.
 
 **Non-production steps — DISPATCH / OS (passed over).** A process with **no machine
 assigned and no cycle time** is treated as a non-production pass-through and **skipped**
