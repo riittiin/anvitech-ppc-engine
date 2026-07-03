@@ -19,7 +19,7 @@ import io
 import json
 import os
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import date
@@ -259,7 +259,9 @@ class RunRequest(BaseModel):
 
 
 class DeleteRequest(BaseModel):
-    so_nos: List[str] = []
+    # Each order is identified by its (SO number, item code) pair — an SO number is
+    # not unique. Sent as [so_no, item_code] pairs.
+    orders: List[List[str]] = []
     password: str = ""    # admin re-enters their password to confirm a delete
 
 
@@ -461,20 +463,21 @@ def _plan(config: Config):
     # so the count matches the Orders tab; flag the ones with nothing left to make
     # (fully produced but not yet marked complete) — they aren't scheduled, which
     # is why they don't appear in the schedule/Gantt.
-    finished = orderbook.finished_good_by_so(actuals, masters)
-    started = orderbook.so_nos_with_actuals(actuals)
-    status_by_so = {sn: orderbook.derive_status(o, started) for sn, o in active.items()}
+    finished = orderbook.finished_good_by_order(actuals, masters)
+    started = orderbook.orders_with_actuals(actuals)
+    # Status keyed by each order's (SO#, item) pair — an SO# alone isn't unique.
+    status_by_order = {o.key: orderbook.derive_status(o, started) for o in active.values()}
 
     def _r8_row(o):
-        remaining = max(o.ordered_qty - finished.get(o.so_no, 0.0), 0.0)
+        remaining = max(o.ordered_qty - finished.get(o.key, 0.0), 0.0)
         return {"SO No": o.so_no, "Item Code": o.item_code, "Remaining Qty": remaining,
                 "SO Delivery Date": fmt_date(o.delivery_date),
-                "Status": status_by_so[o.so_no],
+                "Status": status_by_order[o.key],
                 "In this plan": "scheduled" if remaining > 0 else "no — fully produced, mark complete"}
 
     # Sort by the real date (not the DD-MM-YYYY display string).
     r8_rows = [_r8_row(o) for o in sorted(active.values(),
-                                          key=lambda o: (o.delivery_date, o.so_no))]
+                                          key=lambda o: (o.delivery_date, o.so_no, o.item_code))]
     scheduled = sum(1 for r in r8_rows if r["Remaining Qty"] > 0)
     trace["rule8"] = {
         "input": to_table([{"Active orders": len(active),
@@ -496,7 +499,7 @@ def _plan(config: Config):
     run_id = uuid.uuid4().hex[:8]
     _store_run(run_id, trace)
     gantt = build_gantt(plan_run.schedule, plan_run.batches_prioritized, masters,
-                        status_by_so=status_by_so)
+                        status_by_order=status_by_order)
     orders = to_table(orderbook.order_rows(active, completed, actuals, masters))
     return {"run_id": run_id, "trace": trace, "report": _report_table(masters),
             "gantt": gantt, "orders": orders, "config": config.to_dict()}
@@ -608,11 +611,12 @@ def orders():
 
 @app.post("/orders/delete")
 def delete_orders(req: DeleteRequest, request: Request):
-    """Permanently delete the given SO numbers (orders + their actuals). Admin only,
-    and guarded by re-entering the admin password."""
+    """Permanently delete the given orders — each a (SO number, item code) pair —
+    plus their actuals. Admin only, guarded by re-entering the admin password."""
     require_admin(request)
     require_password(request, req.password)
-    n = book_store.delete_orders(req.so_nos)
+    pairs = [(o[0], o[1]) for o in req.orders if len(o) == 2]
+    n = book_store.delete_orders(pairs)
     return {"deleted": n}
 
 
@@ -649,19 +653,29 @@ def items():
     masters = _current_masters()
     active = book_store.load_active_orders()
     completed = book_store.load_completed_orders()
-    # Every SO from the orders tab (active + completed) for the SO No dropdown.
+    # Every SO from the orders tab (active + completed), keyed by (SO#, item).
     all_orders = {**completed, **active}   # active wins on any conflict
     items_map = {
         code: {"item_name": routing.description,
                "processes": [p.name for p in routing.processes]}
         for code, routing in masters.routings.items()
     }
+
+    # Two-step picker: pick an SO number, then pick one of THAT SO's item lines.
+    # Since an SO number can carry several items, map each SO# -> its open item
+    # lines (item code + name), so the second dropdown lists exactly those.
+    so_to_items = defaultdict(list)
+    for o in active.values():
+        so_to_items[o.so_no].append({"item_code": o.item_code, "item_name": o.item_name})
+    for so in so_to_items:
+        so_to_items[so].sort(key=lambda it: it["item_code"])
+
     return {
         "items": items_map,
         "shifts": ["1st shift", "2nd shift"],
-        "so_to_item": {o.so_no: o.item_code for o in all_orders.values()},
-        "so_nos": sorted(all_orders.keys()),       # for the dropdown
-        "open_so_nos": sorted(active.keys()),
+        "so_to_items": dict(so_to_items),          # {so_no: [{item_code, item_name}, ...]}
+        "so_nos": sorted({so for so, _ in all_orders}),      # all SO numbers (distinct)
+        "open_so_nos": sorted(so_to_items.keys()),           # SO numbers with an open line
     }
 
 
@@ -686,7 +700,7 @@ def post_actuals(req: ActualRequest):
     all_actuals = r7.run(actual)
     completed = False
     if req.mark_complete:
-        completed = book_store.complete_order(req.so_no)
+        completed = book_store.complete_order(req.so_no, req.item_code)
     visible = orderbook.actuals_on_latest_date(all_actuals)   # show only the latest day
     return {
         "saved": len(all_actuals),
@@ -726,9 +740,9 @@ def rollback_actual(req: RollbackRequest):
     uncompleted = False
     if removed.mark_complete and removed.so_no:
         remaining = book_store.load_actuals()
-        still_complete = any(a.so_no == removed.so_no and a.mark_complete for a in remaining)
-        if not still_complete and removed.so_no in book_store.load_completed_orders():
-            uncompleted = book_store.uncomplete_order(removed.so_no)
+        still_complete = any(a.key == removed.key and a.mark_complete for a in remaining)
+        if not still_complete and removed.key in book_store.load_completed_orders():
+            uncompleted = book_store.uncomplete_order(removed.so_no, removed.item_code)
 
     all_actuals = book_store.load_actuals()
     active = book_store.load_active_orders()

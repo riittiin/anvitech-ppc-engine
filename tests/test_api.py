@@ -89,8 +89,9 @@ def test_delete_selected_and_clear_all(client):
     _upload_test_workbook(client)
     assert len(client.get("/orders").json()["orders"]["rows"]) == 3
 
-    # Delete one order permanently (admin password required to confirm).
-    d = client.post("/orders/delete", json={"so_nos": [SO1], "password": _ADMIN_PWD})
+    # Delete one order permanently (admin password required to confirm). Orders are
+    # identified by the (SO#, item) pair, not the SO# alone.
+    d = client.post("/orders/delete", json={"orders": [[SO1, ITEM_A]], "password": _ADMIN_PWD})
     assert d.status_code == 200 and d.json()["deleted"] == 1
     rows = client.get("/orders").json()["orders"]["rows"]
     assert len(rows) == 2 and not any(SO1 in str(r) for r in rows)
@@ -103,8 +104,8 @@ def test_delete_selected_and_clear_all(client):
 def test_delete_rejected_without_correct_password(client):
     _upload_test_workbook(client)
     # Wrong / missing password → 403, nothing deleted.
-    assert client.post("/orders/delete", json={"so_nos": [SO1], "password": "wrong"}).status_code == 403
-    assert client.post("/orders/delete", json={"so_nos": [SO1]}).status_code == 403
+    assert client.post("/orders/delete", json={"orders": [[SO1, ITEM_A]], "password": "wrong"}).status_code == 403
+    assert client.post("/orders/delete", json={"orders": [[SO1, ITEM_A]]}).status_code == 403
     assert client.post("/orders/clear", json={"password": "wrong"}).status_code == 403
     assert len(client.get("/orders").json()["orders"]["rows"]) == 3   # all still there
 
@@ -143,7 +144,9 @@ def test_recorded_downtime_does_not_affect_the_schedule(client):
     ci = {c: i for i, c in enumerate(out["columns"])}
     first = min(out["rows"], key=lambda r: _parse_dt(r[ci["Start"]]))
     machine, item, process = first[ci["Machine"]], first[ci["Item Code"]], first[ci["Process"]]
-    so = next((s for s, it in client.get("/items").json()["so_to_item"].items() if it == item), "X")
+    so_to_items = client.get("/items").json()["so_to_items"]
+    so = next((s for s, lines in so_to_items.items()
+               if any(l["item_code"] == item for l in lines)), "X")
 
     def punch(**extra):
         body = {"so_no": so, "item_code": item, "entry_date": "2025-03-07",

@@ -55,6 +55,11 @@ class SOLine:
     # every step, today's behaviour). Internal scheduling input — not serialized.
     process_qty: Optional[dict] = None
 
+    @property
+    def key(self):
+        """The unique identity of this line: (SO number, item code)."""
+        return (self.so_no, self.item_code)
+
     def as_row(self):
         return {
             "SO No": self.so_no,
@@ -309,6 +314,11 @@ class Actual:
     def total_downtime_min(self) -> float:
         return sum(getattr(self, f) for f, _ in self.DOWNTIME_FIELDS)
 
+    @property
+    def key(self):
+        """The order this entry belongs to: (SO number, item code)."""
+        return (self.so_no, self.item_code)
+
     def good_qty(self) -> float:
         """Pieces that actually fulfil the order = produced − rejected."""
         return max(self.qty_produced - self.qty_rejected, 0.0)
@@ -384,7 +394,9 @@ class Actual:
 
 @dataclass
 class Order:
-    """One order in the persistent order book, keyed by its unique SO number.
+    """One order in the persistent order book, uniquely identified by the
+    **(SO number, item code)** pair — one SO number may carry several item lines,
+    each tracked as its own order.
 
     Status is DERIVED, never stored: COMPLETE if ``completed`` (set only when the
     user denotes it on a Rule 8 entry), else RUNNING if it has any actuals, else
@@ -397,6 +409,11 @@ class Order:
     delivery_date: date
     completed: bool = False
     first_seen: str = ""
+
+    @property
+    def key(self):
+        """The unique identity of this order: (SO number, item code)."""
+        return (self.so_no, self.item_code)
 
     def to_json(self):
         return {

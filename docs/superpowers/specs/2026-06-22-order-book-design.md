@@ -36,13 +36,16 @@ Rule 8 entry ─▶ recorded vs SO#  ───────┘        (orders · 
 
 ## 3. Data model
 
-**Order** — one per **SO number** (the unique key; in production every order line
-has its own SO number):
+**Order** — one per **(SO number, item code)** pair, which is the unique key. An SO
+number is **not** unique on its own: in production one SO number can carry several
+item lines, and each line is tracked as its own order. Every keyed structure
+(orders hash, good-by-order, orders-with-actuals, per-process progress) uses the
+pair, never the SO number alone.
 
 | field | meaning |
 |---|---|
-| `so_no` | unique key |
-| `item_code`, `item_name` | item |
+| `so_no` + `item_code` | **the unique key (the pair)** — exposed as `Order.key` |
+| `item_name` | item |
 | `ordered_qty` | quantity ordered |
 | `delivery_date` | SO delivery date |
 | `completed` | bool — set ONLY when the user denotes complete via Rule 8 |
@@ -50,14 +53,14 @@ has its own SO number):
 
 **Status is derived** (never hand-managed, to avoid state-sync bugs):
 - `completed == true` → **COMPLETE**
-- else has ≥1 actual for this SO# → **RUNNING**
+- else has ≥1 actual for this **(SO#, item)** → **RUNNING**
 - else → **PENDING**
-- `produced_good` = Σ good qty (produced − rejected) from actuals for the SO#
+- `produced_good` = Σ good qty (produced − rejected) from actuals for the (SO#, item)
 - `remaining` = `ordered_qty − produced_good`
 
 **Persistence (durable storage layer, already built — Upstash in prod / local in dev):**
-- active orders (keyed by SO#), `completed` archive, actuals (exists), latest
-  masters workbook.
+- active orders (keyed by the (SO#, item) pair — encoded as a single composite hash
+  field), `completed` archive, actuals (exists), latest masters workbook.
 
 ## 4. Upload → merge flow
 
@@ -110,7 +113,8 @@ book by each order's remaining qty.
 - Book, masters, and actuals all live in the durable store → survive logout, browser
   close, and host restart/sleep. On login + Plan, yesterday's state loads exactly.
 - **Shared** across all users (one book), replacing the per-tab dataset model.
-- **Concurrency (append-safe):** orders are keyed by SO# (different SO#s never clash);
+- **Concurrency (append-safe):** orders are keyed by the (SO#, item) pair (different
+  orders never clash — including two item lines that share an SO number);
   actuals are appended as individual entries rather than rewriting one blob — so two
   workers saving at once don't overwrite each other. (Single-process local dev is
   unaffected.)
@@ -130,8 +134,9 @@ book by each order's remaining qty.
 | Case | Behavior |
 |---|---|
 | Re-upload same file | all flagged, 0 added |
-| New-orders file | new SO#s → pending; overlaps flagged |
-| Completed SO# reappears | flagged "already completed", not re-added |
+| New-orders file | new (SO#, item) lines → pending; overlaps flagged |
+| Same SO#, different item | two distinct orders (SO# alone is not unique) |
+| Completed (SO#, item) reappears | flagged "already completed", not re-added |
 | Orders-only file (no masters) | existing masters kept |
 | New item in upload | uses uploaded routing; none → NO_ROUTING flag (existing) |
 | Fully produced, not marked complete | stays Running, excluded from scheduling, "ready to complete" hint |
@@ -139,7 +144,7 @@ book by each order's remaining qty.
 | User marks complete with qty remaining | allowed (user's call) with an "X of Y produced — sure?" confirm |
 | Corrupt/unparseable upload | HTTP 400, book untouched |
 | Empty book (fresh) | "No orders — upload to begin" |
-| Two users act at once | orders keyed by SO#; actuals append-safe |
+| Two users act at once | orders keyed by (SO#, item); actuals append-safe |
 
 ## 10. Scope
 

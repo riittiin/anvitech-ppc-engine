@@ -136,7 +136,7 @@ async function uploadExcel() {
     ITEMS = null;  // item metadata may have changed
     let msg = `<strong>${escapeHtml(d.name)}</strong>: ${d.added} new order(s) added`;
     if (d.flagged && d.flagged.length) {
-      const detail = d.flagged.map((f) => `${escapeHtml(f.so_no)} (${escapeHtml(f.reason)})`).join("; ");
+      const detail = d.flagged.map((f) => `${escapeHtml(f.so_no)}/${escapeHtml(f.item_code || "")} (${escapeHtml(f.reason)})`).join("; ");
       msg += ` · <span class="pill-pending">${d.flagged.length} flagged</span>: ${detail}`;
     }
     if (d.masters_updated) msg += " · masters updated";
@@ -303,14 +303,17 @@ async function renderOrders() {
 function orderTableHtml(table, showSelect) {
   const sIdx = table.columns.indexOf("Status");
   const soIdx = table.columns.indexOf("SO No");
+  const itemIdx = table.columns.indexOf("Item Code");
   let h = '<div class="table-wrap"><table><thead><tr>';
   if (showSelect) h += '<th><input type="checkbox" id="ord-all-check" title="select all"></th>';
   table.columns.forEach((c) => (h += `<th>${escapeHtml(c)}</th>`));
   h += "</tr></thead><tbody>";
   table.rows.forEach((row) => {
     const so = soIdx >= 0 ? String(row[soIdx]) : "";
+    const item = itemIdx >= 0 ? String(row[itemIdx]) : "";
     h += "<tr>";
-    if (showSelect) h += `<td><input type="checkbox" class="ordsel" value="${escapeHtml(so)}"></td>`;
+    // An order is the (SO#, item) pair — carry both so delete targets the exact line.
+    if (showSelect) h += `<td><input type="checkbox" class="ordsel" data-so="${escapeHtml(so)}" data-item="${escapeHtml(item)}"></td>`;
     row.forEach((cell, i) => {
       const v = cell === null || cell === undefined ? "" : String(cell);
       if (i === sIdx) h += `<td><span class="status-pill status-${v.toLowerCase()}">${escapeHtml(v)}</span></td>`;
@@ -375,13 +378,13 @@ function wireOrdersDelete() {
   };
   const delSel = $("ord-del-sel");
   if (delSel) delSel.onclick = async () => {
-    const sel = [...document.querySelectorAll(".ordsel:checked")].map((c) => c.value);
+    const sel = [...document.querySelectorAll(".ordsel:checked")].map((c) => [c.dataset.so, c.dataset.item]);
     if (!sel.length) { setStatus("No rows selected to delete."); return; }
     const okd = await deleteWithPassword(
       `Permanently delete ${sel.length} order(s) and their production data?`,
       (pw) => fetch("/orders/delete", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ so_nos: sel, password: pw }),
+        body: JSON.stringify({ orders: sel, password: pw }),
       }));
     if (!okd) { setStatus("Delete cancelled."); return; }
     setStatus(`Deleted ${sel.length} order(s).`);
@@ -474,8 +477,8 @@ function actualsFormHtml() {
   const left =
     fy("Date", `<input id="a-date" type="date" value="${today}" /> <span id="a-date-echo" class="date-echo"></span>`) +
     fy("Shift", `<input id="a-shift" value="1st shift" />`) +
-    fr("SO No <span class=auto>(pick from orders)</span>", `<select id="a-so"><option value="">— select SO No —</option></select>`) +
-    fr("Item Code <span class=auto>(auto from SO No)</span>", `<input id="a-item" value="" placeholder="auto-fills from SO No" readonly />`) +
+    fr("SO No <span class=auto>(step 1 — pick from orders)</span>", `<select id="a-so"><option value="">— select SO No —</option></select>`) +
+    fr("Item Code <span class=auto>(step 2 — pick this SO's item)</span>", `<select id="a-item"><option value="">— select SO No first —</option></select>`) +
     fr("Item Name <span class=auto>(auto)</span>", `<input id="a-itemname" readonly />`) +
     fr("Process <span class=auto>(dropdown)</span>", `<select id="a-process"></select>`);
   const right =
@@ -492,7 +495,7 @@ function actualsFormHtml() {
   return `
     <div class="entry-legend"><span class="lg lg-y">Manual entry</span><span class="lg lg-r">Auto-prompt / dropdown</span></div>
     <div class="entry-grid"><div class="entry-col">${left}</div><div class="entry-col">${right}</div></div>
-    <label class="complete-check"><input id="a-complete" type="checkbox" /> <strong>Mark this order (SO No) complete</strong> — archives it; the engine never auto-completes.</label>
+    <label class="complete-check"><input id="a-complete" type="checkbox" /> <strong>Mark this order (this SO No + item) complete</strong> — archives just this item line; the engine never auto-completes.</label>
     <button id="a-save" class="primary">Save daily entry</button>`;
 }
 
@@ -508,12 +511,23 @@ function fillSoDropdown() {
     + list.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
 }
 
-// Selecting an SO No auto-fills its Item Code (from the order book), then the
-// item name + process dropdown follow.
+// Step 2 of the picker: selecting an SO No fills the Item Code dropdown with THAT
+// SO's open item lines (an SO number can carry several items, so the operator picks
+// which one). A lone item auto-selects; then item name + process dropdown follow.
 function fillItemFromSO() {
   const so = $("a-so").value.trim();
-  const map = ITEMS && ITEMS.so_to_item ? ITEMS.so_to_item : {};
-  $("a-item").value = map[so] || "";
+  const map = ITEMS && ITEMS.so_to_items ? ITEMS.so_to_items : {};
+  const lines = map[so] || [];
+  const sel = $("a-item");
+  if (!lines.length) {
+    sel.innerHTML = `<option value="">— select SO No first —</option>`;
+  } else {
+    const head = lines.length > 1 ? `<option value="">— select item —</option>` : "";
+    sel.innerHTML = head + lines.map((l) =>
+      `<option value="${escapeHtml(l.item_code)}">${escapeHtml(l.item_code)}${l.item_name ? " — " + escapeHtml(l.item_name) : ""}</option>`
+    ).join("");
+    if (lines.length === 1) sel.value = lines[0].item_code;   // only one → pick it
+  }
   fillItemMeta();
 }
 
@@ -557,7 +571,8 @@ async function wireActualsForm() {
   ITEMS = null;                 // refetch so the SO dropdown reflects the latest orders
   await ensureItems();
   fillSoDropdown();
-  $("a-so").addEventListener("change", fillItemFromSO);  // pick SO No -> Item Code (auto)
+  $("a-so").addEventListener("change", fillItemFromSO);   // step 1: pick SO No -> fill Item dropdown
+  $("a-item").addEventListener("change", fillItemMeta);   // step 2: pick Item -> name + processes
   fillItemMeta();
   // The native date picker shows the browser locale (MM/DD/YYYY on US machines);
   // echo the chosen date in DD-MM-YYYY so it always matches the rest of the app.

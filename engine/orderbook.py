@@ -42,20 +42,22 @@ def finished_gate(routing) -> str:
     return routing.processes[-1].name
 
 
-def produced_good_by_so(actuals) -> dict:
-    """Sum net good qty (produced − rejected, summed then clamped ≥ 0) per SO across
-    ALL processes — the total output, including work-in-progress. NOT order
-    fulfilment; use ``finished_good_by_so`` for remaining-qty / completion logic."""
+def produced_good_by_order(actuals) -> dict:
+    """Sum net good qty (produced − rejected, summed then clamped ≥ 0) per ORDER
+    — keyed by the ``(SO number, item code)`` pair — across ALL processes: the
+    total output, including work-in-progress. NOT order fulfilment; use
+    ``finished_good_by_order`` for remaining-qty / completion logic."""
     good = defaultdict(float)
     for a in actuals:
-        good[a.so_no] += (a.qty_produced - a.qty_rejected)
+        good[a.key] += (a.qty_produced - a.qty_rejected)
     return {k: max(v, 0.0) for k, v in good.items()}
 
 
-def finished_good_by_so(actuals, masters) -> dict:
-    """Good qty that actually fulfils each order = good produced at the item's
-    **finished-goods gate** (DISPATCH, or the last step if there is no DISPATCH).
-    Intermediate-process production is ignored here (it is WIP, not finished).
+def finished_good_by_order(actuals, masters) -> dict:
+    """Good qty that actually fulfils each order (keyed by the ``(SO number, item
+    code)`` pair) = good produced at the item's **finished-goods gate** (DISPATCH,
+    or the last step if there is no DISPATCH). Intermediate-process production is
+    ignored here (it is WIP, not finished).
 
     Matching is normalized (case/space-insensitive). An item with no routing has
     no gate to check, so its good qty is counted as-is (best effort — such items
@@ -65,24 +67,26 @@ def finished_good_by_so(actuals, masters) -> dict:
     for a in actuals:
         routing = routings.get(a.item_code)
         if routing is None:
-            good[a.so_no] += (a.qty_produced - a.qty_rejected)   # no recipe to gate on
+            good[a.key] += (a.qty_produced - a.qty_rejected)   # no recipe to gate on
             continue
         if _norm(a.process) == _norm(finished_gate(routing)):
-            good[a.so_no] += (a.qty_produced - a.qty_rejected)
+            good[a.key] += (a.qty_produced - a.qty_rejected)
     return {k: max(v, 0.0) for k, v in good.items()}   # net rejections, clamp ≥ 0
 
 
 def completed_by_process(actuals) -> dict:
-    """Good qty completed per (SO number, normalized process) across all entries —
-    the per-step progress the floor punches in. Drives 'continue from reality'
-    re-planning: each process is re-scheduled at ordered − its completed qty.
+    """Good qty completed per (SO number, item code, normalized process) across all
+    entries — the per-step progress the floor punches in. Keyed by the full order
+    pair *plus* process, so two items sharing an SO number (and even a process name)
+    never bleed into each other. Drives 'continue from reality' re-planning: each
+    process is re-scheduled at ordered − its completed qty.
 
     Rejections are netted across ALL entries then clamped at ≥ 0 (NOT per entry) —
     so 100 produced then 20 rejected later nets 80 done, and the 20 rejects stay to
     be redone. (Per-entry clamping would have over-counted and shipped shortages.)"""
     done = defaultdict(float)
     for a in actuals:
-        done[(a.so_no, _norm(a.process))] += (a.qty_produced - a.qty_rejected)
+        done[(a.so_no, a.item_code, _norm(a.process))] += (a.qty_produced - a.qty_rejected)
     return {k: max(v, 0.0) for k, v in done.items()}
 
 
@@ -119,52 +123,60 @@ def effective_plan_start_date(actuals, config_start_date, calendar):
     return max(config_start_date, nxt)
 
 
-def so_nos_with_actuals(actuals) -> set:
-    """SO numbers that have at least one recorded actual — i.e. work has started.
-    Drives the Running status independently of how much is *finished*."""
-    return {a.so_no for a in actuals}
+def orders_with_actuals(actuals) -> set:
+    """Orders — ``(SO number, item code)`` pairs — that have at least one recorded
+    actual, i.e. work has started. Drives the Running status independently of how
+    much is *finished*. Keyed by the pair so one item line starting does not mark a
+    sibling item line (same SO#) as started."""
+    return {a.key for a in actuals}
 
 
-def derive_status(order: Order, so_with_actuals: set) -> str:
+def derive_status(order: Order, started_orders: set) -> str:
     """Status is derived, never stored (except the explicit ``completed`` flag).
     An order is Running once it has ANY actual (work started) — even if every
-    piece is still mid-routing — and only Complete when the user ticks it."""
+    piece is still mid-routing — and only Complete when the user ticks it.
+    ``started_orders`` is a set of ``(SO number, item code)`` pairs."""
     if order.completed:
         return COMPLETE
-    return RUNNING if order.so_no in so_with_actuals else PENDING
+    return RUNNING if order.key in started_orders else PENDING
 
 
 def merge_upload(so_lines, active_orders: dict, completed_orders: dict, first_seen: str = ""):
-    """Merge uploaded SO lines into the book by SO number. Pure — returns
-    ``(new_orders, flags)`` and does not mutate the inputs.
+    """Merge uploaded SO lines into the book. Pure — returns ``(new_orders, flags)``
+    and does not mutate the inputs.
 
-    * unseen SO# -> a new Pending order
-    * SO# already active -> flagged (changed vs identical), original untouched
-    * SO# in the completed archive -> flagged "already completed", not re-added
+    Identity is the **(SO number, item code)** pair, never the SO number alone: one
+    SO number can carry several item lines and each is its own order. So SO1/A and
+    SO1/B are two distinct orders, and only an exact (SO#, item) repeat is a duplicate.
+
+    * unseen (SO#, item) -> a new Pending order
+    * (SO#, item) already active -> flagged (changed vs identical), original untouched
+    * (SO#, item) in the completed archive -> flagged "already completed", not re-added
+
+    Each flag carries both ``so_no`` and ``item_code`` so the report is unambiguous.
     """
     new_orders, flags = [], []
     seen_in_upload = set()
     for so in so_lines:
-        sn = so.so_no
-        if sn in seen_in_upload:
-            flags.append({"so_no": sn, "reason": "duplicate SO# within this upload"})
+        key = so.key                       # (so_no, item_code)
+        base = {"so_no": so.so_no, "item_code": so.item_code}
+        if key in seen_in_upload:
+            flags.append({**base, "reason": "duplicate (SO#, item) within this upload"})
             continue
-        if sn in active_orders:
-            ex = active_orders[sn]
-            changed = (ex.ordered_qty != so.qty
-                       or ex.delivery_date != so.delivery_date
-                       or ex.item_code != so.item_code)
+        if key in active_orders:
+            ex = active_orders[key]
+            changed = (ex.ordered_qty != so.qty or ex.delivery_date != so.delivery_date)
             flags.append({
-                "so_no": sn,
+                **base,
                 "reason": "changed — original kept (revisions deferred)" if changed
                           else "duplicate — already in the book",
             })
-        elif sn in completed_orders:
-            flags.append({"so_no": sn, "reason": "already completed — not re-added"})
+        elif key in completed_orders:
+            flags.append({**base, "reason": "already completed — not re-added"})
         else:
-            seen_in_upload.add(sn)
+            seen_in_upload.add(key)
             new_orders.append(Order(
-                so_no=sn, item_code=so.item_code, item_name=so.item_name,
+                so_no=so.so_no, item_code=so.item_code, item_name=so.item_name,
                 ordered_qty=so.qty, delivery_date=so.delivery_date,
                 completed=False, first_seen=first_seen,
             ))
@@ -182,21 +194,21 @@ def active_so_lines(active_orders: dict, actuals, masters=None) -> list:
       to today.
 
     Orders with nothing left to finish (remaining <= 0) are skipped."""
-    good = finished_good_by_so(actuals, masters)
+    good = finished_good_by_order(actuals, masters)
     done = completed_by_process(actuals)
     routings = masters.routings if masters else {}
-    started = so_nos_with_actuals(actuals)
+    started = orders_with_actuals(actuals)
     lines = []
     for o in active_orders.values():
         if o.completed:
             continue
-        remaining = max(o.ordered_qty - good.get(o.so_no, 0.0), 0.0)
+        remaining = max(o.ordered_qty - good.get(o.key, 0.0), 0.0)
         if remaining <= 0:
             continue
         pq = None
         routing = routings.get(o.item_code)
-        if o.so_no in started and routing is not None:
-            pq = {_norm(p.name): max(o.ordered_qty - done.get((o.so_no, _norm(p.name)), 0.0), 0.0)
+        if o.key in started and routing is not None:
+            pq = {_norm(p.name): max(o.ordered_qty - done.get((o.so_no, o.item_code, _norm(p.name)), 0.0), 0.0)
                   for p in routing.processes}
         lines.append(SOLine(
             so_no=o.so_no, item_code=o.item_code, item_name=o.item_name,
@@ -212,16 +224,16 @@ def process_progress_rows(active_orders: dict, actuals, masters=None) -> list:
     correct per-step WIP view — not a sum of good across steps, which double-counts."""
     done = completed_by_process(actuals)
     routings = masters.routings if masters else {}
-    started = so_nos_with_actuals(actuals)
+    started = orders_with_actuals(actuals)
     rows = []
     for o in active_orders.values():
-        if o.completed or o.so_no not in started:
+        if o.completed or o.key not in started:
             continue
         routing = routings.get(o.item_code)
         if routing is None:
             continue
         for p in routing.processes:
-            c = done.get((o.so_no, _norm(p.name)), 0.0)
+            c = done.get((o.so_no, o.item_code, _norm(p.name)), 0.0)
             rows.append({
                 "SO No": o.so_no,
                 "Item Code": o.item_code,
@@ -240,11 +252,11 @@ def order_rows(active_orders: dict, completed_orders: dict, actuals, masters=Non
     (DISPATCH / last step). Per-process WIP is NOT shown here — it can't be derived
     by summing good across processes (the same pieces flow through every step, so
     that double-counts); proper per-process progress is tracked separately."""
-    finished = finished_good_by_so(actuals, masters)
-    started = so_nos_with_actuals(actuals)
+    finished = finished_good_by_order(actuals, masters)
+    started = orders_with_actuals(actuals)
 
     def row(o: Order, status: str):
-        done = finished.get(o.so_no, 0.0)
+        done = finished.get(o.key, 0.0)
         remaining = max(o.ordered_qty - done, 0.0)
         return {
             "SO No": o.so_no,
@@ -262,5 +274,5 @@ def order_rows(active_orders: dict, completed_orders: dict, actuals, masters=Non
     # wouldn't sort chronologically). Active first, then completed.
     items = ([(o, derive_status(o, started)) for o in active_orders.values()]
              + [(o, COMPLETE) for o in completed_orders.values()])
-    items.sort(key=lambda t: (t[1] == COMPLETE, t[0].delivery_date, t[0].so_no))
+    items.sort(key=lambda t: (t[1] == COMPLETE, t[0].delivery_date, t[0].so_no, t[0].item_code))
     return [row(o, status) for o, status in items]

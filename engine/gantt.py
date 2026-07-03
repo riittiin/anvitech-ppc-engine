@@ -22,16 +22,20 @@ def _empty():
             "rows": [], "machine_colors": {}}
 
 
-def _row_status(source_so_refs, status_by_so):
-    if not status_by_so:
+def _row_status(source_so_refs, item_code, status_by_order):
+    """Status for one Gantt row. A batch consolidates several SO lines that all
+    share this ``item_code`` (Rule 1 groups by item), so each order is looked up by
+    the ``(SO number, item code)`` pair — not the SO number alone, which isn't unique."""
+    if not status_by_order:
         return ""
-    statuses = {status_by_so.get(sn) for sn in source_so_refs if status_by_so.get(sn)}
+    statuses = {status_by_order.get((sn, item_code))
+                for sn in source_so_refs if status_by_order.get((sn, item_code))}
     if len(statuses) == 1:
         return next(iter(statuses))
     return "Mixed" if statuses else ""
 
 
-def build_gantt(schedule, batches, masters, status_by_so=None):
+def build_gantt(schedule, batches, masters, status_by_order=None):
     if not schedule:
         return _empty()
 
@@ -106,7 +110,9 @@ def build_gantt(schedule, batches, masters, status_by_so=None):
             "so_qty": (b.qty if b else ""),
             "so_delivery_date": (b.so_delivery_date.strftime("%d-%m-%Y") if b else ""),
             "completion": completion.strftime("%d-%m-%Y"),
-            "status": _row_status(b.source_so_refs if b else [], status_by_so),
+            "status": _row_status(b.source_so_refs if b else [],
+                                  (b.item_code if b else entries[0].item_code),
+                                  status_by_order),
             "bars": bars,
         })
 

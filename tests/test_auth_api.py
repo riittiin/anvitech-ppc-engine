@@ -93,7 +93,7 @@ def test_static_shell_requires_session():
 def test_user_is_refused_on_admin_endpoints():
     user = _user()
     assert _upload(user).status_code == 403
-    assert user.post("/orders/delete", json={"so_nos": ["X"]}).status_code == 403
+    assert user.post("/orders/delete", json={"orders": [["X", "A"]]}).status_code == 403
     assert user.post("/orders/clear", json={}).status_code == 403
 
 
@@ -102,7 +102,7 @@ def test_admin_allowed_on_admin_endpoints():
     assert _upload(admin).status_code == 200
     # Deletes also require the admin to re-enter their password.
     assert admin.post("/orders/delete",
-                      json={"so_nos": ["nope"], "password": _ADMIN_PWD}).status_code == 200
+                      json={"orders": [["nope", "A"]], "password": _ADMIN_PWD}).status_code == 200
     assert admin.post("/orders/clear", json={"password": _ADMIN_PWD}).status_code == 200
 
 

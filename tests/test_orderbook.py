@@ -1,4 +1,10 @@
-"""Order-book pure logic: merge, status derivation, active lines, persistence."""
+"""Order-book pure logic: merge, status derivation, active lines, persistence.
+
+Identity note: an order is uniquely the pair **(SO number, item code)** — one SO
+number can carry several item lines, each tracked as its own order. Every keyed
+structure here (good-by-order, orders-with-actuals, per-process progress, the
+storage hash) is keyed by that pair, never by SO number alone.
+"""
 from datetime import date
 
 from engine.models import SOLine, Order, Actual, Masters, Routing, Process, WorkCalendar
@@ -18,46 +24,78 @@ D = date(2025, 8, 1)
 
 
 def test_merge_adds_unseen_and_flags_known():
-    active = {"SO1": _order("SO1", "A", 10, D)}
-    completed = {"SO9": _order("SO9", "Z", 5, D, completed=True)}
+    active = {("SO1", "A"): _order("SO1", "A", 10, D)}
+    completed = {("SO9", "Z"): _order("SO9", "Z", 5, D, completed=True)}
     lines = [_so("SO1", "A", 10, D), _so("SO2", "B", 20, D), _so("SO9", "Z", 5, D)]
 
     new, flags = orderbook.merge_upload(lines, active, completed)
-    assert [o.so_no for o in new] == ["SO2"]                 # only the unseen one added
-    reasons = {f["so_no"]: f["reason"] for f in flags}
-    assert "duplicate" in reasons["SO1"]
-    assert "already completed" in reasons["SO9"]
+    assert [(o.so_no, o.item_code) for o in new] == [("SO2", "B")]   # only the unseen one
+    reasons = {(f["so_no"], f["item_code"]): f["reason"] for f in flags}
+    assert "duplicate" in reasons[("SO1", "A")]
+    assert "already completed" in reasons[("SO9", "Z")]
+
+
+def test_same_so_different_item_are_two_distinct_orders():
+    """The whole point of the redesign: SO No is NOT unique. Two lines that share
+    an SO number but carry different item codes are two separate orders."""
+    active = {("SO1", "A"): _order("SO1", "A", 10, D)}     # SO1/A already in the book
+    # Upload SO1 again — but item B. Same SO#, different item => a brand-new order.
+    new, flags = orderbook.merge_upload([_so("SO1", "B", 20, D)], active, {})
+    assert [(o.so_no, o.item_code) for o in new] == [("SO1", "B")]   # added, not flagged
+    assert flags == []
+    # And SO1/A on the SAME upload is still the duplicate it always was.
+    new2, flags2 = orderbook.merge_upload([_so("SO1", "A", 10, D)], active, {})
+    assert new2 == [] and "duplicate" in flags2[0]["reason"]
 
 
 def test_merge_flags_changed_order_without_modifying():
-    active = {"SO1": _order("SO1", "A", 10, D)}
+    active = {("SO1", "A"): _order("SO1", "A", 10, D)}
     new, flags = orderbook.merge_upload([_so("SO1", "A", 99, D)], active, {})
     assert new == []
     assert "changed" in flags[0]["reason"]
-    assert active["SO1"].ordered_qty == 10                   # original untouched
+    assert active[("SO1", "A")].ordered_qty == 10            # original untouched
+
+
+def test_merge_dedupes_within_upload_by_pair():
+    # Same (SO, item) twice in one file => second flagged; same SO diff item => both kept.
+    lines = [_so("SO1", "A", 10, D), _so("SO1", "A", 10, D), _so("SO1", "B", 5, D)]
+    new, flags = orderbook.merge_upload(lines, {}, {})
+    assert [(o.so_no, o.item_code) for o in new] == [("SO1", "A"), ("SO1", "B")]
+    assert any("duplicate" in f["reason"] for f in flags)
 
 
 def test_status_derivation():
     o = _order("SO1", "A", 10, D)
     assert orderbook.derive_status(o, set()) == orderbook.PENDING
-    assert orderbook.derive_status(o, {"SO1"}) == orderbook.RUNNING       # has an actual
+    assert orderbook.derive_status(o, {("SO1", "A")}) == orderbook.RUNNING   # has an actual
+    # A different item on the same SO has NOT started just because SO1/A did.
+    assert orderbook.derive_status(_order("SO1", "B", 3, D), {("SO1", "A")}) == orderbook.PENDING
     o.completed = True
-    assert orderbook.derive_status(o, {"SO1"}) == orderbook.COMPLETE
+    assert orderbook.derive_status(o, {("SO1", "A")}) == orderbook.COMPLETE
 
 
 def test_active_so_lines_use_remaining_and_skip_done():
     active = {
-        "SO1": _order("SO1", "A", 10, D),      # produced 4 -> remaining 6
-        "SO2": _order("SO2", "B", 5, D),       # produced 5 -> remaining 0 -> skipped
-        "SO3": _order("SO3", "C", 8, D, completed=True),   # completed -> skipped
+        ("SO1", "A"): _order("SO1", "A", 10, D),      # produced 4 -> remaining 6
+        ("SO2", "B"): _order("SO2", "B", 5, D),       # produced 5 -> remaining 0 -> skipped
+        ("SO3", "C"): _order("SO3", "C", 8, D, completed=True),   # completed -> skipped
     }
     actuals = [
         Actual("SO1", "A", D, qty_produced=4),
         Actual("SO2", "B", D, qty_produced=5),
     ]
     lines = orderbook.active_so_lines(active, actuals)
-    by = {l.so_no: l.qty for l in lines}
-    assert by == {"SO1": 6}                                  # only SO1, at remaining 6
+    by = {(l.so_no, l.item_code): l.qty for l in lines}
+    assert by == {("SO1", "A"): 6}                           # only SO1/A, at remaining 6
+
+
+def test_active_so_lines_isolate_progress_per_item_on_same_so():
+    """Punching SO1/A must not shrink SO1/B (same SO#, different item)."""
+    active = {("SO1", "A"): _order("SO1", "A", 10, D),
+              ("SO1", "B"): _order("SO1", "B", 10, D)}
+    actuals = [Actual("SO1", "A", D, qty_produced=4)]        # only A produced
+    by = {(l.so_no, l.item_code): l.qty for l in orderbook.active_so_lines(active, actuals)}
+    assert by == {("SO1", "A"): 6, ("SO1", "B"): 10}         # B untouched
 
 
 def test_delete_orders_removes_order_and_its_actuals():
@@ -65,11 +103,22 @@ def test_delete_orders_removes_order_and_its_actuals():
     book_store.append_actual(Actual("SO1", "A", D, qty_produced=4))
     book_store.append_actual(Actual("SO2", "B", D, qty_produced=2))
 
-    book_store.delete_orders(["SO1"])
-    assert "SO1" not in book_store.load_active_orders()
-    assert "SO2" in book_store.load_active_orders()
+    book_store.delete_orders([("SO1", "A")])
+    assert ("SO1", "A") not in book_store.load_active_orders()
+    assert ("SO2", "B") in book_store.load_active_orders()
     remaining = book_store.load_actuals()
-    assert [a.so_no for a in remaining] == ["SO2"]   # SO1's actual purged
+    assert [a.so_no for a in remaining] == ["SO2"]   # SO1/A's actual purged
+
+
+def test_delete_one_item_line_keeps_the_other_on_same_so():
+    book_store.add_orders([_order("SO1", "A", 10, D), _order("SO1", "B", 7, D)])
+    book_store.append_actual(Actual("SO1", "A", D, qty_produced=4))
+    book_store.append_actual(Actual("SO1", "B", D, qty_produced=3))
+
+    book_store.delete_orders([("SO1", "A")])                 # delete only the A line
+    active = book_store.load_active_orders()
+    assert ("SO1", "A") not in active and ("SO1", "B") in active
+    assert [(a.so_no, a.item_code) for a in book_store.load_actuals()] == [("SO1", "B")]
 
 
 def test_delete_all_wipes_orders_and_actuals():
@@ -86,12 +135,21 @@ def test_persistence_round_trip_and_complete():
     book_store.append_actual(Actual("SO1", "A", D, qty_produced=4))
 
     active = book_store.load_active_orders()
-    assert active["SO1"].ordered_qty == 10
+    assert active[("SO1", "A")].ordered_qty == 10
     assert len(book_store.load_actuals()) == 1
 
-    assert book_store.complete_order("SO1") is True
-    assert "SO1" not in book_store.load_active_orders()
-    assert book_store.load_completed_orders()["SO1"].completed is True
+    assert book_store.complete_order("SO1", "A") is True
+    assert ("SO1", "A") not in book_store.load_active_orders()
+    assert book_store.load_completed_orders()[("SO1", "A")].completed is True
+
+
+def test_complete_and_uncomplete_target_one_item_line():
+    book_store.add_orders([_order("SO1", "A", 10, D), _order("SO1", "B", 7, D)])
+    assert book_store.complete_order("SO1", "A") is True
+    active = book_store.load_active_orders()
+    assert ("SO1", "A") not in active and ("SO1", "B") in active   # only A archived
+    assert book_store.uncomplete_order("SO1", "A") is True
+    assert ("SO1", "A") in book_store.load_active_orders()
 
 
 # --------------------------------------------------------------------------- #
@@ -141,32 +199,32 @@ def test_finished_good_ignores_intermediate_process():
     masters = _masters(_DISPATCH_ROUTING)
     # 5 good produced at the FIRST process -> WIP, fulfils nothing.
     wip = _actual("A", "CNC FIRST SIDE", qty_produced=5)
-    assert orderbook.finished_good_by_so([wip], masters) == {}
+    assert orderbook.finished_good_by_order([wip], masters) == {}
 
 
 def test_finished_good_counts_at_dispatch():
     masters = _masters(_DISPATCH_ROUTING)
     done = _actual("A", "DISPATCH", qty_produced=5)
-    assert orderbook.finished_good_by_so([done], masters) == {"SO1": 5.0}
+    assert orderbook.finished_good_by_order([done], masters) == {("SO1", "A"): 5.0}
 
 
 def test_finished_good_counts_at_packing_when_no_dispatch():
     masters = _masters(_PACKING_ROUTING)
     done = Actual(so_no="SO2", item_code="B", entry_date=D, process="PACKING",
                   qty_produced=8, qty_rejected=1)        # good = 7
-    assert orderbook.finished_good_by_so([done], masters) == {"SO2": 7.0}
+    assert orderbook.finished_good_by_order([done], masters) == {("SO2", "B"): 7.0}
 
 
 def test_finished_gate_match_is_normalized():
     masters = _masters(_DISPATCH_ROUTING)
     # operator typed it lower-case with stray spaces — must still match.
     done = _actual("A", "  dispatch ", qty_produced=3)
-    assert orderbook.finished_good_by_so([done], masters) == {"SO1": 3.0}
+    assert orderbook.finished_good_by_order([done], masters) == {("SO1", "A"): 3.0}
 
 
 def test_active_so_lines_ignore_wip_keep_full_qty():
     """The user's bug: 5 good at the first process must NOT shrink the order."""
-    active = {"SO1": _order("SO1", "A", 500, D)}
+    active = {("SO1", "A"): _order("SO1", "A", 500, D)}
     masters = _masters(_DISPATCH_ROUTING)
     wip = _actual("A", "CNC FIRST SIDE", qty_produced=5)
     lines = orderbook.active_so_lines(active, [wip], masters)
@@ -174,7 +232,7 @@ def test_active_so_lines_ignore_wip_keep_full_qty():
 
 
 def test_active_so_lines_reduce_only_on_dispatch():
-    active = {"SO1": _order("SO1", "A", 500, D)}
+    active = {("SO1", "A"): _order("SO1", "A", 500, D)}
     masters = _masters(_DISPATCH_ROUTING)
     done = _actual("A", "DISPATCH", qty_produced=5)
     lines = orderbook.active_so_lines(active, [done], masters)
@@ -184,7 +242,7 @@ def test_active_so_lines_reduce_only_on_dispatch():
 def test_status_running_on_any_actual_even_if_only_wip():
     """Work has started (first process) -> Running, even though nothing is finished."""
     o = _order("SO1", "A", 500, D)
-    with_actuals = orderbook.so_nos_with_actuals(
+    with_actuals = orderbook.orders_with_actuals(
         [_actual("A", "CNC FIRST SIDE", qty_produced=5)]
     )
     assert orderbook.derive_status(o, with_actuals) == orderbook.RUNNING
@@ -194,7 +252,7 @@ def test_status_running_on_any_actual_even_if_only_wip():
 
 def test_status_pending_with_no_actuals():
     o = _order("SO1", "A", 500, D)
-    assert orderbook.derive_status(o, orderbook.so_nos_with_actuals([])) == orderbook.PENDING
+    assert orderbook.derive_status(o, orderbook.orders_with_actuals([])) == orderbook.PENDING
 
 
 # --------------------------------------------------------------------------- #
@@ -206,12 +264,21 @@ def test_completed_by_process_sums_good_per_step():
             _actual("A", "cnc first side ", qty_produced=10),   # normalized -> same step
             _actual("A", "WASHING", qty_produced=20, qty_rejected=2)]
     cbp = orderbook.completed_by_process(acts)
-    assert cbp[("SO1", "CNC FIRST SIDE")] == 60.0
-    assert cbp[("SO1", "WASHING")] == 18.0                       # good = 20 − 2
+    assert cbp[("SO1", "A", "CNC FIRST SIDE")] == 60.0
+    assert cbp[("SO1", "A", "WASHING")] == 18.0                 # good = 20 − 2
+
+
+def test_completed_by_process_separates_same_process_across_items():
+    """Same SO#, same process name, two different items — kept apart by item code."""
+    acts = [Actual("SO1", "A", D, process="CNC", qty_produced=30),
+            Actual("SO1", "B", D, process="CNC", qty_produced=40)]
+    cbp = orderbook.completed_by_process(acts)
+    assert cbp[("SO1", "A", "CNC")] == 30.0
+    assert cbp[("SO1", "B", "CNC")] == 40.0
 
 
 def test_active_so_lines_carry_per_process_remaining():
-    active = {"SO1": _order("SO1", "A", 500, D)}      # routing: CNC FIRST SIDE, WASHING, DISPATCH
+    active = {("SO1", "A"): _order("SO1", "A", 500, D)}   # routing: CNC FIRST SIDE, WASHING, DISPATCH
     masters = _masters(_DISPATCH_ROUTING)
     acts = [_actual("A", "CNC FIRST SIDE", qty_produced=50),
             _actual("A", "WASHING", qty_produced=20)]
@@ -224,14 +291,14 @@ def test_active_so_lines_carry_per_process_remaining():
 
 def test_active_so_lines_no_actuals_leave_process_qty_none():
     # No actuals -> no per-process override -> Rule 6 keeps today's behaviour (golden stable).
-    active = {"SO1": _order("SO1", "A", 500, D)}
+    active = {("SO1", "A"): _order("SO1", "A", 500, D)}
     masters = _masters(_DISPATCH_ROUTING)
     line = orderbook.active_so_lines(active, [], masters)[0]
     assert line.process_qty is None
 
 
 def test_process_progress_rows_show_done_and_remaining_per_step():
-    active = {"SO1": _order("SO1", "A", 500, D)}     # routing: CNC FIRST SIDE, WASHING, DISPATCH
+    active = {("SO1", "A"): _order("SO1", "A", 500, D)}   # routing: CNC FIRST SIDE, WASHING, DISPATCH
     masters = _masters(_DISPATCH_ROUTING)
     acts = [_actual("A", "CNC FIRST SIDE", qty_produced=50),
             _actual("A", "WASHING", qty_produced=20)]
@@ -244,7 +311,7 @@ def test_process_progress_rows_show_done_and_remaining_per_step():
 
 
 def test_process_progress_rows_empty_without_actuals():
-    active = {"SO1": _order("SO1", "A", 500, D)}
+    active = {("SO1", "A"): _order("SO1", "A", 500, D)}
     masters = _masters(_DISPATCH_ROUTING)
     assert orderbook.process_progress_rows(active, [], masters) == []
 
@@ -319,13 +386,13 @@ def test_completed_by_process_nets_rejections_across_entries():
                 process="CNC", qty_produced=100, qty_rejected=0)
     a2 = Actual(so_no="SO1", item_code="A", entry_date=date(2025, 3, 2),
                 process="CNC", qty_produced=0, qty_rejected=20)   # rework scrap next day
-    assert orderbook.completed_by_process([a1, a2]) == {("SO1", "CNC"): 80.0}
+    assert orderbook.completed_by_process([a1, a2]) == {("SO1", "A", "CNC"): 80.0}
 
 
 def test_completed_by_process_clamps_net_negative_to_zero():
     a = Actual(so_no="SO1", item_code="A", entry_date=date(2025, 3, 1),
                process="CNC", qty_produced=5, qty_rejected=8)
-    assert orderbook.completed_by_process([a]).get(("SO1", "CNC"), 0) == 0.0
+    assert orderbook.completed_by_process([a]).get(("SO1", "A", "CNC"), 0) == 0.0
 
 
 def test_finished_good_nets_rejections_across_entries():
@@ -334,4 +401,4 @@ def test_finished_good_nets_rejections_across_entries():
                    process="PACKING", qty_produced=50),
             Actual(so_no="SO1", item_code="A", entry_date=date(2025, 3, 2),
                    process="PACKING", qty_produced=0, qty_rejected=10)]
-    assert orderbook.finished_good_by_so(acts, masters) == {"SO1": 40.0}
+    assert orderbook.finished_good_by_order(acts, masters) == {("SO1", "A"): 40.0}
