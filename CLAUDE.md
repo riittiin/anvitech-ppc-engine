@@ -186,8 +186,10 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
   `rule8` module — Rule 8 is the unified "Plan" over the order book; see `api._plan`.)
   Rule 6 (`rule6_allocate.py`) also has: `_allocate_op` (smart **parallel split** of
   alternative-machine steps — split the qty to finish soonest, only when faster; flag
-  `split_parallel`), and `_is_passthrough` (**DISPATCH/OS** steps — no machine + no
-  cycle time → skipped, "consider it done").
+  `split_parallel`), and `_is_offmachine` (**DISPATCH/OS** steps — no machine + no
+  cycle time → scheduled as a **visible zero-duration milestone** on an "OS /
+  Outsourced" or "Off-machine" lane, so outsourcing is shown, never ignored;
+  `_offmachine_lane` picks the lane).
 - `api/auth.py` — accounts (2 roles), `authenticate`, signed-cookie
   `make_token`/`verify_token`, session secret, login rate limiter. Stdlib only.
 - `api/main.py` — FastAPI: `/login` `/logout` `/me`, `/upload` (merge, admin),

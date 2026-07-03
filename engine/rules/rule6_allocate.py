@@ -64,8 +64,8 @@ def _resolve_candidates(proc):
     A "Suggested M/c" cell may list ALTERNATIVES ('CNC3/CNC6') — the process may run on
     any of them, and the scheduler picks the earliest-free. A blank cell returns [] —
     the step is NOT invented onto a station named after the process. If such a step also
-    has no cycle time it is a DISPATCH/OS passthrough (skipped); if it has a cycle time
-    it is a data gap surfaced as 'needs machine' and never scheduled."""
+    has no cycle time it is an off-machine step (DISPATCH/OS) — scheduled as a visible
+    milestone; if it has a cycle time it is a data gap surfaced as 'needs machine'."""
     return parse_resource_candidates(proc.suggested_machine or proc.allotted_machine or "")
 
 
@@ -80,18 +80,29 @@ def _qty_for(batch, proc):
     return pq.get(normalize_process_name(proc.name), batch.qty)
 
 
-def _is_passthrough(proc):
-    """A non-production step the scheduler passes straight over: NO machine assigned
-    AND no cycle time — e.g. DISPATCH (the final step, no time allotted: "consider it
-    done") or an outside-service OS step. Takes no machine, no operator, no time.
+def _is_offmachine(proc):
+    """An off-machine step: NO machine assigned AND no cycle time — e.g. an
+    outside-service **OS** step (outsourcing) or **DISPATCH** (ship / final step, no
+    time allotted). It runs off any in-house machine, so it takes no machine, no
+    operator and no time — but it is NOT ignored: it is scheduled as a visible
+    zero-duration milestone (see the allocation loop) so outsourcing is always shown.
 
     Keyed on *both* (no machine AND no time) on purpose: a step you merely forgot to
-    fill in (blank machine but a real cycle time) is NOT a pass-through — it still
-    surfaces as 'needs machine/operator' so missing data fails loud."""
+    fill in (blank machine but a real cycle time) is NOT off-machine — it still
+    surfaces as 'needs machine' so missing data fails loud."""
     raw = proc.suggested_machine or proc.allotted_machine or ""
     has_machine = bool(parse_resource_candidates(raw))
     has_time = bool(proc.cycle_time) and proc.cycle_time > 0
     return not has_machine and not has_time
+
+
+def _offmachine_lane(proc):
+    """Gantt lane (shown as the 'machine') for an off-machine milestone: an
+    outsourced **OS** step vs any other off-machine step (DISPATCH, a manual step
+    with no machine assigned, etc.). Two buckets keeps the colour legend readable
+    while still surfacing outsourcing distinctly."""
+    tokens = normalize_process_name(proc.name).split()
+    return "OS / Outsourced" if "OS" in tokens else "Off-machine"
 
 
 def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_for, config,
@@ -262,22 +273,33 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
                 "Seeded machine-unavailable time — " + ", ".join(sorted(seeded)) + "."
             )
 
-    passthrough: list = []   # (item_code, seq, name) of skipped DISPATCH/OS steps
+    offmachine: list = []    # (item_code, seq, name) of off-machine milestones (OS/DISPATCH)
     done_steps: list = []    # (item_code, seq, name) of steps already fully produced
     needs_machine: list = []  # steps with a cycle time but NO machine — a data gap
 
     guard, guard_cap = 0, total_ops + len(states) + 5
     while guard <= guard_cap:
         guard += 1
-        # Advance each batch past steps that need no scheduling:
-        #  * DISPATCH / OS pass-throughs (no machine, no time) — "consider it done";
+        # Advance each batch, handling steps that need no machine scheduling:
+        #  * off-machine steps (no machine, no time) — OS / outsourcing, DISPATCH:
+        #    emitted as a visible zero-duration milestone (NOT ignored) at the batch's
+        #    current ready time, then stepped past (no machine/operator/time consumed);
         #  * steps already fully produced on the floor (per-process remaining 0) —
         #    don't re-run finished work; the pieces are ready for the next step.
         for s in states:
             while not s["blocked"] and s["next"] < len(s["routing"].processes):
                 p = s["routing"].processes[s["next"]]
-                if _is_passthrough(p):
-                    passthrough.append((s["batch"].item_code, p.seq, p.name))
+                if _is_offmachine(p):
+                    schedule.append(ScheduleEntry(
+                        batch_id=s["batch"].batch_id, item_code=s["batch"].item_code,
+                        process_seq=p.seq, process_name=p.name, machine=_offmachine_lane(p),
+                        qty=_qty_for(s["batch"], p), occupancy_min=0.0,
+                        start=s["ready"], end=s["ready"],   # milestone: zero duration
+                        notes="off-machine step (OS / outsourcing / dispatch) — no in-house "
+                              "machine or time; shown as a milestone",
+                        so_refs=list(s["batch"].source_so_refs), operator="",
+                    ))
+                    offmachine.append((s["batch"].item_code, p.seq, p.name))
                     s["next"] += 1
                 elif _qty_for(s["batch"], p) <= 0:
                     done_steps.append((s["batch"].item_code, p.seq, p.name))
@@ -292,7 +314,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             proc = s["routing"].processes[s["next"]]
             candidates = _resolve_candidates(proc)
             if not candidates:
-                # No machine assigned but it survived the passthrough skip → it has a
+                # No machine assigned but it wasn't an off-machine milestone → it has a
                 # cycle time. Fail loud: block the batch, never invent a phantom station.
                 s["blocked"] = True
                 needs_machine.append({
@@ -382,11 +404,12 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             elapsed = r5.elapsed_before_next(slow[4], slow[3], config)
             s["ready"] = slow[1].advance(slow[2], elapsed)
 
-    if passthrough:
-        names = sorted({nm for _, _, nm in passthrough})
+    if offmachine:
+        names = sorted({nm for _, _, nm in offmachine})
         notes.append(
-            f"Passed over {len(passthrough)} non-production step(s) — no machine/time, "
-            f"treated as done (e.g. {', '.join(names[:5])})."
+            f"Included {len(offmachine)} off-machine step(s) as milestones — OS / "
+            f"outsourcing / dispatch (no in-house machine or time), shown on the Gantt "
+            f"but consuming no machine/operator time (e.g. {', '.join(names[:5])})."
         )
     if done_steps:
         names = sorted({nm for _, _, nm in done_steps})

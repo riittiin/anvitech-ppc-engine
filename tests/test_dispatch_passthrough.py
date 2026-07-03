@@ -1,10 +1,11 @@
-"""DISPATCH / OS pass-through + alternatives-everywhere.
+"""Off-machine steps (DISPATCH / OS outsourcing) + alternatives-everywhere.
 
 A step with NO machine and NO cycle time (DISPATCH, an outside-service OS step) is
-passed over — no machine, no operator, no time ("consider it done"). A blank-machine
-step that DOES have a cycle time is NOT passed over (missing data must fail loud).
-Alternative-machine '/' logic + parallel split apply to ANY step (e.g. inspection),
-not just CNC."""
+**included as a visible zero-duration milestone** — no machine, no operator, no time,
+but it IS scheduled and shown (OS / outsourcing must be visible, not ignored). A
+blank-machine step that DOES have a cycle time is still NOT scheduled on a phantom
+station (missing data must fail loud). Alternative-machine '/' logic + parallel split
+apply to ANY step (e.g. inspection), not just CNC."""
 from datetime import date
 
 from engine.config import Config
@@ -31,20 +32,29 @@ def _cfg(**kw):
     return Config(plan_start_date=date(2025, 3, 5), **kw)
 
 
-def test_dispatch_step_is_passed_over():
+def test_dispatch_step_is_included_as_milestone():
     procs = [Process(1, "OP", 10, 10, "M", None),
              Process(2, "DISPATCH", None, None, None, None)]   # blank machine, no time
     sched = rule6_allocate.run([_batch()], config=_cfg(), masters=_masters(procs))
-    seqs = {e.process_seq for e in sched}
-    assert 1 in seqs and 2 not in seqs                # OP scheduled, DISPATCH skipped
+    by_seq = {e.process_seq: e for e in sched}
+    assert 1 in by_seq and 2 in by_seq                 # BOTH scheduled now
+    d = by_seq[2]
+    assert d.occupancy_min == 0 and d.start == d.end    # zero-duration milestone
+    assert d.machine == "Off-machine" and not d.operator
 
 
-def test_leading_os_step_is_passed_over():
+def test_leading_os_step_is_included_as_milestone():
     procs = [Process(1, "BANDSAW OS", None, None, None, None),  # outsourced, no time
              Process(2, "OP", 10, 10, "M", None)]
     sched = rule6_allocate.run([_batch()], config=_cfg(), masters=_masters(procs))
-    seqs = {e.process_seq for e in sched}
-    assert 1 not in seqs and 2 in seqs                # OS skipped, real op runs
+    by_seq = {e.process_seq: e for e in sched}
+    assert 1 in by_seq and 2 in by_seq                 # OS step shown, real op runs
+    assert by_seq[1].machine == "OS / Outsourced"      # labelled as outsourcing
+    assert by_seq[1].occupancy_min == 0
+    # The zero-duration OS milestone must not push the real op later than a plain run.
+    plain = rule6_allocate.run([_batch()], config=_cfg(),
+                               masters=_masters([Process(1, "OP", 10, 10, "M", None)]))
+    assert by_seq[2].start == plain[0].start
 
 
 def test_dispatch_does_not_block_under_operator_logic():
@@ -56,6 +66,7 @@ def test_dispatch_does_not_block_under_operator_logic():
                                config=_cfg(apply_operator_logic=True),
                                masters=_masters(procs, operators=ops))
     assert any(e.process_seq == 1 for e in sched)      # planned, not blocked
+    assert any(e.process_seq == 2 for e in sched)      # DISPATCH milestone included
 
 
 def test_blank_machine_with_cycle_time_fails_loud():
