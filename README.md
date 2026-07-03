@@ -25,7 +25,7 @@ pytest
 uvicorn api.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000`. The **📋 Orders** tab is the home view (the order
+Open `http://127.0.0.1:8000`. The **Orders** tab is the home view (the order
 book). **Upload your Excel** to add orders, then click **Plan** to schedule them.
 Each numbered rule tab shows that rule's input/output, config, and decision notes;
 a failing rule shows a red error and marks downstream tabs "not reached". The
@@ -83,7 +83,7 @@ uses the `/run` response directly, so it doesn't matter.)
 ## How it works
 
 ```
-Upload Excel ─▶ merge into the Order Book (by SO#)
+Upload Excel ─▶ merge into the Order Book (by (SO#, item code))
 Order Book ─▶ active SO-lines (remaining qty) ─▶ R1 consolidate ─▶ R2 sort ─▶
               R3 smart priority ─▶ R6 allocate (R4 setup, R5 overlap)
               ─▶ schedule + Gantt
@@ -98,7 +98,9 @@ Rule 7 actuals reduce each order's remaining qty; "mark complete" archives it.
   breaks ties between equally-ready operations. The Rule 6 tab shows the schedule
   plus a **machine-wise view** (per-machine queue + utilization %) so you can see
   machines run continuously (the CNC bottleneck sits near 97% utilization).
-- **Stateful order book.** Uploads merge into a persistent book (keyed by SO#);
+- **Stateful order book.** Uploads merge into a persistent book (keyed by the
+  **(SO number, item code)** pair — an SO# alone isn't unique; same SO# + different
+  item = two orders);
   **Plan** schedules every active order at its *remaining* qty (ordered − good
   produced) through Rules 1–6 unchanged — so "Run" and "Rerun MRP" are one action.
   Orders flow Pending → Running (first actual) → Complete (ticked on a Rule 7 entry).

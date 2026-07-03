@@ -1,4 +1,4 @@
-"""Generate a tiny workbook in the Test3 format, in memory, for tests + golden.
+"""Generate a tiny workbook in the Test4 format, in memory, for tests + golden.
 
 Replaces the old bundled Test2.xlsx. Built from code each run — no committed
 binary, no real data. It deliberately exercises the loader's behaviours:
@@ -9,7 +9,7 @@ binary, no real data. It deliberately exercises the loader's behaviours:
   * two same-item SO lines within the 10-day window (so Rule 1 consolidates them).
 
 Sheet layouts:
-  * the 3 master sheets use the new header-driven Test3 format (header row 1),
+  * the 3 master sheets use the new header-driven Test4 format (header row 1),
   * "Item's process Master" and "Sales Order (SO) list" use the same column
     positions as the real workbook (the loader was already built for those).
 """

@@ -188,12 +188,17 @@ A batch of **400 or fewer** is **not split** — splitting a small job would was
 (e.g. two 10-piece inspection lots land on MI1 and MI2 by whoever's free), just without
 the extra setup.
 
-**Non-production steps — DISPATCH / OS (passed over).** A process with **no machine
-assigned and no cycle time** is treated as a non-production pass-through and **skipped**
-— no machine, no operator, no time: **DISPATCH** is the final "consider it done" step,
-and an **OS** step (e.g. `BANDSAW OS`) is outsourced, so the next process becomes the
-effective first step. (A blank machine *with* a real cycle time is **not** skipped — it
-still surfaces as "needs machine", so genuinely missing data fails loud.)
+**Off-machine steps — DISPATCH / OS (shown as milestones, never ignored).** A process
+with **no machine assigned and no cycle time** is an *off-machine* step: **DISPATCH**
+(the final "consider it done / shipped" step) or an outsourced **OS** step (e.g.
+`BANDSAW OS`). It takes **no in-house machine, operator, or time**, but it is **not
+dropped** — Rule 6 schedules it as a **visible zero-duration milestone** at the batch's
+current ready point, on an **"OS / Outsourced"** lane (steps whose name has an `OS`
+token) or an **"Off-machine"** lane (everything else). So outsourcing and dispatch are
+always visible on the schedule/Gantt while consuming no machine time. (A blank machine
+*with* a real cycle time is **not** an off-machine step — it still surfaces as "needs
+machine", so genuinely missing data fails loud.) *(Previously these steps were silently
+skipped; changed so nothing is invisible.)*
 
 **Operator & shift logic (`apply_operator_logic`, default on in the UI).** Each
 machine's working window is driven by its **Available Hrs/Day** and by operator

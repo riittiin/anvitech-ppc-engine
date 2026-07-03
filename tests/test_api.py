@@ -13,7 +13,7 @@ from api import auth  # noqa: E402
 from tests.sample_workbook import build_sample_bytes, SO1, ITEM_A  # noqa: E402
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-_SAMPLE = build_sample_bytes()   # generated workbook (Test3 format) — replaces Test2
+_SAMPLE = build_sample_bytes()   # generated workbook (Test4 format) — replaces Test2
 
 _ACCTS = auth._accounts()
 _ADMIN = next(u for u, a in _ACCTS.items() if a["role"] == auth.ADMIN)

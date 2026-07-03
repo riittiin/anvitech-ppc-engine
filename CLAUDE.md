@@ -14,20 +14,25 @@ machines following 9 business rules, then re-plans as actual production comes in
   order, with input/output for each.
 - **Design spec (original 9 rules):** [`docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md`](docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md)
 - **Order-book design (current architecture):** [`docs/superpowers/specs/2026-06-22-order-book-design.md`](docs/superpowers/specs/2026-06-22-order-book-design.md)
-- **Data format:** the user's `Test3.xlsx` (gitignored real data) — the 3 master
-  sheets use a clean header-driven layout the loader reads dynamically.
+- **Data format:** the user's `Test4.xlsx` (gitignored real data — the current
+  file; supersedes the earlier `Test3.xlsx`) — the 3 master sheets use a clean
+  header-driven layout the loader reads dynamically. Extra/reordered columns are
+  fine: the loader finds columns by name, so `Test4` (more columns than `Test3`,
+  same header names) loads unchanged.
 
 ## Stack
 
 - **Backend:** Python + FastAPI. The engine is plain Python; FastAPI is a thin layer.
 - **Frontend:** lightweight HTML/JS with **per-rule tabs**.
-- **Data source:** the user **uploads** their masters/SO Excel (the **Test3
+- **Data source:** the user **uploads** their masters/SO Excel (the **Test4
   format**) via `POST /upload`, read **read-only** via openpyxl. Upload **merges the
-  orders into a persistent order book** (keyed by unique SO number) and stores the
-  workbook's masters. `load_all(source)` requires a path or BytesIO — there is **no
-  bundled default** (pre-upload the app shows empty masters). Tests + the golden
-  trace use a **code-generated sample** in the Test3 format (`tests/sample_workbook.py`);
-  the real-data file `Test3.xlsx` is gitignored and used only by uploading it.
+  orders into a persistent order book** (keyed by the unique **(SO number, item
+  code)** pair — an SO number alone is NOT unique; one SO# can carry several item
+  lines) and stores the workbook's masters. `load_all(source)` requires a path or
+  BytesIO — there is **no bundled default** (pre-upload the app shows empty masters).
+  Tests + the golden trace use a **code-generated sample** in the Test4 format
+  (`tests/sample_workbook.py`); the real-data file `Test4.xlsx` is gitignored and
+  used only by uploading it.
 - **Persistent state (the order book):** orders, their actuals, and the latest
   masters live in a durable key/value store. `engine/storage.py` selects the backend:
   **MongoDB Atlas (`MONGODB_URI`) > Upstash Redis > local file (`data/store/`)**.
@@ -62,8 +67,8 @@ violate them without the user's explicit say-so.
 ## Data flow (memorize this)
 
 ```
-Upload Excel ─▶ MERGE into the Order Book (by SO#)   ┐
-Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
+Upload Excel ─▶ MERGE into the Order Book (by (SO#, item code))   ┐
+Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
                               │
    Order Book ──▶ active SO-lines (remaining qty) ──▶ R1 consolidate ─▶ R2 sort
    (orders · actuals · masters)                       ─▶ R3 smart priority (slack)
@@ -108,7 +113,7 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
   that one order, record it in the report, and keep scheduling every other order.
   Non-blocking and fail-localized; the run does not stop. (Unlike a missing machine,
   a missing routing can't be made provisional — you can't invent a recipe.) In the
-  the current Test3/sample data there are 0 such cases; this is a future safety net.
+  the current Test4/sample data there are 0 such cases; this is a future safety net.
 - **Time-unit inconsistency:** cycle/total times are in minutes in the Process
   Master but appear as tiny decimals in `Planning status monitoring`. Normalize
   to one unit in the loader and log coercions.
@@ -156,7 +161,7 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
 
 - `engine/config.py` — tunable params + validation.
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
-- `engine/loaders.py` — read the uploaded workbook (Test3 format) → typed objects +
+- `engine/loaders.py` — read the uploaded workbook (Test4 format) → typed objects +
   non-blocking report. The 3 master sheets are read **header-driven** (`_locate_table`);
   resource-name normalization (`CNC 4` ≡ `CNC4`) and provisional-machine handling live here.
 - `engine/worktime.py` — `WorkClock`: a list of day-relative working **intervals**
@@ -169,15 +174,24 @@ Rule 7 actual ─▶ recorded vs SO# (+ optional complete)┘
 - `engine/pipeline.py` — `run_rule` (snapshots in/out/config/notes), `run_forward`
   (1→2→3→6), `RuleError`, `to_table`.
 - `engine/orderbook.py` — **order-book logic (pure)**: `merge_upload` (add new /
-  flag repeat / flag completed / intra-upload dedup, all by SO#), `derive_status`
+  flag repeat / flag completed / intra-upload dedup, all by the **(SO#, item code)**
+  pair — same SO# + different item = two orders), `derive_status`
   (Pending/Running/Complete), `active_so_lines` (remaining qty for planning),
-  `order_rows` (dashboard).
+  `order_rows` (dashboard). `Order`/`Actual`/`SOLine` each expose `.key = (so_no,
+  item_code)`; the good-by-order / orders-with-actuals / per-process maps are all
+  keyed by that pair.
 - `engine/book_store.py` — durable persistence of the book: active orders + the
-  completed archive (hashes by SO#), actuals (append-only list), masters workbook.
+  completed archive (hashes keyed by a composite **`"<so_no>\x1f<item_code>"`** field;
+  `complete`/`uncomplete`/`delete` target one (SO#, item) line), actuals (append-only
+  list), masters workbook.
   `delete_orders` / `delete_all` (permanent deletes); `delete_actual` + `uncomplete_order`
   (per-entry **rollback**: each `Actual` has a uuid `id`, legacy backfilled).
 - `engine/storage.py` — the store interface (kv/hash/list) + backends:
   `MongoStore` / `UpstashStore` / `LocalStore`; `get_store()` picks by env.
+  `MongoStore` **percent-encodes hash field names** (`_enc_field`/`_dec_field`)
+  before they go into the `h.<field>` update path — a raw `.` or `$` in a field name
+  (e.g. an item code like `61243661-01..`) would otherwise be read as a nested path
+  and break the write. Any hash field string is safe.
 - `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
   (per-order rows, time-positioned bars by machine, **operator** on each bar, split
   halves as separate bars, Pending/Running label).

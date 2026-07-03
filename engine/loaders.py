@@ -1,4 +1,4 @@
-"""Read a workbook (Test3 format, read-only) into typed Python objects + a report.
+"""Read a workbook (Test4 format, read-only) into typed Python objects + a report.
 
 The 3 master sheets (Machine / Operator & shift / Weekly off & holiday) are read
 **header-driven** (columns located by heading, every row to the end) so Excel edits
@@ -136,7 +136,7 @@ def _num(value, masters: Masters = None, ref: str = ""):
 
 
 # --------------------------------------------------------------------------- #
-# Header-driven table location (Test3 format)
+# Header-driven table location (Test4 format)
 # --------------------------------------------------------------------------- #
 # The three master sheets are clean tables: a header row, then one row per record,
 # open-ended. We locate columns by HEADING (not fixed positions) and read every
@@ -412,7 +412,7 @@ def _validate(masters: Masters, so_lines):
 # Public entry point
 # --------------------------------------------------------------------------- #
 def load_all(xlsx_path):
-    """Load masters + SO lines from a workbook in the Test3 format.
+    """Load masters + SO lines from a workbook in the Test4 format.
 
     ``xlsx_path`` is a path or a file-like object (e.g. an uploaded BytesIO) — there
     is no bundled default; callers always supply the source (an uploaded workbook,

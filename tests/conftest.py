@@ -1,5 +1,5 @@
-"""Shared fixtures: build the generated sample workbook once per session (Test3
-format — there is no bundled Test2 anymore), and isolate the durable store to a
+"""Shared fixtures: build the generated sample workbook once per session (Test4
+format — there is no bundled real workbook), and isolate the durable store to a
 fresh temp dir per test (so the order book / actuals don't leak between tests or
 touch the real ./data/store)."""
 import io
