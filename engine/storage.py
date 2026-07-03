@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -141,9 +142,24 @@ class UpstashStore:
 class MongoStore:
     """MongoDB Atlas backend (bigger free tier). Maps the kv/hash/list interface
     onto three collections; hash uses per-field $set/$unset and list uses $push,
-    so writes are atomic per field/entry (no read-modify-write overwrite)."""
+    so writes are atomic per field/entry (no read-modify-write overwrite).
+
+    Hash field names are **percent-encoded** before they go into the ``h.<field>``
+    update path (and decoded on read). A field name is interpolated into a dotted
+    Mongo path, where a literal '.' would be read as a nested-document separator and
+    a leading '$' as an operator — so a field like an item code ``61243661-01..``
+    would otherwise throw 'empty field name'. Encoding keeps only ``[A-Za-z0-9_-]``
+    literal and %XX-escapes everything else, making any field string path-safe."""
 
     DB_NAME = "anvitech"
+
+    @staticmethod
+    def _enc_field(field: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_-]", lambda m: "%%%02X" % ord(m.group()), field)
+
+    @staticmethod
+    def _dec_field(field: str) -> str:
+        return re.sub(r"%([0-9A-Fa-f]{2})", lambda m: chr(int(m.group(1), 16)), field)
 
     def __init__(self, uri: str):
         import pymongo  # lazy import; only needed when Mongo is configured
@@ -158,13 +174,16 @@ class MongoStore:
 
     def hgetall(self, key) -> dict:
         d = self.db.hash.find_one({"_id": key})
-        return dict(d.get("h", {})) if d else {}
+        # Decode field names back to their original strings (see _enc_field).
+        return {self._dec_field(k): v for k, v in d.get("h", {}).items()} if d else {}
 
     def hset(self, key, field, value: str) -> None:
-        self.db.hash.update_one({"_id": key}, {"$set": {f"h.{field}": value}}, upsert=True)
+        self.db.hash.update_one({"_id": key},
+                                {"$set": {f"h.{self._enc_field(field)}": value}}, upsert=True)
 
     def hdel(self, key, field) -> None:
-        self.db.hash.update_one({"_id": key}, {"$unset": {f"h.{field}": ""}})
+        self.db.hash.update_one({"_id": key},
+                                {"$unset": {f"h.{self._enc_field(field)}": ""}})
 
     def list_append(self, key, value: str) -> None:
         self.db.list.update_one({"_id": key}, {"$push": {"l": value}}, upsert=True)
