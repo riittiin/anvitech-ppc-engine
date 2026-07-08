@@ -64,12 +64,19 @@ sample, the golden trace), behaviour is byte-identical to today.
 New helper `_is_os(proc)`:
 
 ```
-allotted or suggested normalizes to "OS"   OR   "OS" is a whitespace token of the name
+"OS" is a candidate of the Allotted or Suggested cell
+  OR ( the step has NO real machine assigned  AND  "OS" is a whitespace token of the name )
 ```
 
-Checked **before** machine resolution, so the sentinel `OS` never flows into
-`_resolve_candidates`. Normalisation reuses the existing helpers (`normalize_resource_id`
-for the machine cell; a token split of `normalize_process_name(proc.name)` for the name).
+Keyed on the **machine cell** (`Allotted`/`Suggested` = `OS`), with the name only
+counting when no real machine is assigned. This is deliberate: the existing test
+sample (`tests/sample_workbook.py`) has a step literally named `"CNC OS"` that is a
+*normal in-house* step with machine `CNC1/CNC2` — a name-only rule would wrongly flip
+it to an OS block and break the golden trace. In the real data every OS step that has
+a cycle time carries `Allotted = OS`; the name-only cases are all blank-cycle (they
+fall through to a zero-duration OS milestone anyway). Checked **before** machine
+resolution, so the sentinel `OS` never flows into `_resolve_candidates`. Reuses
+`parse_resource_candidates` (machine cell) and `normalize_process_name` (name tokens).
 
 ### 2. Scheduling an OS step (`rule6_allocate.py`, in the allocation loop)
 
