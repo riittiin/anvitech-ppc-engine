@@ -90,3 +90,13 @@ def test_blank_cycle_os_is_zero_duration_milestone():
     os_e = [e for e in sched if e.process_seq == 1][0]
     assert os_e.occupancy_min == 0 and os_e.start == os_e.end
     assert os_e.machine == "OS / Outsourced"
+
+
+def test_os_lane_excluded_from_machine_view():
+    procs = [_P(1, "OP", 1, sug="M"), _P(2, "CNC OS", 600, allot="OS")]
+    m = _masters(procs)
+    sched = rule6_allocate.run([_batch()], config=_cfg(), masters=m)
+    timeline, summary = rule6_allocate.build_machine_view(sched, m, _cfg())
+    lanes = {r["Machine"] for r in summary}
+    assert "OS / Outsourced" not in lanes      # not a machine — kept off utilization
+    assert "M" in lanes                          # real machines still reported

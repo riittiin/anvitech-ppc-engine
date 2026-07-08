@@ -515,8 +515,11 @@ def build_machine_view(schedule, masters, config):
     """
     clock_for, _ = _clock_factory(masters, config)
 
+    NON_MACHINE_LANES = {"OS / Outsourced", "Off-machine"}
     by_machine: dict[str, list] = {}
     for e in schedule:
+        if e.machine in NON_MACHINE_LANES:
+            continue   # outsourcing / dispatch lanes are not machines
         by_machine.setdefault(e.machine, []).append(e)
 
     def display(mid):
