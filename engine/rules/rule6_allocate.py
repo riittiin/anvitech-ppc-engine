@@ -96,6 +96,21 @@ def _is_offmachine(proc):
     return not has_machine and not has_time
 
 
+def _is_os(proc):
+    """True if this process is an OUTSOURCED (OS) step.
+
+    Marked by the machine cell being the sentinel ``OS`` (Allotted or Suggested =
+    OS), or — only when NO real machine is assigned — by an ``OS`` word in the
+    process name. Keyed on the machine cell on purpose: a step merely NAMED
+    '... OS' but given a real machine (e.g. the sample's 'CNC OS' on CNC1/CNC2) is
+    an in-house step, NOT outsourcing."""
+    if "OS" in parse_resource_candidates(proc.allotted_machine) \
+            or "OS" in parse_resource_candidates(proc.suggested_machine):
+        return True
+    real = [c for c in _resolve_candidates(proc) if c != "OS"]
+    return not real and "OS" in normalize_process_name(proc.name).split()
+
+
 def _offmachine_lane(proc):
     """Gantt lane (shown as the 'machine') for an off-machine milestone: an
     outsourced **OS** step vs any other off-machine step (DISPATCH, a manual step
