@@ -365,8 +365,8 @@ def _register_provisional(masters: Masters, raw_label: str):
     """Ensure a resource referenced by a routing exists. If it isn't in the
     Machine master, register it as a PROVISIONAL machine and report it once."""
     canonical = normalize_resource_id(raw_label)
-    if not canonical:
-        return
+    if not canonical or canonical == "OS":
+        return   # 'OS' marks outsourcing, not a machine — never a provisional resource
     if canonical in masters.machines:
         return
     masters.machines[canonical] = Machine(

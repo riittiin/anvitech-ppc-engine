@@ -1,7 +1,9 @@
 """Loader tests — expected counts and the known non-blocking data quirks."""
 from engine.loaders import (
     load_all, normalize_resource_id, parse_date, parse_resource_candidates, _num,
+    _validate,
 )
+from engine.models import Masters, Routing, Process
 from datetime import date
 
 
@@ -96,3 +98,15 @@ def test_alternative_cells_register_each_machine_not_a_merged_id(loaded):
         assert bogus not in masters.machines
     assert "CNC1" in masters.machines and not masters.machines["CNC1"].provisional
     assert "CNC2" in masters.machines and not masters.machines["CNC2"].provisional
+
+
+def test_os_is_not_registered_as_a_machine():
+    # An outsourced step (Allotted = OS) must NOT create a phantom 'OS' machine
+    # or a PENDING_MASTER_DATA report — OS is a sentinel, not a resource.
+    proc = Process(seq=1, name="CNC OS", cycle_time=7200, total_time=None,
+                   suggested_machine=None, allotted_machine="OS")
+    masters = Masters(routings={"X": Routing(item_code="X", description="", customer="",
+                                             rm_type="", moq=None, processes=[proc])})
+    _validate(masters, [])
+    assert normalize_resource_id("OS") not in masters.machines
+    assert not any(r["ref"] == "OS" for r in masters.report)
