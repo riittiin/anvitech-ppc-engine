@@ -164,6 +164,7 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
 - `engine/loaders.py` — read the uploaded workbook (Test4 format) → typed objects +
   non-blocking report. The 3 master sheets are read **header-driven** (`_locate_table`);
   resource-name normalization (`CNC 4` ≡ `CNC4`) and provisional-machine handling live here.
+  The `OS` sentinel is never registered as a (provisional) machine.
 - `engine/worktime.py` — `WorkClock`: a list of day-relative working **intervals**
   (per-machine windows) + Thursday/holiday skip; `from_config` = legacy two-shift
   window; empty intervals raise `NoWorkingWindow`.
@@ -179,7 +180,8 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (Pending/Running/Complete), `active_so_lines` (remaining qty for planning),
   `order_rows` (dashboard). `Order`/`Actual`/`SOLine` each expose `.key = (so_no,
   item_code)`; the good-by-order / orders-with-actuals / per-process maps are all
-  keyed by that pair.
+  keyed by that pair. The DISPATCH gate (`finished_gate`) is matched via `is_dispatch`
+  (tolerates the `DISAPTCH` misspelling).
 - `engine/book_store.py` — durable persistence of the book: active orders + the
   completed archive (hashes keyed by a composite **`"<so_no>\x1f<item_code>"`** field;
   `complete`/`uncomplete`/`delete` target one (SO#, item) line), actuals (append-only
@@ -203,7 +205,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `split_parallel`), and `_is_offmachine` (**DISPATCH/OS** steps — no machine + no
   cycle time → scheduled as a **visible zero-duration milestone** on an "OS /
   Outsourced" or "Off-machine" lane, so outsourcing is shown, never ignored;
-  `_offmachine_lane` picks the lane).
+  `_offmachine_lane` picks the lane). `_is_os` (outsourced step — Allotted/Suggested =
+  `OS`, or an `OS` word in the name when no real machine) reserves the **cycle-time as
+  a flat, continuous 24×7, unlimited-parallel, operator-less block** on the "OS /
+  Outsourced" lane; the successor waits for it. A blank OS cycle stays a zero-duration
+  milestone. OS/off-machine lanes are excluded from the machine-utilization view.
 - `api/auth.py` — accounts (2 roles), `authenticate`, signed-cookie
   `make_token`/`verify_token`, session secret, login rate limiter. Stdlib only.
 - `api/main.py` — FastAPI: `/login` `/logout` `/me`, `/upload` (merge, admin),

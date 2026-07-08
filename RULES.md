@@ -188,17 +188,28 @@ A batch of **400 or fewer** is **not split** — splitting a small job would was
 (e.g. two 10-piece inspection lots land on MI1 and MI2 by whoever's free), just without
 the extra setup.
 
-**Off-machine steps — DISPATCH / OS (shown as milestones, never ignored).** A process
-with **no machine assigned and no cycle time** is an *off-machine* step: **DISPATCH**
-(the final "consider it done / shipped" step) or an outsourced **OS** step (e.g.
-`BANDSAW OS`). It takes **no in-house machine, operator, or time**, but it is **not
-dropped** — Rule 6 schedules it as a **visible zero-duration milestone** at the batch's
-current ready point, on an **"OS / Outsourced"** lane (steps whose name has an `OS`
-token) or an **"Off-machine"** lane (everything else). So outsourcing and dispatch are
-always visible on the schedule/Gantt while consuming no machine time. (A blank machine
-*with* a real cycle time is **not** an off-machine step — it still surfaces as "needs
-machine", so genuinely missing data fails loud.) *(Previously these steps were silently
-skipped; changed so nothing is invisible.)*
+**Off-machine steps — DISPATCH vs OS / outsourcing.** A process that runs off any
+in-house machine is handled in one of two ways:
+
+- **DISPATCH** (the final "consider it done / shipped" gate) and any other step with
+  **no machine and no cycle time** → a **zero-duration milestone** on the
+  "Off-machine" lane (or "OS / Outsourced" if its name has an `OS` word). It consumes
+  no machine, operator or time. The dispatch gate is matched tolerantly — `DISPATCH`,
+  `Dispatch`, and the real-data misspelling `DISAPTCH` all count.
+- **OS / outsourcing with a turnaround time** — a step marked `OS` in its Allotted (or
+  Suggested) machine cell, carrying a **cycle-time value in minutes** (e.g. `7200`).
+  This is scheduled as a **reserved continuous block**: it holds that many minutes of
+  vendor turnaround **flat per batch** (NOT × qty, no 90-min setup), runs **continuous
+  24×7** (it ignores Anvitech's Thursday-off and shift hours — the vendor works on its
+  own clock), takes **no in-house machine or operator**, and has **unlimited parallel
+  capacity** (any number of orders can be at OS at once). The next process **waits for
+  the full block to finish** (no overlap). Shown as an `OS` bar on the "OS / Outsourced"
+  Gantt lane; kept out of the machine-utilization table (it is not a machine). If the
+  cycle-time cell is **blank**, the step is a zero-duration milestone until a number is
+  entered — then it reserves that block automatically, no code change. An OS step that
+  arrives early is closed via Capture Actuals (its per-process remaining hits 0 and the
+  next Plan skips it). A blank machine *with* a real cycle time is still NOT off-machine
+  — it surfaces as "needs machine" so genuinely missing data fails loud.
 
 **Operator & shift logic (`apply_operator_logic`, default on in the UI).** Each
 machine's working window is driven by its **Available Hrs/Day** and by operator
