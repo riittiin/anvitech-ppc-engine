@@ -404,11 +404,7 @@ def test_finished_good_nets_rejections_across_entries():
     assert orderbook.finished_good_by_order(acts, masters) == {("SO1", "A"): 40.0}
 
 
-from engine.orderbook import is_dispatch, finished_gate
-from engine.models import Routing, Process
-
-
-def _routing(*names):
+def _seq_routing(*names):
     procs = [Process(seq=i + 1, name=n, cycle_time=1, total_time=1,
                      suggested_machine="M", allotted_machine=None)
              for i, n in enumerate(names)]
@@ -417,19 +413,19 @@ def _routing(*names):
 
 
 def test_is_dispatch_matches_misspelling():
-    assert is_dispatch("DISPATCH")
-    assert is_dispatch("Dispatch")
-    assert is_dispatch("DISAPTCH")      # transposed misspelling in the real data
-    assert not is_dispatch("BANDSAW OS")
-    assert not is_dispatch("PACKING")
+    assert orderbook.is_dispatch("DISPATCH")
+    assert orderbook.is_dispatch("Dispatch")
+    assert orderbook.is_dispatch("DISAPTCH")      # transposed misspelling in the real data
+    assert not orderbook.is_dispatch("BANDSAW OS")
+    assert not orderbook.is_dispatch("PACKING")
 
 
 def test_finished_gate_uses_misspelled_dispatch():
     # DISAPTCH is the gate even when it is NOT the last step.
-    r = _routing("OP", "DISAPTCH", "STRAGGLER")
-    assert finished_gate(r) == "DISAPTCH"
+    r = _seq_routing("OP", "DISAPTCH", "STRAGGLER")
+    assert orderbook.finished_gate(r) == "DISAPTCH"
 
 
-def test_finished_gate_falls_back_to_last_step_without_dispatch():
-    r = _routing("OP", "PACKING")
-    assert finished_gate(r) == "PACKING"
+def test_finished_gate_falls_back_to_last_step_seq_helper():
+    r = _seq_routing("OP", "PACKING")
+    assert orderbook.finished_gate(r) == "PACKING"
