@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import timedelta
 
+import re as _re
+
 from .models import Order, SOLine, fmt_date
 from .loaders import normalize_process_name
 
@@ -17,10 +19,15 @@ PENDING = "Pending"
 RUNNING = "Running"
 COMPLETE = "Complete"
 
-DISPATCH = "DISPATCH"   # the "consider it done / shipped" finished-goods gate
-
-
 _norm = normalize_process_name   # shared canonical process-name key (see loaders)
+
+DISPATCH_NAMES = {"DISPATCH", "DISAPTCH"}   # accepts the real-data misspelling
+
+
+def is_dispatch(name) -> bool:
+    """True if a process name is the DISPATCH gate — tolerant of case, spaces and
+    the transposed misspelling 'DISAPTCH' seen in the real workbook."""
+    return _re.sub(r"[^A-Z0-9]", "", str(name or "").upper()) in DISPATCH_NAMES
 
 
 def finished_gate(routing) -> str:
@@ -37,7 +44,7 @@ def finished_gate(routing) -> str:
     if routing is None or not routing.processes:
         return ""
     for p in routing.processes:
-        if _norm(p.name) == DISPATCH:
+        if is_dispatch(p.name):
             return p.name
     return routing.processes[-1].name
 
