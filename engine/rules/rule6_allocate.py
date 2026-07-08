@@ -291,6 +291,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
     offmachine: list = []    # (item_code, seq, name) of off-machine milestones (OS/DISPATCH)
     done_steps: list = []    # (item_code, seq, name) of steps already fully produced
     needs_machine: list = []  # steps with a cycle time but NO machine — a data gap
+    os_reserved: list = []   # (item_code, seq, name, minutes) of OS turnaround blocks
 
     guard, guard_cap = 0, total_ops + len(states) + 5
     while guard <= guard_cap:
@@ -304,7 +305,33 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         for s in states:
             while not s["blocked"] and s["next"] < len(s["routing"].processes):
                 p = s["routing"].processes[s["next"]]
-                if _is_offmachine(p):
+                if _is_os(p):
+                    q = _qty_for(s["batch"], p)
+                    if q <= 0:                      # already cleared on the floor — skip
+                        done_steps.append((s["batch"].item_code, p.seq, p.name))
+                        s["next"] += 1
+                        continue
+                    cyc = p.cycle_time or 0.0
+                    start = s["ready"]
+                    end = start + timedelta(minutes=cyc) if cyc > 0 else start
+                    schedule.append(ScheduleEntry(
+                        batch_id=s["batch"].batch_id, item_code=s["batch"].item_code,
+                        process_seq=p.seq, process_name=p.name, machine="OS / Outsourced",
+                        qty=q, occupancy_min=cyc, start=start, end=end,
+                        notes=(f"outsourced (OS) — reserves {cyc:g} min of vendor "
+                               f"turnaround (continuous, no in-house machine/operator)"
+                               if cyc > 0 else
+                               "outsourced (OS) — no turnaround time set yet; shown "
+                               "as a milestone"),
+                        so_refs=list(s["batch"].source_so_refs), operator="",
+                    ))
+                    if cyc > 0:
+                        os_reserved.append((s["batch"].item_code, p.seq, p.name, cyc))
+                        s["ready"] = end            # successor waits for the full block
+                    else:
+                        offmachine.append((s["batch"].item_code, p.seq, p.name))
+                    s["next"] += 1
+                elif _is_offmachine(p):
                     schedule.append(ScheduleEntry(
                         batch_id=s["batch"].batch_id, item_code=s["batch"].item_code,
                         process_seq=p.seq, process_name=p.name, machine=_offmachine_lane(p),
@@ -439,6 +466,13 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             f"⚠ {len(needs_machine)} step(s) have a cycle time but NO machine assigned — "
             f"NOT scheduled (their batch is held). Fix the Machine column in the process "
             f"master (e.g. {', '.join(names[:5])})."
+        )
+    if os_reserved:
+        names = sorted({nm for _, _, nm, _ in os_reserved})
+        notes.append(
+            f"Reserved {len(os_reserved)} outsourced (OS) step(s) as continuous "
+            f"turnaround blocks — no in-house machine or operator; the next process "
+            f"waits for each to return (e.g. {', '.join(names[:5])})."
         )
 
     # Decision notes: prove machines ran continuously.
