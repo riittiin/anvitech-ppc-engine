@@ -512,7 +512,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         )
 
     # Decision notes: prove machines ran continuously.
-    _timeline, summary = build_machine_view(schedule, masters, config)
+    _timeline, summary = build_machine_view(schedule, masters, config, batches)
     total_idle = sum(r["Idle within span (min)"] for r in summary)
     zero_idle = sum(1 for r in summary if r["Idle within span (min)"] < 1)
     notes.append(
@@ -540,16 +540,27 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
     return schedule
 
 
-def build_machine_view(schedule, masters, config):
+def build_machine_view(schedule, masters, config, batches=None):
     """Derive the machine-centric tables from a schedule:
 
     * ``timeline`` — every operation, grouped per machine and ordered by start,
       with an "Idle before" column = working minutes the machine waited since its
-      previous operation (≈0 means it ran continuously).
+      previous operation (≈0 means it ran continuously). Each row also carries the
+      order's SO delivery date + expected completion and the pieces produced in
+      that op (``batches`` supplies the SO delivery date per batch).
     * ``summary`` — per machine: op count, busy minutes, idle-within-span, and
       utilization %.
     """
     clock_for, _ = _clock_factory(masters, config)
+
+    # Per-order lookups: SO delivery date (from the batch) and expected completion
+    # (latest end across ALL the order's ops — incl. OS/dispatch, matching the Gantt).
+    bmap = {b.batch_id: b for b in (batches or [])}
+    completion: dict = {}
+    for e in schedule:
+        c = completion.get(e.batch_id)
+        if c is None or e.end > c:
+            completion[e.batch_id] = e.end
 
     NON_MACHINE_LANES = {"OS / Outsourced", "Off-machine"}
     by_machine: dict[str, list] = {}
@@ -587,7 +598,11 @@ def build_machine_view(schedule, masters, config):
                 "Batch": e.batch_id,
                 "Item Code": e.item_code,
                 "Item Description": desc(e.item_code),
+                "SO Del date": (bmap[e.batch_id].so_delivery_date if e.batch_id in bmap else ""),
+                "Expected completion": (completion[e.batch_id].date()
+                                        if e.batch_id in completion else ""),
                 "Process": e.process_name,
+                "Qty": e.qty,
                 "Start": e.start,
                 "End": e.end,
                 "Busy (min)": round(e.occupancy_min, 1),

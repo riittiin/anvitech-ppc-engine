@@ -321,3 +321,17 @@ def test_machine_view_includes_item_description(loaded):
     row = timeline[0]
     assert "Item Description" in row                     # new column present
     assert row["Item Description"] == masters.routings[row["Item Code"]].description
+
+
+def test_machine_view_includes_so_date_completion_and_qty(loaded):
+    # Each machine-view row also shows the order's SO delivery date, its expected
+    # completion (latest end across the order), and the pieces produced in that op.
+    _, masters = loaded
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    batch = _batch(masters, ITEM_A, qty=10)
+    sched = rule6_allocate.run([batch], config=cfg, masters=masters)
+    timeline, _ = rule6_allocate.build_machine_view(sched, masters, cfg, [batch])
+    row = timeline[0]
+    assert row["SO Del date"] == date(2025, 3, 7)                     # from the order
+    assert row["Expected completion"] == max(e.end for e in sched).date()
+    assert row["Qty"] > 0                                             # pieces in this op

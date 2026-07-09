@@ -308,7 +308,8 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
         ]
 
     if "rule6" in trace and trace["rule6"].get("reached", True):
-        timeline, summary = r6.build_machine_view(plan_run.schedule, masters, config)
+        timeline, summary = r6.build_machine_view(
+            plan_run.schedule, masters, config, plan_run.batches_prioritized)
         trace["rule6"]["tables"] = [
             {"title": "Machine timeline — per-machine queue (Idle before = working minutes the machine waited)",
              "table": to_table(timeline)},
