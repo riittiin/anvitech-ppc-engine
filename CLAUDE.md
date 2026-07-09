@@ -197,6 +197,14 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
 - `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
   (per-order rows, time-positioned bars by machine, **operator** on each bar, split
   halves as separate bars, Pending/Running label).
+- `engine/analytics.py` — pure `build_analytics(schedule, masters, config, batches)`:
+  utilization & bottlenecks from the current plan. **Utilization = busy ÷ each resource's
+  OWN available time in the plan window** (`[min(start), max(end)]`), so every machine is
+  judged fairly against its own capacity. Machine capacity reuses Rule 6's `_clock_factory`
+  clock (same shifts/coverage/calendar as the schedule). Sections: per-machine (+ type
+  rollup), per-operator (busy vs shift capacity), per-process (work share, not %), and a
+  headline (bottleneck / under-used ≤30% / totals). Surfaced as the **Analytics** tab
+  (`trace.analytics`; CSS bars + tables in `web/`, no chart lib).
 - `engine/rules/ruleN_*.py` — Rules 1–7, one pure `run(...)` each; 4/5 also expose
   the calc helpers Rule 6 imports. (Rule 7 = `rule7_capture_actuals`. There is no
   `rule8` module — Rule 8 is the unified "Plan" over the order book; see `api._plan`.)

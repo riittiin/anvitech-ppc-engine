@@ -308,6 +308,10 @@ While running, Rule 6 consumes: ⚙️ Rule 4 (setup time) and ⚙️ Rule 5 (ov
     **utilization** summary (busy / idle-within-span / utilization %) — this is
     how you see that machines run continuously.
   - Drives `Planning status monitoring`, `Machinewise`, `Weekly Production plan`.
+  - an **Analytics view** (`engine/analytics.py`): utilization & bottlenecks from the
+    plan — each machine/operator/process measured against **its own** available time in
+    the plan window (busy ÷ available), so a single-shift manual station and a two-shift
+    CNC are judged fairly. Flags bottlenecks (≥85%) and under-used resources (≤30%).
 
 **Recorded times are NOT fed into the plan.** The downtime categories (No Power, No
 Operator, Tool Problem, Breakdown, …) and the actual setup time are captured and
