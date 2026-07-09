@@ -57,16 +57,22 @@ def _clock_factory(masters, config):
     return clock_for, cov_report
 
 
-def _resolve_candidates(proc):
-    """Ordered REAL machine ids for a process (first = preferred), or [] if the process
-    has no machine assigned.
+def _resolve_candidates(proc, config=None):
+    """Ordered REAL machine ids for a process (first = preferred), or [] if none.
 
-    A "Suggested M/c" cell may list ALTERNATIVES ('CNC3/CNC6') — the process may run on
-    any of them, and the scheduler picks the earliest-free. A blank cell returns [] —
-    the step is NOT invented onto a station named after the process. If such a step also
-    has no cycle time it is an off-machine step (DISPATCH/OS) — scheduled as a visible
-    milestone; if it has a cycle time it is a data gap surfaced as 'needs machine'."""
-    return parse_resource_candidates(proc.suggested_machine or proc.allotted_machine or "")
+    The parallelization toggle (``config.split_parallel``) decides the set:
+      * OFF → the **Allotted** machine(s) only (the planned choice); if Allotted is
+        blank, fall back to the **Suggested** machine(s) so the step still schedules.
+      * ON  → the **union** of Allotted + Suggested (Allotted first, deduped) — every
+        machine the item is capable of, so work can spread across all of them.
+    Alternatives within a cell ('CNC3/CNC6') are parsed either way. A fully blank cell
+    returns [] (the step is never invented onto a phantom station; with no cycle time
+    it is an off-machine milestone, else 'needs machine')."""
+    allotted = parse_resource_candidates(proc.allotted_machine)
+    suggested = parse_resource_candidates(proc.suggested_machine)
+    if getattr(config, "split_parallel", False):
+        return allotted + [c for c in suggested if c not in allotted]
+    return allotted or suggested
 
 
 def _qty_for(batch, proc):
@@ -107,7 +113,8 @@ def _is_os(proc):
     if "OS" in parse_resource_candidates(proc.allotted_machine) \
             or "OS" in parse_resource_candidates(proc.suggested_machine):
         return True
-    real = [c for c in _resolve_candidates(proc) if c != "OS"]
+    real = [c for c in (parse_resource_candidates(proc.allotted_machine)
+                        + parse_resource_candidates(proc.suggested_machine)) if c != "OS"]
     return not real and "OS" in normalize_process_name(proc.name).split()
 
 
@@ -141,7 +148,7 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
 
     ``blocked`` is True only if no candidate machine has a working window (uncovered)."""
     qty = int(qty or 0)
-    listed = _resolve_candidates(proc)
+    listed = _resolve_candidates(proc, config)
     operator_free = operator_free if operator_free is not None else {}
     op_lookup = op_lookup or (lambda m, t: [])
     reserved = set()        # operators tentatively taken by earlier (split-sibling) candidates
@@ -354,7 +361,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
             if s["blocked"] or s["next"] >= len(s["routing"].processes):
                 continue
             proc = s["routing"].processes[s["next"]]
-            candidates = _resolve_candidates(proc)
+            candidates = _resolve_candidates(proc, config)
             if not candidates:
                 # No machine assigned but it wasn't an off-machine milestone → it has a
                 # cycle time. Fail loud: block the batch, never invent a phantom station.
@@ -411,7 +418,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         batch = s["batch"]
         cyc = proc.cycle_time or 0.0
         setup = config.setup_time_min
-        cands_list = _resolve_candidates(proc)
+        cands_list = _resolve_candidates(proc, config)
         proc_qty = _qty_for(batch, proc)   # this step's remaining (= batch qty if no progress)
 
         entries, _blk = _allocate_op(proc, proc_qty, cyc, setup, s["ready"],
