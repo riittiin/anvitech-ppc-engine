@@ -484,50 +484,102 @@ function renderAnalytics() {
   const root = $("tab-content");
   const a = currentTrace && currentTrace.analytics;
   if (!a || !a.machines || !a.machines.length) {
-    root.innerHTML = '<div class="rule-header"><h2>Analytics</h2></div>'
-      + '<p class="placeholder">Click <strong>Plan</strong> to build analytics.</p>';
+    root.innerHTML = '<div class="a-head"><h2>Analytics</h2></div>'
+      + '<p class="placeholder">Click <strong>Plan</strong> to build analytics — utilization &amp; bottlenecks across every machine, operator, and process.</p>';
     return;
   }
   const h = a.headline || {};
-  const cls = (s) => s === "bottleneck" ? "u-hot" : s === "under-used" ? "u-cold" : "u-ok";
   const pct = (v) => v == null ? "—" : v + "%";
-  const bar = (v, s) => `<div class="u-bar"><div class="u-fill ${cls(s)}" style="width:${Math.min(v || 0, 100)}%"></div></div>`;
-  const barRow = (label, sub, v, s) =>
-    `<div class="u-row"><div class="u-lab">${escapeHtml(label)}<span class="u-sub">${escapeHtml(sub)}</span></div>${bar(v, s)}<div class="u-val">${pct(v)}</div></div>`;
+  const cls = (s) => s === "bottleneck" ? "hot" : s === "under-used" ? "cold" : s === "process" ? "proc" : "ok";
 
-  const bott = h.bottleneck ? `${escapeHtml(h.bottleneck.Machine)} ${pct(h.bottleneck["Utilization %"])}` : "—";
-  const under = (h.underused || []).map((m) => escapeHtml(m.Machine) + " " + pct(m["Utilization %"])).join(" · ") || "none";
-  const win = a.window ? `${a.window.start} → ${a.window.end}` : "";
-  const headline = `<div class="a-headline">
-      <div><strong>Bottleneck:</strong> ${bott}</div>
-      <div><strong>Under-used:</strong> ${under}</div>
-      <div><strong>Plan:</strong> ${h.makespan_days || "?"} days · ${h.total_busy_hrs || 0} busy hrs · avg machine util ${pct(h.avg_machine_util)}</div>
+  // one utilization row: status dot · name (+ muted sub) · track/fill bar · value
+  const row = (label, sub, v, s) => {
+    const c = cls(s);
+    const w = Math.max(Math.min(v == null ? 0 : v, 100), v ? 2 : 0);
+    return `<div class="au-row">
+      <span class="au-dot au-${c}"></span>
+      <div class="au-name" title="${escapeHtml(label)}">${escapeHtml(label)}${sub ? `<span>${escapeHtml(sub)}</span>` : ""}</div>
+      <div class="au-track"><div class="au-fill au-${c}" style="width:${w}%"></div></div>
+      <div class="au-val au-${c}">${pct(v)}</div>
     </div>`;
-
-  const machineBars = a.machines.map((m) => barRow(m.Machine, m.Type, m["Utilization %"], m.Status)).join("");
-  const groupBars = a.machine_groups.map((g) => barRow(g.Type + " (group)", g.Machines + " machines", g["Utilization %"], g.Status)).join("");
-  const opBars = a.operators.length
-    ? a.operators.map((o) => barRow(o.Operator, "operator", o["Utilization %"], o.Status)).join("")
-    : '<p class="muted">Operator logic off — no operator utilization.</p>';
-  const procBars = a.processes.map((p) => barRow(p.Process, p.Machines, p["Share %"], "ok")).join("");
-
-  const table = (rows) => {
-    if (!rows.length) return "";
-    const cols = Object.keys(rows[0]);
-    const th = cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
-    const tr = rows.map((r) => "<tr>" + cols.map((c) => `<td>${escapeHtml(String(r[c] == null ? "—" : r[c]))}</td>`).join("") + "</tr>").join("");
-    return `<table class="a-table"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>`;
   };
 
-  root.innerHTML = `
-    <div class="rule-header"><h2>Analytics — from the current plan${win ? ` (${win})` : ""}</h2></div>
-    ${headline}
-    <div class="a-grid">
-      <div class="a-col"><h3>Machines</h3>${machineBars}<h4>By type</h4>${groupBars}${table(a.machines)}</div>
-      <div class="a-col"><h3>Operators</h3>${opBars}${table(a.operators)}</div>
-      <div class="a-col"><h3>Processes — where the work is</h3>${procBars}${table(a.processes)}</div>
+  // collapsible raw-numbers table (declutters — bars are the primary view)
+  const table = (rows) => {
+    if (!rows.length) return "";
+    const cols = Object.keys(rows[0]).filter((c) => c !== "Status");
+    const th = cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+    const tr = rows.map((r) => "<tr>" + cols.map((c) =>
+      `<td>${escapeHtml(String(r[c] == null ? "—" : r[c]))}</td>`).join("") + "</tr>").join("");
+    return `<details class="a-more"><summary>Show numbers</summary>
+      <div class="table-wrap"><table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table></div></details>`;
+  };
+
+  // --- KPI cards ---
+  const b = h.bottleneck;
+  const nMach = a.machines.length;
+  const kpis = `<div class="a-kpis">
+    <div class="a-kpi hot">
+      <span class="a-kpi-lab">Bottleneck</span>
+      <span class="a-kpi-val">${b ? escapeHtml(b.Machine) : "—"}</span>
+      <span class="a-kpi-sub">${b ? pct(b["Utilization %"]) + " used · your tightest resource" : "no machines"}</span>
     </div>
-    <p class="g-note">Utilization = busy ÷ the resource's own available time in the plan window (Thursdays/holidays excluded). 🔴 ≥85% bottleneck · ⚪ ≤30% under-used. Process % = share of total machine-hours. Operator capacity assumes the standard shift length.</p>`;
+    <div class="a-kpi">
+      <span class="a-kpi-lab">Avg machine use</span>
+      <span class="a-kpi-val">${pct(h.avg_machine_util)}</span>
+      <span class="a-kpi-sub">across ${nMach} machine${nMach === 1 ? "" : "s"}</span>
+    </div>
+    <div class="a-kpi">
+      <span class="a-kpi-lab">Scheduled work</span>
+      <span class="a-kpi-val">${Math.round(h.total_busy_hrs || 0)}<span class="a-kpi-unit">hrs</span></span>
+      <span class="a-kpi-sub">total machine time</span>
+    </div>
+    <div class="a-kpi">
+      <span class="a-kpi-lab">Makespan</span>
+      <span class="a-kpi-val">${h.makespan_days || "?"}<span class="a-kpi-unit">days</span></span>
+      <span class="a-kpi-sub">${a.window ? escapeHtml(a.window.start + " → " + a.window.end) : ""}</span>
+    </div>
+  </div>`;
+
+  const legend = `<span class="a-legend">
+    <span class="au-dot au-hot"></span>bottleneck ≥85%
+    <span class="au-dot au-ok"></span>healthy
+    <span class="au-dot au-cold"></span>under-used ≤30%</span>`;
+
+  const machineBars = a.machines.map((m) => row(m.Machine, m.Type, m["Utilization %"], m.Status)).join("");
+  const groupBars = a.machine_groups.map((g) =>
+    row(g.Type, g.Machines + (g.Machines === 1 ? " machine" : " machines"), g["Utilization %"], g.Status)).join("");
+  const opBars = a.operators.length
+    ? a.operators.map((o) => row(o.Operator, "", o["Utilization %"], o.Status)).join("")
+    : '<p class="a-empty">Operator logic is off. Turn it on in <strong>Settings</strong> to see per-operator load.</p>';
+  const procBars = a.processes.map((p) => row(p.Process, p.Machines, p["Share %"], "process")).join("");
+
+  root.innerHTML = `
+    <div class="a-head">
+      <h2>Analytics</h2>
+      <span class="a-window">${a.window ? "Current plan · " + escapeHtml(a.window.start + " → " + a.window.end) : ""}</span>
+    </div>
+    ${kpis}
+    <div class="a-grid">
+      <section class="a-card">
+        <div class="a-card-head"><h3>Machine utilization</h3>${legend}</div>
+        <div class="au-list">${machineBars}</div>
+        <div class="a-subhead">By machine type</div>
+        <div class="au-list">${groupBars}</div>
+        ${table(a.machines)}
+      </section>
+      <section class="a-card">
+        <div class="a-card-head"><h3>Operator load</h3></div>
+        <div class="au-list">${opBars}</div>
+        ${a.operators.length ? table(a.operators) : ""}
+      </section>
+      <section class="a-card a-span">
+        <div class="a-card-head"><h3>Where the work goes</h3><span class="muted">share of total machine-hours</span></div>
+        <div class="au-list au-cols">${procBars}</div>
+        ${table(a.processes)}
+      </section>
+    </div>
+    <p class="a-foot"><strong>How to read this.</strong> Utilization = busy time ÷ that resource's <em>own</em> available time in the plan window (Thursdays &amp; holidays excluded), so a single-shift manual station and a two-shift CNC are judged fairly — 60% means the same for both. A <span class="au-t hot">bottleneck</span> is your constraint to relieve; <span class="au-t cold">under-used</span> resources have slack to take on more. Process share = each operation's cut of total machine-hours. Operator capacity assumes the standard shift length.</p>`;
 }
 
 // ---- Rule 8 daily entry form ----
