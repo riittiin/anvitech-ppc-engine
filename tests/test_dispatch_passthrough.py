@@ -8,7 +8,7 @@ station (missing data must fail loud). Alternative-machine '/' logic + parallel 
 apply to ANY step (e.g. inspection), not just CNC."""
 from datetime import date
 
-from engine.config import Config
+from engine.config import Config, OVERLAP_PERCENT
 from engine.models import (Batch, Process, Routing, Machine, WorkCalendar, Masters, Operator)
 from engine.rules import rule6_allocate
 
@@ -94,3 +94,22 @@ def test_inspection_alternatives_split_in_parallel():
     used = {e.machine for e in sched}
     assert len(sched) >= 2                              # split happened
     assert used <= {"MI1", "MI2", "MI3"} and len(used) >= 2
+
+
+def test_dispatch_waits_for_all_processes_not_just_predecessor():
+    # SLOW step (one machine), then a FAST step (another machine) that OVERLAPS and
+    # finishes BEFORE slow. DISPATCH must wait for the LATEST-finishing process (slow),
+    # not the fast step's overlap point — you can't ship before every piece is done.
+    procs = [Process(1, "SLOW", 10, 10, "M", None),
+             Process(2, "FAST", 1, 1, "M2", None),
+             Process(3, "DISPATCH", None, None, None, None)]
+    cfg = _cfg(overlap_mode=OVERLAP_PERCENT, overlap_percent=50)
+    sched = rule6_allocate.run([_batch(100)], config=cfg,
+                               masters=_masters(procs, machines=("M", "M2")))
+    by_seq = {}
+    for e in sched:
+        by_seq.setdefault(e.process_seq, e)
+    slow, fast, disp = by_seq[1], by_seq[2], by_seq[3]
+    assert fast.end < slow.end                # overlap still lets the fast step finish early
+    assert disp.start == slow.end             # DISPATCH waits for the LATEST process (slow)
+    assert disp.occupancy_min == 0 and disp.start == disp.end   # still a zero-duration milestone

@@ -27,6 +27,7 @@ from datetime import datetime, timedelta
 from ..models import ScheduleEntry
 from ..worktime import WorkClock, NoWorkingWindow
 from ..loaders import parse_resource_candidates, normalize_process_name
+from ..orderbook import is_dispatch
 from . import rule4_setup_time as r4
 from . import rule5_overlap_mode as r5
 
@@ -339,11 +340,21 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
                         offmachine.append((s["batch"].item_code, p.seq, p.name))
                     s["next"] += 1
                 elif _is_offmachine(p):
+                    if is_dispatch(p.name):
+                        # DISPATCH = the finished-goods gate: wait for the WHOLE order.
+                        # Overlap can let a later step finish before an earlier long one,
+                        # so place it at the LATEST end across all of this batch's prior
+                        # processes (not the immediate predecessor) — you can't ship until
+                        # every piece has cleared every process.
+                        at = max((e.end for e in schedule
+                                  if e.batch_id == s["batch"].batch_id), default=s["ready"])
+                    else:
+                        at = s["ready"]
                     schedule.append(ScheduleEntry(
                         batch_id=s["batch"].batch_id, item_code=s["batch"].item_code,
                         process_seq=p.seq, process_name=p.name, machine=_offmachine_lane(p),
                         qty=_qty_for(s["batch"], p), occupancy_min=0.0,
-                        start=s["ready"], end=s["ready"],   # milestone: zero duration
+                        start=at, end=at,   # milestone: zero duration
                         notes="off-machine step (OS / outsourcing / dispatch) — no in-house "
                               "machine or time; shown as a milestone",
                         so_refs=list(s["batch"].source_so_refs), operator="",
