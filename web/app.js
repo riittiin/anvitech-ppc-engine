@@ -190,11 +190,18 @@ function renderTabs() {
   g.textContent = "Gantt";
   g.onclick = () => { activeTab = "gantt"; renderTabs(); renderTab("gantt"); };
   nav.appendChild(g);
+
+  const an = document.createElement("div");
+  an.className = "tab tab-gantt" + (activeTab === "analytics" ? " active" : "");
+  an.textContent = "Analytics";
+  an.onclick = () => { activeTab = "analytics"; renderTabs(); renderTab("analytics"); };
+  nav.appendChild(an);
 }
 
 function renderTab(key) {
   if (key === "orders") { renderOrders(); return; }
   if (key === "gantt") { renderGantt(); return; }
+  if (key === "analytics") { renderAnalytics(); return; }
   const entry = currentTrace ? currentTrace[key] : null;
   const meta = RULES[key];
   const root = $("tab-content");
@@ -470,6 +477,57 @@ function renderGantt() {
     <p class="g-note">Each process sits on its own line, coloured by machine, placed on the day(s) it runs, with its start → end date shown. Hover a bar for machine · operator · time · qty. Status = Pending/Running per order.</p>`;
   $("g-zoom-in").onclick = () => { ganttDayWidth = Math.min(ganttDayWidth + 40, 560); renderGantt(); };
   $("g-zoom-out").onclick = () => { ganttDayWidth = Math.max(ganttDayWidth - 40, 80); renderGantt(); };
+}
+
+// ---- Analytics ----
+function renderAnalytics() {
+  const root = $("tab-content");
+  const a = currentTrace && currentTrace.analytics;
+  if (!a || !a.machines || !a.machines.length) {
+    root.innerHTML = '<div class="rule-header"><h2>Analytics</h2></div>'
+      + '<p class="placeholder">Click <strong>Plan</strong> to build analytics.</p>';
+    return;
+  }
+  const h = a.headline || {};
+  const cls = (s) => s === "bottleneck" ? "u-hot" : s === "under-used" ? "u-cold" : "u-ok";
+  const pct = (v) => v == null ? "—" : v + "%";
+  const bar = (v, s) => `<div class="u-bar"><div class="u-fill ${cls(s)}" style="width:${Math.min(v || 0, 100)}%"></div></div>`;
+  const barRow = (label, sub, v, s) =>
+    `<div class="u-row"><div class="u-lab">${escapeHtml(label)}<span class="u-sub">${escapeHtml(sub)}</span></div>${bar(v, s)}<div class="u-val">${pct(v)}</div></div>`;
+
+  const bott = h.bottleneck ? `${escapeHtml(h.bottleneck.Machine)} ${pct(h.bottleneck["Utilization %"])}` : "—";
+  const under = (h.underused || []).map((m) => escapeHtml(m.Machine) + " " + pct(m["Utilization %"])).join(" · ") || "none";
+  const win = a.window ? `${a.window.start} → ${a.window.end}` : "";
+  const headline = `<div class="a-headline">
+      <div><strong>Bottleneck:</strong> ${bott}</div>
+      <div><strong>Under-used:</strong> ${under}</div>
+      <div><strong>Plan:</strong> ${h.makespan_days || "?"} days · ${h.total_busy_hrs || 0} busy hrs · avg machine util ${pct(h.avg_machine_util)}</div>
+    </div>`;
+
+  const machineBars = a.machines.map((m) => barRow(m.Machine, m.Type, m["Utilization %"], m.Status)).join("");
+  const groupBars = a.machine_groups.map((g) => barRow(g.Type + " (group)", g.Machines + " machines", g["Utilization %"], g.Status)).join("");
+  const opBars = a.operators.length
+    ? a.operators.map((o) => barRow(o.Operator, "operator", o["Utilization %"], o.Status)).join("")
+    : '<p class="muted">Operator logic off — no operator utilization.</p>';
+  const procBars = a.processes.map((p) => barRow(p.Process, p.Machines, p["Share %"], "ok")).join("");
+
+  const table = (rows) => {
+    if (!rows.length) return "";
+    const cols = Object.keys(rows[0]);
+    const th = cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+    const tr = rows.map((r) => "<tr>" + cols.map((c) => `<td>${escapeHtml(String(r[c] == null ? "—" : r[c]))}</td>`).join("") + "</tr>").join("");
+    return `<table class="a-table"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>`;
+  };
+
+  root.innerHTML = `
+    <div class="rule-header"><h2>Analytics — from the current plan${win ? ` (${win})` : ""}</h2></div>
+    ${headline}
+    <div class="a-grid">
+      <div class="a-col"><h3>Machines</h3>${machineBars}<h4>By type</h4>${groupBars}${table(a.machines)}</div>
+      <div class="a-col"><h3>Operators</h3>${opBars}${table(a.operators)}</div>
+      <div class="a-col"><h3>Processes — where the work is</h3>${procBars}${table(a.processes)}</div>
+    </div>
+    <p class="g-note">Utilization = busy ÷ the resource's own available time in the plan window (Thursdays/holidays excluded). 🔴 ≥85% bottleneck · ⚪ ≤30% under-used. Process % = share of total machine-hours. Operator capacity assumes the standard shift length.</p>`;
 }
 
 // ---- Rule 8 daily entry form ----
