@@ -110,6 +110,20 @@ def test_dispatch_waits_for_all_processes_not_just_predecessor():
     for e in sched:
         by_seq.setdefault(e.process_seq, e)
     slow, fast, disp = by_seq[1], by_seq[2], by_seq[3]
-    assert fast.end < slow.end                # overlap still lets the fast step finish early
+    assert fast.start < slow.end              # overlap: fast STARTS early (pipelined)
     assert disp.start == slow.end             # DISPATCH waits for the LATEST process (slow)
     assert disp.occupancy_min == 0 and disp.start == disp.end   # still a zero-duration milestone
+
+
+def test_fast_step_cannot_finish_before_its_predecessor():
+    # A FAST step overlaps a SLOW predecessor: it STARTS early (pipelined) but can't
+    # FINISH before the slow step delivers the last piece — it is paced to the slow end.
+    procs = [Process(1, "SLOW", 10, 10, "M", None),
+             Process(2, "FAST", 1, 1, "M2", None)]
+    cfg = _cfg(overlap_mode=OVERLAP_PERCENT, overlap_percent=50)
+    sched = rule6_allocate.run([_batch(100)], config=cfg,
+                               masters=_masters(procs, machines=("M", "M2")))
+    slow = [e for e in sched if e.process_seq == 1][0]
+    fast = [e for e in sched if e.process_seq == 2][0]
+    assert fast.start < slow.end              # overlap START kept (begins before slow ends)
+    assert fast.end == slow.end               # paced: finishes no earlier than its predecessor

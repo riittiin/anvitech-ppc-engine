@@ -435,6 +435,16 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         entries, _blk = _allocate_op(proc, proc_qty, cyc, setup, s["ready"],
                                      machine_free, plan_start, clock_for, config,
                                      operator_free, op_lookup)
+        # Pace by the predecessor: a step may START early (overlap) but cannot FINISH
+        # before every earlier process of this batch has delivered the last piece — a fast
+        # step is *starved* by a slow one. Hold its completion to the latest prior end
+        # (extend the entries' span; the machine stays engaged with this batch until then).
+        # Work (occupancy) is unchanged — only the span grows (idle waiting for pieces).
+        prev_end = max((e.end for e in schedule if e.batch_id == batch.batch_id), default=None)
+        if prev_end is not None and entries:
+            naive_end = max(en for _, _, _, en, _ in entries)
+            if prev_end > naive_end:
+                entries = [(m, q, st, prev_end, op) for (m, q, st, en, op) in entries]
         split = len(entries) > 1
 
         # Emit an entry per machine; track the slowest portion (it decides recombine).
@@ -461,14 +471,16 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         # (Rule 5 overlap measured on that machine's clock — split-then-recombine).
         s["next"] += 1
         if s["next"] < len(s["routing"].processes):
-            if _is_os(s["routing"].processes[s["next"]]):
-                # Outsourced next step: the in-house predecessor must FULLY complete
-                # before the OS block starts (no overlap into an OS step — you can't
-                # ship parts that aren't machined yet). slow[4] = full occupancy.
-                elapsed = slow[4]
+            nxt = s["routing"].processes[s["next"]]
+            elapsed = r5.elapsed_before_next(slow[4], slow[3], config)
+            if _is_os(nxt) or elapsed >= slow[4]:
+                # Full-completion cases — the OS next step (can't ship un-machined parts),
+                # sequential mode, or a no-cutting predecessor: the successor waits for the
+                # predecessor's *paced* END (slow[0], held to its own predecessor). Overlap
+                # otherwise: start after % of the predecessor's cutting time (setup excluded).
+                s["ready"] = slow[0]
             else:
-                elapsed = r5.elapsed_before_next(slow[4], slow[3], config)
-            s["ready"] = slow[1].advance(slow[2], elapsed)
+                s["ready"] = slow[1].advance(slow[2], elapsed)
 
     if offmachine:
         names = sorted({nm for _, _, nm in offmachine})
