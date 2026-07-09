@@ -430,9 +430,14 @@ function renderGantt() {
       const dates = (d1 === d0) ? d0 : `${d0} → ${d1}`;
       const op = b.operator ? ` · ${b.operator}` : "";
       const tip = `${b.process} · ${b.machine}${op} · ${d0}${d1 !== d0 ? " → " + d1 : ""} · qty ${b.qty}`;
+      // Wide bars (multi-day, e.g. OS turnaround) show the dates INSIDE at their start
+      // so they stay on-screen; narrow bars show the dates just after the bar.
+      const wide = w >= 220;
+      const label = wide ? `${b.process} · ${dates}` : b.process;
+      const after = wide ? "" : `<div class="g-bar-dates" style="left:${left + w + 6}px">${escapeHtml(dates)}</div>`;
       return `<div class="g-lane">`
-        + `<div class="g-bar" style="left:${left}px;width:${w}px;background:${b.color}" title="${escapeHtml(tip)}">${escapeHtml(b.process)}</div>`
-        + `<div class="g-bar-dates" style="left:${left + w + 6}px">${escapeHtml(dates)}</div>`
+        + `<div class="g-bar" style="left:${left}px;width:${w}px;background:${b.color}" title="${escapeHtml(tip)}">${escapeHtml(label)}</div>`
+        + after
         + `</div>`;
     }).join("");
     const st = r.status || "";
