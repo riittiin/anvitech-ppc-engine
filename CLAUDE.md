@@ -211,7 +211,12 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `_offmachine_lane` picks the lane). A **DISPATCH** milestone (matched via
   `orderbook.is_dispatch`) is placed at the **latest end across all the batch's
   processes** — it waits for the whole order (overlap can let a later step finish before
-  an earlier long one), so dispatch never precedes a still-running process. `_is_os` (outsourced step — Allotted/Suggested =
+  an earlier long one), so dispatch never precedes a still-running process. **Overlap
+  pacing:** a step may START early (overlap) but its entries' END is extended to ≥ the
+  latest end of the batch's earlier processes — a fast step starved by a slow predecessor
+  finishes just after it, never before (occupancy unchanged, span grows); full-completion
+  successors (OS / sequential / no-cutting) then wait for that *paced* end (`slow[0]`).
+  `_is_os` (outsourced step — Allotted/Suggested =
   `OS`, or an `OS` word in the name when no real machine) reserves the **cycle-time as
   a flat, continuous 24×7, unlimited-parallel, operator-less block** on the "OS /
   Outsourced" lane; it is **fully sequential both sides** — its in-house predecessor

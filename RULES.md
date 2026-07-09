@@ -125,6 +125,19 @@ time** (deburring, CMM, inspection, washing, packing) produces nothing gradually
 so overlap is meaningless for it — its successor **waits for it to fully
 complete** (as in sequential mode). Overlap only compresses real machining steps.
 
+**A step can START early but cannot FINISH before its predecessor delivers the
+last piece (pacing).** Overlap lets a step begin after 50% of the previous step's
+cutting — but a step processes pieces only as fast as its predecessor hands them
+over. A **fast** step after a **slow** one (e.g. INSPECTION on 3 stations after
+WASHING on one) is *starved*: it starts early (pipelined) yet its completion is
+**held to its predecessor's end**, finishing just after — never before. Without
+this, a fast step would appear to finish before the slow step delivered its last
+pieces, and those pieces would be dispatched having skipped it. So each step's END
+is ≥ every earlier step's END (ends are monotonic through the routing); its span
+grows (idle waiting for pieces) while its work — cutting × qty + setup — is
+unchanged. The overlap *start* and the schedule's compression are preserved; only
+the impossible early *finish* is corrected.
+
 - **Source:** original Rule 6 (sheet rows 19–20, verbatim: "second operation
   shall start after first is fully completed" / "after 50% (or user defined) of
   first operation time is over")
