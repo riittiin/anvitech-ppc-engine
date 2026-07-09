@@ -211,7 +211,9 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `_offmachine_lane` picks the lane). `_is_os` (outsourced step — Allotted/Suggested =
   `OS`, or an `OS` word in the name when no real machine) reserves the **cycle-time as
   a flat, continuous 24×7, unlimited-parallel, operator-less block** on the "OS /
-  Outsourced" lane; the successor waits for it. A blank OS cycle stays a zero-duration
+  Outsourced" lane; it is **fully sequential both sides** — its in-house predecessor
+  runs to 100% before the block starts (no Rule 5 overlap *into* an OS step) and the
+  successor waits for the whole block. A blank OS cycle stays a zero-duration
   milestone. OS/off-machine lanes are excluded from the machine-utilization view.
 - `api/auth.py` — accounts (2 roles), `authenticate`, signed-cookie
   `make_token`/`verify_token`, session secret, login rate limiter. Stdlib only.

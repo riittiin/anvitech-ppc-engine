@@ -220,8 +220,12 @@ in-house machine is handled in one of two ways:
   vendor turnaround **flat per batch** (NOT × qty, no 90-min setup), runs **continuous
   24×7** (it ignores Anvitech's Thursday-off and shift hours — the vendor works on its
   own clock), takes **no in-house machine or operator**, and has **unlimited parallel
-  capacity** (any number of orders can be at OS at once). The next process **waits for
-  the full block to finish** (no overlap). Shown as an `OS` bar on the "OS / Outsourced"
+  capacity** (any number of orders can be at OS at once). An OS step is **fully
+  sequential on both sides**: its in-house **predecessor runs to 100% completion before
+  the block starts** (no overlap *into* an OS step — you can't ship parts that aren't
+  machined yet, so all of process 1 finishes whether it's 20 or 1000 pcs, regardless of
+  the overlap toggle), and the next process **waits for the full block to finish** (no
+  overlap *out of* it). Shown as an `OS` bar on the "OS / Outsourced"
   Gantt lane; kept out of the machine-utilization table (it is not a machine). If the
   cycle-time cell is **blank**, the step is a zero-duration milestone until a number is
   entered — then it reserves that block automatically, no code change. An OS step that
