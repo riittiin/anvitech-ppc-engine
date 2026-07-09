@@ -208,7 +208,10 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   independent of the toggle. Also `_is_offmachine` (**DISPATCH/OS** steps — no machine + no
   cycle time → scheduled as a **visible zero-duration milestone** on an "OS /
   Outsourced" or "Off-machine" lane, so outsourcing is shown, never ignored;
-  `_offmachine_lane` picks the lane). `_is_os` (outsourced step — Allotted/Suggested =
+  `_offmachine_lane` picks the lane). A **DISPATCH** milestone (matched via
+  `orderbook.is_dispatch`) is placed at the **latest end across all the batch's
+  processes** — it waits for the whole order (overlap can let a later step finish before
+  an earlier long one), so dispatch never precedes a still-running process. `_is_os` (outsourced step — Allotted/Suggested =
   `OS`, or an `OS` word in the name when no real machine) reserves the **cycle-time as
   a flat, continuous 24×7, unlimited-parallel, operator-less block** on the "OS /
   Outsourced" lane; it is **fully sequential both sides** — its in-house predecessor

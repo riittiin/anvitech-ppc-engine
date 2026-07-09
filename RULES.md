@@ -214,6 +214,12 @@ in-house machine is handled in one of two ways:
   "Off-machine" lane (or "OS / Outsourced" if its name has an `OS` word). It consumes
   no machine, operator or time. The dispatch gate is matched tolerantly — `DISPATCH`,
   `Dispatch`, and the real-data misspelling `DISAPTCH` all count.
+  **DISPATCH waits for the WHOLE order.** Because the Rule 5 overlap can let a *later*
+  fast step finish before an *earlier* long step (e.g. INSPECTION on 3 stations finishing
+  before WASHING on one), the dispatch milestone is placed at the **latest end across all
+  of the batch's processes**, not at its immediate predecessor's overlap point — so an
+  order is "dispatched" only once **every piece has cleared every process**. (The overlap
+  rule itself is unchanged for every real step; only the dispatch gate is held back.)
 - **OS / outsourcing with a turnaround time** — a step marked `OS` in its Allotted (or
   Suggested) machine cell, carrying a **cycle-time value in minutes** (e.g. `7200`).
   This is scheduled as a **reserved continuous block**: it holds that many minutes of
