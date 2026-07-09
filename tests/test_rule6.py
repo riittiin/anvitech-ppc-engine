@@ -309,3 +309,15 @@ def test_seeded_machine_does_not_affect_other_machines():
     n_base = next(e for e in base if e.machine == "N")
     n_seed = next(e for e in seeded if e.machine == "N")
     assert n_seed.start == n_base.start    # the N op is untouched by M's lost time
+
+
+def test_machine_view_includes_item_description(loaded):
+    # The machine-wise timeline shows the item's description next to its code.
+    _, masters = loaded
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    sched = rule6_allocate.run([_batch(masters, ITEM_A)], config=cfg, masters=masters)
+    timeline, _ = rule6_allocate.build_machine_view(sched, masters, cfg)
+    assert timeline, "expected machine-view rows"
+    row = timeline[0]
+    assert "Item Description" in row                     # new column present
+    assert row["Item Description"] == masters.routings[row["Item Code"]].description

@@ -566,6 +566,10 @@ def build_machine_view(schedule, masters, config):
         m = masters.machines.get(mid)
         return bool(m.provisional) if m else False
 
+    def desc(item_code):
+        r = masters.routings.get(item_code)
+        return r.description if r else ""
+
     # Order machines by when they first start working (then by id).
     order = sorted(by_machine, key=lambda mid: (min(e.start for e in by_machine[mid]), mid))
 
@@ -582,6 +586,7 @@ def build_machine_view(schedule, masters, config):
                 "SO No": ", ".join(e.so_refs),
                 "Batch": e.batch_id,
                 "Item Code": e.item_code,
+                "Item Description": desc(e.item_code),
                 "Process": e.process_name,
                 "Start": e.start,
                 "End": e.end,
