@@ -424,12 +424,16 @@ function renderGantt() {
   const dateOnly = (s) => String(s).split(" ")[0];   // "DD-MM-YYYY HH:MM" -> "DD-MM-YYYY"
 
   const rowsHtml = g.rows.map((r) => {
-    const bars = r.bars.map((b) => {
+    const lanes = r.bars.map((b) => {
       const left = b.offset_days * DAYW, w = Math.max(b.duration_days * DAYW, 8);
       const d0 = dateOnly(b.start), d1 = dateOnly(b.end);
+      const dates = (d1 === d0) ? d0 : `${d0} → ${d1}`;
       const op = b.operator ? ` · ${b.operator}` : "";
       const tip = `${b.process} · ${b.machine}${op} · ${d0}${d1 !== d0 ? " → " + d1 : ""} · qty ${b.qty}`;
-      return `<div class="g-bar" style="left:${left}px;width:${w}px;background:${b.color}" title="${escapeHtml(tip)}">${escapeHtml(b.process)}</div>`;
+      return `<div class="g-lane">`
+        + `<div class="g-bar" style="left:${left}px;width:${w}px;background:${b.color}" title="${escapeHtml(tip)}">${escapeHtml(b.process)}</div>`
+        + `<div class="g-bar-dates" style="left:${left + w + 6}px">${escapeHtml(dates)}</div>`
+        + `</div>`;
     }).join("");
     const st = r.status || "";
     // Flag orders whose expected completion falls after the SO delivery date (late).
@@ -441,7 +445,7 @@ function renderGantt() {
       <td>${escapeHtml(r.so_no)}</td><td>${r.so_qty}</td><td>${escapeHtml(r.so_delivery_date)}</td>
       <td class="${late ? "g-late" : ""}" title="${late ? "Finishes after the SO delivery date" : "On time"}">${escapeHtml(r.completion || "")}</td>
       <td>${st ? `<span class="status-pill status-${st.toLowerCase()}">${escapeHtml(st)}</span>` : ""}</td>
-      <td class="g-timeline"><div class="g-track" style="width:${axisW}px;background-image:${grid}">${offDays}${bars}</div></td>
+      <td class="g-timeline"><div class="g-lanes" style="width:${axisW}px;background-image:${grid}">${offDays}${lanes}</div></td>
     </tr>`;
   }).join("");
 
@@ -458,7 +462,7 @@ function renderGantt() {
           <th class="g-axis"><div class="g-band" style="width:${axisW}px"></div></th></tr>
     </thead><tbody>${rowsHtml}</tbody></table></div>
     <div class="g-legend"><strong>Machines (bar colour):</strong> ${legend}</div>
-    <p class="g-note">Each bar = one process, coloured by machine, placed on the day(s) it runs. Hover a bar for machine · operator · time · qty. Status = Pending/Running per order.</p>`;
+    <p class="g-note">Each process sits on its own line, coloured by machine, placed on the day(s) it runs, with its start → end date shown. Hover a bar for machine · operator · time · qty. Status = Pending/Running per order.</p>`;
   $("g-zoom-in").onclick = () => { ganttDayWidth = Math.min(ganttDayWidth + 40, 560); renderGantt(); };
   $("g-zoom-out").onclick = () => { ganttDayWidth = Math.max(ganttDayWidth - 40, 80); renderGantt(); };
 }
