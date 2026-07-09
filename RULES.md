@@ -173,8 +173,26 @@ wins (it's the preferred one), keeping plans deterministic. A listed machine not
 yet in the Machine master is registered as a provisional machine and still used.
 This applies to **any** alternative cell — CNC, inspection (`MI1/MI2/MI3`), etc.
 
+**Suggested vs Allotted, and what the parallelization toggle spans.** The *Suggested
+M/c* cell lists every machine the item is **capable** of using; the *Allotted M/c* cell
+is the machine(s) actually **allotted** for the step. Which set the scheduler may use
+depends on the parallelization toggle (`split_parallel`):
+
+- **Toggle OFF** → the step uses its **Allotted** machine(s) only (the planned choice).
+  If the Allotted cell is blank, it falls back to the Suggested machine(s) so the step
+  still schedules.
+- **Toggle ON** → the step may use the **union of Allotted + Suggested** (Allotted
+  first) — every capable machine — so work load-balances and (for batches over 400)
+  splits across all of them.
+
+So with the toggle off, an item with Allotted `CNC4` and Suggested `CNC3/CNC6` runs only
+on `CNC4`; with it on, it may run on `CNC4`, `CNC3` and `CNC6`. Ties prefer the Allotted
+machine (it is listed first). This is independent of OS/DISPATCH handling, which is
+decided before machine selection.
+
 **Parallel split (`split_parallel`, default on in the UI) — LARGE batches only.**
-When a step lists alternatives, the engine **splits the quantity across them to finish
+When a step lists alternatives, the engine **splits the quantity across the machines the
+toggle exposes (Allotted only when off, Allotted+Suggested when on) to finish
 the step as early as possible** — but **only for batches over 400 pieces**
 (`split_min_qty = 401`). Each candidate gets the load it can complete by a common target
 finish time, counted **from when it becomes free** — so a machine that's busy now but

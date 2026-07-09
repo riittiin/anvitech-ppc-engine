@@ -202,7 +202,10 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `rule8` module — Rule 8 is the unified "Plan" over the order book; see `api._plan`.)
   Rule 6 (`rule6_allocate.py`) also has: `_allocate_op` (smart **parallel split** of
   alternative-machine steps — split the qty to finish soonest, only when faster; flag
-  `split_parallel`), and `_is_offmachine` (**DISPATCH/OS** steps — no machine + no
+  `split_parallel`). `_resolve_candidates(proc, config)` is **parallelization-aware**:
+  split OFF → the Allotted machine(s) only (Suggested fallback if blank); split ON →
+  the union of Allotted + Suggested (Allotted first). OS/off-machine detection is
+  independent of the toggle. Also `_is_offmachine` (**DISPATCH/OS** steps — no machine + no
   cycle time → scheduled as a **visible zero-duration milestone** on an "OS /
   Outsourced" or "Off-machine" lane, so outsourcing is shown, never ignored;
   `_offmachine_lane` picks the lane). `_is_os` (outsourced step — Allotted/Suggested =
