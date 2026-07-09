@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import timedelta
 
+from .models import fmt_date
 from .rules.rule6_allocate import _clock_factory
 
 NON_MACHINE_LANES = {"OS / Outsourced", "Off-machine"}
@@ -151,16 +152,17 @@ def build_analytics(schedule, masters, config, batches=None):
         key=lambda r: -r["Work (hrs)"])
 
     total_busy = round(sum(m["Busy (hrs)"] for m in machines), 1)
+    makespan_days = (win_end.date() - win_start.date()).days + 1
     return {
-        "window": {"start": win_start, "end": win_end,
-                   "makespan_days": (win_end.date() - win_start.date()).days + 1},
+        "window": {"start": fmt_date(win_start), "end": fmt_date(win_end),
+                   "makespan_days": makespan_days},
         "machines": machines,
         "machine_groups": machine_groups,
         "operators": operators,
         "processes": processes,
         "headline": {
-            "window_start": win_start, "window_end": win_end,
-            "makespan_days": (win_end.date() - win_start.date()).days + 1,
+            "window_start": fmt_date(win_start), "window_end": fmt_date(win_end),
+            "makespan_days": makespan_days,
             "total_busy_hrs": total_busy,
             "avg_machine_util": _avg_util(machines),
             "bottleneck": machines[0] if machines else None,

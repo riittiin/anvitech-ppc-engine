@@ -315,6 +315,10 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
              "table": to_table(timeline)},
             {"title": "Machine utilization", "table": to_table(summary)},
         ]
+        # Analytics tab: utilization & bottlenecks derived from this plan.
+        from engine import analytics as _an
+        trace["analytics"] = _an.build_analytics(
+            plan_run.schedule, masters, config, plan_run.batches_prioritized)
         # Operator/shift coverage: when each machine can run, and unmatched specialties.
         if config.apply_operator_logic:
             from engine.operator_coverage import machine_windows
