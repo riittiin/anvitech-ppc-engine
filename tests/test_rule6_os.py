@@ -1,7 +1,7 @@
 """Rule 6 — OS (outsourcing) steps reserve their cycle-time as a continuous block."""
 from datetime import date, datetime, timedelta
 
-from engine.config import Config
+from engine.config import Config, OVERLAP_SEQUENTIAL, OVERLAP_PERCENT
 from engine.models import Batch, Process, Routing, Machine, WorkCalendar, Masters
 from engine.rules import rule6_allocate
 
@@ -100,3 +100,36 @@ def test_os_lane_excluded_from_machine_view():
     lanes = {r["Machine"] for r in summary}
     assert "OS / Outsourced" not in lanes      # not a machine — kept off utilization
     assert "M" in lanes                          # real machines still reported
+
+
+# --------------------------------------------------------------------------- #
+# An OS step waits for its in-house predecessor to FULLY complete (no overlap
+# into an outsourced step) — you can't ship parts that aren't machined yet.
+# --------------------------------------------------------------------------- #
+def test_os_predecessor_fully_completes_before_os_starts_overlap_on():
+    procs = [_P(1, "CNC FIRST SIDE", 6, sug="M"), _P(2, "OUTSOURCE", 600, allot="OS")]
+    cfg = _cfg(overlap_mode=OVERLAP_PERCENT, overlap_percent=50)
+    sched = rule6_allocate.run([_batch(20)], config=cfg, masters=_masters(procs))
+    p1 = [e for e in sched if e.process_seq == 1][0]
+    os_e = [e for e in sched if e.process_seq == 2][0]
+    assert os_e.start == p1.end          # full completion, NOT the 50% overlap point
+
+
+def test_inhouse_successor_still_overlaps_overlap_on():
+    # Contrast: when the next step is in-house, overlap still applies (starts early).
+    procs = [_P(1, "CNC FIRST SIDE", 6, sug="M"), _P(2, "CNC SECOND SIDE", 6, sug="M2")]
+    cfg = _cfg(overlap_mode=OVERLAP_PERCENT, overlap_percent=50)
+    sched = rule6_allocate.run([_batch(20)], config=cfg,
+                               masters=_masters(procs, machines=("M", "M2")))
+    p1 = [e for e in sched if e.process_seq == 1][0]
+    p2 = [e for e in sched if e.process_seq == 2][0]
+    assert p2.start < p1.end             # in-house successor overlaps (unchanged)
+
+
+def test_os_predecessor_full_completion_overlap_off_unchanged():
+    procs = [_P(1, "CNC FIRST SIDE", 6, sug="M"), _P(2, "OUTSOURCE", 600, allot="OS")]
+    cfg = _cfg(overlap_mode=OVERLAP_SEQUENTIAL)
+    sched = rule6_allocate.run([_batch(20)], config=cfg, masters=_masters(procs))
+    p1 = [e for e in sched if e.process_seq == 1][0]
+    os_e = [e for e in sched if e.process_seq == 2][0]
+    assert os_e.start == p1.end          # already full under sequential; stays full

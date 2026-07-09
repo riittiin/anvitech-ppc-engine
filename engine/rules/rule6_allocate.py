@@ -450,7 +450,13 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         # (Rule 5 overlap measured on that machine's clock — split-then-recombine).
         s["next"] += 1
         if s["next"] < len(s["routing"].processes):
-            elapsed = r5.elapsed_before_next(slow[4], slow[3], config)
+            if _is_os(s["routing"].processes[s["next"]]):
+                # Outsourced next step: the in-house predecessor must FULLY complete
+                # before the OS block starts (no overlap into an OS step — you can't
+                # ship parts that aren't machined yet). slow[4] = full occupancy.
+                elapsed = slow[4]
+            else:
+                elapsed = r5.elapsed_before_next(slow[4], slow[3], config)
             s["ready"] = slow[1].advance(slow[2], elapsed)
 
     if offmachine:
