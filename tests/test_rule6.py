@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 from engine.config import Config, OVERLAP_PERCENT
 from engine.models import (
-    Batch, Process, Routing, Machine, WorkCalendar, Masters,
+    Batch, Process, Routing, Machine, Operator, WorkCalendar, Masters,
 )
 from engine.rules import rule6_allocate
 from tests.sample_workbook import ITEM_A
@@ -352,3 +352,79 @@ def test_machine_view_includes_so_date_completion_and_qty(loaded):
     assert row["SO Del date"] == date(2025, 3, 7)                     # from the order
     assert row["Expected completion"] == max(e.end for e in sched).date()
     assert row["Qty"] > 0                                             # pieces in this op
+
+
+# --- Expedite window (least-slack tie-break within a small window) ----------- #
+
+def _operator_contention_masters():
+    """Two machines M, N sharing ONE operator OP1 (first shift), so only one of the
+    two can run at a time. Each of two batches has a single op — LESS on M, MORE on
+    N — both ready at plan start. N is briefly busy so MORE is feasible a few minutes
+    AFTER LESS: pure non-delay then gives M+OP1 to the less-urgent LESS first, and the
+    urgent MORE waits behind it. The expedite window lets MORE (least slack) take OP1
+    first even though it is a few minutes later."""
+    M = Machine(machine_no="M", display_name="M", machine_type="mill",
+                hr_rate=0.0, provisional=False, available_hrs_per_day=19.5)
+    N = Machine(machine_no="N", display_name="N", machine_type="mill",
+                hr_rate=0.0, provisional=False, available_hrs_per_day=19.5)
+    op1 = Operator(name="OP1", preferred_machines_raw="M, N", machines=["M", "N"],
+                   shift="First shift")
+    masters = Masters(machines={"M": M, "N": N}, operators=[op1], calendar=WorkCalendar())
+    masters.routings["LESS"] = Routing(
+        item_code="LESS", description="", customer="", rm_type="", moq=None,
+        processes=[Process(1, "less-on-M", cycle_time=10, total_time=None,
+                           suggested_machine="M", allotted_machine=None)],
+    )
+    masters.routings["MORE"] = Routing(
+        item_code="MORE", description="", customer="", rm_type="", moq=None,
+        processes=[Process(1, "more-on-N", cycle_time=10, total_time=None,
+                           suggested_machine="N", allotted_machine=None)],
+    )
+    return masters
+
+
+def _contention_batches():
+    # LESS: 12 pcs -> 120 min block if it grabs OP1 first. Due far out (low urgency).
+    less = Batch(batch_id="LESS", item_code="LESS", item_name="LESS", qty=12,
+                 so_delivery_date=date(2025, 3, 20), source_so_refs=["LESS"])
+    # MORE: 1 pc. Due soon (high urgency / least slack).
+    more = Batch(batch_id="MORE", item_code="MORE", item_name="MORE", qty=1,
+                 so_delivery_date=date(2025, 3, 7), source_so_refs=["MORE"])
+    return less, more
+
+
+def _more_start(cfg):
+    masters = _operator_contention_masters()
+    less, more = _contention_batches()
+    # N briefly busy (5 working-min) so MORE is feasible just after LESS -> a near-tie.
+    sched = rule6_allocate.run([less, more], config=cfg, masters=masters,
+                               machine_lost_min={"N": 5})
+    return next(e for e in sched if e.batch_id == "MORE").start
+
+
+def test_expedite_window_pulls_urgent_order_ahead_of_a_near_tie():
+    base_cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    exp_cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True,
+                     expedite_window_min=15)
+    baseline_start = _more_start(base_cfg)
+    expedite_start = _more_start(exp_cfg)
+    # Without the window, urgent MORE waits behind the 120-min LESS block on OP1.
+    assert baseline_start == datetime(2025, 3, 5, 10, 0)
+    # With a 15-min window, MORE (least slack) takes OP1 first -> starts ~08:05.
+    assert expedite_start < baseline_start
+    assert expedite_start == datetime(2025, 3, 5, 8, 5)
+
+
+def test_expedite_window_default_is_noop():
+    """Default config (expedite_window_min=0) reproduces the legacy non-delay plan
+    exactly, so the golden trace and existing plans are unchanged."""
+    off = _more_start(Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True))
+    explicit_zero = _more_start(Config(plan_start_date=date(2025, 3, 5),
+                                       apply_operator_logic=True, expedite_window_min=0))
+    assert off == explicit_zero == datetime(2025, 3, 5, 10, 0)
+
+
+def test_expedite_window_negative_is_rejected():
+    import pytest
+    with pytest.raises(ValueError):
+        Config(expedite_window_min=-1).validate()

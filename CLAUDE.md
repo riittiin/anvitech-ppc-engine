@@ -162,7 +162,9 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
 
 ## Map of the code
 
-- `engine/config.py` — tunable params + validation.
+- `engine/config.py` — tunable params + validation. Includes `expedite_window_min`
+  (default 0 = off): Rule 6's least-slack tie-break window (Settings tick mark
+  "Expedite urgent orders"); 0 is byte-identical to the legacy non-delay plan.
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
 - `engine/loaders.py` — read the uploaded workbook (Test4 format) → typed objects +
   non-blocking report. The 3 master sheets are read **header-driven** (`_locate_table`);
@@ -214,7 +216,14 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   Rule 6 (`rule6_allocate.py`) also has: `_is_setup_machine(mid, masters)` — the
   90-min setup (`config.setup_time_min`) is charged to **CNC/VMC machining only** (id
   `CNC*`/`VMC*`, or the master's CNC-lathe / Vertical-Machining-center type); manual/
-  finishing steps get **0 setup** (2026-07-11 change). `_allocate_op` (smart **parallel
+  finishing steps get **0 setup** (2026-07-11 change). **Expedite window**
+  (`config.expedite_window_min`, default 0 = off): the op-selection step collects all
+  ready ops into `options`, then — when the window is > 0 — picks the **least-slack** op
+  among those startable within the window of the earliest feasible start (else the
+  legacy earliest-feasible, priority tie-break). It never idles a resource (only
+  ready-now ops are chosen). Trade-off measured on Test5: pulls the worst-stuck orders
+  in (worst 48.6→38.7 days) but can push a currently-on-time order late — a tick mark so
+  the planner can A/B it, **not on by default**. `_allocate_op` (smart **parallel
   split** of alternative-machine steps — split the qty to finish soonest, only when
   faster; flag `split_parallel`). `_resolve_candidates(proc, config)` is **parallelization-aware**:
   split OFF → the Allotted machine(s) only (Suggested fallback if blank); split ON →

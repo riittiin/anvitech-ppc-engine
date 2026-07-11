@@ -41,6 +41,8 @@ function readConfig() {
     priority_window_days: $("cfg-priority-window").value,
     apply_operator_logic: $("cfg-operator-logic").checked,
     split_parallel: $("cfg-split-parallel").checked,
+    // Tick mark → a 45-min expedite window; unticked → 0 (legacy non-delay).
+    expedite_window_min: $("cfg-expedite") && $("cfg-expedite").checked ? 45 : 0,
   };
   // Plan start date (the day scheduling begins). Sent as ISO; omitted if blank so
   // the saved/default date is kept. Daily punches still advance the clock past it.
@@ -97,6 +99,8 @@ function applyConfig(cfg) {
   if (ol) ol.checked = !!cfg.apply_operator_logic;
   const sp = $("cfg-split-parallel");
   if (sp) sp.checked = !!cfg.split_parallel;
+  const ex = $("cfg-expedite");
+  if (ex) ex.checked = Number(cfg.expedite_window_min) > 0;
 }
 
 // ---- Plan (Run + Rerun unified) ----

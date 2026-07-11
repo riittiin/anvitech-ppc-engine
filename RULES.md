@@ -181,6 +181,22 @@ ready; it never forces a machine to wait for a higher-priority batch whose
 operation isn't ready yet. This is the core of the optimization: maximize machine
 utilization while honouring delivery-date priority.
 
+**Expedite window (`expedite_window_min`, default 0 = off).** Pure non-delay
+(above) breaks ties only when two operations can start at the *exact* same instant;
+when the earliest-startable op is a few minutes ahead, it wins even if a **more
+urgent** order's op is right behind it — so an overdue order can keep losing every
+near-race for a shared machine/operator and finish weeks late. The expedite window
+softens this **without ever idling a resource**: among the operations that could
+start within `expedite_window_min` minutes of the *earliest* startable one, the
+scheduler picks the one with the **least slack** (dynamic slack = working time to
+its SO delivery date − work it still needs), rather than the one that is merely a
+few minutes earlier. With the window at **0** the behaviour is exactly the legacy
+non-delay tie-break (byte-identical plans). A small window (≈45 min) pulls the
+worst-stuck urgent orders forward by days while never pushing a comfortably on-time
+order late — it only redistributes machine/operator time *among orders competing at
+nearly the same moment*. It is a tie-break refinement, not a reordering: no machine
+ever waits for a not-yet-ready op.
+
 **Alternative ("preferred") machines.** A process's *Suggested M/c* cell may list
 **alternatives separated by `/`** (e.g. `CNC3/CNC6` = run on either CNC3 or CNC6).
 The scheduler picks the **earliest-available** of the allowed machines, so work
@@ -393,3 +409,4 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 | Two-shift threshold | 12 hrs (Available Hrs/Day) | Rule 6 |
 | Manual / single-shift window | 09:00–18:00 | Rule 6 |
 | Split alternative machines in parallel | on (UI) | Rule 6 |
+| Expedite window (least-slack tie-break) | 0 min = off (engine) | Rule 6 |

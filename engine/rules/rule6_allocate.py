@@ -22,7 +22,7 @@ Raises RuleError on a contract violation (e.g. a batch with no routing).
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 
 from ..models import ScheduleEntry
 from ..worktime import WorkClock, NoWorkingWindow
@@ -387,7 +387,9 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
                 else:
                     break
 
-        best = None  # (sort_key, state, proc, resource, occ, note)
+        # Collect every ready op with its earliest-feasible start; the dispatch rule
+        # below chooses which one to schedule this iteration.
+        options = []  # (feasible, prio, slack, state, proc, resource, occ, note)
         for s in states:
             if s["blocked"] or s["next"] >= len(s["routing"].processes):
                 continue
@@ -439,13 +441,32 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
                 continue
 
             note = f"chose {resource} of {'/'.join(candidates)}" if len(candidates) > 1 else ""
-            key = (feasible, s["prio"], s["batch"].batch_id, proc.seq)
-            if best is None or key < best[0]:
-                best = (key, s, proc, resource, occ, note)
+            # Dynamic slack = working time to the SO delivery date − work still needed
+            # for this batch (this op + every later op). Only used by the expedite window.
+            due = datetime.combine(s["batch"].so_delivery_date, dtime(23, 59))
+            rem_work = sum(r4.occupancy_minutes(pp.cycle_time, _qty_for(s["batch"], pp), config)
+                           for pp in s["routing"].processes[s["next"]:])
+            slack = (due - feasible).total_seconds() / 60.0 - rem_work
+            options.append((feasible, s["prio"], slack, s, proc, resource, occ, note))
 
-        if best is None:
+        if not options:
             break
-        _, s, proc, resource, occ, note = best
+
+        # Dispatch rule. Baseline (expedite_window_min == 0): the earliest-startable op
+        # wins, priority breaks exact ties — byte-identical to the legacy plan. With a
+        # window: among ops that could start within `expedite_window_min` of the
+        # EARLIEST feasible start, pick the least-slack (most at-risk) one, so an urgent
+        # order wins a near-race for a shared machine/operator. No resource ever idles —
+        # only ops that are already ready-and-feasible-now are ever chosen.
+        win = getattr(config, "expedite_window_min", 0) or 0
+        if win > 0:
+            earliest = min(o[0] for o in options)
+            horizon = earliest + timedelta(minutes=win)
+            near = [o for o in options if o[0] <= horizon]
+            pick = min(near, key=lambda o: (o[2], o[0], o[3]["batch"].batch_id, o[4].seq))
+        else:
+            pick = min(options, key=lambda o: (o[0], o[1], o[3]["batch"].batch_id, o[4].seq))
+        _feasible, _prio, _slack, s, proc, resource, occ, note = pick
         batch = s["batch"]
         cyc = proc.cycle_time or 0.0
         # Setup (machine programming time) applies to CNC/VMC only; manual/finishing

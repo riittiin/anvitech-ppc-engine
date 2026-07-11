@@ -80,6 +80,16 @@ class Config:
     split_parallel: bool = False
     split_min_qty: int = 401
 
+    # Rule 6 — expedite window (minutes). Pure non-delay scheduling only breaks a tie
+    # when two ops can start at the exact same instant; a more-urgent op that is
+    # feasible a few minutes later keeps losing every near-race for a shared
+    # machine/operator. When > 0, among the ops that could start within this many
+    # minutes of the EARLIEST startable one, the scheduler picks the least-slack
+    # (most at-risk of its SO delivery date) instead of the merely-earliest. 0 = off
+    # → byte-identical to the legacy non-delay tie-break (golden/tests stay stable);
+    # the web UI can enable a small window (≈45).
+    expedite_window_min: int = 0
+
     # When True, the full operator/shift model applies in Rule 6:
     #   * each machine uses a per-availability working window (≥threshold → two
     #     shifts 08:00-05:00; else single-shift manual 09:00-18:00), AND
@@ -124,6 +134,8 @@ class Config:
             errs.append("split_parallel must be true or false")
         if self.split_min_qty < 1:
             errs.append("split_min_qty must be >= 1")
+        if self.expedite_window_min < 0:
+            errs.append("expedite_window_min must be >= 0")
         if errs:
             raise ValueError("Invalid config: " + "; ".join(errs))
 
