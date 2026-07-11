@@ -32,6 +32,26 @@ from . import rule4_setup_time as r4
 from . import rule5_overlap_mode as r5
 
 
+def _is_setup_machine(mid, masters=None) -> bool:
+    """Setup time (``config.setup_time_min``) models the effort to PROGRAM/SET a CNC or
+    VMC before it runs, so it is charged ONLY to CNC/VMC machining. Manual/finishing
+    stations (washing, deburring, packing, inspection, drilling/chamfer, bandsaw,
+    manual lathe) need no such setup and get 0.
+
+    A machine qualifies if its (normalized) id starts with CNC/VMC — which is how every
+    real CNC/VMC machine is named — or, as a fallback for oddly-named ids, if its
+    Machine-master type is a CNC lathe / Vertical Machining center."""
+    m = str(mid or "").upper()
+    if m.startswith("CNC") or m.startswith("VMC"):
+        return True
+    if masters is not None:
+        mach = getattr(masters, "machines", {}).get(mid)
+        t = (getattr(mach, "machine_type", "") or "").upper() if mach else ""
+        if "CNC" in t or "VMC" in t or "VERTICAL MACHINING" in t:
+            return True
+    return False
+
+
 def _clock_factory(masters, config):
     """A memoized ``clock_for(machine_id)``. With operator logic ON, each machine
     gets its own working window (per Available Hrs/Day + operator coverage; an
@@ -428,7 +448,9 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
         _, s, proc, resource, occ, note = best
         batch = s["batch"]
         cyc = proc.cycle_time or 0.0
-        setup = config.setup_time_min
+        # Setup (machine programming time) applies to CNC/VMC only; manual/finishing
+        # steps occupy their station for run time alone (no 90-min setup).
+        setup = config.setup_time_min if _is_setup_machine(resource, masters) else 0
         cands_list = _resolve_candidates(proc, config)
         proc_qty = _qty_for(batch, proc)   # this step's remaining (= batch qty if no progress)
 

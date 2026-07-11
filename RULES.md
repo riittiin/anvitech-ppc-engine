@@ -98,11 +98,15 @@ two dates may be for the metric to reorder them (default: no limit).
 ## PHASE 3 — Allocation parameters *(consumed inside Rule 6, not pipeline stages)*
 
 ### ⚙️ Rule 4 — Setup time per process  *(Parameter / calc)*
-For every process, add **90 min setup time** on top of (cycle time × qty) when
-computing how long it occupies a machine.
+Add **90 min setup time** on top of (cycle time × qty) when computing how long a
+process occupies a machine — but **only for CNC/VMC machining** (the setup models the
+time to program/set the machine). Manual/finishing steps (washing, deburring, packing,
+inspection, drilling/chamfer, bandsaw, manual lathe) need no such setup and occupy
+their station for run time alone. A machine is CNC/VMC by id (`CNC*`/`VMC*`) or by its
+Machine-master type (CNC lathe / Vertical Machining center).
 
 - **Source:** original Rule 5a
-- **Consumed by:** Rule 6 (machine occupancy calculation)
+- **Consumed by:** Rule 6 (machine occupancy calculation); see `rule6_allocate._is_setup_machine`
 
 ### ⚙️ Rule 5 — Operation overlap mode  *(Parameter / calc — global toggle per plan run)*
 Provide a two-option selection:
@@ -112,7 +116,7 @@ Provide a two-option selection:
   process's _cutting time_** is done.
 
 **What the 50% measures (data-confirmed decision).** Machine occupancy =
-*cutting time* (cycle × qty) **+ a 90-min setup** (Rule 4). The source rule says
+*cutting time* (cycle × qty) **+ a 90-min setup** (Rule 4, CNC/VMC steps only). The source rule says
 "50% of first operation time," but does not define whether that includes setup.
 It is measured against the **cutting time only — the setup is excluded**, because
 while the previous operation cuts, the *next* machine's own setup runs in
@@ -163,8 +167,8 @@ preferred/suggested list** — respecting:
   **Shift column** in the Operator & shift Master (First/Second) — there is no
   swap-every-Friday rule.
 
-**Time basis.** A process's machine time = **cycle time × qty** (+ the 90-min setup,
-Rule 4). The Process "Total time" column in the master is **never** used.
+**Time basis.** A process's machine time = **cycle time × qty** (+ the 90-min setup
+for CNC/VMC steps only, Rule 4). The Process "Total time" column in the master is **never** used.
 
 **Non-delay scheduling (keep machines running).** The engine schedules at the
 *operation* level, not batch-by-batch: at every step it considers the next ready
@@ -383,7 +387,7 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 | Parameter | Default | Rule |
 |---|---|---|
 | Consolidation window | 10 days | Rule 1 |
-| Setup time per process | 90 min | Rule 4 |
+| Setup time per process (CNC/VMC only) | 90 min | Rule 4 |
 | Operation overlap | always on, 50% (configurable) | Rule 5 |
 | Apply operator & shift logic | on (UI) | Rule 6 ← masters |
 | Two-shift threshold | 12 hrs (Available Hrs/Day) | Rule 6 |

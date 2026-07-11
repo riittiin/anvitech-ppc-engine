@@ -14,11 +14,13 @@ machines following 9 business rules, then re-plans as actual production comes in
   order, with input/output for each.
 - **Design spec (original 9 rules):** [`docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md`](docs/superpowers/specs/2026-06-19-anvitech-ppc-engine-design.md)
 - **Order-book design (current architecture):** [`docs/superpowers/specs/2026-06-22-order-book-design.md`](docs/superpowers/specs/2026-06-22-order-book-design.md)
-- **Data format:** the user's `Test4.xlsx` (gitignored real data — the current
-  file; supersedes the earlier `Test3.xlsx`) — the 3 master sheets use a clean
-  header-driven layout the loader reads dynamically. Extra/reordered columns are
-  fine: the loader finds columns by name, so `Test4` (more columns than `Test3`,
-  same header names) loads unchanged.
+- **Data format:** the user's `Test5.xlsx` (gitignored real data — the **current
+  file**; supersedes `Test4.xlsx`, which superseded `Test3.xlsx`) — the 3 master
+  sheets use a clean header-driven layout the loader reads dynamically. Extra/reordered
+  columns are fine: the loader finds columns by name, so each new file (more columns,
+  same header names) loads unchanged. `Test5` adds parallel manual stations
+  (`MW1/MW2/MW3`, `MD1/MD2`, `MPK1/MPK2/MPK3`) and carries a **+30% cycle/total time
+  on every CNC/VMC step** (owner request, 2026-07-11).
 
 ## Stack
 
@@ -30,8 +32,8 @@ machines following 9 business rules, then re-plans as actual production comes in
   code)** pair — an SO number alone is NOT unique; one SO# can carry several item
   lines) and stores the workbook's masters. `load_all(source)` requires a path or
   BytesIO — there is **no bundled default** (pre-upload the app shows empty masters).
-  Tests + the golden trace use a **code-generated sample** in the Test4 format
-  (`tests/sample_workbook.py`); the real-data file `Test4.xlsx` is gitignored and
+  Tests + the golden trace use a **code-generated sample** in the same format
+  (`tests/sample_workbook.py`); the real-data file `Test5.xlsx` is gitignored and
   used only by uploading it.
 - **Persistent state (the order book):** orders, their actuals, and the latest
   masters live in a durable key/value store. `engine/storage.py` selects the backend:
@@ -113,7 +115,7 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   that one order, record it in the report, and keep scheduling every other order.
   Non-blocking and fail-localized; the run does not stop. (Unlike a missing machine,
   a missing routing can't be made provisional — you can't invent a recipe.) In the
-  the current Test4/sample data there are 0 such cases; this is a future safety net.
+  the current Test5/sample data there are 0 such cases; this is a future safety net.
 - **Time-unit inconsistency:** cycle/total times are in minutes in the Process
   Master but appear as tiny decimals in `Planning status monitoring`. Normalize
   to one unit in the loader and log coercions.
@@ -127,7 +129,8 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
 - One test file per rule under `tests/`, named `test_ruleN.py`. Seed tests with
   the generated sample workbook (`tests/sample_workbook.py`) or self-contained data.
 - Configurable params live in `engine/config.py` with validation: consolidation
-  window (10d), setup time (90min), overlap mode (50%).
+  window (10d), setup time (90min, **CNC/VMC steps only** — manual/finishing steps get
+  no setup; see `rule6_allocate._is_setup_machine`), overlap mode (50%).
 - Keep files focused; if a rule file grows large it's probably doing too much.
 
 ## Commands
@@ -208,9 +211,12 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
 - `engine/rules/ruleN_*.py` — Rules 1–7, one pure `run(...)` each; 4/5 also expose
   the calc helpers Rule 6 imports. (Rule 7 = `rule7_capture_actuals`. There is no
   `rule8` module — Rule 8 is the unified "Plan" over the order book; see `api._plan`.)
-  Rule 6 (`rule6_allocate.py`) also has: `_allocate_op` (smart **parallel split** of
-  alternative-machine steps — split the qty to finish soonest, only when faster; flag
-  `split_parallel`). `_resolve_candidates(proc, config)` is **parallelization-aware**:
+  Rule 6 (`rule6_allocate.py`) also has: `_is_setup_machine(mid, masters)` — the
+  90-min setup (`config.setup_time_min`) is charged to **CNC/VMC machining only** (id
+  `CNC*`/`VMC*`, or the master's CNC-lathe / Vertical-Machining-center type); manual/
+  finishing steps get **0 setup** (2026-07-11 change). `_allocate_op` (smart **parallel
+  split** of alternative-machine steps — split the qty to finish soonest, only when
+  faster; flag `split_parallel`). `_resolve_candidates(proc, config)` is **parallelization-aware**:
   split OFF → the Allotted machine(s) only (Suggested fallback if blank); split ON →
   the union of Allotted + Suggested (Allotted first). OS/off-machine detection is
   independent of the toggle. Also `_is_offmachine` (**DISPATCH/OS** steps — no machine + no

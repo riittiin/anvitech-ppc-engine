@@ -3,6 +3,10 @@
 Machine occupancy for a process = cycle_time x qty + setup_time, where setup
 defaults to 90 min (config.setup_time_min). A missing cycle time counts as 0
 run time, so the process still occupies the machine for the setup.
+
+NOTE: Rule 6 charges this setup to **CNC/VMC machining only** (setup = machine
+programming time). Manual/finishing steps get 0 setup — Rule 6 decides per the
+chosen machine (``rule6_allocate._is_setup_machine``); this helper stays generic.
 """
 from __future__ import annotations
 

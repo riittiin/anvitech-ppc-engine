@@ -143,7 +143,7 @@ Rule 7 actuals reduce each order's remaining qty; "mark complete" archives it.
 | Parameter | Default | Rule |
 |---|---|---|
 | Consolidation window | 10 days | Rule 1 |
-| Setup time per process | 90 min | Rule 4 |
+| Setup time per process (CNC/VMC only) | 90 min | Rule 4 |
 | Operation overlap mode | sequential / 50% | Rule 5 |
 
 All validated at run start. Edit them live in the frontend or pass a `config`

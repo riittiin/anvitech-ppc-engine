@@ -7,7 +7,9 @@ from engine.rules import rule6_allocate
 
 
 def _masters(suggested="M/N", n_machines=2):
-    machines = {"M": Machine("M", "M", "t"), "N": Machine("N", "N", "t")}
+    # CNC-typed so the 90-min setup applies (setup is CNC/VMC-only); split in practice
+    # happens on alternative CNC/VMC machines.
+    machines = {"M": Machine("M", "M", "CNC lathe"), "N": Machine("N", "N", "CNC lathe")}
     masters = Masters(machines=machines, calendar=WorkCalendar())
     masters.routings["X"] = Routing(
         item_code="X", description="", customer="", rm_type="", moq=None,

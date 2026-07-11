@@ -18,7 +18,7 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0, 512 MB).
 - **Repo:** GitHub `riittiin/anvitech-ppc-engine` (private). Push to `main` →
   Render auto-redeploys (no separate deploy step).
-- **198 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
+- **232 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
   Python engine. Python 3 (run as `python3` locally — there is no `python` alias).
 - **Login is a two-role app-owned session** (admin / user) — see "Login & roles".
 - The engine has **8 business rules** (1–8). (Rule 8 = the Plan over the order book —
@@ -27,11 +27,16 @@ job shop. **Built, tested, deployed live, and actively iterated.**
   rules 1–5 debug tabs and the Rule 8 tab are hidden (the trace still records them).
 - **Order identity is the `(SO No, Item Code)` pair** — an SO number is NOT unique;
   one SO# can carry several item lines, each its own order. (Changed from SO#-only.)
-- **Data file is now `Test4.xlsx`** (supersedes `Test3.xlsx`) — gitignored real data.
-- **Most recent work** is the "Latest session" block below: composite (SO#, item) key
-  + two-step capture picker, a MongoDB upload fix, OS/outsourcing steps now shown on
-  the Gantt, a Plan-start-date setting, an Expected-completion column, a quantity-only
-  feedback loop with a self-advancing plan clock, and a big UI cleanup.
+- **Data file is now `Test5.xlsx`** (supersedes `Test4.xlsx` → `Test3.xlsx`) —
+  gitignored real data. Test5 adds parallel manual stations (`MW1/MW2/MW3`, `MD1/MD2`,
+  `MPK1/MPK2/MPK3`) and a **+30% cycle/total time on every CNC/VMC step**.
+- **Most recent work (2026-07-11 — UNCOMMITTED, NOT on the live site yet):** a
+  root-cause analysis of late deliveries + two changes — (1) **setup time is now
+  CNC/VMC-only** (a code change; manual steps no longer carry the 90-min setup) and
+  (2) the **Test5 +30% CNC/VMC time bump** (data). See "Latest session" below. Earlier
+  shipped work (on `main`): composite (SO#, item) key + two-step capture picker, a
+  MongoDB upload fix, OS/outsourcing milestones on the Gantt, a Plan-start-date
+  setting, an Expected-completion column, a quantity-only feedback loop, UI cleanup.
 
 ## How to pick up where the last session left off (behavioral context)
 
@@ -126,7 +131,7 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (good qty, complete?)   ┘
 | 1 | Consolidate SO lines (same item, 10-day window) | `rule1_consolidate.py` | hidden |
 | 2 | Sort by SO delivery date | `rule2_sort_by_date.py` | hidden |
 | 3 | Smart priority = least **slack** | `rule3_tiebreak_process_time.py` | hidden |
-| 4 | Setup time (cycle×qty + 90 min) — calc, consumed by R6 | `rule4_setup_time.py` | hidden |
+| 4 | Setup time (cycle×qty + 90 min, **CNC/VMC steps only**) — calc, consumed by R6 | `rule4_setup_time.py` | hidden |
 | 5 | Overlap mode — calc, consumed by R6 | `rule5_overlap_mode.py` | hidden |
 | 6 | Allocate to machines (non-delay scheduler) | `rule6_allocate.py` | **Allocate to machines** |
 | 7 | Capture daily actuals | `rule7_capture_actuals.py` | **Capture actuals** |
@@ -160,10 +165,56 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 - **Plan consistency:** the admin's Plan click (`/run` with `persist:true`) saves the
   config to `anvitech:plan_config`; users (and admin auto-load) plan with that config.
 
-## What changed most recently (read these commits, newest first)
+## What changed most recently (read these, newest first)
 
-All shipped to `main`. The **(SO#, item) key**, the **MongoDB fix**, and **OS
-inclusion** are the three most recent and most important.
+### Latest session (2026-07-11) — ⚠️ UNCOMMITTED, NOT on `main`/live yet
+
+This session did a deep root-cause analysis of "orders finishing past their delivery
+date" and made two changes. **All of it is local/uncommitted** (git status: modified
+`engine/rules/rule6_allocate.py`, `rule4_setup_time.py`, `tests/test_rule6.py`,
+`tests/test_parallel_split.py`, `tests/golden_trace.json`, `CLAUDE.md`, `RULES.md`;
+`Test5.xlsx` is gitignored). Decide with the user whether to commit + push (push =
+deploy). **The live site still runs the old code and has whatever Test4 data was last
+uploaded.**
+
+1. **Setup time is now CNC/VMC-only** (`rule6_allocate._is_setup_machine`). The 90-min
+   setup models CNC/VMC **programming** time, so manual/finishing steps (washing,
+   deburring, packing, inspection, drilling/chamfer DTC2, bandsaw, manual lathe) now
+   get **0 setup**. Detection: machine id `CNC*`/`VMC*`, or the master's CNC-lathe /
+   Vertical-Machining-center type. Golden trace regenerated; 232 tests pass.
+2. **Test5 data edits** (in the gitignored `Test5.xlsx`, via openpyxl, backed up first):
+   - Expanded manual stations in the Item's process Master: `MW1`→`MW1/MW2/MW3`,
+     `MD1`→`MD1/MD2`, `MPK1`→`MPK1/MPK2/MPK3` (mirrors how inspection is `MI1/MI2/MI3`).
+   - **+30% cycle time AND total time on every CNC/VMC machining step** (566 cells).
+
+**Root-cause findings (important context — see the `late-deliveries-root-cause`
+memory):**
+- Machines are **not** the constraint (avg utilization ~28%); orders spend ~76% of
+  their life **waiting**. The model *appeared* to blame 3 manual operators, but that was
+  an **artifact of inflated manual step times** — manual steps are computed **per-piece
+  × full qty** (e.g. deburring 1000 pcs = one long block) plus the phantom 90-min setup.
+- The owner's father (floor knowledge) says **manual is fast and never the bottleneck;
+  CNC/VMC sequencing is**. Confirmed: modeling manual as fast collapses lateness ~95%,
+  and the residual bottleneck is then **CNC/VMC (70% of the late orders' wait)**.
+- **All CNC/VMC steps are hard-pinned to one machine** in the Allotted column (0% list
+  alternatives); the Suggested column *does* list alternatives (`CNC3/CNC6`) but only
+  on smaller items → load imbalance (CNC4 1.7×, VMC2 2×).
+- **Parallel split isn't firing** because its two data gates never line up: 51/65 orders
+  are ≤400 pcs (below `split_min_qty=401`), and the 14 orders that ARE big enough list a
+  **single** machine per CNC/VMC step (nothing to split across).
+
+**Still open (discussed, not done):** (a) manual steps modeled per-piece × qty — the
+owner's father implies they're **bulk/batch** ops (fast, ~fixed per batch); if so the
+engine should stop multiplying manual steps by qty (needs owner confirmation: per-piece
+vs per-batch). (b) CNC hard-pinning — put real alternatives in Allotted (or lower
+`split_min_qty`) so big runs can split/balance. (c) local `plan_start_date` is stale
+(`2025-03-01`) → everything plans a year early; the real lateness only shows when the
+start is near the July-2026 due cluster.
+
+### Earlier, shipped to `main` (newest first)
+
+The **(SO#, item) key**, the **MongoDB fix**, and **OS inclusion** are the three most
+recent shipped and most important.
 
 - **OS / outsourcing shown as milestones** (`520601a`) — a step with **no machine AND
   no cycle time** (OS/outsourcing like `BANDSAW OS`, `DISPATCH`, and other off-machine
@@ -218,7 +269,7 @@ Test2→Test3 migration) is in the git history and the design specs.
 
 ```bash
 pip install -r requirements.txt
-python3 -m pytest -q                          # 198 tests
+python3 -m pytest -q                          # 232 tests
 REGEN_GOLDEN=1 python3 -m pytest -k golden    # ONLY after an intentional logic change
 python3 -m uvicorn api.main:app --reload      # http://127.0.0.1:8000  (frontend at /)
 ```
@@ -232,7 +283,7 @@ rm -rf data/store
 STORE_DIR=data/store nohup python3 -m uvicorn api.main:app --port 8011 >/tmp/uv.log 2>&1 &
 # log in (saves the session cookie), then upload as admin:
 curl -s -c /tmp/ck.txt -X POST http://127.0.0.1:8011/login -d "username=anvitech&password=1930rail" >/dev/null
-curl -s -b /tmp/ck.txt -F "file=@Test4.xlsx" http://127.0.0.1:8011/upload >/dev/null   # your real data (Test4)
+curl -s -b /tmp/ck.txt -F "file=@Test5.xlsx" http://127.0.0.1:8011/upload >/dev/null   # your real data (Test5)
 # then drive a browser (log in through /login; the cookie persists), or POST /run and read the JSON.
 ```
 The scratchpad `STORE_DIR=/tmp/...` trick gives a truly fresh store for a clean repro.
@@ -290,8 +341,10 @@ The scratchpad `STORE_DIR=/tmp/...` trick gives a truly fresh store for a clean 
   to the single least-queued one.
 - **Off-machine steps (DISPATCH / OS) are shown as zero-duration milestones**, never
   ignored — "OS / Outsourced" or "Off-machine" lane; no machine/operator/time consumed.
-- **Time basis = cycle time × qty** (+ 90-min setup). The Process "Total time" column is
-  **never** used.
+- **Time basis = cycle time × qty** (+ 90-min setup **on CNC/VMC steps only**; manual/
+  finishing steps get no setup). The Process "Total time" column is **never** used.
+  (NOTE / open item: manual steps are still multiplied by full qty — likely should be
+  batch-based; confirm with the owner.)
 - **Operator/shift logic** (toggle) — each machine runs only shifts with a qualified
   operator; operators are a real one-at-a-time resource (earliest-free, load-balanced).
 - **Masters** are latest-wins on upload, kept if a file omits them.
@@ -307,9 +360,17 @@ quantity-only feedback loop (gate-counted finished goods, per-process re-plan,
 self-advancing plan clock, latest-day-only capture list); operators as a real resource;
 preferred/alternative machine + **split only over 400**; **OS/off-machine milestones**;
 **Settings Plan-start-date**; DD-MM-YYYY dates; UI cleanup (4 tabs, no emojis, redesigned
-header). **Data:** now **`Test4.xlsx`** (Test4 format, standardized masters).
+header). **Data:** now **`Test5.xlsx`** (same header-driven format; parallel manual
+stations + CNC/VMC +30% time). **Setup time is CNC/VMC-only** (2026-07-11, uncommitted).
 
 **Deferred (explicitly, per the user):**
+- **Manual step time model (per-piece vs per-batch)** — manual/finishing steps are
+  computed cycle × full-qty; the owner's floor knowledge implies they're bulk/batch
+  ops. Confirm and, if batch, stop multiplying manual steps by qty. **The single
+  biggest remaining lever on delivery lateness.**
+- **CNC/VMC hard-pinning** — every machining step names one machine in Allotted (no
+  alternatives), causing load imbalance and blocking parallel split on big runs. Put
+  the real alternatives in Allotted, or lower `split_min_qty`.
 - **Remaining process-master items** — historically only the focus items were fully
   filled in; the rest of the Item's process Master is completed as the user edits the
   Excel. A missing machine is a *provisional* placeholder (non-blocking); a missing
@@ -329,10 +390,11 @@ header). **Data:** now **`Test4.xlsx`** (Test4 format, standardized masters).
   `Order.key`/`Actual.key` give the pair. The MongoDB hash field is the composite
   `"<so>\x1f<item>"`, **percent-encoded** in `MongoStore` (a raw `.`/`$` in an item
   code breaks the dotted update path — that was the live upload bug).
-- **`Test4.xlsx` is the user's real-data file** — **gitignored** (`Test*.xlsx`), never
-  commit it. It has more SO-list columns than `Test3` but the same header names; the
-  header-driven loader is unaffected. `61243661-01..` in the SO list looks like a data
-  typo (trailing dots) — the app handles it, but worth flagging to the user.
+- **`Test5.xlsx` is the user's real-data file** — **gitignored** (`Test*.xlsx`), never
+  commit it. Same header names as Test4/Test3 (header-driven loader unaffected). There
+  are timestamped backups from this session's edits (`Test5_backup_*.xlsx`, also
+  gitignored). `61243661-01..` in the SO list looks like a data typo (trailing dots) —
+  the app handles it, but worth flagging to the user.
 - **There is no bundled data file.** Tests + the golden trace use a **code-generated
   sample** (`tests/sample_workbook.py`, Test4 format). Pre-upload the app shows empty
   masters ("please upload").

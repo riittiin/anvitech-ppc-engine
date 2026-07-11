@@ -19,8 +19,25 @@ def test_first_process_starts_at_plan_start(loaded):
     cfg = Config(plan_start_date=date(2025, 3, 5))  # Wednesday
     sched = rule6_allocate.run([_batch(masters, ITEM_A)], config=cfg, masters=masters)
     assert sched[0].start == datetime(2025, 3, 5, 8, 0)
-    # ITEM_A P1 (BANDSAW): cycle 3 x 10 + 90 setup = 120 min occupancy.
-    assert sched[0].occupancy_min == 120
+    # ITEM_A P1 (BANDSAW on BS1) is a MANUAL step: cycle 3 x 10 + 0 setup = 30 min
+    # (the 90-min setup is charged to CNC/VMC machining only).
+    assert sched[0].occupancy_min == 30
+
+
+def test_setup_charged_to_cnc_vmc_only(loaded):
+    """The 90-min setup (machine programming) applies to CNC/VMC steps only; manual
+    stations (bandsaw, washing, inspection, etc.) occupy their station for run time
+    alone."""
+    _, masters = loaded
+    cfg = Config(plan_start_date=date(2025, 3, 5))
+    sched = rule6_allocate.run([_batch(masters, ITEM_A)], config=cfg, masters=masters)
+    by_seq = {e.process_seq: e for e in sched}
+    # P1 BANDSAW on BS1 (manual) → no setup: 3 x 10 + 0 = 30.
+    assert by_seq[1].machine == "BS1"
+    assert by_seq[1].occupancy_min == 30
+    # P2 CNC OS on a real CNC (CNC1/CNC2) → 90-min setup: 5 x 10 + 90 = 140.
+    assert by_seq[2].machine.startswith("CNC")
+    assert by_seq[2].occupancy_min == 5 * 10 + 90
 
 
 def test_processes_are_sequenced_within_batch(loaded):
