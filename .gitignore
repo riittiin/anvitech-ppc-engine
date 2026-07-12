@@ -24,3 +24,7 @@ Production*.xlsx
 # macOS
 .DS_Store
 data/store/
+
+# Downloaded schedule exports (real order data — never commit)
+anvitech-machine-schedule-*.csv
+*-machine-schedule-*.csv
