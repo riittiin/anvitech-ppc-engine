@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 from engine.config import Config, OVERLAP_PERCENT
 from engine.models import (
-    Batch, Process, Routing, Machine, Operator, WorkCalendar, Masters,
+    Batch, Process, Routing, Machine, Operator, WorkCalendar, Masters, ScheduleEntry,
 )
 from engine.rules import rule6_allocate
 from tests.sample_workbook import ITEM_A
@@ -428,3 +428,60 @@ def test_expedite_window_negative_is_rejected():
     import pytest
     with pytest.raises(ValueError):
         Config(expedite_window_min=-1).validate()
+
+
+# --- Operator load balancing (fairness post-process, schedule-neutral) -------- #
+
+def _op_pool_masters():
+    """Two machines M, N; two operators OP1, OP2 both qualified for both, first shift."""
+    M = Machine(machine_no="M", display_name="M", machine_type="mill",
+                hr_rate=0.0, provisional=False, available_hrs_per_day=19.5)
+    N = Machine(machine_no="N", display_name="N", machine_type="mill",
+                hr_rate=0.0, provisional=False, available_hrs_per_day=19.5)
+    op1 = Operator(name="OP1", preferred_machines_raw="M,N", machines=["M", "N"], shift="First shift")
+    op2 = Operator(name="OP2", preferred_machines_raw="M,N", machines=["M", "N"], shift="First shift")
+    return Masters(machines={"M": M, "N": N}, operators=[op1, op2], calendar=WorkCalendar())
+
+
+def _entry(bid, machine, start, end, operator):
+    return ScheduleEntry(batch_id=bid, item_code=bid, process_seq=1, process_name="op",
+                         machine=machine, qty=1,
+                         occupancy_min=(end - start).total_seconds() / 60,
+                         start=start, end=end, notes="", so_refs=[bid], operator=operator)
+
+
+def test_rebalance_operators_spreads_load_and_preserves_timing():
+    """Two back-to-back ops both landed on OP1 while OP2 sat idle. Rebalancing hands
+    one to OP2 (fair) WITHOUT moving any start/end time (schedule-neutral)."""
+    masters = _op_pool_masters()
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    h = lambda hr: datetime(2025, 3, 5, hr, 0)
+    sched = [_entry("A", "M", h(8), h(9), "OP1"),
+             _entry("B", "M", h(9), h(10), "OP1")]
+    before = [(e.batch_id, e.machine, e.start, e.end) for e in sched]
+
+    rule6_allocate._rebalance_operators(sched, masters, cfg)
+
+    after = [(e.batch_id, e.machine, e.start, e.end) for e in sched]
+    assert before == after                                   # timing untouched
+    assert {e.operator for e in sched} == {"OP1", "OP2"}     # load now spread
+
+
+def test_rebalance_never_double_books_an_operator():
+    """Two OVERLAPPING ops must end up on different people (one can't run two at once)."""
+    masters = _op_pool_masters()
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    h = lambda hr: datetime(2025, 3, 5, hr, 0)
+    sched = [_entry("A", "M", h(8), h(11), "OP1"),
+             _entry("B", "N", h(9), h(10), "OP1")]   # overlaps A
+    rule6_allocate._rebalance_operators(sched, masters, cfg)
+    assert sched[0].operator != sched[1].operator
+
+
+def test_balance_operator_load_defaults_off_and_validates():
+    assert Config().balance_operator_load is False
+    import pytest
+    bad = Config()
+    bad.balance_operator_load = "yes"
+    with pytest.raises(ValueError):
+        bad.validate()

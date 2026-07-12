@@ -580,7 +580,45 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
                 f"match no machine — check naming (see the table)."
             )
 
+    if getattr(config, "balance_operator_load", False):
+        moved = _rebalance_operators(schedule, masters, config)
+        if moved:
+            notes.append(
+                f"Operator load balancing ON: reassigned {moved} operation(s) to the "
+                f"least-loaded qualified operator (same shift, already free) — spreads "
+                f"work evenly across interchangeable people; start/end times unchanged."
+            )
+
     return schedule
+
+
+def _rebalance_operators(schedule, masters, config) -> int:
+    """Fairness POST-PROCESS. Timing is already fixed; only reassign *who* runs each
+    operator-run op so load spreads evenly across interchangeable people. Walks ops in
+    time order and hands each to the qualified, same-shift operator who is **free at
+    that op's start** and has the **least accumulated work** so far. Because it never
+    touches start/end, makespan and lateness are provably unchanged. Returns the number
+    of ops whose operator changed. No-op when operator logic is off (no operators)."""
+    from ..operator_coverage import qualified_operators
+    busy_until: dict = {}
+    load: dict = {}
+    moved = 0
+    for e in sorted((x for x in schedule if x.operator), key=lambda x: (x.start, x.end)):
+        eligible = qualified_operators(e.machine, e.start, masters, config)
+        free = [o for o in eligible if busy_until.get(o, e.start) <= e.start]
+        if free:
+            # Least work so far; break ties by longest-idle then name (deterministic).
+            pick = min(free, key=lambda o: (load.get(o, 0.0),
+                                            busy_until.get(o, e.start), o))
+            if pick != e.operator:
+                e.operator = pick
+                moved += 1
+        # If nobody is free (should not happen on a feasible plan), keep the original
+        # operator — never double-book. Track whoever ends up assigned.
+        op = e.operator
+        busy_until[op] = e.end
+        load[op] = load.get(op, 0.0) + (e.end - e.start).total_seconds() / 60.0
+    return moved
 
 
 def build_machine_view(schedule, masters, config, batches=None):

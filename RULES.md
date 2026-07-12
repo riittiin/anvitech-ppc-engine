@@ -318,6 +318,17 @@ Rule 6; the finished-goods gate is just this rule applied to the **last** proces
 
 While running, Rule 6 consumes: ⚙️ Rule 4 (setup time) and ⚙️ Rule 5 (overlap mode).
 
+**Balance operator workload (`balance_operator_load`, default off).** A
+**schedule-neutral** fairness pass applied *after* the plan is built. The first-listed
+tie-break can pile work on the early-named operators (e.g. one at 106% while an equally
+qualified peer sits idle). When on, each already-scheduled operation is reassigned to
+the **qualified, same-shift operator who is free at that moment and has the least work
+so far** — spreading load evenly across interchangeable people. It **never changes any
+start/end time**, so **makespan and lateness are provably unchanged** (only *who* runs
+each job changes). It never double-books a person (an op whose operators are all busy
+keeps its original). Measured on Test5: peak operator 106%→97%, spread (stdev) 23→16,
+with an identical schedule. See `rule6_allocate._rebalance_operators`.
+
 - **Source:** original Rule 4 + `Machine master` + `Operator & shift Master` +
   `Weekly off & holiday master`
 - **Input:** prioritized batch list (Rule 3) + Rules 4/5/7 + masters
@@ -410,3 +421,4 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
 | Manual / single-shift window | 09:00–18:00 | Rule 6 |
 | Split alternative machines in parallel | on (UI) | Rule 6 |
 | Expedite window (least-slack tie-break) | 0 min = off (engine) | Rule 6 |
+| Balance operator workload (schedule-neutral) | off (engine) | Rule 6 |

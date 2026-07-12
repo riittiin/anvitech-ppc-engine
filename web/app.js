@@ -43,6 +43,7 @@ function readConfig() {
     split_parallel: $("cfg-split-parallel").checked,
     // Tick mark → a 45-min expedite window; unticked → 0 (legacy non-delay).
     expedite_window_min: $("cfg-expedite") && $("cfg-expedite").checked ? 45 : 0,
+    balance_operator_load: !!($("cfg-balance-ops") && $("cfg-balance-ops").checked),
   };
   // Plan start date (the day scheduling begins). Sent as ISO; omitted if blank so
   // the saved/default date is kept. Daily punches still advance the clock past it.
@@ -101,6 +102,8 @@ function applyConfig(cfg) {
   if (sp) sp.checked = !!cfg.split_parallel;
   const ex = $("cfg-expedite");
   if (ex) ex.checked = Number(cfg.expedite_window_min) > 0;
+  const bo = $("cfg-balance-ops");
+  if (bo) bo.checked = !!cfg.balance_operator_load;
 }
 
 // ---- Plan (Run + Rerun unified) ----

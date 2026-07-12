@@ -164,7 +164,10 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
 
 - `engine/config.py` — tunable params + validation. Includes `expedite_window_min`
   (default 0 = off): Rule 6's least-slack tie-break window (Settings tick mark
-  "Expedite urgent orders"); 0 is byte-identical to the legacy non-delay plan.
+  "Expedite urgent orders"); 0 is byte-identical to the legacy non-delay plan. And
+  `balance_operator_load` (default off): Rule 6's schedule-neutral operator-fairness
+  post-process (Settings tick mark "Balance operator workload") — reassigns *who* runs
+  each op without moving any time, so makespan/lateness are unchanged.
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
 - `engine/loaders.py` — read the uploaded workbook (Test4 format) → typed objects +
   non-blocking report. The 3 master sheets are read **header-driven** (`_locate_table`);

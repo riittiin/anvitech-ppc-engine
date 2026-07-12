@@ -80,6 +80,14 @@ class Config:
     split_parallel: bool = False
     split_min_qty: int = 401
 
+    # Rule 6 — balance operator workload (default off). A schedule-neutral POST-PROCESS:
+    # after the plan is built, each already-scheduled operation is reassigned to the
+    # qualified, same-shift operator who is free at that moment and has the least work
+    # so far — spreading load evenly across interchangeable people. It never changes any
+    # start/end time, so makespan and lateness are unaffected; only *who* runs each job
+    # changes. The web UI can enable it as a fairness toggle.
+    balance_operator_load: bool = False
+
     # Rule 6 — expedite window (minutes). Pure non-delay scheduling only breaks a tie
     # when two ops can start at the exact same instant; a more-urgent op that is
     # feasible a few minutes later keeps losing every near-race for a shared
@@ -132,6 +140,8 @@ class Config:
             errs.append("apply_operator_logic must be true or false")
         if not isinstance(self.split_parallel, bool):
             errs.append("split_parallel must be true or false")
+        if not isinstance(self.balance_operator_load, bool):
+            errs.append("balance_operator_load must be true or false")
         if self.split_min_qty < 1:
             errs.append("split_min_qty must be >= 1")
         if self.expedite_window_min < 0:

@@ -28,3 +28,10 @@ def test_expedite_window_defaults_off_and_round_trips():
     cfg = Config.from_dict({"expedite_window_min": 45})
     assert cfg.expedite_window_min == 45
     assert Config.from_dict(cfg.to_dict()).expedite_window_min == 45
+
+
+def test_balance_operator_load_defaults_off_and_round_trips():
+    assert Config().balance_operator_load is False
+    cfg = Config.from_dict({"balance_operator_load": True})
+    assert cfg.balance_operator_load is True
+    assert Config.from_dict(cfg.to_dict()).balance_operator_load is True
