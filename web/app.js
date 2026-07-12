@@ -230,6 +230,7 @@ function renderTab(key) {
     html += '<div class="dl-toolbar">'
       + '<button id="dl-schedule" class="primary">⬇ Download schedule (CSV)</button>'
       + '<button id="dl-machine">⬇ Download machine-wise view</button>'
+      + '<button id="dl-shiftwise">⬇ Download shift-wise schedule</button>'
       + '<span class="muted"> — opens in Excel; print it for the floor</span></div>';
   }
 
@@ -260,6 +261,10 @@ function renderTab(key) {
     const mView = entry.tables && entry.tables[0] && entry.tables[0].table;
     if (mach && mView) mach.onclick = () => downloadCsv(`anvitech-machine-schedule-${todayStamp()}.csv`, mView);
     else if (mach) mach.style.display = "none";
+    const shift = $("dl-shiftwise");
+    if (shift && entry.shiftwise && entry.shiftwise.rows && entry.shiftwise.rows.length) {
+      shift.onclick = () => downloadCsv(`anvitech-shiftwise-schedule-${todayStamp()}.csv`, entry.shiftwise);
+    } else if (shift) shift.style.display = "none";   // hidden when operator logic is off
   }
 }
 

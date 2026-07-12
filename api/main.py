@@ -319,6 +319,13 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
         from engine import analytics as _an
         trace["analytics"] = _an.build_analytics(
             plan_run.schedule, masters, config, plan_run.batches_prioritized)
+        # Shift-wise timeline (download-only view): every op split into per-shift segments
+        # with the real operator each shift. Not rendered as a panel (can be ~900 rows) —
+        # attached under its own key for the "Download shift-wise schedule" button. Only
+        # meaningful when operator/shift logic is on.
+        if config.apply_operator_logic:
+            trace["rule6"]["shiftwise"] = to_table(r6.build_shiftwise_timeline(
+                plan_run.schedule, masters, config, plan_run.batches_prioritized))
         # Operator/shift coverage: when each machine can run, and unmatched specialties.
         if config.apply_operator_logic:
             from engine.operator_coverage import machine_windows

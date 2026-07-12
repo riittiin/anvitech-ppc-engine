@@ -485,3 +485,38 @@ def test_balance_operator_load_defaults_off_and_validates():
     bad.balance_operator_load = "yes"
     with pytest.raises(ValueError):
         bad.validate()
+
+
+# --- Shift-wise timeline (split each op into per-shift segments with the real op) --- #
+
+def _shiftwise_masters():
+    M = Machine(machine_no="M", display_name="M", machine_type="CNC lathe",
+                hr_rate=0.0, provisional=False, available_hrs_per_day=19.5)   # two-shift
+    op1 = Operator(name="DayOp", preferred_machines_raw="M", machines=["M"], shift="First shift")
+    op2 = Operator(name="NightOp", preferred_machines_raw="M", machines=["M"], shift="Second shift")
+    m = Masters(machines={"M": M}, operators=[op1, op2], calendar=WorkCalendar())
+    m.routings["X"] = Routing(item_code="X", description="WIDGET", customer="", rm_type="",
+                              moq=None, processes=[])
+    return m
+
+
+def test_shiftwise_splits_a_multi_shift_op_by_shift_with_real_operator():
+    masters = _shiftwise_masters()
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    # One op on M from 08:00 to next day 02:00 → spans 1st shift (08–19) + 2nd shift (19–05).
+    e = ScheduleEntry(batch_id="B1", item_code="X", process_seq=1, process_name="CNC",
+                      machine="M", qty=100, occupancy_min=1080,
+                      start=datetime(2025, 3, 5, 8, 0), end=datetime(2025, 3, 6, 2, 0),
+                      notes="", so_refs=["SO1"], operator="DayOp")
+    b = Batch(batch_id="B1", item_code="X", item_name="X", qty=100,
+              so_delivery_date=date(2025, 3, 20), source_so_refs=["SO1"])
+
+    rows = rule6_allocate.build_shiftwise_timeline([e], masters, cfg, [b])
+
+    assert len(rows) == 2                                            # split into two shifts
+    first, second = rows[0], rows[1]
+    assert first["Shift"] == "First shift" and first["Operator"] == "DayOp"
+    assert second["Shift"] == "Second shift" and second["Operator"] == "NightOp"
+    assert first["Item Description"] == "WIDGET"                     # carries full detail
+    # the segment minutes cover only working shift time (no 05:00–08:00 gap double-count)
+    assert first["Minutes"] == 11 * 60                              # 08:00–19:00

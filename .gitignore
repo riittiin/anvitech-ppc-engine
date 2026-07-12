@@ -28,3 +28,5 @@ data/store/
 # Downloaded schedule exports (real order data — never commit)
 anvitech-machine-schedule-*.csv
 *-machine-schedule-*.csv
+anvitech-schedule-*.csv
+anvitech-shiftwise-schedule-*.csv

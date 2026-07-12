@@ -621,6 +621,96 @@ def _rebalance_operators(schedule, masters, config) -> int:
     return moved
 
 
+def build_shiftwise_timeline(schedule, masters, config, batches=None):
+    """Split every operator-run operation into its per-day, per-shift segments and name
+    the **actual operator** working each shift. A two-shift machine runs 08:00–19:00
+    (1st) + 19:00–05:00 (2nd); a single-shift/manual station runs 09:00–18:00 only.
+    Operators are assigned fairly (qualified for the machine + on that shift; the
+    free-now, least-loaded one), so the same machine hands off to different people at
+    shift change instead of crediting one person for a multi-day block. Returns a list
+    of detail rows (Machine, SO, Batch, Item, …, Date, Shift, Start, End, Minutes,
+    Operator). Timing is never changed — this is a reporting view of the fixed plan."""
+    from ..operator_coverage import qualified_operators
+    cal = masters.calendar
+    thr = config.two_shift_threshold_hours
+
+    def _working(d):
+        return d.weekday() != cal.weekly_off_weekday and d not in cal.holidays
+
+    def _two_shift(mid):
+        m = masters.machines.get(mid)
+        hrs = getattr(m, "available_hrs_per_day", None) if m else None
+        return (hrs >= thr) if hrs is not None else (mid.startswith(("CNC", "VMC")))
+
+    def _windows(mid, d):
+        """Working shift windows (label, start, end) for machine `mid` on date `d`."""
+        if not _working(d):
+            return []
+        base = datetime(d.year, d.month, d.day)
+        if _two_shift(mid):
+            return [("First shift", base.replace(hour=config.first_shift_start_hour),
+                     base.replace(hour=config.first_shift_end_hour)),
+                    ("Second shift", base.replace(hour=config.first_shift_end_hour),
+                     base + timedelta(days=1, hours=config.second_shift_end_hour))]
+        return [(f"Day shift ({config.manual_start_hour:02d}:00–{config.manual_end_hour:02d}:00)",
+                 base.replace(hour=config.manual_start_hour),
+                 base.replace(hour=config.manual_end_hour))]
+
+    batch_by_id = {b.batch_id: b for b in (batches or [])}
+    end_by_batch: dict = {}
+    for e in schedule:
+        if e.end > end_by_batch.get(e.batch_id, e.end - timedelta(days=1)):
+            end_by_batch[e.batch_id] = e.end
+
+    # Collect every shift-segment of every operator-run op, then assign operators in time
+    # order (fair: free-now least-loaded qualified person for that machine + shift).
+    segs = []
+    for e in schedule:
+        if not e.operator:
+            continue
+        d = e.start.date() - timedelta(days=1)   # start a day early to catch overnight 2nd shift
+        while d <= e.end.date():
+            for label, ws, we in _windows(e.machine, d):
+                s = max(ws, e.start)
+                en = min(we, e.end)
+                if en > s:
+                    segs.append((s, en, label, e))
+            d += timedelta(days=1)
+    segs.sort(key=lambda x: (x[0], x[3].machine))
+
+    busy_until: dict = {}
+    load: dict = {}
+    rows = []
+    for s, en, label, e in segs:
+        eligible = qualified_operators(e.machine, s, masters, config)
+        free = [o for o in eligible if busy_until.get(o, s) <= s]
+        pool = free or eligible
+        op = min(pool, key=lambda o: (load.get(o, 0.0), busy_until.get(o, s), o)) if pool else e.operator
+        if op:
+            busy_until[op] = en
+            load[op] = load.get(op, 0.0) + (en - s).total_seconds() / 60.0
+        b = batch_by_id.get(e.batch_id)
+        routing = masters.routings.get(e.item_code)
+        rows.append({
+            "Machine": e.machine,
+            "SO No": ", ".join(e.so_refs),
+            "Batch": e.batch_id,
+            "Item Code": e.item_code,
+            "Item Description": routing.description if routing else "",
+            "SO Del date": b.so_delivery_date if b else "",
+            "Expected completion": end_by_batch.get(e.batch_id, e.end).date(),
+            "Process": f"{e.process_seq}. {e.process_name}",
+            "Qty": int(e.qty),
+            "Date": s.date(),
+            "Shift": label,
+            "Start": s.strftime("%H:%M"),
+            "End": en.strftime("%d-%m %H:%M"),
+            "Minutes": round((en - s).total_seconds() / 60),
+            "Operator": op,
+        })
+    return rows
+
+
 def build_machine_view(schedule, masters, config, batches=None):
     """Derive the machine-centric tables from a schedule:
 
