@@ -243,7 +243,10 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
         return out
 
     # Binary-search the smallest finish time T (in (bf, single_end]) whose combined
-    # capacity covers the quantity. working_minutes is monotonic in T, so capacity is.
+    # capacity covers the quantity. Note: split sizing uses pre-push free times, so a
+    # reservation may make the split slightly sub-optimal; but _push_clear on each
+    # split entry (lines 271-273) preserves the no-overlap guarantee. working_minutes
+    # is monotonic in T, so capacity is.
     span = (single_end - bf).total_seconds() / 60.0
     lo, hi, bestT = 0.0, span, None
     for _ in range(40):
