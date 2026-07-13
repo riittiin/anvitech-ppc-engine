@@ -181,11 +181,10 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
-### Optimize follow-ups (2026-07-13, same second session) — ⏳ on branch `optimize-speed`, NOT yet pushed
+### Optimize follow-ups (2026-07-13, same second session) — ✅ SHIPPED to `main` and LIVE
 
 After the owner ran Deep on the live free-tier server, three issues surfaced and were
-fixed (branch `optimize-speed`, built on `fix-optimize-ui-robustness`; **308 tests pass**,
-golden unchanged; **not pushed** — awaiting the owner's "push to main"):
+fixed and **shipped/live** (**308 tests pass**, golden unchanged):
 
 1. **Progress froze / Deep too slow.** The progress counter died on a single failed poll
    (Render free tier drops requests) — fixed to reschedule on any failure + resume on
