@@ -200,29 +200,50 @@ function optimizeProgressLine(st) {
   return tried + best;
 }
 
+// Poll the server for progress. CRUCIAL: this must survive a failed poll — Render's
+// free tier drops the odd request, and if we stopped polling on the first blip the
+// counter would freeze while the search kept running underneath. So on ANY failure we
+// simply schedule another attempt (a slightly longer gap) instead of giving up.
+function _schedulePoll(ms) {
+  clearTimeout(optimizePollTimer);
+  optimizePollTimer = setTimeout(pollOptimizeStatus, ms);
+}
+
+function _showRunningControls(running) {
+  const startBtn = $("optimize-start"), stopBtn = $("optimize-stop");
+  if (startBtn) startBtn.disabled = running;
+  if (stopBtn) stopBtn.classList.toggle("hidden", !running);
+}
+
 async function pollOptimizeStatus() {
+  let st;
   try {
     const res = await fetch("/optimize/status");
-    if (!res.ok) return;
-    const st = await res.json();
-    const prog = $("optimize-progress");
-    if (st.state === "running") {
-      if (prog) prog.textContent = optimizeProgressLine(st) + "…";
-      optimizePollTimer = setTimeout(pollOptimizeStatus, 3000);
-      return;
-    }
-    optimizePollTimer = null;
-    const startBtn = $("optimize-start");
-    if (startBtn) startBtn.disabled = false;
-    if (st.state === "failed") {
-      if (prog) prog.textContent = "Optimization failed: " + (st.error || "unknown error");
-      return;
-    }
-    if (st.state === "done") {
-      if (prog) prog.textContent = `done — ${st.evals} plans tried in ${st.elapsed_s}s`;
-      renderOptimizeResult(st);
-    }
-  } catch (e) { /* next poll or user retry recovers */ }
+    if (!res.ok) { _schedulePoll(5000); return; }   // transient — try again, don't die
+    st = await res.json();
+  } catch (e) {
+    _schedulePoll(5000);                              // network blip — try again, don't die
+    return;
+  }
+  const prog = $("optimize-progress");
+  if (st.state === "running") {
+    _showRunningControls(true);
+    const tail = st.stopping ? " — stopping…" : "…";
+    if (prog) prog.textContent = optimizeProgressLine(st) + tail;
+    _schedulePoll(3000);
+    return;
+  }
+  clearTimeout(optimizePollTimer); optimizePollTimer = null;
+  _showRunningControls(false);
+  if (st.state === "failed") {
+    if (prog) prog.textContent = "Optimization failed: " + (st.error || "unknown error");
+    return;
+  }
+  if (st.state === "done") {
+    const how = st.cancelled ? "stopped early" : "done";
+    if (prog) prog.textContent = `${how} — ${st.evals} plans tried in ${st.elapsed_s}s`;
+    renderOptimizeResult(st);
+  }
 }
 
 function renderOptimizeResult(st) {
@@ -239,8 +260,9 @@ function renderOptimizeResult(st) {
     ["Worst order lateness (days)", st.baseline ? st.baseline.max_late_days : "—",
      st.best ? st.best.max_late_days : "—"],
   ];
+  const stoppedNote = st.cancelled ? " (stopped early — this is the best of the plans tried so far)" : "";
   let h = st.improved
-    ? `<p><strong>A better plan was found.</strong> Apply it to use this order in every plan from now on.</p>`
+    ? `<p><strong>A better plan was found${stoppedNote}.</strong> Apply it to use this order in every plan from now on.</p>`
     : `<p><strong>No improvement found</strong> — the current plan already matches the best sequence tried.</p>`;
   h += '<div class="table-wrap"><table><thead><tr><th></th><th>Standard plan</th><th>Optimized</th></tr></thead><tbody>';
   rows.forEach((r) => {
@@ -264,11 +286,10 @@ function renderOptimizeResult(st) {
 
 async function startOptimize() {
   const budget = (document.querySelector('input[name="opt-budget"]:checked') || {}).value || "quick";
-  const startBtn = $("optimize-start");
   const prog = $("optimize-progress");
   const box = $("optimize-result");
   if (box) { box.classList.add("hidden"); box.innerHTML = ""; }
-  if (startBtn) startBtn.disabled = true;
+  _showRunningControls(true);
   if (prog) prog.textContent = "starting…";
   try {
     const res = await fetch("/optimize", {
@@ -277,14 +298,24 @@ async function startOptimize() {
     });
     if (!res.ok) {
       if (prog) prog.textContent = "Could not start: " + (await res.text());
-      if (startBtn) startBtn.disabled = false;
+      _showRunningControls(false);
       return;
     }
     pollOptimizeStatus();
   } catch (e) {
     if (prog) prog.textContent = "Request failed: " + e.message;
-    if (startBtn) startBtn.disabled = false;
+    _showRunningControls(false);
   }
+}
+
+async function stopOptimize() {
+  const stopBtn = $("optimize-stop");
+  if (stopBtn) stopBtn.disabled = true;
+  try {
+    await fetch("/optimize/cancel", { method: "POST" });   // keeps best-so-far
+  } catch (e) { /* the poll will still pick up the done state */ }
+  if (stopBtn) stopBtn.disabled = false;
+  pollOptimizeStatus();   // reflect "stopping…" / result promptly
 }
 
 // ---- Loader report (collapsible) ----
@@ -1129,6 +1160,8 @@ if (_optBtn) _optBtn.onclick = () => {
 };
 const _optStart = $("optimize-start");
 if (_optStart) _optStart.onclick = startOptimize;
+const _optStop = $("optimize-stop");
+if (_optStop) _optStop.onclick = stopOptimize;
 
 // Boot: learn the role, render the shell, then auto-load the current plan (no
 // persist) so the schedule/Gantt/rule tabs populate without a Plan click.
@@ -1137,15 +1170,15 @@ if (_optStart) _optStart.onclick = startOptimize;
   renderTabs();
   renderTab(activeTab);
   await runPlan(false);
-  // If an optimization was left running (page reload mid-search), resume the
-  // progress display; admin-only controls exist only for the admin role.
+  // A search may still be running (or have finished) from before a page reload.
+  // Re-open the panel and either resume the progress display or show the result the
+  // admin never got to see — so a refresh mid-run never loses the work.
   if (currentRole === "admin") {
     try {
       const st = await (await fetch("/optimize/status")).json();
-      if (st.state === "running") {
+      if (st.state === "running" || (st.state === "done" && st.best)) {
         const panel = $("optimize-panel");
         if (panel) panel.classList.remove("hidden");
-        const sb = $("optimize-start"); if (sb) sb.disabled = true;
         pollOptimizeStatus();
       }
     } catch (e) { /* status is cosmetic at boot */ }

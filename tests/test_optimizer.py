@@ -93,6 +93,21 @@ def test_empty_book_returns_empty_result():
     assert r.ranks == {} and r.evals == 0 and not r.improved
 
 
+def test_should_cancel_stops_early_and_keeps_best_so_far():
+    # Cancel after 3 evaluations: the search stops well short of the 500 budget but
+    # still returns a valid best plan (ranks + metrics), flagged cancelled.
+    calls = {"n": 0}
+    def cancel():
+        calls["n"] += 1
+        return calls["n"] > 3
+    r = optimizer.optimize(_lines(), _cfg(), _masters(), budget_evals=500, seed=1,
+                           should_cancel=cancel)
+    assert r.cancelled is True
+    assert r.evals < 500            # stopped early
+    assert r.ranks                  # best-so-far is a usable result
+    assert optimizer.score(r.best) <= optimizer.score(r.baseline)
+
+
 def test_reserved_intervals_are_respected():
     # With machine M fully reserved for a window, the optimized plan's ops on M
     # must not start inside it (Rule 6's reserved semantics carried through).

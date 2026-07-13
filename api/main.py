@@ -712,12 +712,16 @@ def _load_plan_config() -> Config:
 # APPLIED result is durable (book_store.save_plan_priority) — a process restart
 # mid-run just returns the job to idle, the applied ranks are unaffected.
 # --------------------------------------------------------------------------- #
-_OPT_BUDGETS = {"quick": 150, "deep": 1000}   # evaluation counts — deterministic
+# Evaluation counts — deterministic. Kept modest because the free Render tier plans
+# ~9 s/plan (≈13× a laptop); Quick ≈ 20 min, Deep ≈ 60 min there. The user can Stop
+# any run and keep the best plan found so far (most of the gain lands in the first
+# ~150 plans anyway), so Deep is bounded rather than a multi-hour 1,000-plan run.
+_OPT_BUDGETS = {"quick": 150, "deep": 400}
 _OPT_SEED = 42
 
 _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              "baseline": None, "best": None, "error": None, "elapsed_s": 0.0,
-             "started_mono": None, "result": None}
+             "started_mono": None, "result": None, "cancel": False}
 _OPTIMIZE_LOCK = threading.Lock()
 
 
@@ -756,7 +760,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
 
         _OPTIMIZE.update(state="running", label=label, budget_evals=budget_evals,
                          evals=0, baseline=None, best=None, error=None, result=None,
-                         elapsed_s=0.0, started_mono=time.monotonic())
+                         elapsed_s=0.0, started_mono=time.monotonic(), cancel=False)
 
     def job():
         try:
@@ -766,17 +770,20 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
 
             res = optimizer.optimize(target, config, masters, reserved=reserved,
                                      budget_evals=budget_evals, seed=_OPT_SEED,
-                                     on_progress=on_progress)
+                                     on_progress=on_progress,
+                                     should_cancel=lambda: _OPTIMIZE.get("cancel"))
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE.update(
                     state="done", evals=res.evals, baseline=res.baseline, best=res.best,
+                    cancel=False,
                     elapsed_s=round(time.monotonic() - _OPTIMIZE["started_mono"], 1),
                     result={"ranks": res.ranks, "improved": res.improved,
+                            "cancelled": res.cancelled,
                             "baseline": res.baseline, "best": res.best,
                             "budget": label, "seed": _OPT_SEED})
         except Exception as e:  # noqa: BLE001 — a failed search must report, not hang
             with _OPTIMIZE_LOCK:
-                _OPTIMIZE.update(state="failed", error=str(e))
+                _OPTIMIZE.update(state="failed", error=str(e), cancel=False)
 
     if background:
         threading.Thread(target=job, daemon=True).start()
@@ -795,7 +802,17 @@ def _optimize_status():
                 "budget_evals": _OPTIMIZE["budget_evals"], "evals": _OPTIMIZE["evals"],
                 "baseline": _OPTIMIZE["baseline"], "best": _OPTIMIZE["best"],
                 "error": _OPTIMIZE["error"], "elapsed_s": elapsed,
-                "improved": res.get("improved")}
+                "improved": res.get("improved"), "cancelled": res.get("cancelled", False),
+                "stopping": bool(_OPTIMIZE.get("cancel")) and _OPTIMIZE["state"] == "running"}
+
+
+def _optimize_cancel():
+    """Ask a running search to stop after its current plan; it keeps the best plan
+    found so far (state becomes 'done'). No-op if nothing is running."""
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] == "running":
+            _OPTIMIZE["cancel"] = True
+    return _optimize_status()
 
 
 def _optimize_apply():
@@ -812,6 +829,9 @@ def _optimize_apply():
                 "baseline": res["baseline"], "best": res["best"],
                 "covered": len(res["ranks"])}
         book_store.save_plan_priority(res["ranks"], meta)
+        # Clear the in-memory job so a later page refresh doesn't re-show the
+        # "Apply" panel for a plan that's already applied.
+        _OPTIMIZE.update(state="idle", result=None, best=None, baseline=None)
         return meta
 
 
@@ -983,6 +1003,13 @@ def optimize_ep(req: OptimizeRequest, request: Request):
 def optimize_status_ep():
     """Live progress of the current/last optimization (any logged-in role)."""
     return _optimize_status()
+
+
+@app.post("/optimize/cancel")
+def optimize_cancel_ep(request: Request):
+    """Stop a running search; it keeps the best plan found so far. Admin only."""
+    require_admin(request)
+    return _optimize_cancel()
 
 
 @app.post("/optimize/apply")

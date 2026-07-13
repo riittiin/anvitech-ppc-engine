@@ -49,6 +49,7 @@ class OptimizeResult:
     best: dict = field(default_factory=dict)      # metrics of the best sequence
     evals: int = 0
     improved: bool = False
+    cancelled: bool = False   # True when stopped early via should_cancel (best-so-far kept)
 
 
 def score(metrics: dict) -> float:
@@ -112,13 +113,16 @@ def ranks_for(seq) -> dict:
 
 
 def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
-             seed=42, on_progress=None) -> OptimizeResult:
+             seed=42, on_progress=None, should_cancel=None) -> OptimizeResult:
     """Search for a better batch sequence for THIS book (rolling: call it on
     whatever the order book holds today; the result is disposable and re-computable).
 
     ``on_progress(evals_done, best_metrics)`` is called after every evaluation —
-    the API layer streams it to the UI. Exceptions from Rule 6 are not caught:
-    a book that cannot plan at all should fail loud exactly like Plan does.
+    the API layer streams it to the UI. ``should_cancel()`` (optional) is polled
+    between evaluations; when it returns True the search stops early and returns the
+    **best plan found so far** (so a user can Stop a long run on a slow server and
+    still keep the improvement). Exceptions from Rule 6 are not caught: a book that
+    cannot plan at all should fail loud exactly like Plan does.
     """
     config.validate()
 
@@ -130,6 +134,14 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
         return OptimizeResult()
 
     evals = 0
+    cancelled = [False]
+
+    def _stop() -> bool:
+        if cancelled[0]:
+            return True
+        if should_cancel and should_cancel():
+            cancelled[0] = True
+        return cancelled[0]
 
     def evaluate(seq) -> dict:
         nonlocal evals
@@ -154,7 +166,7 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
     best_seq, best_m = None, None
     baseline_m = None
     for s in seeds:
-        if evals >= budget_evals and baseline_m is not None:
+        if baseline_m is not None and (evals >= budget_evals or _stop()):
             break
         m = evaluate(s)
         if baseline_m is None:
@@ -166,7 +178,7 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
     rng = random.Random(seed)
     cur_seq, cur_m = list(best_seq), best_m
     since_improve = 0
-    while evals < budget_evals and n >= 2:
+    while evals < budget_evals and n >= 2 and not _stop():
         r = rng.random()
         cand = list(cur_seq)
         if r < 0.5 or n < 4:                                    # insertion
@@ -204,4 +216,5 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
         best=best_m,
         evals=evals,
         improved=score(best_m) < score(baseline_m),
+        cancelled=cancelled[0],
     )

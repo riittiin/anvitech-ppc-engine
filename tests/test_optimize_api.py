@@ -98,6 +98,21 @@ def test_clear_removes_applied_optimization():
     assert book_store.load_plan_priority() is None
 
 
+def test_apply_clears_in_memory_job_so_refresh_does_not_reoffer():
+    m = _api()
+    _seed_book()
+    m._start_optimize(budget_evals=10, label="quick", background=False)
+    m._optimize_apply()
+    st = m._optimize_status()
+    assert st["state"] == "idle" and st["best"] is None   # nothing left to re-offer
+
+
+def test_cancel_is_noop_when_idle():
+    m = _api()
+    st = m._optimize_cancel()
+    assert st["state"] == "idle"
+
+
 # --------------------------------------------------------------------------- #
 # _plan integration: replay + optimize_meta
 # --------------------------------------------------------------------------- #
@@ -170,8 +185,10 @@ def test_http_role_gating():
     assert cu.post("/optimize", json={"budget": "quick"}).status_code == 403
     assert cu.post("/optimize/apply").status_code == 403
     assert cu.post("/optimize/clear").status_code == 403
+    assert cu.post("/optimize/cancel").status_code == 403
     assert cu.get("/optimize/status").status_code == 200     # read-only is fine
 
     ca = client_as(admin)
     assert ca.get("/optimize/status").status_code == 200
+    assert ca.post("/optimize/cancel").status_code == 200    # idle no-op, admin allowed
     assert ca.post("/optimize", json={"budget": "nonsense"}).status_code == 400
