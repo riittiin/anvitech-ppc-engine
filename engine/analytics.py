@@ -11,7 +11,7 @@ from collections import defaultdict
 from datetime import timedelta
 
 from .models import fmt_date
-from .rules.rule6_allocate import _clock_factory
+from .rules.rule6_allocate import _clock_factory, build_shiftwise_timeline
 
 NON_MACHINE_LANES = {"OS / Outsourced", "Off-machine"}
 BOTTLENECK_PCT = 85.0
@@ -116,22 +116,34 @@ def build_analytics(schedule, masters, config, batches=None):
     ])
 
     # --- Operators (only when operator logic assigned them) ---
+    # Hours are attributed PER SHIFT via the shift-wise timeline: a multi-shift op
+    # (e.g. a days-long block on a two-shift VMC) carries ONE operator name on the
+    # schedule entry, but its night-shift hours are really worked by the qualified
+    # second-shift person. Billing the whole block to the named (day) operator made
+    # utilization exceed 100% — physically impossible. Splitting each op into its
+    # per-day, per-shift segments and crediting the operator actually manning each
+    # shift keeps every person within their own shift capacity.
     operators = []
     if getattr(config, "apply_operator_logic", False):
+        segs = build_shiftwise_timeline(schedule, masters, config, batches)
         by_op = defaultdict(list)
-        for e in schedule:
-            if e.operator:
-                by_op[e.operator].append(e)
+        for r in segs:
+            if r["Operator"]:
+                by_op[r["Operator"]].append(r)
         wdays = _working_days(masters.calendar, win_start, win_end)
         shift_of = {o.name: o.shift for o in masters.operators}
-        for name, ops in by_op.items():
-            busy = sum(e.occupancy_min for e in ops) / 60.0
+        for name, rows in by_op.items():
+            busy = sum(r["Minutes"] for r in rows) / 60.0
             avail = wdays * _shift_hours(shift_of.get(name, ""), config)
             u = _util(busy, avail)
+            # Distinct operations the person manned (a multi-shift op shared with
+            # another shift's operator counts for each participant).
+            distinct = {(r["Batch"], r["Process"]): r["Qty"] for r in rows}
             operators.append({
                 "Operator": name, "Busy (hrs)": round(busy, 1),
                 "Available (hrs)": round(avail, 1), "Utilization %": u,
-                "Ops": len(ops), "Pieces": round(sum(e.qty for e in ops)), "Status": _status(u),
+                "Ops": len(distinct), "Pieces": round(sum(distinct.values())),
+                "Status": _status(u),
             })
         _by_util(operators)
 

@@ -99,6 +99,48 @@ def test_operator_utilization_uses_shift_capacity():
     assert o["Busy (hrs)"] > 0 and 0 <= o["Utilization %"] <= 100
 
 
+def test_operator_hours_attributed_per_shift_never_over_100():
+    # THE RUPESH CASE: a two-shift machine (19.5 h/day) runs one LONG op (several
+    # days, both shifts). Rule 6 pins ONE first-shift operator name on the whole op,
+    # but the night hours are really worked by the second-shift man. Analytics must
+    # bill each person only the hours of shifts he actually mans — so no operator
+    # can ever exceed 100% of his own shift capacity.
+    procs = [Process(1, "CNC", 30, 30, "M", None)]     # 30 min/pc x 200 = 6000 min >> one shift
+    masters = _masters(procs, [("M", "CNC lathe", 19.5)])
+    masters.operators = [
+        Operator("Day Man", "M", machines=["M"], shift="First shift"),
+        Operator("Night Man", "M", machines=["M"], shift="Second shift"),
+    ]
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    sched = rule6_allocate.run([_batch(200)], config=cfg, masters=masters)
+    assert sum(e.occupancy_min for e in sched) == 6090          # sanity: multi-day op
+    a = analytics.build_analytics(sched, masters, cfg)
+    ops = {o["Operator"]: o for o in a["operators"]}
+    # Both people appear: the night shift is genuinely manned by Night Man.
+    assert "Day Man" in ops and "Night Man" in ops
+    for o in ops.values():
+        assert o["Busy (hrs)"] <= o["Available (hrs)"] + 0.1, \
+            f'{o["Operator"]} billed {o["Busy (hrs)"]}h against {o["Available (hrs)"]}h'
+        assert o["Utilization %"] <= 100.0
+
+
+def test_operator_utilization_never_exceeds_100_on_multi_machine_plan():
+    # Two machines sharing one first-shift man + a night man: per-shift attribution
+    # keeps everyone <= 100% even when ops overlap machines and shifts.
+    procs = [Process(1, "CNC", 6, 6, "M", None), Process(2, "VMC", 6, 6, "N", None)]
+    masters = _masters(procs, [("M", "CNC lathe", 19.5), ("N", "VMC", 19.5)])
+    masters.operators = [
+        Operator("Day Man", "M, N", machines=["M", "N"], shift="First shift"),
+        Operator("Night Man", "M, N", machines=["M", "N"], shift="Second shift"),
+    ]
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True,
+                 overlap_mode=OVERLAP_PERCENT, overlap_percent=80)
+    sched = rule6_allocate.run([_batch(150)], config=cfg, masters=masters)
+    a = analytics.build_analytics(sched, masters, cfg)
+    for o in a["operators"]:
+        assert o["Utilization %"] is None or o["Utilization %"] <= 100.0
+
+
 def test_headline_flags_bottleneck_and_underused():
     procs = [Process(1, "HEAVY", 20, 20, "M", None), Process(2, "LIGHT", 1, 1, "N", None)]
     masters = _masters(procs, [("M", "CNC lathe", 19.5), ("N", "Manual Washing", 9.5)])
