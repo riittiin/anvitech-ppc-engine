@@ -19,7 +19,9 @@ def _masters_for(batches):
 
 
 def test_protected_batches_sort_by_promised_date():
-    # feed later-promised first; Rule 3 must reorder to earliest-promised first
-    batches = [_b("LATE", date(2026, 7, 28)), _b("EARLY", date(2026, 7, 22))]
+    # Batch-id order (A < Z) is OPPOSITE to promised-date order (Z earlier than A).
+    # Feed batches in non-promise order. Rule 3 must reorder by promised_date.
+    # Without the fix, batch_id tiebreak would give ["A", "Z"] (wrong).
+    batches = [_b("A", date(2026, 7, 28)), _b("Z", date(2026, 7, 22))]
     out = r3.run(batches, config=Config(), masters=_masters_for(batches))
-    assert [b.batch_id for b in out] == ["EARLY", "LATE"]
+    assert [b.batch_id for b in out] == ["Z", "A"]
