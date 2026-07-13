@@ -24,6 +24,7 @@ let currentGantt = null;
 let currentOrders = null;     // {columns, rows} from /run or /orders
 let currentExpected = null;   // {"SO\x1fITEM": "YYYY-MM-DD"} from /run's expected_end (Task 9)
 let optimizeMeta = null;      // /run's optimize_meta: applied optimization + staleness
+let recoveryMeta = null;      // /run's recovery_meta: auto committed re-sequence after a disruption
 let optimizePollTimer = null; // /optimize/status polling handle
 let ITEMS = null;
 let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour detail)
@@ -127,9 +128,11 @@ async function runPlan(persist = false) {
     currentOrders = data.orders || null;
     currentExpected = data.expected_end || null;
     optimizeMeta = data.optimize_meta || null;
+    recoveryMeta = data.recovery_meta || null;
     if (currentRole === "admin" && data.config) applyConfig(data.config);
     renderReport(data.report);
     renderOptimizeBanner();
+    renderRecoveryNote();
     renderTabs();
     renderTab(activeTab);
     setStatus("Plan " + data.run_id + " complete.");
@@ -192,6 +195,27 @@ function renderOptimizeBanner() {
     if (res.ok) { setStatus("Optimization removed."); await runPlan(false); }
     else setStatus("Could not remove optimization: " + (await res.text()));
   };
+}
+
+// Promise recovery is automatic (no control) — this is just an informational line that
+// appears when a disruption has made committed orders slip and the plan is protecting them.
+function renderRecoveryNote() {
+  const el = $("recovery-note");
+  if (!el) return;
+  const rm = recoveryMeta;
+  if (!rm) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  if (rm.active) {
+    const saved = rm.promises_saved || 0;
+    el.classList.remove("hidden");
+    el.innerHTML = saved > 0
+      ? `Committed orders re-sequenced to protect <strong>${saved} more promise${saved === 1 ? "" : "s"}</strong> after the delay.`
+      : `Committed orders re-sequenced to limit the delay to your promised dates.`;
+  } else if (rm.computing) {
+    el.classList.remove("hidden");
+    el.innerHTML = `Some committed orders have slipped — re-sequencing them to protect your promises… (updates shortly)`;
+  } else {
+    el.classList.add("hidden"); el.innerHTML = "";
+  }
 }
 
 function optimizeProgressLine(st) {

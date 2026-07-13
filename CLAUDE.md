@@ -217,7 +217,9 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `total_late_days + 10×makespan_days` (delivery gaps dominant — owner priority: fewest late
   deliveries, since shortest-makespan plans push more orders late). Deterministic (eval-count
   budget + fixed seed). `should_cancel()` is polled between evals so a run can be stopped
-  early keeping the best-so-far. **Speed:** the scheduler is memoized — `loaders`
+  early keeping the best-so-far. **`objective="promise_slip"`** switches the scorecard to
+  promise recovery — `promise_slip_metrics` scores committed orders vs their `promised_date`
+  (not delivery date); used by the auto committed re-sequencing (below). **Speed:** the scheduler is memoized — `loaders`
   `normalize_resource_id`/`parse_resource_candidates` (lru_cache on fixed routing text),
   Rule 6's `op_lookup` (per machine+shift, not per op), and `WorkClock._windows_for_day`
   (per-day window cache) — ~3.5× faster per plan, results byte-identical (golden unchanged). Returns `OptimizeResult`
@@ -229,6 +231,17 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   background thread at a time), `/optimize/status`, `/optimize/apply`, `/optimize/clear`;
   `_plan` passes the saved ranks to the open pass only (committed pass untouched) and
   returns `optimize_meta` (active/saved_at/covered/uncovered) for the staleness banner.
+- **Promise recovery (auto committed re-sequencing)** — when a disruption makes committed
+  orders slip past their promises, `api._plan`'s Pass 1 auto-triggers a **background**
+  `optimize(objective="promise_slip")` on the committed set (its own slot `_RECOVERY`,
+  separate from the manual `_OPTIMIZE`), persists the result as ranks
+  (`book_store.save/load/clear_promise_recovery` → `anvitech:promise_recovery`), and replays
+  it on every Plan (expedite-off) until the committed set/promises change (freshness =
+  `_recovery_signature`, which includes each promise date). Never worse than date-order
+  (search seeded with it); no slip → no search → byte-identical. `_plan` returns
+  `recovery_meta` (active/promises_saved/slip_before-after/computing); `web/` shows a quiet
+  `#recovery-note` (informational only — no control). Design:
+  `docs/superpowers/specs/2026-07-14-promise-recovery-committed-resequencing-design.md`.
 - `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
   (per-order rows, time-positioned bars by machine, **operator** on each bar, split
   halves as separate bars, Pending/Running label).

@@ -386,6 +386,34 @@ straddle lanes. Cross-lane orders stay separate.
 **Default:** all orders are Open; with no committed orders the plan is byte-identical
 to today (no change in behaviour).
 
+### Promise recovery — automatic committed re-sequencing after a disruption *(feature)*
+
+When a disruption (a worker absent, a machine down) makes committed orders slip past their
+promises, scheduling them in strict promised-date order is measurably sub-optimal: it
+serves the earliest promise even when that needlessly breaks several others. Measured on a
+real disrupted book, **re-sequencing the committed set recovers ~a third of the promise
+damage** (e.g. a lost week: 344 → 242 promise-slip-days, 55 → 44 broken; a lost fortnight:
+637 → 511). This is done **automatically — no setting, no button**:
+
+- When Pass 1 (committed/urgent) shows any order finishing past its promise, the planner
+  kicks off a **background** search (`optimizer.optimize(..., objective="promise_slip")`)
+  that minimises total promise-slip (broken-promise count as tiebreak) on the committed set.
+- The result — a committed order **rank** — is persisted (`anvitech:promise_recovery`) and
+  **replayed on every Plan** (planned expedite-off so the order takes effect), until the
+  committed set or its promises change (a new commit/uncommit or changed promise re-triggers;
+  a mere feedback quantity change does not — the ORDER still replays).
+- **Safety:** the search is seeded with the promised-date order and keeps the best, so the
+  recovered plan is **never worse** than today's date-order. Deterministic. No committed
+  slip → no search → byte-identical to today (golden untouched).
+- **How it works (the logic):** it re-orders which committed job claims each shared machine
+  next. An order with slack is made to wait, yielding its machine slot to an at-risk order;
+  the slack order still makes its promise, the at-risk one is saved. It **redistributes** the
+  unavoidable slip to protect the most promises — it never invents lost capacity back.
+- **Equal weighting (owner decision):** every promise counts the same; **no per-order
+  "critical" flag** (kept off the surface for non-technical floor users — a truly critical
+  order is handled by marking it Urgent). A quiet Orders-tab note reports how many promises
+  were protected; there is no control to operate.
+
 ### Optimize plan (sequence search) *(feature)*
 
 Rule 6 is a greedy, single-pass scheduler: it builds exactly ONE plan, and the batch

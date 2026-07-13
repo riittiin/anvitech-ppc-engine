@@ -181,6 +181,24 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
+### Promise recovery (2026-07-14) — ✅ BUILT on branch `promise-recovery` (not pushed)
+
+**Auto committed re-sequencing after a disruption.** When a worker absent / machine down
+makes committed orders slip past their promises, strict promised-date order is measurably
+sub-optimal. Measured (real Test5, all committed, lost week): re-sequencing recovers
+**344 → 242 promise-slip-days, 55 → 44 broken** (~⅓ of the damage); no fast rule captures
+it (a search is required). Built as **automatic, no setting/button** (owner: keep the
+surface clean for non-technical users; equal weighting, no critical flag): `_plan` Pass 1
+detects a slip → kicks a **background** `optimize(objective="promise_slip")` on the
+committed set → persists ranks (`anvitech:promise_recovery`) → replays every Plan
+(expedite-off) until the committed set/promises change. Safety: seeded with date-order +
+keeps best ⇒ **never worse**; no slip → byte-identical (golden untouched). Verified
+end-to-end on the real book (disruption → recovery → **17 promises protected**, slip
+377 → 315). Quiet `#recovery-note` on Orders (informational only). **323 tests.** 4 commits
+on `promise-recovery` (objective / store / _plan wiring / UI+docs). Spec + full findings:
+`2026-07-14-promise-recovery-...design.md` and the `sequence-optimizer-findings` memory.
+The branch is stacked on the unpushed Expedite fix, so "push to main" ships both + this.
+
 ### Optimize ↔ Expedite bug (2026-07-13) — ✅ FIXED (committed to `main`; push when asked)
 
 **The owner ran Deep on the live site (Expedite tick ON) and got "No improvement found"
