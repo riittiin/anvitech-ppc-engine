@@ -131,7 +131,8 @@ def _mark_not_reached(trace: dict, from_index: int):
 
 
 def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
-                machine_lost_min: dict | None = None) -> dict:
+                machine_lost_min: dict | None = None,
+                reserved: dict | None = None) -> dict:
     """Run the forward planning chain 1 → 2 → 3 → 6, returning the trace.
 
     Rules 4/5 are consumed inside Rule 6 (their effect is logged in rule6's
@@ -140,6 +141,10 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
     ``machine_lost_min`` (optional) maps machine id → working minutes lost to
     recorded downtime/setup overrun; Rule 6 seeds it into machine availability so
     lost time loops back into the plan. ``None`` → no effect (default).
+
+    ``reserved`` (optional) maps machine id / operator name → busy intervals
+    that Rule 6 must treat as already occupied (the two-pass Plan's committed
+    pass reserving time for the open pass). ``None`` → no effect (default).
     """
     config.validate()
     trace: dict = {}
@@ -160,6 +165,7 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
         plan_run.schedule = run_rule(
             trace, "rule6", rule6_allocate.run, plan_run.batches_prioritized,
             config=config, masters=masters, machine_lost_min=machine_lost_min,
+            reserved=reserved,
         )
     except RuleError:
         # The failing rule's entry already holds the error; mark the rest unreached.

@@ -449,6 +449,20 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
 # --------------------------------------------------------------------------- #
 # Core: plan the active order book
 # --------------------------------------------------------------------------- #
+def _reservations_from_schedule(schedule):
+    """Machine id → busy intervals and operator name → busy intervals, from a plan
+    (used to reserve the committed pass's machine/operator time in the open pass)."""
+    res = {}
+    for e in schedule:
+        m = e.machine or ""
+        if m and "OS" not in m and "Off-machine" not in m and "Outsourced" not in m:
+            res.setdefault(m, []).append((e.start, e.end))
+        op = getattr(e, "operator", "") or ""
+        if op:
+            res.setdefault(op, []).append((e.start, e.end))
+    return res
+
+
 def _plan(config: Config):
     masters = _current_masters()
     active = book_store.load_active_orders()
@@ -467,8 +481,37 @@ def _plan(config: Config):
 
     # The feedback loop is quantity-only: recorded times (downtime, actual setup) are
     # stored for the record and never affect the schedule.
-    plan_run = PlanRun(so_lines=so_lines)
-    trace = run_forward(plan_run, config, masters)
+    protected, open_lines = orderbook.split_committed_open(so_lines)
+    if not protected:
+        # Today's single pass — unchanged. Keeps the golden trace byte-identical
+        # for an all-open book (no committed/urgent orders).
+        plan_run = PlanRun(so_lines=so_lines)
+        trace = run_forward(plan_run, config, masters)
+    else:
+        # Two-pass: committed/urgent orders are planned first, as if open orders
+        # don't exist; open orders then backfill the gaps left by that pass —
+        # so a later, larger open order can never push a committed order's plan.
+        plan_protected = PlanRun(so_lines=protected)
+        trace = run_forward(plan_protected, config, masters)
+        reserved = _reservations_from_schedule(plan_protected.schedule)
+
+        plan_open = PlanRun(so_lines=open_lines)
+        trace_open = run_forward(plan_open, config, masters, reserved=reserved)
+
+        # Merge for the downstream views (protected first).
+        plan_run = PlanRun(so_lines=so_lines)
+        plan_run.batches = plan_protected.batches + plan_open.batches
+        plan_run.batches_sorted = plan_protected.batches_sorted + plan_open.batches_sorted
+        plan_run.batches_prioritized = plan_protected.batches_prioritized + plan_open.batches_prioritized
+        plan_run.schedule = plan_protected.schedule + plan_open.schedule
+
+        # Merge the per-rule trace tables so each tab shows the full plan (rows concatenated).
+        for rk in ("rule1", "rule2", "rule3", "rule6"):
+            base = trace.get(rk, {}).get("output")
+            add = trace_open.get(rk, {}).get("output")
+            if base and add and "rows" in base and "rows" in add:
+                base["rows"] = base["rows"] + add["rows"]
+
     _augment_helpers(trace, plan_run, config, masters, actuals=actuals)
 
     # Rule 8 tab: the active order book by remaining qty. List EVERY active order
