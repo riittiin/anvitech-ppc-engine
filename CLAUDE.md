@@ -208,6 +208,19 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   before they go into the `h.<field>` update path — a raw `.` or `$` in a field name
   (e.g. an item code like `61243661-01..`) would otherwise be read as a nested path
   and break the write. Any hash field string is safe.
+- `engine/optimizer.py` — **the Optimize feature's pure sequence search**: `optimize(
+  so_lines, config, masters, reserved=, budget_evals=, seed=, on_progress=)` runs the
+  unchanged Rules 1→2→3 once, then repeatedly permutes the batch order and replays the
+  unchanged Rule 6, scoring each plan (`total_late_days + 10×makespan_days`) and keeping
+  the best. Deterministic (eval-count budget + fixed seed). Returns `OptimizeResult`
+  with a rank per **"<so>\x1f<item>"** key; `pipeline.apply_priority_rank` replays it
+  (ranked batches reorder among their own slots; unranked keep their Rule-3 slot).
+  `run_forward(priority_rank=)` is the replay hook — `None` (all existing callers) is
+  byte-identical. Persisted via `book_store.save/load/clear_plan_priority`
+  (`anvitech:plan_priority`). API: `/optimize` (admin; quick=150/deep=1000 evals, one
+  background thread at a time), `/optimize/status`, `/optimize/apply`, `/optimize/clear`;
+  `_plan` passes the saved ranks to the open pass only (committed pass untouched) and
+  returns `optimize_meta` (active/saved_at/covered/uncovered) for the staleness banner.
 - `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
   (per-order rows, time-positioned bars by machine, **operator** on each bar, split
   halves as separate bars, Pending/Running label).

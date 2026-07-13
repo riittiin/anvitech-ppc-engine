@@ -386,6 +386,36 @@ straddle lanes. Cross-lane orders stay separate.
 **Default:** all orders are Open; with no committed orders the plan is byte-identical
 to today (no change in behaviour).
 
+### Optimize plan (sequence search) *(feature)*
+
+Rule 6 is a greedy, single-pass scheduler: it builds exactly ONE plan, and the batch
+sequence it consumes (Rule 3's order) is worth days of makespan by itself — measured on
+the real book, better sequencing alone cut the plan from 42.5 to 39.7 days and total
+late-days from 1,026 to 792. Because one full plan evaluates in under a second, the
+**Optimize** button (admin) searches instead of trusting one pass: it tries many batch
+sequences on the *current* order book (seeds: the Rule-3 order, SPT, ATC due-pressure ÷
+work, fixed shuffles; then insertion/swap/block-move hill-climbing), replays the
+**unchanged Rule 6** for each, scores every plan (`total_late_days + 10 ×
+makespan_days` — delivery gaps dominant), and keeps the best.
+
+- **Quick** ≈ 150 plans tried; **Deep** ≈ 1,000. Budgets are **evaluation counts** with
+  a fixed random seed, so the same book + settings + budget always yields the same
+  result on any machine.
+- The admin sees a before/after table and chooses **Apply** or Discard. Apply persists
+  a **rank per (SO No, Item Code)**; every subsequent Plan replays it
+  (`pipeline.apply_priority_rank`): ranked batches reorder among the slots they already
+  occupy, **unranked (new) orders keep their natural Rule-3 slot** — a fresh urgent
+  order is never pushed to the back. A banner flags how many orders were added since
+  the last optimization ("re-optimize for the best plan"); **Remove optimization**
+  reverts to the pure Rule-3 order.
+- **Promises stay sacred:** with committed/urgent orders present, only the OPEN pass is
+  searched, against the protected pass's reservations — an optimized plan can never
+  move a promised date. All-open books search the whole book.
+- **Replay guarantee:** feeding the saved ranks back through the pipeline reproduces
+  exactly the metrics the search reported (tested).
+- **Default: off.** With no applied optimization every plan is byte-identical to today
+  (golden trace unchanged).
+
 ---
 
 ## PHASE 5 — Execute and re-plan *(closed loop)*

@@ -362,3 +362,16 @@ button.danger:hover { opacity: 0.9; }
 
 .a-foot { color:var(--muted); font-size:12px; margin-top:20px; line-height:1.6; max-width:1000px; }
 .a-foot strong { color:var(--text); }
+
+/* ---- Optimize (sequence search) ---- */
+.optimize-intro { font-size: 13px; color: var(--muted); margin-bottom: 10px; max-width: 860px; }
+.optimize-intro strong { color: var(--text); }
+.optimize-controls { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.optimize-result { margin-top: 12px; max-width: 640px; }
+.optimize-result p { margin: 0 0 8px; font-size: 13px; }
+.optimize-actions { display: flex; gap: 10px; margin-top: 10px; }
+.optimize-banner {
+  padding: 8px 24px; font-size: 13px; color: var(--text);
+  background: var(--panel); border-bottom: 1px solid var(--border);
+}
+.optimize-banner .ghost-btn.small { font-size: 12px; padding: 2px 8px; margin-left: 8px; }

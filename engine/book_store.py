@@ -21,6 +21,7 @@ COMPLETED_KEY = "anvitech:orders:completed"  # hash: same composite field (archi
 ACTUALS_KEY = "anvitech:actuals"           # list of Actual json
 MASTERS_KEY = "anvitech:masters"           # kv: base64 of the latest workbook
 PLAN_CONFIG_KEY = "anvitech:plan_config"   # kv: json of the admin's saved Config
+PLAN_PRIORITY_KEY = "anvitech:plan_priority"  # kv: json {ranks, meta} of the applied Optimize run
 
 _SEP = "\x1f"   # ASCII unit separator — never appears in an SO# or item code
 
@@ -182,3 +183,30 @@ def save_plan_config(raw_json: str) -> None:
 
 def load_plan_config():
     return get_store().kv_get(PLAN_CONFIG_KEY)
+
+
+# --- plan priority (the applied Optimize run) --- #
+def save_plan_priority(ranks: dict, meta: dict) -> None:
+    """Persist an applied optimization: ``ranks`` maps the composite order key
+    "<so>\x1f<item>" -> 1-based rank; ``meta`` records saved_at, scores, budget,
+    seed and the covered keys, for the staleness banner."""
+    get_store().kv_set(PLAN_PRIORITY_KEY, json.dumps({"ranks": ranks, "meta": meta}))
+
+
+def load_plan_priority():
+    """The applied optimization as {"ranks": {...}, "meta": {...}}, or None.
+    A corrupt/legacy value is treated as absent (plans fall back to pure Rule 3)."""
+    raw = get_store().kv_get(PLAN_PRIORITY_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("ranks"), dict) or not data["ranks"]:
+        return None
+    return data
+
+
+def clear_plan_priority() -> None:
+    get_store().delete_key(PLAN_PRIORITY_KEY)

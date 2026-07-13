@@ -116,6 +116,42 @@ RULE_NAMES = [
     "rule1", "rule2", "rule3", "rule4", "rule5", "rule6", "rule7", "rule8",
 ]
 
+# Separator of the composite order key "<SO No>\x1f<Item Code>" — the same field
+# separator book_store uses, so a persisted rank map round-trips unchanged.
+KEY_SEP = "\x1f"
+
+
+def batch_rank(batch, priority_rank: dict):
+    """A batch's rank under a saved optimization = the best (minimum) rank among
+    its member orders (each keyed "<so>\x1f<item>"). None when no member is ranked.
+    Consolidation-safe: batches merge/shrink as orders arrive/complete, and the
+    rank survives through any member still present."""
+    ranks = [priority_rank[k] for k in
+             (f"{so}{KEY_SEP}{batch.item_code}" for so in (batch.source_so_refs or []))
+             if k in priority_rank]
+    return min(ranks) if ranks else None
+
+
+def apply_priority_rank(batches: list, priority_rank: dict | None) -> tuple[list, int]:
+    """Replay a saved optimized sequence over Rule 3's output.
+
+    Ranked batches are reordered (by rank, stable on their Rule-3 position) among
+    the SLOTS they already occupy; unranked batches keep their own Rule-3 slots,
+    so a new order uploaded after the optimization keeps its natural priority.
+    Returns (reordered list, number of ranked batches). Empty/None rank map or
+    nothing ranked -> the input list unchanged (byte-identical)."""
+    if not priority_rank:
+        return batches, 0
+    ranked_slots = [i for i, b in enumerate(batches)
+                    if batch_rank(b, priority_rank) is not None]
+    if not ranked_slots:
+        return batches, 0
+    order = sorted(ranked_slots, key=lambda i: (batch_rank(batches[i], priority_rank), i))
+    out = list(batches)
+    for slot, src in zip(ranked_slots, order):
+        out[slot] = batches[src]
+    return out, len(ranked_slots)
+
 
 def _mark_not_reached(trace: dict, from_index: int):
     for nm in RULE_NAMES[from_index:]:
@@ -132,7 +168,8 @@ def _mark_not_reached(trace: dict, from_index: int):
 
 def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
                 machine_lost_min: dict | None = None,
-                reserved: dict | None = None) -> dict:
+                reserved: dict | None = None,
+                priority_rank: dict | None = None) -> dict:
     """Run the forward planning chain 1 → 2 → 3 → 6, returning the trace.
 
     Rules 4/5 are consumed inside Rule 6 (their effect is logged in rule6's
@@ -145,6 +182,10 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
     ``reserved`` (optional) maps machine id / operator name → busy intervals
     that Rule 6 must treat as already occupied (the two-pass Plan's committed
     pass reserving time for the open pass). ``None`` → no effect (default).
+
+    ``priority_rank`` (optional) maps composite order keys "<so>\\x1f<item>" → rank
+    from a saved Optimize run; ranked batches replay in that order among the slots
+    they occupy after Rule 3 (see ``apply_priority_rank``). ``None`` → no effect.
     """
     config.validate()
     trace: dict = {}
@@ -162,6 +203,16 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
             trace, "rule3", rule3_tiebreak_process_time.run, plan_run.batches_sorted,
             config=config, masters=masters,
         )
+        replayed, n_ranked = apply_priority_rank(plan_run.batches_prioritized, priority_rank)
+        if n_ranked:
+            plan_run.batches_prioritized = replayed
+            # Keep the Rule-3 tab honest: show the order Rule 6 will actually consume.
+            trace["rule3"]["output"] = to_table(replayed)
+            trace["rule3"]["notes"].append(
+                f"Optimized sequence applied (saved by the Optimize feature): "
+                f"{n_ranked} of {len(replayed)} batches follow the optimized order; "
+                f"unranked (new) batches keep their Rule-3 position."
+            )
         plan_run.schedule = run_rule(
             trace, "rule6", rule6_allocate.run, plan_run.batches_prioritized,
             config=config, masters=masters, machine_lost_min=machine_lost_min,

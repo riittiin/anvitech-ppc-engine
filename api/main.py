@@ -18,6 +18,8 @@ import asyncio
 import io
 import json
 import os
+import threading
+import time
 import uuid
 from collections import OrderedDict, defaultdict
 from contextlib import asynccontextmanager
@@ -35,7 +37,8 @@ from pydantic import BaseModel, Field
 from engine.config import Config, OVERLAP_SEQUENTIAL, OVERLAP_PERCENT
 from engine.loaders import load_all
 from engine.models import PlanRun, Actual, Masters, fmt_date
-from engine.pipeline import run_forward, to_table
+from engine.pipeline import run_forward, to_table, KEY_SEP
+from engine import optimizer
 from engine.gantt import build_gantt
 from engine import book_store, orderbook
 from engine.rules import (
@@ -281,6 +284,10 @@ class UrgentRequest(BaseModel):
     confirm: bool = False   # False = preview only; True = apply even if it pushes others
 
 
+class OptimizeRequest(BaseModel):
+    budget: str = "quick"   # "quick" (~150 plans tried) or "deep" (~1000)
+
+
 class ActualRequest(BaseModel):
     so_no: str
     item_code: str
@@ -491,6 +498,12 @@ def _plan(config: Config):
     if eff_start != config.plan_start_date:
         config = replace(config, plan_start_date=eff_start)
 
+    # An applied Optimize run (the saved rank map) replays over the OPEN pass only:
+    # committed orders keep their promise order; unranked (new) orders keep their
+    # natural Rule-3 slot. No saved optimization -> plans are byte-identical.
+    prio = book_store.load_plan_priority()
+    ranks = prio["ranks"] if prio else None
+
     # The feedback loop is quantity-only: recorded times (downtime, actual setup) are
     # stored for the record and never affect the schedule.
     protected, open_lines = orderbook.split_committed_open(so_lines)
@@ -498,7 +511,7 @@ def _plan(config: Config):
         # Today's single pass — unchanged. Keeps the golden trace byte-identical
         # for an all-open book (no committed/urgent orders).
         plan_run = PlanRun(so_lines=so_lines)
-        trace = run_forward(plan_run, config, masters)
+        trace = run_forward(plan_run, config, masters, priority_rank=ranks)
     else:
         # Two-pass: committed/urgent orders are planned first, as if open orders
         # don't exist; open orders then backfill the gaps left by that pass —
@@ -508,7 +521,8 @@ def _plan(config: Config):
         reserved = _reservations_from_schedule(plan_protected.schedule)
 
         plan_open = PlanRun(so_lines=open_lines)
-        trace_open = run_forward(plan_open, config, masters, reserved=reserved)
+        trace_open = run_forward(plan_open, config, masters, reserved=reserved,
+                                 priority_rank=ranks)
 
         # Rule 1 numbers batches B001.. fresh per run_forward, so pass 1 and pass 2
         # both produce the same ids. The Gantt keys on batch_id, so a collision would
@@ -535,6 +549,10 @@ def _plan(config: Config):
             add = trace_open.get(rk, {}).get("output")
             if base and add and "rows" in base and "rows" in add:
                 base["rows"] = base["rows"] + add["rows"]
+        # Surface the open pass's "Optimized sequence applied" note on the visible tab.
+        for n in trace_open.get("rule3", {}).get("notes", []):
+            if n not in trace["rule3"]["notes"]:
+                trace["rule3"]["notes"].append(n)
         if "rule6" in trace and trace["rule6"].get("output") is not None:
             trace["rule6"]["output"] = to_table([e.as_row() for e in plan_run.schedule])
 
@@ -595,9 +613,19 @@ def _plan(config: Config):
                 exp_end_dates[k] = d
     exp_end = {k: d.isoformat() for k, d in exp_end_dates.items()}
 
+    # Staleness info for the Optimize banner: how many of the currently planned
+    # orders the applied optimization covers (uncovered = uploaded after it ran).
+    optimize_meta = {"active": False}
+    if prio:
+        keys = {f"{l.so_no}{KEY_SEP}{l.item_code}" for l in so_lines}
+        covered = sum(1 for k in keys if k in prio["ranks"])
+        optimize_meta = {"active": True,
+                         "saved_at": (prio.get("meta") or {}).get("saved_at"),
+                         "covered": covered, "uncovered": len(keys) - covered}
+
     return {"run_id": run_id, "trace": trace, "report": _report_table(masters),
             "gantt": gantt, "orders": orders, "config": config.to_dict(),
-            "expected_end": exp_end}
+            "expected_end": exp_end, "optimize_meta": optimize_meta}
 
 
 def _commit_orders(pairs):
@@ -675,6 +703,121 @@ def _load_plan_config() -> Config:
         return cfg
     except Exception:
         return Config()
+
+
+# --------------------------------------------------------------------------- #
+# Optimize: search the current book for a better batch sequence (admin action).
+# One job at a time, in a background thread (Render free tier = 1 worker); the
+# job snapshots its inputs at start so later book edits can't race it. Only the
+# APPLIED result is durable (book_store.save_plan_priority) — a process restart
+# mid-run just returns the job to idle, the applied ranks are unaffected.
+# --------------------------------------------------------------------------- #
+_OPT_BUDGETS = {"quick": 150, "deep": 1000}   # evaluation counts — deterministic
+_OPT_SEED = 42
+
+_OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
+             "baseline": None, "best": None, "error": None, "elapsed_s": 0.0,
+             "started_mono": None, "result": None}
+_OPTIMIZE_LOCK = threading.Lock()
+
+
+def _start_optimize(budget_evals: int, label: str, background: bool = True):
+    """Snapshot the book + config and run the sequence search. With committed/
+    urgent orders present, only the OPEN pass is searched (against the protected
+    pass's reservations) — a found plan can never disturb a promise."""
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] == "running":
+            raise HTTPException(status_code=409,
+                                detail="an optimization is already running")
+
+        config = _load_plan_config()
+        masters = _current_masters()
+        actuals = book_store.load_actuals()
+        so_lines = orderbook.active_so_lines(book_store.load_active_orders(),
+                                             actuals, masters)
+        eff_start = orderbook.effective_plan_start_date(actuals, config.plan_start_date,
+                                                        masters.calendar)
+        if eff_start != config.plan_start_date:
+            config = replace(config, plan_start_date=eff_start)
+
+        protected, open_lines = orderbook.split_committed_open(so_lines)
+        target = open_lines if protected else so_lines
+        if not target:
+            raise HTTPException(
+                status_code=400,
+                detail="nothing to optimize — no open orders with work remaining"
+                       + (" (all orders are promise-protected)" if protected else ""))
+
+        reserved = None
+        if protected:
+            plan_protected = PlanRun(so_lines=protected)
+            run_forward(plan_protected, config, masters)
+            reserved = _reservations_from_schedule(plan_protected.schedule)
+
+        _OPTIMIZE.update(state="running", label=label, budget_evals=budget_evals,
+                         evals=0, baseline=None, best=None, error=None, result=None,
+                         elapsed_s=0.0, started_mono=time.monotonic())
+
+    def job():
+        try:
+            def on_progress(evals, best):
+                _OPTIMIZE["evals"] = evals
+                _OPTIMIZE["best"] = best
+
+            res = optimizer.optimize(target, config, masters, reserved=reserved,
+                                     budget_evals=budget_evals, seed=_OPT_SEED,
+                                     on_progress=on_progress)
+            with _OPTIMIZE_LOCK:
+                _OPTIMIZE.update(
+                    state="done", evals=res.evals, baseline=res.baseline, best=res.best,
+                    elapsed_s=round(time.monotonic() - _OPTIMIZE["started_mono"], 1),
+                    result={"ranks": res.ranks, "improved": res.improved,
+                            "baseline": res.baseline, "best": res.best,
+                            "budget": label, "seed": _OPT_SEED})
+        except Exception as e:  # noqa: BLE001 — a failed search must report, not hang
+            with _OPTIMIZE_LOCK:
+                _OPTIMIZE.update(state="failed", error=str(e))
+
+    if background:
+        threading.Thread(target=job, daemon=True).start()
+    else:
+        job()
+    return _optimize_status()
+
+
+def _optimize_status():
+    with _OPTIMIZE_LOCK:
+        elapsed = _OPTIMIZE["elapsed_s"]
+        if _OPTIMIZE["state"] == "running" and _OPTIMIZE["started_mono"] is not None:
+            elapsed = round(time.monotonic() - _OPTIMIZE["started_mono"], 1)
+        res = _OPTIMIZE.get("result") or {}
+        return {"state": _OPTIMIZE["state"], "budget": _OPTIMIZE["label"],
+                "budget_evals": _OPTIMIZE["budget_evals"], "evals": _OPTIMIZE["evals"],
+                "baseline": _OPTIMIZE["baseline"], "best": _OPTIMIZE["best"],
+                "error": _OPTIMIZE["error"], "elapsed_s": elapsed,
+                "improved": res.get("improved")}
+
+
+def _optimize_apply():
+    """Persist the last completed run's ranks — from then on every Plan replays
+    them (admin, user, and the auto re-plan after actuals)."""
+    from datetime import datetime
+    with _OPTIMIZE_LOCK:
+        res = _OPTIMIZE.get("result")
+        if _OPTIMIZE["state"] != "done" or not res:
+            raise HTTPException(status_code=409,
+                                detail="no completed optimization to apply")
+        meta = {"saved_at": datetime.now().isoformat(timespec="seconds"),
+                "budget": res["budget"], "seed": res["seed"],
+                "baseline": res["baseline"], "best": res["best"],
+                "covered": len(res["ranks"])}
+        book_store.save_plan_priority(res["ranks"], meta)
+        return meta
+
+
+def _optimize_clear():
+    book_store.clear_plan_priority()
+    return {"cleared": True}
 
 
 # --------------------------------------------------------------------------- #
@@ -823,6 +966,38 @@ def urgent_order_ep(req: UrgentRequest, request: Request):
                               order.delivery_date if order else None,
                               datetime.now().isoformat(timespec="seconds"))
     return {"urgent": True}
+
+
+@app.post("/optimize")
+def optimize_ep(req: OptimizeRequest, request: Request):
+    """Start a sequence-search job on the current order book (admin only).
+    Returns the job status immediately; poll GET /optimize/status for progress."""
+    require_admin(request)
+    if req.budget not in _OPT_BUDGETS:
+        raise HTTPException(status_code=400,
+                            detail=f"budget must be one of {sorted(_OPT_BUDGETS)}")
+    return _start_optimize(_OPT_BUDGETS[req.budget], req.budget)
+
+
+@app.get("/optimize/status")
+def optimize_status_ep():
+    """Live progress of the current/last optimization (any logged-in role)."""
+    return _optimize_status()
+
+
+@app.post("/optimize/apply")
+def optimize_apply_ep(request: Request):
+    """Persist the last completed run's optimized order — every Plan replays it.
+    Admin only."""
+    require_admin(request)
+    return _optimize_apply()
+
+
+@app.post("/optimize/clear")
+def optimize_clear_ep(request: Request):
+    """Remove the applied optimization (back to the pure Rule-3 order). Admin only."""
+    require_admin(request)
+    return _optimize_clear()
 
 
 @app.get("/gantt")

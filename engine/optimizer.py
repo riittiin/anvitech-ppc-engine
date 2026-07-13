@@ -1,0 +1,207 @@
+"""The Optimize feature's sequence search (pure; no state, no UI, no I/O).
+
+Rule 6 is a greedy, single-pass, non-delay scheduler: it builds exactly ONE plan,
+and whichever operation is ready first claims the machine — so the same unlucky
+orders can lose every near-race for weeks (measured on the real book: 723
+order-days of queueing, 74% of it waiting for CNC/VMC). The batch sequence fed
+into Rule 6 is worth days of makespan by itself, and one full plan evaluates in
+well under a second — so instead of trusting one greedy pass, this module SEARCHES:
+try a sequence, replay the unchanged Rule 6, score the plan, keep the best.
+
+Design contract (see the 2026-07-13 optimize-plan spec):
+  * Reuses the unchanged Rules 1→2→3 (once) and Rule 6 (per evaluation) — never
+    duplicates rule logic.
+  * Deterministic: same so_lines + config + masters + budget + seed → identical
+    result, on any machine (budget counts EVALUATIONS, not wall-clock).
+  * The result is a rank per composite order key "<SO No>\x1f<Item Code>";
+    ``pipeline.apply_priority_rank`` replays it, and replaying reproduces exactly
+    the metrics reported here (the "what you Apply is what you get" guarantee).
+  * ``reserved`` (the two-pass Plan's committed-pass reservations) is passed
+    through to every Rule 6 evaluation, so committed orders are never disturbed.
+"""
+from __future__ import annotations
+
+import math
+import random
+from dataclasses import dataclass, field
+
+from .pipeline import KEY_SEP
+from .rules import rule1_consolidate, rule2_sort_by_date, rule3_tiebreak_process_time, \
+    rule6_allocate
+
+# Score = total_late_days + MAKESPAN_WEIGHT x makespan_days. Both owner goals in one
+# number, delivery gaps dominant (a day of one order's lateness trades 1:10 against
+# a day of everyone-finishes-earlier makespan).
+MAKESPAN_WEIGHT = 10.0
+
+# Local-search shape (measured on the real book: most of the gain lands well inside
+# the first ~200 evaluations; the kick keeps long runs from stalling on a plateau).
+_KICK_AFTER = 400          # non-improving evaluations before restarting from best
+_KICK_SWAPS = 4            # shake size of a kick restart
+
+
+@dataclass
+class OptimizeResult:
+    """What the search found. ``ranks`` is the persistable artifact."""
+
+    ranks: dict = field(default_factory=dict)   # "<so>\x1f<item>" -> 1-based rank
+    baseline: dict = field(default_factory=dict)  # metrics of the Rule-3 order
+    best: dict = field(default_factory=dict)      # metrics of the best sequence
+    evals: int = 0
+    improved: bool = False
+
+
+def score(metrics: dict) -> float:
+    """Lower is better."""
+    return metrics["total_late_days"] + MAKESPAN_WEIGHT * metrics["makespan_days"]
+
+
+def plan_metrics(schedule, so_lines, plan_start) -> dict:
+    """Owner-facing quality of one plan: makespan + lateness vs SO delivery dates.
+
+    Each order (SO#, item) is judged by its OWN delivery date — a consolidated
+    batch's schedule entries carry every member's so_ref, so members due earlier
+    are correctly measured against their earlier date.
+    """
+    from datetime import datetime
+    due = {(l.so_no, l.item_code): l.delivery_date for l in so_lines}
+    expected: dict = {}
+    last_end = None
+    for e in schedule:
+        if last_end is None or e.end > last_end:
+            last_end = e.end
+        d = e.end.date()
+        for ref in (e.so_refs or []):
+            k = (ref, e.item_code)
+            if k not in expected or d > expected[k]:
+                expected[k] = d
+    t0 = datetime.combine(plan_start, datetime.min.time())
+    makespan = ((last_end - t0).total_seconds() / 86400.0) if last_end else 0.0
+    gaps = [(expected[k] - due[k]).days for k in expected if k in due]
+    late = [g for g in gaps if g > 0]
+    return {
+        "makespan_days": round(makespan, 2),
+        "late_orders": len(late),
+        "total_late_days": int(sum(late)),
+        "max_late_days": int(max(late)) if late else 0,
+        "orders": len(gaps),
+    }
+
+
+def _work(batch, masters) -> float:
+    r = masters.routings.get(batch.item_code)
+    return (r.total_cycle_time() if r else 0.0) * batch.qty
+
+
+def _atc_key(batch, masters, plan_start):
+    """Apparent-Tardiness-Cost flavour: due-date pressure divided by work — the
+    best single-pass dispatch rule found on the real book (a strong seed)."""
+    slack_days = (batch.so_delivery_date - plan_start).days
+    p = max(_work(batch, masters), 1.0)
+    return -((1.0 / p) * math.exp(-max(slack_days, 0) / 14.0))
+
+
+def ranks_for(seq) -> dict:
+    """The persistable artifact: every member order of the i-th batch gets rank i+1
+    (batch members share a rank; ``apply_priority_rank`` replays by min member rank)."""
+    ranks: dict = {}
+    for i, b in enumerate(seq):
+        for so in (b.source_so_refs or []):
+            ranks[f"{so}{KEY_SEP}{b.item_code}"] = i + 1
+    return ranks
+
+
+def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
+             seed=42, on_progress=None) -> OptimizeResult:
+    """Search for a better batch sequence for THIS book (rolling: call it on
+    whatever the order book holds today; the result is disposable and re-computable).
+
+    ``on_progress(evals_done, best_metrics)`` is called after every evaluation —
+    the API layer streams it to the UI. Exceptions from Rule 6 are not caught:
+    a book that cannot plan at all should fail loud exactly like Plan does.
+    """
+    config.validate()
+
+    batches = rule1_consolidate.run(list(so_lines), config=config, masters=masters)
+    batches = rule2_sort_by_date.run(batches, config=config, masters=masters)
+    pri0 = rule3_tiebreak_process_time.run(batches, config=config, masters=masters)
+    n = len(pri0)
+    if n == 0:
+        return OptimizeResult()
+
+    evals = 0
+
+    def evaluate(seq) -> dict:
+        nonlocal evals
+        sched = rule6_allocate.run(list(seq), config=config, masters=masters,
+                                   reserved=reserved)
+        evals += 1
+        m = plan_metrics(sched, so_lines, config.plan_start_date)
+        if on_progress:
+            on_progress(evals, best_m if best_m and score(best_m) <= score(m) else m)
+        return m
+
+    # --- Seeds: the Rule-3 order (the baseline), two dispatch heuristics, and a
+    # few fixed shuffles. Deterministic: every RNG below is seeded.
+    seeds = [list(pri0),
+             sorted(pri0, key=lambda b: _work(b, masters)),                  # SPT
+             sorted(pri0, key=lambda b: _atc_key(b, masters, config.plan_start_date))]
+    for i in range(3):
+        s = list(pri0)
+        random.Random(seed * 1000 + i).shuffle(s)
+        seeds.append(s)
+
+    best_seq, best_m = None, None
+    baseline_m = None
+    for s in seeds:
+        if evals >= budget_evals and baseline_m is not None:
+            break
+        m = evaluate(s)
+        if baseline_m is None:
+            baseline_m = m                      # first seed IS the Rule-3 order
+        if best_m is None or score(m) < score(best_m):
+            best_seq, best_m = list(s), m
+
+    # --- Hill climb with sideways moves + kick restarts.
+    rng = random.Random(seed)
+    cur_seq, cur_m = list(best_seq), best_m
+    since_improve = 0
+    while evals < budget_evals and n >= 2:
+        r = rng.random()
+        cand = list(cur_seq)
+        if r < 0.5 or n < 4:                                    # insertion
+            i, j = rng.randrange(n), rng.randrange(n)
+            b = cand.pop(i)
+            cand.insert(j, b)
+        elif r < 0.8:                                           # swap
+            i, j = rng.randrange(n), rng.randrange(n)
+            cand[i], cand[j] = cand[j], cand[i]
+        else:                                                   # 3-batch block move
+            i, j = rng.randrange(n - 3), rng.randrange(n - 3)
+            blk = cand[i:i + 3]
+            del cand[i:i + 3]
+            cand[j:j] = blk
+        m = evaluate(cand)
+        if score(m) < score(cur_m) or (score(m) == score(cur_m) and rng.random() < 0.5):
+            if score(m) < score(cur_m):
+                since_improve = 0
+            cur_seq, cur_m = cand, m
+            if score(m) < score(best_m):
+                best_seq, best_m = list(cand), m
+        else:
+            since_improve += 1
+            if since_improve > _KICK_AFTER and evals + 1 < budget_evals:
+                cur_seq = list(best_seq)
+                for _ in range(_KICK_SWAPS):
+                    i, j = rng.randrange(n), rng.randrange(n)
+                    cur_seq[i], cur_seq[j] = cur_seq[j], cur_seq[i]
+                cur_m = evaluate(cur_seq)
+                since_improve = 0
+
+    return OptimizeResult(
+        ranks=ranks_for(best_seq),
+        baseline=baseline_m,
+        best=best_m,
+        evals=evals,
+        improved=score(best_m) < score(baseline_m),
+    )

@@ -31,9 +31,30 @@
     </div>
     <div class="toolbar-group toolbar-actions">
       <button id="settings-toggle" class="ghost-btn" type="button" aria-expanded="false">Settings</button>
+      <button id="optimize-toggle" class="ghost-btn" type="button" aria-expanded="false">Optimize</button>
       <button id="run-btn" class="primary big">Plan</button>
     </div>
   </section>
+
+  <section id="optimize-panel" class="settings-panel admin-only hidden">
+    <div class="optimize-intro">
+      <strong>Optimize plan</strong> — tries many different job sequences on the current
+      order book and keeps the best plan found (smaller delivery gaps first, fewer total
+      days second). Same machines, same people — only the order in which jobs claim the
+      machines changes. Committed / urgent orders are never moved.
+    </div>
+    <div class="optimize-controls">
+      <label class="cfg-check"><input type="radio" name="opt-budget" value="quick" checked />
+        Quick (~150 plans tried)</label>
+      <label class="cfg-check"><input type="radio" name="opt-budget" value="deep" />
+        Deep (~1,000 plans tried — takes longer)</label>
+      <button id="optimize-start" class="primary">Start</button>
+      <span id="optimize-progress" class="status"></span>
+    </div>
+    <div id="optimize-result" class="optimize-result hidden"></div>
+  </section>
+
+  <section id="optimize-banner" class="optimize-banner hidden"></section>
 
   <section id="settings-panel" class="settings-panel admin-only hidden">
     <div class="settings-grid">

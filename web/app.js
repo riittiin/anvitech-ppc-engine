@@ -23,6 +23,8 @@ let currentTrace = null;
 let currentGantt = null;
 let currentOrders = null;     // {columns, rows} from /run or /orders
 let currentExpected = null;   // {"SO\x1fITEM": "YYYY-MM-DD"} from /run's expected_end (Task 9)
+let optimizeMeta = null;      // /run's optimize_meta: applied optimization + staleness
+let optimizePollTimer = null; // /optimize/status polling handle
 let ITEMS = null;
 let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour detail)
 let activeTab = "orders";
@@ -124,8 +126,10 @@ async function runPlan(persist = false) {
     currentGantt = data.gantt || null;
     currentOrders = data.orders || null;
     currentExpected = data.expected_end || null;
+    optimizeMeta = data.optimize_meta || null;
     if (currentRole === "admin" && data.config) applyConfig(data.config);
     renderReport(data.report);
+    renderOptimizeBanner();
     renderTabs();
     renderTab(activeTab);
     setStatus("Plan " + data.run_id + " complete.");
@@ -153,6 +157,134 @@ async function uploadExcel() {
     await runPlan();           // refresh the book + schedule
     activeTab = "orders"; renderTabs(); renderTab("orders");
   } catch (e) { setDatasetStatus("Upload error: " + e.message); }
+}
+
+// ---- Optimize (admin: search for a better job sequence; banner for everyone) ----
+function fmtMetrics(m) {
+  if (!m) return "—";
+  return `${m.makespan_days} days · ${m.late_orders}/${m.orders} late · ${m.total_late_days} late-days`;
+}
+
+function isoToDisplayDateTime(iso) {       // "2026-07-13T10:04:00" -> "13-07-2026 10:04"
+  const s = String(iso || "");
+  const [d, t] = s.split("T");
+  return d ? isoToDdmmyyyy(d) + (t ? " " + t.slice(0, 5) : "") : s;
+}
+
+function renderOptimizeBanner() {
+  const b = $("optimize-banner");
+  if (!b) return;
+  if (!optimizeMeta || !optimizeMeta.active) { b.classList.add("hidden"); b.innerHTML = ""; return; }
+  b.classList.remove("hidden");
+  let h = `Optimized plan active (saved ${escapeHtml(isoToDisplayDateTime(optimizeMeta.saved_at))})`;
+  if (optimizeMeta.uncovered > 0) {
+    h += ` · <span class="pill-pending">${optimizeMeta.uncovered} order(s) added since — ` +
+         `run Optimize again for the best plan</span>`;
+  }
+  if (currentRole === "admin") {
+    h += ` <button id="optimize-clear-btn" class="ghost-btn small">Remove optimization</button>`;
+  }
+  b.innerHTML = h;
+  const clr = $("optimize-clear-btn");
+  if (clr) clr.onclick = async () => {
+    if (!window.confirm("Remove the optimized order and go back to the standard plan?")) return;
+    const res = await fetch("/optimize/clear", { method: "POST" });
+    if (res.ok) { setStatus("Optimization removed."); await runPlan(false); }
+    else setStatus("Could not remove optimization: " + (await res.text()));
+  };
+}
+
+function optimizeProgressLine(st) {
+  const tried = `tried ${st.evals} of ${st.budget_evals} plans`;
+  const best = st.best ? ` — best so far: ${fmtMetrics(st.best)}` : "";
+  return tried + best;
+}
+
+async function pollOptimizeStatus() {
+  try {
+    const res = await fetch("/optimize/status");
+    if (!res.ok) return;
+    const st = await res.json();
+    const prog = $("optimize-progress");
+    if (st.state === "running") {
+      if (prog) prog.textContent = optimizeProgressLine(st) + "…";
+      optimizePollTimer = setTimeout(pollOptimizeStatus, 3000);
+      return;
+    }
+    optimizePollTimer = null;
+    const startBtn = $("optimize-start");
+    if (startBtn) startBtn.disabled = false;
+    if (st.state === "failed") {
+      if (prog) prog.textContent = "Optimization failed: " + (st.error || "unknown error");
+      return;
+    }
+    if (st.state === "done") {
+      if (prog) prog.textContent = `done — ${st.evals} plans tried in ${st.elapsed_s}s`;
+      renderOptimizeResult(st);
+    }
+  } catch (e) { /* next poll or user retry recovers */ }
+}
+
+function renderOptimizeResult(st) {
+  const box = $("optimize-result");
+  if (!box) return;
+  box.classList.remove("hidden");
+  const rows = [
+    ["Total days to finish", st.baseline ? st.baseline.makespan_days : "—",
+     st.best ? st.best.makespan_days : "—"],
+    ["Late orders", st.baseline ? `${st.baseline.late_orders} / ${st.baseline.orders}` : "—",
+     st.best ? `${st.best.late_orders} / ${st.best.orders}` : "—"],
+    ["Total late-days (sum of delivery gaps)", st.baseline ? st.baseline.total_late_days : "—",
+     st.best ? st.best.total_late_days : "—"],
+    ["Worst order lateness (days)", st.baseline ? st.baseline.max_late_days : "—",
+     st.best ? st.best.max_late_days : "—"],
+  ];
+  let h = st.improved
+    ? `<p><strong>A better plan was found.</strong> Apply it to use this order in every plan from now on.</p>`
+    : `<p><strong>No improvement found</strong> — the current plan already matches the best sequence tried.</p>`;
+  h += '<div class="table-wrap"><table><thead><tr><th></th><th>Standard plan</th><th>Optimized</th></tr></thead><tbody>';
+  rows.forEach((r) => {
+    h += `<tr><td>${escapeHtml(String(r[0]))}</td><td>${escapeHtml(String(r[1]))}</td><td><strong>${escapeHtml(String(r[2]))}</strong></td></tr>`;
+  });
+  h += "</tbody></table></div>";
+  h += `<div class="optimize-actions">
+          <button id="optimize-apply-btn" class="primary">Apply this plan</button>
+          <button id="optimize-discard-btn" class="ghost-btn">Discard</button>
+        </div>`;
+  box.innerHTML = h;
+  $("optimize-apply-btn").onclick = async () => {
+    const res = await fetch("/optimize/apply", { method: "POST" });
+    if (!res.ok) { setStatus("Apply failed: " + (await res.text())); return; }
+    box.classList.add("hidden"); box.innerHTML = "";
+    setStatus("Optimized order applied — replanning…");
+    await runPlan(false);
+  };
+  $("optimize-discard-btn").onclick = () => { box.classList.add("hidden"); box.innerHTML = ""; };
+}
+
+async function startOptimize() {
+  const budget = (document.querySelector('input[name="opt-budget"]:checked') || {}).value || "quick";
+  const startBtn = $("optimize-start");
+  const prog = $("optimize-progress");
+  const box = $("optimize-result");
+  if (box) { box.classList.add("hidden"); box.innerHTML = ""; }
+  if (startBtn) startBtn.disabled = true;
+  if (prog) prog.textContent = "starting…";
+  try {
+    const res = await fetch("/optimize", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ budget }),
+    });
+    if (!res.ok) {
+      if (prog) prog.textContent = "Could not start: " + (await res.text());
+      if (startBtn) startBtn.disabled = false;
+      return;
+    }
+    pollOptimizeStatus();
+  } catch (e) {
+    if (prog) prog.textContent = "Request failed: " + e.message;
+    if (startBtn) startBtn.disabled = false;
+  }
 }
 
 // ---- Loader report (collapsible) ----
@@ -987,6 +1119,16 @@ if (_setBtn) _setBtn.onclick = () => {
   _setBtn.classList.toggle("open", open);
   _setBtn.setAttribute("aria-expanded", String(open));
 };
+// Optimize disclosure + start button (admin-only controls; null-guarded).
+const _optBtn = $("optimize-toggle");
+if (_optBtn) _optBtn.onclick = () => {
+  const panel = $("optimize-panel");
+  const open = panel.classList.toggle("hidden") === false;
+  _optBtn.classList.toggle("open", open);
+  _optBtn.setAttribute("aria-expanded", String(open));
+};
+const _optStart = $("optimize-start");
+if (_optStart) _optStart.onclick = startOptimize;
 
 // Boot: learn the role, render the shell, then auto-load the current plan (no
 // persist) so the schedule/Gantt/rule tabs populate without a Plan click.
@@ -995,4 +1137,17 @@ if (_setBtn) _setBtn.onclick = () => {
   renderTabs();
   renderTab(activeTab);
   await runPlan(false);
+  // If an optimization was left running (page reload mid-search), resume the
+  // progress display; admin-only controls exist only for the admin role.
+  if (currentRole === "admin") {
+    try {
+      const st = await (await fetch("/optimize/status")).json();
+      if (st.state === "running") {
+        const panel = $("optimize-panel");
+        if (panel) panel.classList.remove("hidden");
+        const sb = $("optimize-start"); if (sb) sb.disabled = true;
+        pollOptimizeStatus();
+      }
+    } catch (e) { /* status is cosmetic at boot */ }
+  }
 })();
