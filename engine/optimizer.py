@@ -34,10 +34,11 @@ from .rules import rule1_consolidate, rule2_sort_by_date, rule3_tiebreak_process
 # a day of everyone-finishes-earlier makespan).
 MAKESPAN_WEIGHT = 10.0
 
-# Local-search shape (measured on the real book: most of the gain lands well inside
-# the first ~200 evaluations; the kick keeps long runs from stalling on a plateau).
-_KICK_AFTER = 400          # non-improving evaluations before restarting from best
-_KICK_SWAPS = 4            # shake size of a kick restart
+# Local-search shape. Multi-start iterated local search: each restart hill-climbs a
+# fresh random permutation until it has gone this many evaluations with no improvement,
+# then a new restart explores a different basin. Smaller = more diverse restarts,
+# larger = deeper per-basin refinement; tuned on the real book for the best final plan.
+_RESTART_AFTER = 60        # non-improving evaluations before a fresh restart
 
 
 @dataclass
@@ -153,62 +154,67 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
             on_progress(evals, best_m if best_m and score(best_m) <= score(m) else m)
         return m
 
-    # --- Seeds: the Rule-3 order (the baseline), two dispatch heuristics, and a
-    # few fixed shuffles. Deterministic: every RNG below is seeded.
-    seeds = [list(pri0),
-             sorted(pri0, key=lambda b: _work(b, masters)),                  # SPT
-             sorted(pri0, key=lambda b: _atc_key(b, masters, config.plan_start_date))]
-    for i in range(3):
-        s = list(pri0)
-        random.Random(seed * 1000 + i).shuffle(s)
-        seeds.append(s)
+    best_seq, best_m = None, None      # GLOBAL best across every restart
 
-    best_seq, best_m = None, None
-    baseline_m = None
-    for s in seeds:
-        if baseline_m is not None and (evals >= budget_evals or _stop()):
-            break
-        m = evaluate(s)
-        if baseline_m is None:
-            baseline_m = m                      # first seed IS the Rule-3 order
+    def consider(seq, m):
+        nonlocal best_seq, best_m
         if best_m is None or score(m) < score(best_m):
-            best_seq, best_m = list(s), m
+            best_seq, best_m = list(seq), m
 
-    # --- Hill climb with sideways moves + kick restarts.
-    rng = random.Random(seed)
-    cur_seq, cur_m = list(best_seq), best_m
-    since_improve = 0
+    # The Rule-3 order is the BASELINE (what we're trying to beat) — evaluate it first.
+    baseline_m = evaluate(list(pri0))
+    consider(pri0, baseline_m)
+
+    # Restart starting points: the strong dispatch heuristics first (SPT, ATC), then an
+    # unlimited stream of fresh random permutations. A single trajectory from one seed
+    # gets stuck in whatever local optimum it first descends into; independent restarts
+    # from DIVERSE starts explore different basins and keep the global best, which
+    # reliably finds better plans than one long run. Deterministic: every RNG is seeded.
+    def _starts():
+        yield sorted(pri0, key=lambda b: _work(b, masters))                       # SPT
+        yield sorted(pri0, key=lambda b: _atc_key(b, masters, config.plan_start_date))  # ATC
+        k = 0
+        while True:
+            s = list(pri0)
+            random.Random(seed * 1000 + k).shuffle(s)
+            k += 1
+            yield s
+
+    gen = _starts()
+    restart = 0
     while evals < budget_evals and n >= 2 and not _stop():
-        r = rng.random()
-        cand = list(cur_seq)
-        if r < 0.5 or n < 4:                                    # insertion
-            i, j = rng.randrange(n), rng.randrange(n)
-            b = cand.pop(i)
-            cand.insert(j, b)
-        elif r < 0.8:                                           # swap
-            i, j = rng.randrange(n), rng.randrange(n)
-            cand[i], cand[j] = cand[j], cand[i]
-        else:                                                   # 3-batch block move
-            i, j = rng.randrange(n - 3), rng.randrange(n - 3)
-            blk = cand[i:i + 3]
-            del cand[i:i + 3]
-            cand[j:j] = blk
-        m = evaluate(cand)
-        if score(m) < score(cur_m) or (score(m) == score(cur_m) and rng.random() < 0.5):
-            if score(m) < score(cur_m):
-                since_improve = 0
-            cur_seq, cur_m = cand, m
-            if score(m) < score(best_m):
-                best_seq, best_m = list(cand), m
-        else:
-            since_improve += 1
-            if since_improve > _KICK_AFTER and evals + 1 < budget_evals:
-                cur_seq = list(best_seq)
-                for _ in range(_KICK_SWAPS):
-                    i, j = rng.randrange(n), rng.randrange(n)
-                    cur_seq[i], cur_seq[j] = cur_seq[j], cur_seq[i]
-                cur_m = evaluate(cur_seq)
-                since_improve = 0
+        rng = random.Random(seed + 100000 + restart)   # per-restart move RNG
+        cur_seq = list(next(gen))
+        cur_m = evaluate(cur_seq)
+        consider(cur_seq, cur_m)
+        since_improve = 0
+        # Hill-climb this restart until it stalls (then a fresh restart escapes it).
+        while evals < budget_evals and not _stop():
+            r = rng.random()
+            cand = list(cur_seq)
+            if r < 0.5 or n < 4:                                    # insertion
+                i, j = rng.randrange(n), rng.randrange(n)
+                b = cand.pop(i)
+                cand.insert(j, b)
+            elif r < 0.8:                                           # swap
+                i, j = rng.randrange(n), rng.randrange(n)
+                cand[i], cand[j] = cand[j], cand[i]
+            else:                                                   # 3-batch block move
+                i, j = rng.randrange(n - 3), rng.randrange(n - 3)
+                blk = cand[i:i + 3]
+                del cand[i:i + 3]
+                cand[j:j] = blk
+            m = evaluate(cand)
+            if score(m) < score(cur_m) or (score(m) == score(cur_m) and rng.random() < 0.5):
+                if score(m) < score(cur_m):
+                    since_improve = 0
+                cur_seq, cur_m = cand, m
+                consider(cand, m)
+            else:
+                since_improve += 1
+                if since_improve > _RESTART_AFTER:
+                    break            # basin exhausted → next restart from a fresh start
+        restart += 1
 
     return OptimizeResult(
         ranks=ranks_for(best_seq),
