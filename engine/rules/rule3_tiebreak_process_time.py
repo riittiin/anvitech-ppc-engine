@@ -72,6 +72,15 @@ def _metrics(batch, masters, clock, plan_start, config):
 
 def run(batches, config=None, notes=None, masters=None, **kw):
     notes = notes if notes is not None else []
+
+    protected = [b for b in batches if getattr(b, "commitment", "open") in ("committed", "urgent")]
+    if protected and len(protected) == len(batches):
+        # Single protected pass: order by the locked promise (earliest first),
+        # then delivery date as a stable tiebreak. Slack is irrelevant here — the
+        # promise is the commitment we schedule to.
+        return sorted(batches, key=lambda b: (b.promised_date or b.so_delivery_date,
+                                               b.so_delivery_date, b.batch_id))
+
     routings = masters.routings if masters else {}
     metric = config.priority_metric if config else PRIORITY_SLACK
     window = config.priority_window_days if config else None
