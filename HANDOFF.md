@@ -181,6 +181,32 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
+### Optimize follow-ups (2026-07-13, same second session) — ⏳ on branch `optimize-speed`, NOT yet pushed
+
+After the owner ran Deep on the live free-tier server, three issues surfaced and were
+fixed (branch `optimize-speed`, built on `fix-optimize-ui-robustness`; **308 tests pass**,
+golden unchanged; **not pushed** — awaiting the owner's "push to main"):
+
+1. **Progress froze / Deep too slow.** The progress counter died on a single failed poll
+   (Render free tier drops requests) — fixed to reschedule on any failure + resume on
+   refresh. Added a **"Stop & keep best"** button (`/optimize/cancel` + `should_cancel`)
+   so a slow run can be ended keeping the best-so-far. Deep reduced 1000→400 plans.
+2. **Scheduler was ~13× slower on Render than a laptop — because of redundant work, not
+   Render.** Profiling showed millions of invariant string/regex parses + datetime rebuilds
+   per plan. Memoized them (`loaders.normalize_resource_id`/`parse_resource_candidates`
+   lru_cache; Rule 6 `op_lookup` per machine+shift; `WorkClock._windows_for_day` per-day
+   cache; skip the midnight look-back for non-crossing clocks). **~3.5× faster** (640→183
+   ms/plan laptop), **byte-identical results** (verified: Quick 39.75/792, Deep 39.75/778
+   unchanged; golden intact). On Render: Quick ~22→~8 min, Deep ~1 hr→~19 min.
+3. **Optimizer was stuck in a mediocre local optimum** (39.75 d / 778 late-days; the owner
+   correctly recalled an earlier exploratory run hitting 38.7). Root cause: a single
+   hill-climb trajectory from one seed. Fixed with **multi-start** (SPT/ATC + random
+   restarts, keep global best) → **39.7 d / 713 late-days / 44 late** — better than both the
+   old shipped plan (778) and the exploratory 752. **Trade-off finding (owner-confirmed
+   priority = fewest late deliveries):** the shortest-makespan plans (38.6 d) carry *more*
+   late-days (861, worse than today), so the score rightly favours delivery gaps over the
+   very shortest finish. Frontier + numbers in the `sequence-optimizer-findings` memory.
+
 ### Latest session (2026-07-13, second session) — ✅ SHIPPED to `main` and LIVE
 
 Owner's goals, verbatim: shrink SO-delivery-vs-expected gaps and the ~43-day makespan,

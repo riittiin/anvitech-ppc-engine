@@ -209,10 +209,18 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (e.g. an item code like `61243661-01..`) would otherwise be read as a nested path
   and break the write. Any hash field string is safe.
 - `engine/optimizer.py` — **the Optimize feature's pure sequence search**: `optimize(
-  so_lines, config, masters, reserved=, budget_evals=, seed=, on_progress=)` runs the
-  unchanged Rules 1→2→3 once, then repeatedly permutes the batch order and replays the
-  unchanged Rule 6, scoring each plan (`total_late_days + 10×makespan_days`) and keeping
-  the best. Deterministic (eval-count budget + fixed seed). Returns `OptimizeResult`
+  so_lines, config, masters, reserved=, budget_evals=, seed=, on_progress=, should_cancel=)`
+  runs the unchanged Rules 1→2→3 once, then **multi-start** search: independent restarts
+  (SPT, ATC, then fresh random permutations), each hill-climbed (insertion/swap/block) until
+  it stalls (`_RESTART_AFTER`), keeping the **global best** — a single trajectory got stuck
+  in a worse local optimum (39.75/778 on Test5; multi-start → 39.7/713). Scores each plan
+  `total_late_days + 10×makespan_days` (delivery gaps dominant — owner priority: fewest late
+  deliveries, since shortest-makespan plans push more orders late). Deterministic (eval-count
+  budget + fixed seed). `should_cancel()` is polled between evals so a run can be stopped
+  early keeping the best-so-far. **Speed:** the scheduler is memoized — `loaders`
+  `normalize_resource_id`/`parse_resource_candidates` (lru_cache on fixed routing text),
+  Rule 6's `op_lookup` (per machine+shift, not per op), and `WorkClock._windows_for_day`
+  (per-day window cache) — ~3.5× faster per plan, results byte-identical (golden unchanged). Returns `OptimizeResult`
   with a rank per **"<so>\x1f<item>"** key; `pipeline.apply_priority_rank` replays it
   (ranked batches reorder among their own slots; unranked keep their Rule-3 slot).
   `run_forward(priority_rank=)` is the replay hook — `None` (all existing callers) is

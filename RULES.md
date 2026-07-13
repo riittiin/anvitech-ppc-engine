@@ -393,14 +393,25 @@ sequence it consumes (Rule 3's order) is worth days of makespan by itself — me
 the real book, better sequencing alone cut the plan from 42.5 to 39.7 days and total
 late-days from 1,026 to 792. Because one full plan evaluates in under a second, the
 **Optimize** button (admin) searches instead of trusting one pass: it tries many batch
-sequences on the *current* order book (seeds: the Rule-3 order, SPT, ATC due-pressure ÷
-work, fixed shuffles; then insertion/swap/block-move hill-climbing), replays the
-**unchanged Rule 6** for each, scores every plan (`total_late_days + 10 ×
-makespan_days` — delivery gaps dominant), and keeps the best.
+sequences on the *current* order book, replays the **unchanged Rule 6** for each, scores
+every plan (`total_late_days + 10 × makespan_days` — **delivery gaps dominant**, the
+owner-chosen priority: favour fewest/smallest late deliveries over the very shortest
+finish, because on the real book the shortest-finish plans push *more* orders late), and
+keeps the best.
 
-- **Quick** ≈ 150 plans tried; **Deep** ≈ 1,000. Budgets are **evaluation counts** with
+- **Multi-start search.** A single hill-climb from one seed gets trapped in whatever local
+  optimum it first descends into (measured: it stalled at 39.75 d / 778 late-days on
+  Test5, and adding plans didn't help). So the search runs **many independent restarts** —
+  the strong dispatch heuristics (SPT, ATC) then an unlimited stream of fresh random
+  permutations — hill-climbs each with insertion/swap/block moves until it stalls
+  (`_RESTART_AFTER`), and keeps the **global best** across all restarts. This reliably
+  reaches better basins (Test5: → 39.7 d / **713 late-days** / 44 late). Fully
+  deterministic (every restart's RNG is seeded off the base seed); never skips a run.
+- **Quick** ≈ 150 plans tried; **Deep** ≈ 400. Budgets are **evaluation counts** with
   a fixed random seed, so the same book + settings + budget always yields the same
-  result on any machine.
+  result on any machine. The scheduler is memoized (invariant machine-name parsing and
+  per-day work-windows are cached), so each plan evaluates ~3.5× faster with identical
+  results.
 - The admin sees a before/after table and chooses **Apply** or Discard. Apply persists
   a **rank per (SO No, Item Code)**; every subsequent Plan replays it
   (`pipeline.apply_priority_rank`): ranked batches reorder among the slots they already
