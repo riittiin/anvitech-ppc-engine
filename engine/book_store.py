@@ -104,6 +104,35 @@ def uncomplete_order(so_no: str, item_code: str) -> bool:
     return True
 
 
+def set_commitment(so_no: str, item_code: str, commitment: str,
+                   promised_date, committed_at: str) -> bool:
+    """Set an ACTIVE order's commitment lane + promised date. `commitment` is
+    'committed' or 'urgent'; `promised_date` is a date or None; `committed_at` is an
+    ISO datetime string (passed in so this stays deterministic). False if unknown."""
+    s = get_store()
+    o = load_active_orders().get((so_no, item_code))
+    if o is None:
+        return False
+    o.commitment = commitment
+    o.promised_date = promised_date
+    o.committed_at = committed_at
+    s.hset(ORDERS_KEY, _skey(so_no, item_code), json.dumps(o.to_json()))
+    return True
+
+
+def clear_commitment(so_no: str, item_code: str) -> bool:
+    """Reset an active order back to the Open lane (clears promise). False if unknown."""
+    s = get_store()
+    o = load_active_orders().get((so_no, item_code))
+    if o is None:
+        return False
+    o.commitment = "open"
+    o.promised_date = None
+    o.committed_at = None
+    s.hset(ORDERS_KEY, _skey(so_no, item_code), json.dumps(o.to_json()))
+    return True
+
+
 # --- actuals (append-safe) --- #
 def load_actuals() -> list:
     """Load all actuals. Backfills a stable id on any legacy entry that lacks one
