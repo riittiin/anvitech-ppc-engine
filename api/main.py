@@ -514,6 +514,7 @@ def _plan(config: Config):
 
     # The feedback loop is quantity-only: recorded times (downtime, actual setup) are
     # stored for the record and never affect the schedule.
+    recovery_meta = {"active": False}
     protected, open_lines = orderbook.split_committed_open(so_lines)
     if not protected:
         # Today's single pass — unchanged. Keeps the golden trace byte-identical
@@ -524,9 +525,31 @@ def _plan(config: Config):
         # Two-pass: committed/urgent orders are planned first, as if open orders
         # don't exist; open orders then backfill the gaps left by that pass —
         # so a later, larger open order can never push a committed order's plan.
+        #
+        # Promise recovery: if a disruption has made committed orders slip past their
+        # promises, replay the auto-recovered committed order (a re-sequence that
+        # protects the most promises). Fresh only when its signature matches this exact
+        # committed set + promises; otherwise it is ignored and (if slip exists) a fresh
+        # recovery search is kicked off in the background.
+        rec = book_store.load_promise_recovery()
+        rec_sig = _recovery_signature(protected)
+        rec_ranks = rec["ranks"] if (rec and rec.get("meta", {}).get("signature") == rec_sig) else None
+        prot_config = replace(config, expedite_window_min=0) if rec_ranks else config
+
         plan_protected = PlanRun(so_lines=protected)
-        trace = run_forward(plan_protected, config, masters)
+        trace = run_forward(plan_protected, prot_config, masters, priority_rank=rec_ranks)
         reserved = _reservations_from_schedule(plan_protected.schedule)
+
+        # Detect a promise slip; with no fresh recovery in hand, start the search.
+        slip_m = _committed_slip_metrics(plan_protected.schedule, protected, config.plan_start_date)
+        if rec_ranks and rec:
+            m = rec.get("meta", {})
+            recovery_meta = {"active": True, "saved_at": m.get("saved_at"),
+                             "promises_saved": m.get("promises_saved", 0),
+                             "slip_before": m.get("slip_before"), "slip_after": m.get("slip_after")}
+        elif slip_m["promise_slip_days"] > 0:
+            _maybe_start_recovery(protected, config, masters)
+            recovery_meta = {"active": False, "computing": True}   # search running in the background
 
         plan_open = PlanRun(so_lines=open_lines)
         trace_open = run_forward(plan_open, ranked_config, masters, reserved=reserved,
@@ -633,7 +656,8 @@ def _plan(config: Config):
 
     return {"run_id": run_id, "trace": trace, "report": _report_table(masters),
             "gantt": gantt, "orders": orders, "config": config.to_dict(),
-            "expected_end": exp_end, "optimize_meta": optimize_meta}
+            "expected_end": exp_end, "optimize_meta": optimize_meta,
+            "recovery_meta": recovery_meta}
 
 
 def _commit_orders(pairs):
@@ -863,6 +887,72 @@ def _optimize_apply():
 def _optimize_clear():
     book_store.clear_plan_priority()
     return {"cleared": True}
+
+
+# --------------------------------------------------------------------------- #
+# Promise recovery: when a disruption makes committed orders slip, automatically
+# re-sequence the committed set to protect the most promises. No control — the
+# planner triggers it. Runs in its OWN background slot (separate from the manual
+# Optimize) so the two never collide. Only the persisted ranks are durable.
+# --------------------------------------------------------------------------- #
+_RECOVERY_BUDGET = 150   # promise-recovery search depth (most of the prize; see the design)
+_RECOVERY = {"state": "idle", "signature": None}
+_RECOVERY_LOCK = threading.Lock()
+
+
+def _recovery_signature(protected):
+    """A committed set's identity for cache freshness: each order's key AND its promised
+    date. A new commit/uncommit or a changed promise changes the signature and re-triggers;
+    a mere quantity change (feedback) does not — the recovered ORDER still replays."""
+    return sorted(
+        f"{l.so_no}{KEY_SEP}{l.item_code}\x1e{l.promised_date.isoformat() if l.promised_date else ''}"
+        for l in protected)
+
+
+def _committed_slip_metrics(schedule, protected, plan_start):
+    return optimizer.promise_slip_metrics(schedule, protected, plan_start)
+
+
+def _maybe_start_recovery(protected, config, masters):
+    """Kick off the background promise-recovery search for THIS committed set, unless one
+    is already running or a recovery for exactly this signature already exists."""
+    sig = _recovery_signature(protected)
+    with _RECOVERY_LOCK:
+        if _RECOVERY["state"] == "running":
+            return
+        existing = book_store.load_promise_recovery()
+        if existing and existing.get("meta", {}).get("signature") == sig:
+            return                      # already recovered for this exact committed set
+        _RECOVERY.update(state="running", signature=sig)
+
+    lines, cfg, ms = list(protected), config, masters
+    # Expedite would dynamically re-sort ops and cancel the recovered order (same as the
+    # open-order optimizer) — search & replay in the pure non-delay model.
+    search_cfg = replace(cfg, expedite_window_min=0)
+
+    def job():
+        try:
+            from datetime import datetime
+            base = PlanRun(so_lines=list(lines))
+            run_forward(base, search_cfg, ms)
+            bm = optimizer.promise_slip_metrics(base.schedule, lines, search_cfg.plan_start_date)
+            res = optimizer.optimize(lines, search_cfg, ms, budget_evals=_RECOVERY_BUDGET,
+                                     seed=_OPT_SEED, objective="promise_slip")
+            meta = {"saved_at": datetime.now().isoformat(timespec="seconds"),
+                    "signature": sig,
+                    "slip_before": bm["promise_slip_days"], "slip_after": res.best["promise_slip_days"],
+                    "promises_saved": max(bm["promises_missed"] - res.best["promises_missed"], 0)}
+            # Safety: res.best <= baseline (seeded with promised-date order), so replaying
+            # the ranks can never make committed orders worse. Save unconditionally so the
+            # signature check stops us re-triggering the same search.
+            book_store.save_promise_recovery(res.ranks, meta)
+        except Exception:  # noqa: BLE001 — a failed recovery must not break planning
+            pass
+        finally:
+            with _RECOVERY_LOCK:
+                _RECOVERY["state"] = "idle"
+
+    threading.Thread(target=job, daemon=True).start()
 
 
 # --------------------------------------------------------------------------- #
