@@ -54,8 +54,14 @@ class OptimizeResult:
 
 
 def score(metrics: dict) -> float:
-    """Lower is better."""
+    """Lower is better (open-order objective: delivery lateness + makespan)."""
     return metrics["total_late_days"] + MAKESPAN_WEIGHT * metrics["makespan_days"]
+
+
+def promise_score(metrics: dict) -> float:
+    """Lower is better (promise-recovery objective: promise-slip dominant, broken-promise
+    count as the tiebreak — matches the disruption experiment)."""
+    return metrics["promise_slip_days"] * 100 + metrics["promises_missed"]
 
 
 def plan_metrics(schedule, so_lines, plan_start) -> dict:
@@ -90,6 +96,42 @@ def plan_metrics(schedule, so_lines, plan_start) -> dict:
     }
 
 
+def promise_slip_metrics(schedule, so_lines, plan_start) -> dict:
+    """Promise-recovery quality: how far committed orders finish PAST THEIR PROMISE
+    (``SOLine.promised_date``), not their SO delivery date. Orders with no promise are
+    ignored. Carries the standard fields too so results display consistently."""
+    from datetime import datetime
+    promised = {(l.so_no, l.item_code): l.promised_date
+                for l in so_lines if getattr(l, "promised_date", None) is not None}
+    expected: dict = {}
+    last_end = None
+    for e in schedule:
+        if last_end is None or e.end > last_end:
+            last_end = e.end
+        d = e.end.date()
+        for ref in (e.so_refs or []):
+            k = (ref, e.item_code)
+            if k not in expected or d > expected[k]:
+                expected[k] = d
+    t0 = datetime.combine(plan_start, datetime.min.time())
+    makespan = ((last_end - t0).total_seconds() / 86400.0) if last_end else 0.0
+    slips = [(expected[k] - promised[k]).days for k in promised if k in expected]
+    missed = [s for s in slips if s > 0]
+    return {
+        "makespan_days": round(makespan, 2),
+        "promise_slip_days": int(sum(missed)),
+        "promises_missed": len(missed),
+        "max_slip_days": int(max(missed)) if missed else 0,
+        "promised_orders": len(slips),
+        # standard aliases so downstream display code that reads late_orders/total_late_days
+        # still works when it renders a promise-recovery result:
+        "late_orders": len(missed),
+        "total_late_days": int(sum(missed)),
+        "max_late_days": int(max(missed)) if missed else 0,
+        "orders": len(slips),
+    }
+
+
 def _work(batch, masters) -> float:
     r = masters.routings.get(batch.item_code)
     return (r.total_cycle_time() if r else 0.0) * batch.qty
@@ -114,18 +156,25 @@ def ranks_for(seq) -> dict:
 
 
 def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
-             seed=42, on_progress=None, should_cancel=None) -> OptimizeResult:
+             seed=42, on_progress=None, should_cancel=None,
+             objective="lateness") -> OptimizeResult:
     """Search for a better batch sequence for THIS book (rolling: call it on
     whatever the order book holds today; the result is disposable and re-computable).
 
-    ``on_progress(evals_done, best_metrics)`` is called after every evaluation —
-    the API layer streams it to the UI. ``should_cancel()`` (optional) is polled
-    between evaluations; when it returns True the search stops early and returns the
-    **best plan found so far** (so a user can Stop a long run on a slow server and
-    still keep the improvement). Exceptions from Rule 6 are not caught: a book that
-    cannot plan at all should fail loud exactly like Plan does.
+    ``objective`` selects what "better" means:
+      * ``"lateness"`` (default) — open-order optimization: delivery lateness + makespan.
+      * ``"promise_slip"`` — promise recovery: minimise how far COMMITTED orders finish
+        past their ``promised_date`` (used after a disruption; see the promise-recovery
+        design). Same search, different scorecard.
+
+    ``on_progress(evals_done, best_metrics)`` is called after every evaluation.
+    ``should_cancel()`` (optional) is polled between evaluations; when it returns True the
+    search stops early and returns the best plan found so far. Exceptions from Rule 6 are
+    not caught: a book that cannot plan at all should fail loud exactly like Plan does.
     """
     config.validate()
+    _metrics = promise_slip_metrics if objective == "promise_slip" else plan_metrics
+    _score = promise_score if objective == "promise_slip" else score
 
     batches = rule1_consolidate.run(list(so_lines), config=config, masters=masters)
     batches = rule2_sort_by_date.run(batches, config=config, masters=masters)
@@ -149,16 +198,16 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
         sched = rule6_allocate.run(list(seq), config=config, masters=masters,
                                    reserved=reserved)
         evals += 1
-        m = plan_metrics(sched, so_lines, config.plan_start_date)
+        m = _metrics(sched, so_lines, config.plan_start_date)
         if on_progress:
-            on_progress(evals, best_m if best_m and score(best_m) <= score(m) else m)
+            on_progress(evals, best_m if best_m and _score(best_m) <= _score(m) else m)
         return m
 
     best_seq, best_m = None, None      # GLOBAL best across every restart
 
     def consider(seq, m):
         nonlocal best_seq, best_m
-        if best_m is None or score(m) < score(best_m):
+        if best_m is None or _score(m) < _score(best_m):
             best_seq, best_m = list(seq), m
 
     # The Rule-3 order is the BASELINE (what we're trying to beat) — evaluate it first.
@@ -205,8 +254,8 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
                 del cand[i:i + 3]
                 cand[j:j] = blk
             m = evaluate(cand)
-            if score(m) < score(cur_m) or (score(m) == score(cur_m) and rng.random() < 0.5):
-                if score(m) < score(cur_m):
+            if _score(m) < _score(cur_m) or (_score(m) == _score(cur_m) and rng.random() < 0.5):
+                if _score(m) < _score(cur_m):
                     since_improve = 0
                 cur_seq, cur_m = cand, m
                 consider(cand, m)
@@ -221,6 +270,6 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
         baseline=baseline_m,
         best=best_m,
         evals=evals,
-        improved=score(best_m) < score(baseline_m),
+        improved=_score(best_m) < _score(baseline_m),
         cancelled=cancelled[0],
     )
