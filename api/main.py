@@ -269,6 +269,18 @@ class ClearRequest(BaseModel):
     password: str = ""
 
 
+class CommitRequest(BaseModel):
+    # Each order is identified by its (SO number, item code) pair, sent as
+    # [so_no, item_code] pairs — mirrors DeleteRequest.
+    orders: List[List[str]] = []
+
+
+class UrgentRequest(BaseModel):
+    so: str
+    item: str
+    confirm: bool = False   # False = preview only; True = apply even if it pushes others
+
+
 class ActualRequest(BaseModel):
     so_no: str
     item_code: str
@@ -560,8 +572,84 @@ def _plan(config: Config):
     gantt = build_gantt(plan_run.schedule, plan_run.batches_prioritized, masters,
                         status_by_order=status_by_order)
     orders = to_table(orderbook.order_rows(active, completed, actuals, masters))
+
+    # Expected completion per order (SO#, item) = the latest scheduled End across
+    # every op tied to that order, keyed "SO\x1fitem" (a schedule entry can carry
+    # several so_refs when Rule 1 consolidated same-item SOs into one batch).
+    exp_end_dates = {}
+    for e in plan_run.schedule:
+        for r in (e.so_refs or []):
+            k = f"{r}\x1f{e.item_code}"
+            d = e.end.date()
+            if k not in exp_end_dates or d > exp_end_dates[k]:
+                exp_end_dates[k] = d
+    exp_end = {k: d.isoformat() for k, d in exp_end_dates.items()}
+
     return {"run_id": run_id, "trace": trace, "report": _report_table(masters),
-            "gantt": gantt, "orders": orders, "config": config.to_dict()}
+            "gantt": gantt, "orders": orders, "config": config.to_dict(),
+            "expected_end": exp_end}
+
+
+def _commit_orders(pairs):
+    """Snapshot each order's current expected completion (from a fresh plan) as
+    its promised date, and lock it into the committed lane. Unknown (so, item)
+    pairs are silently skipped — set_commitment() returns False for them."""
+    from datetime import datetime, date as _date
+    result = _plan(_load_plan_config())
+    exp = result.get("expected_end", {})
+    now = datetime.now().isoformat(timespec="seconds")
+    for so, item in pairs:
+        iso = exp.get(f"{so}\x1f{item}")
+        promised = _date.fromisoformat(iso) if iso else None
+        book_store.set_commitment(so, item, "committed", promised, now)
+
+
+def _preview_urgent_pushes(so, item):
+    """If (so, item) is made urgent, which OTHER protected (committed/urgent)
+    orders would get pushed past their already-promised date? Re-plans PASS 1
+    (protected orders only, the same set `_plan` uses) on a scratch copy of the
+    order book with the target order flipped to urgent, and compares each other
+    protected order's new expected completion against its stored promise.
+
+    Pure preview — never touches the durable store."""
+    import copy as _copy
+
+    masters = _current_masters()
+    actuals = book_store.load_actuals()
+    config = _load_plan_config()
+
+    scratch = {k: _copy.copy(o) for k, o in book_store.load_active_orders().items()}
+    tgt = scratch.get((so, item))
+    if tgt is None:
+        return []
+    tgt.commitment = "urgent"
+    tgt.promised_date = tgt.delivery_date
+
+    lines = orderbook.active_so_lines(scratch, actuals, masters)
+    protected, _open = orderbook.split_committed_open(lines)
+
+    plan_run = PlanRun(so_lines=protected)
+    run_forward(plan_run, config, masters)
+
+    exp = {}
+    for e in plan_run.schedule:
+        for r in (e.so_refs or []):
+            k = (r, e.item_code)
+            d = e.end.date()
+            if k not in exp or d > exp[k]:
+                exp[k] = d
+
+    pushed = []
+    for k, o in scratch.items():
+        if k == (so, item):
+            continue
+        if o.commitment in ("committed", "urgent") and o.promised_date:
+            newd = exp.get(k)
+            if newd and newd > o.promised_date:
+                pushed.append({"so": o.so_no, "item": o.item_code,
+                               "promised": o.promised_date.isoformat(),
+                               "new": newd.isoformat()})
+    return pushed
 
 
 def _load_plan_config() -> Config:
@@ -687,6 +775,44 @@ def clear_orders(req: ClearRequest, request: Request):
     require_password(request, req.password)
     book_store.delete_all()
     return {"cleared": True}
+
+
+@app.post("/orders/commit")
+def commit_orders_ep(req: CommitRequest, request: Request):
+    """Lock the given orders into the committed lane: each order's current
+    expected completion (from a fresh plan) becomes its locked promise. Admin
+    only."""
+    require_admin(request)
+    _commit_orders([(o[0], o[1]) for o in req.orders if len(o) == 2])
+    return {"committed": len(req.orders)}
+
+
+@app.post("/orders/uncommit")
+def uncommit_orders_ep(req: CommitRequest, request: Request):
+    """Release the given orders back to the open lane (clears their promise).
+    Admin only."""
+    require_admin(request)
+    for o in req.orders:
+        if len(o) == 2:
+            book_store.clear_commitment(o[0], o[1])
+    return {"uncommitted": len(req.orders)}
+
+
+@app.post("/orders/urgent")
+def urgent_order_ep(req: UrgentRequest, request: Request):
+    """Mark one order urgent. Previews which other committed/urgent orders would
+    get pushed past their promise; without `confirm`, a non-empty preview is
+    returned as a warning instead of being applied. Admin only."""
+    require_admin(request)
+    from datetime import datetime
+    pushed = _preview_urgent_pushes(req.so, req.item)
+    if pushed and not req.confirm:
+        return {"warning": pushed}
+    order = book_store.load_active_orders().get((req.so, req.item))
+    book_store.set_commitment(req.so, req.item, "urgent",
+                              order.delivery_date if order else None,
+                              datetime.now().isoformat(timespec="seconds"))
+    return {"urgent": True}
 
 
 @app.get("/gantt")
