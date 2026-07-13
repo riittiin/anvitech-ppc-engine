@@ -220,8 +220,16 @@ def active_so_lines(active_orders: dict, actuals, masters=None) -> list:
         lines.append(SOLine(
             so_no=o.so_no, item_code=o.item_code, item_name=o.item_name,
             qty=remaining, delivery_date=o.delivery_date, process_qty=pq,
+            commitment=o.commitment, promised_date=o.promised_date,
         ))
     return lines
+
+
+def split_committed_open(so_lines):
+    """Partition SO-lines into (protected, open). Protected = committed or urgent."""
+    protected = [l for l in so_lines if l.commitment in ("committed", "urgent")]
+    open_lines = [l for l in so_lines if l.commitment not in ("committed", "urgent")]
+    return protected, open_lines
 
 
 def process_progress_rows(active_orders: dict, actuals, masters=None) -> list:
@@ -274,6 +282,8 @@ def order_rows(active_orders: dict, completed_orders: dict, actuals, masters=Non
             "Remaining": remaining,
             "SO Delivery Date": fmt_date(o.delivery_date),
             "Status": status,
+            "Lane": o.commitment,
+            "Promised": fmt_date(o.promised_date) if o.promised_date else "",
             "Note": "ready to complete" if (status == RUNNING and remaining <= 0) else "",
         }
 
