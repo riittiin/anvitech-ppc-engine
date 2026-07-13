@@ -351,6 +351,41 @@ schedule — the feedback loop is driven **purely by quantity produced/rejected 
 process** (the director's spec). A power cut or over-long setup is logged for
 analysis but does not move the plan.
 
+### Order commitment (lanes) & two-pass promise protection *(feature)*
+
+Every order occupies exactly one **commitment lane**:
+- **Open** (default) — new or not yet promised; schedules after all protected work
+  into remaining machine/operator capacity.
+- **Committed** — promised to a client; locked at its **current expected completion
+  date**. Scheduled in the protected group, ordered by `promised_date` (first promised,
+  first served).
+- **Urgent** — must hit a specific delivery date (its SO delivery date). Scheduled in
+  the protected group, ordered by that date (just high enough to meet it).
+
+**Two-pass planning enforces the promise.** Pass 1 schedules the **protected orders
+(Committed + Urgent)** in isolation via the unchanged Rules 1–6, producing their
+schedule as if Open orders do not exist. Pass 2 runs Rules 1–6 on **Open orders only**,
+with machine/operator intervals reserved from Pass 1's schedule, so Open ops backfill
+idle windows but **never overrun a committed block**. New Open orders thus cannot
+push a promised order past its date — the protected schedule is frozen. An **Urgent
+order's promised date** is its SO delivery date; a **normal Commit snapshots** the
+order's current expected completion at commit time. The admin may **Uncommit** an
+order (returns it to Open) or view a **warning preview** before marking an order
+**Urgent**, showing any committed orders it would push past their promise.
+
+**Rule 6 reservation support (engine-side change).** Rule 6 gains an optional
+`reserved={machine|operator: [(start,end), …]}` argument: when placing an operation,
+skip windows that overlap a reservation and reject placement that would not finish
+before the next reserved interval. `reserved=None` (Pass 1 and all existing callers) is
+byte-identical to today.
+
+**Consolidation guard:** orders of the same item are merged only when they share the
+same lane and (for protected lanes) the same promised date — a batch must not
+straddle lanes. Cross-lane orders stay separate.
+
+**Default:** all orders are Open; with no committed orders the plan is byte-identical
+to today (no change in behaviour).
+
 ---
 
 ## PHASE 5 — Execute and re-plan *(closed loop)*

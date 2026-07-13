@@ -167,7 +167,20 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
-### Latest session (2026-07-11) — ⚠️ UNCOMMITTED, NOT on `main`/live yet
+### Latest session (2026-07-13) — ⚠️ ON BRANCH `committed-orders`, NOT on `main`/live yet
+
+**Order commitment lanes & two-pass promise protection:** Orders now have a
+**commitment** lane (open | committed | urgent) and locked `promised_date`. The
+**Plan runs in two passes**: Pass 1 schedules protected (committed+urgent) orders in
+isolation via Rules 1–6, locking their dates; Pass 2 schedules Open orders into the
+free machine/operator intervals left over, so Open orders never push committed orders
+past their promises. Admin can **Commit** an order (snapshots its current expected
+completion) or **Urgent** it (slots by its SO delivery date, with a warning if it
+would push another committed order past promise). Unmarked orders stay Open and
+schedule last. **Defaults:** all orders Open → plan is byte-identical to today
+(golden trace unchanged).
+
+### Previous (2026-07-11) — ⚠️ UNCOMMITTED, NOT on `main`/live yet
 
 This session did a deep root-cause analysis of "orders finishing past their delivery
 date" and made two changes. **All of it is local/uncommitted** (git status: modified

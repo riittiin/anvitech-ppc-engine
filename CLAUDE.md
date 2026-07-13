@@ -169,6 +169,8 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   post-process (Settings tick mark "Balance operator workload") — reassigns *who* runs
   each op without moving any time, so makespan/lateness are unchanged.
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
+  `Order` and `SOLine` now carry `commitment` (open|committed|urgent), `promised_date`,
+  and `committed_at` for promise protection.
 - `engine/loaders.py` — read the uploaded workbook (Test4 format) → typed objects +
   non-blocking report. The 3 master sheets are read **header-driven** (`_locate_table`);
   resource-name normalization (`CNC 4` ≡ `CNC4`) and provisional-machine handling live here.
@@ -189,13 +191,17 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `order_rows` (dashboard). `Order`/`Actual`/`SOLine` each expose `.key = (so_no,
   item_code)`; the good-by-order / orders-with-actuals / per-process maps are all
   keyed by that pair. The DISPATCH gate (`finished_gate`) is matched via `is_dispatch`
-  (tolerates the `DISAPTCH` misspelling).
+  (tolerates the `DISAPTCH` misspelling). `split_committed_open` separates protected
+  (Committed + Urgent) from Open orders for two-pass planning; carries
+  `commitment`/`promised_date` forward to `SOLine` so rules can see the lane.
 - `engine/book_store.py` — durable persistence of the book: active orders + the
   completed archive (hashes keyed by a composite **`"<so_no>\x1f<item_code>"`** field;
   `complete`/`uncomplete`/`delete` target one (SO#, item) line), actuals (append-only
   list), masters workbook.
   `delete_orders` / `delete_all` (permanent deletes); `delete_actual` + `uncomplete_order`
-  (per-entry **rollback**: each `Actual` has a uuid `id`, legacy backfilled).
+  (per-entry **rollback**: each `Actual` has a uuid `id`, legacy backfilled);
+  `set_commitment`/`clear_commitment` persist the `commitment`, `promised_date`,
+  `committed_at` fields for promise protection.
 - `engine/storage.py` — the store interface (kv/hash/list) + backends:
   `MongoStore` / `UpstashStore` / `LocalStore`; `get_store()` picks by env.
   `MongoStore` **percent-encodes hash field names** (`_enc_field`/`_dec_field`)
@@ -249,6 +255,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   runs to 100% before the block starts (no Rule 5 overlap *into* an OS step) and the
   successor waits for the whole block. A blank OS cycle stays a zero-duration
   milestone. OS/off-machine lanes are excluded from the machine-utilization view.
+  **Two-pass promise protection:** Rule 6 gains an optional `reserved={machine|operator:
+  [(start,end), …]}` argument for Pass 2 of the two-pass plan — when finding an op's
+  earliest feasible start, skip windows that overlap a reservation, and reject
+  placement that would not finish before the next reservation begins. `reserved=None`
+  (Pass 1 and all existing callers) is byte-identical to today.
 - `api/auth.py` — accounts (2 roles), `authenticate`, signed-cookie
   `make_token`/`verify_token`, session secret, login rate limiter. Stdlib only.
 - `api/main.py` — FastAPI: `/login` `/logout` `/me`, `/upload` (merge, admin),
@@ -257,7 +268,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (+ `/actuals/rollback`), `/items` (`so_nos` for the SO dropdown), `/gantt`,
   `/report`, `/trace/{id}`. `gatekeeper` (session + CSRF) + `security_headers`
   middleware; `require_admin`; `require_password` (re-auth on destructive deletes);
-  helper-tab augmentation.
+  helper-tab augmentation. **New admin-only endpoints for promise protection:**
+  `/orders/commit`, `/orders/urgent`, `/orders/uncommit` (role-gated, non-destructive).
+  **Two-pass `_plan`**: orchestrates Pass 1 (protected orders only) via `run_forward`,
+  extracts reservations from the schedule, then Pass 2 (`run_forward` on Open orders
+  with `reserved=` seeded), and merges both passes' schedules for display.
 - `web/` — `login.html` (self-contained login page), `📋 Orders` tab (order book +
   delete, with a **password-confirm modal**), the per-rule tabs (Rule 7 = Capture
   Actuals, with an **SO No dropdown** + per-entry **↺ Rollback** button), and a
