@@ -18,7 +18,7 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0, 512 MB).
 - **Repo:** GitHub `riittiin/anvitech-ppc-engine` (private). Push to `main` →
   Render auto-redeploys (no separate deploy step).
-- **232 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
+- **267 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
   Python engine. Python 3 (run as `python3` locally — there is no `python` alias).
 - **Login is a two-role app-owned session** (admin / user) — see "Login & roles".
 - The engine has **8 business rules** (1–8). (Rule 8 = the Plan over the order book —
@@ -30,13 +30,17 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Data file is now `Test5.xlsx`** (supersedes `Test4.xlsx` → `Test3.xlsx`) —
   gitignored real data. Test5 adds parallel manual stations (`MW1/MW2/MW3`, `MD1/MD2`,
   `MPK1/MPK2/MPK3`) and a **+30% cycle/total time on every CNC/VMC step**.
-- **Most recent work (2026-07-11 — UNCOMMITTED, NOT on the live site yet):** a
-  root-cause analysis of late deliveries + two changes — (1) **setup time is now
-  CNC/VMC-only** (a code change; manual steps no longer carry the 90-min setup) and
-  (2) the **Test5 +30% CNC/VMC time bump** (data). See "Latest session" below. Earlier
-  shipped work (on `main`): composite (SO#, item) key + two-step capture picker, a
-  MongoDB upload fix, OS/outsourcing milestones on the Gantt, a Plan-start-date
-  setting, an Expected-completion column, a quantity-only feedback loop, UI cleanup.
+- **Most recent work (2026-07-13 — ✅ SHIPPED & LIVE):** the flagship **order
+  commitment & promise protection** feature (three lanes Open/Committed/Urgent +
+  **two-pass planning** so new orders can't push already-promised dates), plus this
+  session's optimization levers — **Overlap 80%**, **Expedite** tick, **Balance operator
+  workload** tick, a **shift-wise schedule download**, and the earlier **setup-is-CNC/VMC-only**
+  fix. Defaults keep every plan byte-identical (golden unchanged). See "Latest session
+  (2026-07-13)" below and the `committed-orders-design` + `expedite-window-and-ontime-findings`
+  memories. Earlier shipped work (on `main`): composite (SO#, item) key + two-step capture
+  picker, a MongoDB upload fix, OS/outsourcing milestones on the Gantt, a Plan-start-date
+  setting, an Expected-completion column, a quantity-only feedback loop, UI cleanup, the
+  Analytics tab.
 
 ## How to pick up where the last session left off (behavioral context)
 
@@ -167,28 +171,57 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
-### Latest session (2026-07-13) — ⚠️ ON BRANCH `committed-orders`, NOT on `main`/live yet
+### Latest session (2026-07-13) — ✅ ALL SHIPPED to `main` and LIVE
 
-**Order commitment lanes & two-pass promise protection:** Orders now have a
-**commitment** lane (open | committed | urgent) and locked `promised_date`. The
-**Plan runs in two passes**: Pass 1 schedules protected (committed+urgent) orders in
-isolation via Rules 1–6, locking their dates; Pass 2 schedules Open orders into the
-free machine/operator intervals left over, so Open orders never push committed orders
-past their promises. Admin can **Commit** an order (snapshots its current expected
-completion) or **Urgent** it (slots by its SO delivery date, with a warning if it
-would push another committed order past promise). Unmarked orders stay Open and
-schedule last. **Defaults:** all orders Open → plan is byte-identical to today
-(golden trace unchanged).
+Two big things shipped this session, both **live** on https://anvitech-ppc.onrender.com.
+**267 tests pass; golden trace byte-identical without regen** (every new lever/feature
+is opt-in or a no-op by default). Built test-first; the commitment feature went through
+full subagent-driven development (10 tasks, each code-reviewed + a final whole-branch
+review). See memories `committed-orders-design` and `expedite-window-and-ontime-findings`.
 
-### Previous (2026-07-11) — ⚠️ UNCOMMITTED, NOT on `main`/live yet
+**1. Order commitment lanes & two-pass promise protection (the flagship).** Solves the
+owner's rolling-order-book fear: new weekly uploads used to re-plan the whole book and
+push already-promised delivery dates later. Now orders have a **commitment lane**
+(`open` default | `committed` | `urgent`) + a locked `promised_date`.
+- **Two-pass Plan** (`api._plan`): Pass 1 schedules protected (committed+urgent) orders
+  in isolation via the unchanged Rules 1–6, locking their dates as if Open orders don't
+  exist; Pass 2 schedules Open orders into the free machine/operator intervals left over
+  (Rule 6's new `reserved=` arg), so an Open order can **never** push a committed order.
+- Admin **Commits** an order (snapshots its current expected completion as the promise)
+  or marks it **Urgent** (promised = its SO delivery date, slotted by that date, with a
+  **warning** if it would push another committed order past its promise); **Uncommit**
+  reverts. Orders tab shows lane badge, Promised vs Current expected (red slip flag).
+- Endpoints `/orders/commit|urgent|uncommit`; fields persisted in `book_store`
+  (`set_commitment`/`clear_commitment`). All-open book → plan is byte-identical to today.
+- **Gotcha fixed in final review:** the two passes each numbered batches `B001..`, so
+  their ids collided when merged and committed orders vanished off the Gantt — pass 2's
+  ids are now prefixed `O-` (`api._plan`). Regression test: `tests/test_two_pass_gantt.py`.
 
-This session did a deep root-cause analysis of "orders finishing past their delivery
-date" and made two changes. **All of it is local/uncommitted** (git status: modified
-`engine/rules/rule6_allocate.py`, `rule4_setup_time.py`, `tests/test_rule6.py`,
-`tests/test_parallel_split.py`, `tests/golden_trace.json`, `CLAUDE.md`, `RULES.md`;
-`Test5.xlsx` is gitignored). Decide with the user whether to commit + push (push =
-deploy). **The live site still runs the old code and has whatever Test4 data was last
-uploaded.**
+**2. Optimization levers + a deep root-cause analysis of late deliveries.** Three opt-in
+tick marks/settings shipped, plus a shift-wise download:
+- **Overlap 80%** (Settings, was 50) — the one clean free win: makespan 44→43 days AND
+  6 fewer late orders on Test5. Overlap is a *model of how the shop works* (pipelining),
+  not a quality dial — the live app always runs overlap mode.
+- **Expedite urgent orders** tick (`config.expedite_window_min`, default 0=off): Rule 6
+  least-slack tie-break within a window. Pulls the worst-stuck orders in (worst
+  48.6→38.7d) but can push one on-time order late — an A/B toggle, off by default.
+- **Balance operator workload** tick (`config.balance_operator_load`, default off):
+  schedule-neutral post-process — reassigns *who* runs each op to the least-loaded
+  qualified same-shift person. Peak operator 106%→97%, **makespan/lateness unchanged**.
+- **Download shift-wise schedule** button (Allocate tab): splits each multi-shift op
+  into per-shift segments with the real operator each shift (`build_shiftwise_timeline`).
+- **Findings (see the `expedite-window-and-ontime-findings` memory):** Test5 lateness is
+  a **runway** problem (from a Jul-11 start, ~29/57 orders are structurally impossible —
+  overdue or routing+OS too long), NOT a master-imbalance problem. Machines run ~40%;
+  the true throughput constraint is the **single-shift finishing/inspection crew** during
+  the end-drain, then VMC — NOT CNC (owner's father thought CNC; the data disagreed —
+  freeing CNC operators changed nothing). Sequencing/WIP/lot-streaming all proved they
+  can't beat the ~43-day floor (it's resource+precedence bound). Manual-per-piece×qty is
+  now a *small* lever (the setup-CNC/VMC-only fix already removed most inflation).
+
+### Previous (2026-07-11) — ✅ now SHIPPED (was uncommitted; committed + pushed this session)
+
+Deep root-cause analysis + two changes, both **now live**:
 
 1. **Setup time is now CNC/VMC-only** (`rule6_allocate._is_setup_machine`). The 90-min
    setup models CNC/VMC **programming** time, so manual/finishing steps (washing,
@@ -282,7 +315,7 @@ Test2→Test3 migration) is in the git history and the design specs.
 
 ```bash
 pip install -r requirements.txt
-python3 -m pytest -q                          # 232 tests
+python3 -m pytest -q                          # 267 tests (266 pass + 1 skipped Mongo)
 REGEN_GOLDEN=1 python3 -m pytest -k golden    # ONLY after an intentional logic change
 python3 -m uvicorn api.main:app --reload      # http://127.0.0.1:8000  (frontend at /)
 ```
@@ -374,7 +407,10 @@ self-advancing plan clock, latest-day-only capture list); operators as a real re
 preferred/alternative machine + **split only over 400**; **OS/off-machine milestones**;
 **Settings Plan-start-date**; DD-MM-YYYY dates; UI cleanup (4 tabs, no emojis, redesigned
 header). **Data:** now **`Test5.xlsx`** (same header-driven format; parallel manual
-stations + CNC/VMC +30% time). **Setup time is CNC/VMC-only** (2026-07-11, uncommitted).
+stations + CNC/VMC +30% time). **Setup time is CNC/VMC-only** (shipped). **Order
+commitment lanes + two-pass promise protection** (shipped/live). **Optimization toggles:**
+Overlap 80% default in Settings, **Expedite urgent orders** tick, **Balance operator
+workload** tick, **shift-wise schedule download** (all shipped/live).
 
 **Deferred (explicitly, per the user):**
 - **Manual step time model (per-piece vs per-batch)** — manual/finishing steps are
