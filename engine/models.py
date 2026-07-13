@@ -94,6 +94,11 @@ class Batch:
     # merged lines (Rule 1). None = run the full batch qty at every step. Internal
     # scheduling input consumed by Rule 6 — not serialized into the trace.
     process_qty: Optional[dict] = None
+    # Commitment lane carried from the merged SO-lines: "open" (default) |
+    # "committed" | "urgent". All lines in a batch share the same lane (Rule 1
+    # never merges across lanes).
+    commitment: str = "open"
+    promised_date: Optional[date] = None
 
     def as_row(self):
         return {

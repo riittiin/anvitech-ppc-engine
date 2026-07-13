@@ -1,19 +1,23 @@
 """Rule 1 — Consolidate sales orders.
 
-Group SO lines of the SAME item code whose delivery dates fall within a
-configurable window (default 10 days) into one production batch.
+Group SO lines of the SAME item code AND SAME commitment lane (open /
+committed / urgent, at the same promised date) whose delivery dates fall
+within a configurable window (default 10 days) into one production batch.
+Lines in different lanes are never merged, even if same item code — a
+committed/urgent promise must stay a distinct, separately trackable batch.
 
 Pure function: ``run(so_lines, config, notes, masters) -> list[Batch]``.
 
-Algorithm (per item code): sort that item's lines by delivery date, then walk
-them greedily — a line joins the current batch if its delivery date is within
-``window`` days of the batch's GOVERNING (earliest) date; otherwise it opens a
-new batch. The governing date is the earliest delivery in the batch (it drives
-priority in Rule 2).
+Algorithm (per item code + lane): sort that group's lines by delivery date,
+then walk them greedily — a line joins the current batch if its delivery date
+is within ``window`` days of the batch's GOVERNING (earliest) date; otherwise
+it opens a new batch. The governing date is the earliest delivery in the
+batch (it drives priority in Rule 2).
 """
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import date as _date
 
 from ..models import Batch, fmt_date
 
@@ -22,16 +26,19 @@ def run(so_lines, config=None, notes=None, masters=None, **kw):
     notes = notes if notes is not None else []
     window = config.consolidation_window_days if config else 10
 
+    # Group by (item code, commitment lane, promised date) — same item but a
+    # different lane (or promised date) must never be clubbed into one batch.
     by_item = defaultdict(list)
     for so in so_lines:
-        by_item[so.item_code].append(so)
+        by_item[(so.item_code, so.commitment, so.promised_date)].append(so)
 
     batches = []
     batch_counter = 0
-    for item_code in sorted(by_item.keys()):
+    for group_key in sorted(by_item.keys(), key=lambda k: (k[0], k[1], k[2] or _date.min)):
+        item_code, commitment, promised_date = group_key
         # Lines sorted by SO delivery date; the batch's SO delivery date is the
         # earliest one in the group (the binding customer commitment).
-        lines = sorted(by_item[item_code], key=lambda s: s.delivery_date)
+        lines = sorted(by_item[group_key], key=lambda s: s.delivery_date)
         current = None
         for line in lines:
             if current is None or (line.delivery_date - current["so_date"]).days > window:
@@ -45,6 +52,8 @@ def run(so_lines, config=None, notes=None, masters=None, **kw):
                     "qty": line.qty,
                     "so_refs": [line.so_no],
                     "lines": [line],
+                    "commitment": commitment,
+                    "promised_date": promised_date,
                 }
             else:
                 current["qty"] += line.qty
@@ -95,4 +104,6 @@ def _finalize(cur, idx) -> Batch:
         so_delivery_date=cur["so_date"],
         source_so_refs=list(cur["so_refs"]),
         process_qty=_merge_process_qty(cur["lines"]),
+        commitment=cur["commitment"],
+        promised_date=cur["promised_date"],
     )
