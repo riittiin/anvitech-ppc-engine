@@ -510,6 +510,16 @@ def _plan(config: Config):
         plan_open = PlanRun(so_lines=open_lines)
         trace_open = run_forward(plan_open, config, masters, reserved=reserved)
 
+        # Rule 1 numbers batches B001.. fresh per run_forward, so pass 1 and pass 2
+        # both produce the same ids. The Gantt keys on batch_id, so a collision would
+        # drop committed rows. Namespace the open pass's ids to keep them globally unique.
+        for e in plan_open.schedule:
+            e.batch_id = "O-" + e.batch_id
+        for lst in (plan_open.batches, plan_open.batches_sorted, plan_open.batches_prioritized):
+            for b in lst:
+                if not b.batch_id.startswith("O-"):
+                    b.batch_id = "O-" + b.batch_id
+
         # Merge for the downstream views (protected first).
         plan_run = PlanRun(so_lines=so_lines)
         plan_run.batches = plan_protected.batches + plan_open.batches
