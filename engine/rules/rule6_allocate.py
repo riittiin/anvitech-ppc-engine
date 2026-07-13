@@ -148,8 +148,28 @@ def _offmachine_lane(proc):
     return "OS / Outsourced" if "OS" in tokens else "Off-machine"
 
 
+def _push_clear(clk, start, qty, cyc, setup, res_lists):
+    """Return ``(start, end)`` pushed forward until the op runs continuously clear of
+    every reserved interval in ``res_lists`` (each a list of ``(s, e)`` tuples for the
+    machine and the operator). Non-preemptive: the whole ``[start, end]`` must clear each
+    block. ``end`` is always recomputed via the machine's working clock, so the op keeps
+    its full working-minute occupancy no matter how far it is pushed."""
+    end = clk.advance(start, cyc * qty + setup)
+    for _ in range(256):
+        conflict_end = None
+        for lst in res_lists:
+            for rs, re_ in lst:
+                if start < re_ and end > rs and (conflict_end is None or re_ > conflict_end):
+                    conflict_end = re_
+        if conflict_end is None:
+            return start, end
+        start = clk.advance(conflict_end, 0)          # first working minute after the block
+        end = clk.advance(start, cyc * qty + setup)
+    return start, end
+
+
 def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_for, config,
-                 operator_free=None, op_lookup=None):
+                 operator_free=None, op_lookup=None, reserved_intervals=None):
     """Decide how to run one operation. Returns ``(entries, blocked)`` where
     ``entries`` is a list of ``(machine, qty, start, end, operator)``:
 
@@ -172,6 +192,7 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
     listed = _resolve_candidates(proc, config)
     operator_free = operator_free if operator_free is not None else {}
     op_lookup = op_lookup or (lambda m, t: [])
+    reserved_intervals = reserved_intervals or {}
     reserved = set()        # operators tentatively taken by earlier (split-sibling) candidates
     cands = []  # (machine, clock, earliest_free, operator)
     for m in listed:
@@ -199,7 +220,12 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
         return clk.advance(f, cyc * q + setup)
 
     bm, bclk, bf, bop = cands[0]
-    single = [(bm, qty, bf, end_of(bclk, bf, qty), bop)]
+    if reserved_intervals:
+        bf, bend = _push_clear(bclk, bf, qty, cyc, setup,
+                               [reserved_intervals.get(bm, []), reserved_intervals.get(bop, [])])
+    else:
+        bend = end_of(bclk, bf, qty)
+    single = [(bm, qty, bf, bend, bop)]
     if (not getattr(config, "split_parallel", False) or len(cands) < 2
             or qty < getattr(config, "split_min_qty", 2) or cyc <= 0):
         return single, False
@@ -237,20 +263,30 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
             break
     if rem > 0:
         return single, False
-    entries = [(cands[i][0], shares[i], cands[i][2], end_of(cands[i][1], cands[i][2], shares[i]),
-                cands[i][3])
-               for i in range(len(cands)) if shares[i] > 0]
+    entries = []
+    for i in range(len(cands)):
+        if shares[i] <= 0:
+            continue
+        m_i, clk_i, st_i, op_i = cands[i][0], cands[i][1], cands[i][2], cands[i][3]
+        if reserved_intervals:
+            st_i, en_i = _push_clear(clk_i, st_i, shares[i], cyc, setup,
+                                     [reserved_intervals.get(m_i, []), reserved_intervals.get(op_i, [])])
+        else:
+            en_i = end_of(clk_i, st_i, shares[i])
+        entries.append((m_i, shares[i], st_i, en_i, op_i))
     # Split only if it genuinely beats one machine and uses 2+ machines.
     if len(entries) < 2 or max(e[3] for e in entries) >= single_end:
         return single, False
     return entries, False
 
 
-def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, **kw):
+def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
+        reserved=None, **kw):
     # Imported lazily to avoid a circular import (pipeline imports this module).
     from ..pipeline import RuleError
 
     notes = notes if notes is not None else []
+    reserved = reserved or {}
     if masters is None:
         raise RuleError("rule6", "-", "masters are required to allocate")
 
@@ -477,7 +513,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None, *
 
         entries, _blk = _allocate_op(proc, proc_qty, cyc, setup, s["ready"],
                                      machine_free, plan_start, clock_for, config,
-                                     operator_free, op_lookup)
+                                     operator_free, op_lookup, reserved)
         # Pace by the predecessor: a step may START early (overlap) but cannot FINISH
         # before every earlier process of this batch has delivered the last piece — a fast
         # step is *starved* by a slow one. Hold its completion to the latest prior end
