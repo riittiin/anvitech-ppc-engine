@@ -18,7 +18,7 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0, 512 MB).
 - **Repo:** GitHub `riittiin/anvitech-ppc-engine` (private). Push to `main` →
   Render auto-redeploys (no separate deploy step).
-- **267 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
+- **298 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
   Python engine. Python 3 (run as `python3` locally — there is no `python` alias).
 - **Login is a two-role app-owned session** (admin / user) — see "Login & roles".
 - The engine has **8 business rules** (1–8). (Rule 8 = the Plan over the order book —
@@ -30,13 +30,23 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Data file is now `Test5.xlsx`** (supersedes `Test4.xlsx` → `Test3.xlsx`) —
   gitignored real data. Test5 adds parallel manual stations (`MW1/MW2/MW3`, `MD1/MD2`,
   `MPK1/MPK2/MPK3`) and a **+30% cycle/total time on every CNC/VMC step**.
-- **Most recent work (2026-07-13 — ✅ SHIPPED & LIVE):** the flagship **order
-  commitment & promise protection** feature (three lanes Open/Committed/Urgent +
-  **two-pass planning** so new orders can't push already-promised dates), plus this
-  session's optimization levers — **Overlap 80%**, **Expedite** tick, **Balance operator
-  workload** tick, a **shift-wise schedule download**, and the earlier **setup-is-CNC/VMC-only**
-  fix. Defaults keep every plan byte-identical (golden unchanged). See "Latest session
-  (2026-07-13)" below and the `committed-orders-design` + `expedite-window-and-ontime-findings`
+- **Most recent work (2026-07-13, second session — ✅ SHIPPED & LIVE):** the
+  **Optimize plan** feature (`engine/optimizer.py` + `/optimize` endpoints + admin
+  Optimize button): a deterministic sequence search that tries many batch orders
+  through the unchanged Rule 6 and keeps the best plan — on the real Test5 book a
+  90-second Quick run cut the plan **42.5 → 39.75 days** and total late-days
+  **1,026 → 792**; Apply persists a rank per (SO#, item) that every Plan replays
+  (open pass only — promises untouched; unranked new orders keep their Rule-3 slot).
+  Plus an **Analytics fix**: operator hours now billed **per shift** (a multi-shift op
+  no longer billed to one person — 120% utilization impossible; real bottleneck =
+  second-shift Saif/Mahesh ~88%). See "Latest session" below, the
+  `sequence-optimizer-findings` memory, and the 2026-07-13 optimize-plan spec.
+  Earlier the same day: **order commitment & promise protection** (three lanes
+  Open/Committed/Urgent + **two-pass planning** so new orders can't push
+  already-promised dates), plus optimization levers — **Overlap 80%**, **Expedite**
+  tick, **Balance operator workload** tick, a **shift-wise schedule download**, and
+  the **setup-is-CNC/VMC-only** fix. Defaults keep every plan byte-identical (golden
+  unchanged). See the `committed-orders-design` + `expedite-window-and-ontime-findings`
   memories. Earlier shipped work (on `main`): composite (SO#, item) key + two-step capture
   picker, a MongoDB upload fix, OS/outsourcing milestones on the Gantt, a Plan-start-date
   setting, an Expected-completion column, a quantity-only feedback loop, UI cleanup, the
@@ -171,7 +181,39 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
-### Latest session (2026-07-13) — ✅ ALL SHIPPED to `main` and LIVE
+### Latest session (2026-07-13, second session) — ✅ SHIPPED to `main` and LIVE
+
+Owner's goals, verbatim: shrink SO-delivery-vs-expected gaps and the ~43-day makespan,
+**software only**. Deep measurement on Test5 found the binding constraint is the
+**greedy single-pass scheduler**, not capacity (VMC2, the busiest machine, holds only
+~34 calendar days of work; 723 order-days of queueing, 74% waiting for CNC/VMC; config
+levers don't stack; full machine-pool flexibility made lateness WORSE). One plan
+evaluates in <1 s → search instead of trusting one pass. Details + all measured
+negatives: the `sequence-optimizer-findings` memory.
+
+**1. Optimize plan (sequence search) — the feature.** Admin **Optimize** button next to
+Plan: Quick (150 plans tried) / Deep (1,000), live progress, before/after table,
+**Apply/Discard**. `engine/optimizer.py` (pure, deterministic: eval-count budget +
+fixed seed; seeds rule3/SPT/ATC/shuffles; insertion/swap/block hill-climb + kicks;
+score = late-days + 10×makespan). Apply persists a rank per (SO#, item)
+(`anvitech:plan_priority`); `run_forward(priority_rank=)` replays it — ranked batches
+reorder among their own slots, **unranked new orders keep their Rule-3 slot**, and with
+committed/urgent present only the **open pass** is searched (promises can never move).
+Banner "Optimized plan active" + "N orders added since — re-optimize" + admin Remove.
+**Measured on the real book via the running app:** 42.5 d / 53 late / 1,026 late-days →
+**39.75 d / 47 late / 792 late-days** in 90 s locally (Render free tier ≈ 3–6 min for
+Quick); replayed plan recounts to exactly the reported metrics. No optimization applied
+→ byte-identical plans (golden untouched). Spec:
+`docs/superpowers/specs/2026-07-13-optimize-plan-sequence-search-design.md`.
+
+**2. Analytics operator hours are now billed per shift** (`engine/analytics.py` via
+`build_shiftwise_timeline`). A multi-day op on a two-shift machine was billing ALL its
+hours to the single named (day) operator — Rupesh Pawar showed an impossible **120%**.
+Now each shift's hours go to the person actually manning it: Rupesh 120→79%, the real
+near-bottleneck is the **second shift (Saif/Mahesh ~88%)**, and **no operator or
+machine can exceed 100%** (owner-requested guarantee, regression-tested).
+
+### Earlier session (2026-07-13) — ✅ ALL SHIPPED to `main` and LIVE
 
 Two big things shipped this session, both **live** on https://anvitech-ppc.onrender.com.
 **267 tests pass; golden trace byte-identical without regen** (every new lever/feature
