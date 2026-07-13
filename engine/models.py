@@ -54,6 +54,9 @@ class SOLine:
     # ordered − already done at that step. None = no progress (run the full qty at
     # every step, today's behaviour). Internal scheduling input — not serialized.
     process_qty: Optional[dict] = None
+    # Commitment lane carried into planning: "open" (default) | "committed" | "urgent".
+    commitment: str = "open"
+    promised_date: Optional[date] = None
 
     @property
     def key(self):
@@ -409,6 +412,9 @@ class Order:
     delivery_date: date
     completed: bool = False
     first_seen: str = ""
+    commitment: str = "open"            # "open" | "committed" | "urgent"
+    promised_date: Optional[date] = None  # locked promise (None while open)
+    committed_at: Optional[str] = None    # ISO datetime string, snapshot time
 
     @property
     def key(self):
@@ -424,6 +430,9 @@ class Order:
             "delivery_date": self.delivery_date.isoformat(),
             "completed": self.completed,
             "first_seen": self.first_seen,
+            "commitment": self.commitment,
+            "promised_date": self.promised_date.isoformat() if self.promised_date else None,
+            "committed_at": self.committed_at,
         }
 
     @classmethod
@@ -436,6 +445,10 @@ class Order:
             delivery_date=date.fromisoformat(d["delivery_date"]),
             completed=d.get("completed", False),
             first_seen=d.get("first_seen", ""),
+            commitment=d.get("commitment", "open"),
+            promised_date=(date.fromisoformat(d["promised_date"])
+                           if d.get("promised_date") else None),
+            committed_at=d.get("committed_at"),
         )
 
 
