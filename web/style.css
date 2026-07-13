@@ -239,6 +239,20 @@ tbody tr:nth-child(even) { background: rgba(255,255,255,0.02); }
 .complete-check { display: block; margin: 16px 0; font-size: 13px; color: var(--text); }
 .complete-check input { margin-right: 6px; vertical-align: middle; }
 
+/* ---- Order commitment lanes (Task 9) ---- */
+.lane-badge {
+  display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 11px;
+  font-weight: 600; white-space: nowrap; text-transform: capitalize;
+}
+.lane-open { background: rgba(140,145,156,0.18); color: var(--muted); }
+.lane-committed { background: rgba(79,156,249,0.18); color: var(--accent); }
+.lane-urgent { background: rgba(248,81,73,0.18); color: var(--bad); }
+
+td.slip { color: var(--bad); background: rgba(248,81,73,0.10); font-weight: 600; }
+
+.warn-list { margin: 8px 0; padding-left: 20px; font-size: 13px; }
+.warn-list li { margin: 4px 0; }
+
 .ord-toolbar { margin: 0 0 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 button.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
 button.danger:hover { opacity: 0.9; }

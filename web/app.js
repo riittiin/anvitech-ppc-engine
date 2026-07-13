@@ -22,6 +22,7 @@ const VISIBLE_TABS = ["rule6", "rule7"];
 let currentTrace = null;
 let currentGantt = null;
 let currentOrders = null;     // {columns, rows} from /run or /orders
+let currentExpected = null;   // {"SO\x1fITEM": "YYYY-MM-DD"} from /run's expected_end (Task 9)
 let ITEMS = null;
 let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour detail)
 let activeTab = "orders";
@@ -122,6 +123,7 @@ async function runPlan(persist = false) {
     currentTrace = data.trace;
     currentGantt = data.gantt || null;
     currentOrders = data.orders || null;
+    currentExpected = data.expected_end || null;
     if (currentRole === "admin" && data.config) applyConfig(data.config);
     renderReport(data.report);
     renderTabs();
@@ -306,26 +308,48 @@ async function renderOrders() {
       : '<p class="placeholder">No orders yet.</p>';
     root.innerHTML = html; return;
   }
-  // Delete controls are admin-only (server enforces this too).
+  // Delete + commitment controls are admin-only (server enforces this too).
   if (isAdmin) {
     html += '<div class="ord-toolbar">'
+      + '<button id="ord-commit-sel">Commit selected</button> '
+      + '<button id="ord-urgent-sel">Mark Urgent</button> '
+      + '<button id="ord-uncommit-sel">Uncommit selected</button> '
       + '<button id="ord-del-sel">Delete selected</button> '
       + '<button id="ord-del-all" class="danger">Delete ALL data</button>'
       + '<span class="muted"> · deletes permanently from the database (and their actuals)</span></div>';
   }
   html += orderTableHtml(currentOrders, isAdmin);
-  html += '<p class="g-note">Pending = not started · Running = production logged · Complete = marked complete on a Rule 7 entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty.</p>';
+  html += '<p class="g-note">Pending = not started · Running = production logged · Complete = marked complete on a Rule 7 entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty. '
+    + 'Lane: <strong>open</strong> = normal planning · <strong>committed</strong> = promised date locked in · <strong>urgent</strong> = jumps the queue (may push other promises).</p>';
   root.innerHTML = html;
-  if (isAdmin) wireOrdersDelete();
+  if (isAdmin) { wireOrdersDelete(); wireOrdersCommit(); }
+}
+
+// "DD-MM-YYYY" -> Date, or null if unparseable (used to compare Promised vs
+// Current expected for the slip highlight).
+function ddmmyyyyToDate(s) {
+  const p = String(s || "").split("-");
+  if (p.length !== 3) return null;
+  const d = new Date(+p[2], +p[1] - 1, +p[0]);
+  return isNaN(d.getTime()) ? null : d;
+}
+// ISO "YYYY-MM-DD" -> Date, or null.
+function isoToDate(s) {
+  if (!s) return null;
+  const d = new Date(String(s) + "T00:00:00");
+  return isNaN(d.getTime()) ? null : d;
 }
 
 function orderTableHtml(table, showSelect) {
   const sIdx = table.columns.indexOf("Status");
   const soIdx = table.columns.indexOf("SO No");
   const itemIdx = table.columns.indexOf("Item Code");
+  const laneIdx = table.columns.indexOf("Lane");
+  const promIdx = table.columns.indexOf("Promised");
   let h = '<div class="table-wrap"><table><thead><tr>';
   if (showSelect) h += '<th><input type="checkbox" id="ord-all-check" title="select all"></th>';
   table.columns.forEach((c) => (h += `<th>${escapeHtml(c)}</th>`));
+  h += '<th>Current expected</th>';
   h += "</tr></thead><tbody>";
   table.rows.forEach((row) => {
     const so = soIdx >= 0 ? String(row[soIdx]) : "";
@@ -336,8 +360,19 @@ function orderTableHtml(table, showSelect) {
     row.forEach((cell, i) => {
       const v = cell === null || cell === undefined ? "" : String(cell);
       if (i === sIdx) h += `<td><span class="status-pill status-${v.toLowerCase()}">${escapeHtml(v)}</span></td>`;
+      else if (i === laneIdx) h += `<td><span class="lane-badge lane-${v.toLowerCase()}">${escapeHtml(v)}</span></td>`;
       else h += `<td>${escapeHtml(v)}</td>`;
     });
+    // Current expected: look up the plan's expected completion for this (SO, item);
+    // only populated after a Plan run (currentExpected comes from /run, not /orders).
+    const key = so + "\x1f" + item;
+    const expIso = currentExpected ? currentExpected[key] : null;
+    const expDisp = expIso ? isoToDdmmyyyy(expIso) : "";
+    const promised = promIdx >= 0 ? String(row[promIdx] || "") : "";
+    const promD = promised ? ddmmyyyyToDate(promised) : null;
+    const expD = expIso ? isoToDate(expIso) : null;
+    const slip = promD && expD && expD > promD;
+    h += `<td class="${slip ? "slip" : ""}">${escapeHtml(expDisp)}</td>`;
     h += "</tr>";
   });
   return h + "</tbody></table></div>";
@@ -420,6 +455,102 @@ function wireOrdersDelete() {
     if (!okd) { setStatus("Delete cancelled."); return; }
     setStatus("All orders deleted.");
     currentOrders = null; await runPlan();
+  };
+}
+
+// Selected (SO, item) pairs from the order-book checkboxes.
+function selectedOrderPairs() {
+  return [...document.querySelectorAll(".ordsel:checked")].map((c) => [c.dataset.so, c.dataset.item]);
+}
+
+// A non-destructive confirmation modal — mirrors deleteWithPassword's overlay/modal
+// pattern but with no password field. Lists each promise that would be pushed by
+// marking an order urgent. Resolves true on Proceed, false on Cancel/Escape/click-out.
+function confirmUrgentWarning(list) {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    const items = list.map((p) =>
+      `<li>${escapeHtml(p.so)} (${escapeHtml(p.item)}): ${escapeHtml(isoToDdmmyyyy(p.promised))} → `
+      + `${escapeHtml(isoToDdmmyyyy(p.new))} <span class="muted">(past its promise)</span></li>`).join("");
+    ov.innerHTML = `
+      <div class="modal">
+        <h3>⚠ This will push committed promises</h3>
+        <p>Marking this order urgent pushes the following already-promised order(s) later:</p>
+        <ul class="warn-list">${items}</ul>
+        <p class="muted">Proceed anyway, or cancel and keep the current plan.</p>
+        <div class="modal-actions">
+          <button id="warn-cancel">Cancel</button>
+          <button id="warn-ok" class="danger">Proceed</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    const done = (v) => { ov.remove(); resolve(v); };
+    ov.querySelector("#warn-cancel").onclick = () => done(false);
+    ov.querySelector("#warn-ok").onclick = () => done(true);
+    document.addEventListener("keydown", function esc(e) {
+      if (e.key === "Escape") { document.removeEventListener("keydown", esc); done(false); }
+    });
+    ov.addEventListener("click", (e) => { if (e.target === ov) done(false); });
+  });
+}
+
+// Wire the Commit / Mark Urgent / Uncommit toolbar buttons (admin only).
+function wireOrdersCommit() {
+  const commitBtn = $("ord-commit-sel");
+  if (commitBtn) commitBtn.onclick = async () => {
+    const sel = selectedOrderPairs();
+    if (!sel.length) { setStatus("Select orders to commit."); return; }
+    try {
+      const res = await fetch("/orders/commit", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orders: sel }),
+      });
+      if (!res.ok) { setStatus("Commit failed: " + (await res.text())); return; }
+      setStatus(`Committed ${sel.length} order(s).`);
+      currentOrders = null; await runPlan();
+    } catch (e) { setStatus("Commit error: " + e.message); }
+  };
+
+  const uncommitBtn = $("ord-uncommit-sel");
+  if (uncommitBtn) uncommitBtn.onclick = async () => {
+    const sel = selectedOrderPairs();
+    if (!sel.length) { setStatus("Select orders to uncommit."); return; }
+    try {
+      const res = await fetch("/orders/uncommit", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ orders: sel }),
+      });
+      if (!res.ok) { setStatus("Uncommit failed: " + (await res.text())); return; }
+      setStatus(`Uncommitted ${sel.length} order(s).`);
+      currentOrders = null; await runPlan();
+    } catch (e) { setStatus("Uncommit error: " + e.message); }
+  };
+
+  const urgentBtn = $("ord-urgent-sel");
+  if (urgentBtn) urgentBtn.onclick = async () => {
+    const sel = selectedOrderPairs();
+    if (sel.length !== 1) { setStatus("Select exactly one order to mark urgent."); return; }
+    const [so, item] = sel[0];
+    try {
+      let res = await fetch("/orders/urgent", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ so, item, confirm: false }),
+      });
+      if (!res.ok) { setStatus("Mark urgent failed: " + (await res.text())); return; }
+      let d = await res.json();
+      if (d.warning && d.warning.length) {
+        const proceed = await confirmUrgentWarning(d.warning);
+        if (!proceed) { setStatus("Urgent cancelled."); return; }
+        res = await fetch("/orders/urgent", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ so, item, confirm: true }),
+        });
+        if (!res.ok) { setStatus("Mark urgent failed: " + (await res.text())); return; }
+      }
+      setStatus(`Marked ${so} (${item}) urgent.`);
+      currentOrders = null; await runPlan();
+    } catch (e) { setStatus("Mark urgent error: " + e.message); }
   };
 }
 
