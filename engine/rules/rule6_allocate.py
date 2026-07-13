@@ -296,10 +296,20 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     clock_for, cov_report = _clock_factory(masters, config)
     # Operators as one-at-a-time resources: op_lookup(m, t) = qualified operators for
     # machine m at time t (empty when logic off → no operator constraint, no label).
+    # qualified_operators only actually depends on the machine and WHICH SHIFT t is in
+    # (first/second) — two possibilities — so memoize on (machine, shift). This turns a
+    # per-op scan over every operator (millions of calls in an optimizer run) into ~52
+    # distinct computations; results are read-only downstream, so sharing is safe.
     if getattr(config, "apply_operator_logic", False):
-        from ..operator_coverage import qualified_operators
+        from ..operator_coverage import qualified_operators, _shift_of
+        _qual_memo: dict = {}
         def op_lookup(m, t):
-            return qualified_operators(m, t, masters, config)
+            key = (m, _shift_of(t, config))
+            names = _qual_memo.get(key)
+            if names is None:
+                names = qualified_operators(m, t, masters, config)
+                _qual_memo[key] = names
+            return names
     else:
         def op_lookup(m, t):
             return []

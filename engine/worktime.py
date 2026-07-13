@@ -52,6 +52,15 @@ class WorkClock:
         else:
             intervals = list(intervals_or_config or [])
         self.intervals = _normalize(intervals)
+        # Per-day window cache: a given calendar day's working windows never change,
+        # but scheduling asks for them millions of times. Memoizing the datetime
+        # construction here is the single biggest scheduler speedup (results identical).
+        self._day_cache: dict = {}
+        # Only a window that runs past midnight (end > 24:00, e.g. the 08:00→05:00
+        # two-shift) can make a PREVIOUS day's window end after "today's" cursor. When
+        # no interval crosses midnight (single-shift/manual 09:00–18:00), _next_window
+        # can start scanning at the cursor's own day and skip the wasted look-back.
+        self._crosses_midnight = any(e > 24 * 60 for _s, e in self.intervals)
 
     @classmethod
     def from_config(cls, calendar, config):
@@ -59,19 +68,28 @@ class WorkClock:
         return cls(calendar, config)
 
     def _windows_for_day(self, d):
-        """All working windows opened on day ``d`` as (start, end) datetimes."""
+        """All working windows opened on day ``d`` as (start, end) datetimes.
+        Memoized per day (an immutable tuple, shared read-only by callers)."""
+        cached = self._day_cache.get(d)
+        if cached is not None:
+            return cached
         if not self.cal.is_working_day(d):
-            return []
+            self._day_cache[d] = ()
+            return ()
         base = datetime(d.year, d.month, d.day)
-        return [(base + timedelta(minutes=s), base + timedelta(minutes=e))
-                for s, e in self.intervals]
+        wins = tuple((base + timedelta(minutes=s), base + timedelta(minutes=e))
+                     for s, e in self.intervals)
+        self._day_cache[d] = wins
+        return wins
 
     def _next_window(self, cursor):
         """First working window (chronologically) whose end is strictly after
         ``cursor``. Starts one day back to catch a window that crosses midnight."""
         if not self.intervals:
             raise NoWorkingWindow("clock has no working intervals")
-        d = (cursor - timedelta(days=1)).date()
+        # Look one day back only when a window can cross midnight; otherwise the
+        # previous day's windows always end by this cursor and are pure waste to scan.
+        d = (cursor - timedelta(days=1)).date() if self._crosses_midnight else cursor.date()
         for _ in range(800):  # generous cap; guards against an all-off calendar
             for ws, we in self._windows_for_day(d):  # sorted by start
                 if we > cursor:

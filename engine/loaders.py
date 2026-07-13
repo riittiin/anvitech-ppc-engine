@@ -19,6 +19,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import date, datetime
+from functools import lru_cache
 
 import openpyxl
 
@@ -40,16 +41,25 @@ ROUTING_FIRST_PROCESS_COL = 12  # 0-based col of "Process 1"
 # --------------------------------------------------------------------------- #
 # Normalization helpers
 # --------------------------------------------------------------------------- #
+@lru_cache(maxsize=None)
+def _normalize_resource_id_cached(raw: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", raw.upper())
+
+
 def normalize_resource_id(raw) -> str:
     """Canonical machine/resource id: uppercase, alnum only.
 
     Collapses the master's spaced labels ('CNC 4', 'VMC 1') and the routing's
     compact labels ('CNC4', 'VMC1') onto the same key, so they match without a
     hand-maintained alias table.
+
+    Memoized: this is a pure string→string function called millions of times per
+    optimizer run over a tiny set of distinct machine labels, so the regex runs
+    once per distinct input, not once per call. Correctness is unchanged.
     """
     if raw is None:
         return ""
-    return re.sub(r"[^A-Z0-9]", "", str(raw).upper())
+    return _normalize_resource_id_cached(raw if isinstance(raw, str) else str(raw))
 
 
 def normalize_process_name(raw) -> str:
@@ -61,20 +71,30 @@ def normalize_process_name(raw) -> str:
     return " ".join(str(raw or "").split()).upper()
 
 
+@lru_cache(maxsize=None)
+def _parse_resource_candidates_cached(raw: str) -> tuple:
+    out = []
+    for token in re.split(r"[/&,]| or ", raw):
+        cid = normalize_resource_id(token)
+        if cid and cid not in out:
+            out.append(cid)
+    return tuple(out)
+
+
 def parse_resource_candidates(raw) -> list:
     """Canonical machine ids a routing cell allows, in order (first = preferred).
 
     A "Suggested M/c" cell may list ALTERNATIVES separated by '/', ',', '&' or ' or '
     (e.g. 'CNC3/CNC6' = run on either CNC3 or CNC6). Returns an ordered, deduped list
-    of normalized ids; empty/None -> []. The same split is used for operators."""
+    of normalized ids; empty/None -> []. The same split is used for operators.
+
+    Memoized on the (fixed) cell text, so the split/normalize runs once per distinct
+    routing cell instead of millions of times across an optimizer run. Returns a
+    fresh list each call (callers may treat it as owned), built cheaply from the
+    cached tuple — the regex work is what's saved."""
     if raw is None:
         return []
-    out = []
-    for token in re.split(r"[/&,]| or ", str(raw)):
-        cid = normalize_resource_id(token)
-        if cid and cid not in out:
-            out.append(cid)
-    return out
+    return list(_parse_resource_candidates_cached(raw if isinstance(raw, str) else str(raw)))
 
 
 def parse_date(value):
