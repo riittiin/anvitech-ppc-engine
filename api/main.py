@@ -506,11 +506,15 @@ def _plan(config: Config):
         plan_run.schedule = plan_protected.schedule + plan_open.schedule
 
         # Merge the per-rule trace tables so each tab shows the full plan (rows concatenated).
-        for rk in ("rule1", "rule2", "rule3", "rule6"):
+        # rule1/2/3 have fixed keys → safe to concat rows. rule6's Operator column is
+        # conditional, so rebuild its table from the merged schedule (union-of-keys columns).
+        for rk in ("rule1", "rule2", "rule3"):
             base = trace.get(rk, {}).get("output")
             add = trace_open.get(rk, {}).get("output")
             if base and add and "rows" in base and "rows" in add:
                 base["rows"] = base["rows"] + add["rows"]
+        if "rule6" in trace and trace["rule6"].get("output") is not None:
+            trace["rule6"]["output"] = to_table([e.as_row() for e in plan_run.schedule])
 
     _augment_helpers(trace, plan_run, config, masters, actuals=actuals)
 
