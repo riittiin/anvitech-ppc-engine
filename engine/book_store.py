@@ -22,6 +22,7 @@ ACTUALS_KEY = "anvitech:actuals"           # list of Actual json
 MASTERS_KEY = "anvitech:masters"           # kv: base64 of the latest workbook
 PLAN_CONFIG_KEY = "anvitech:plan_config"   # kv: json of the admin's saved Config
 PLAN_PRIORITY_KEY = "anvitech:plan_priority"  # kv: json {ranks, meta} of the applied Optimize run
+PROMISE_RECOVERY_KEY = "anvitech:promise_recovery"  # kv: json {ranks, meta} of the auto committed re-sequence
 
 _SEP = "\x1f"   # ASCII unit separator — never appears in an SO# or item code
 
@@ -210,3 +211,31 @@ def load_plan_priority():
 
 def clear_plan_priority() -> None:
     get_store().delete_key(PLAN_PRIORITY_KEY)
+
+
+# --- promise recovery (auto committed re-sequencing after a disruption) --- #
+def save_promise_recovery(ranks: dict, meta: dict) -> None:
+    """Persist the auto-recovered committed order: ``ranks`` maps "<so>\x1f<item>" ->
+    1-based rank for the committed set; ``meta`` records saved_at, the committed keys it
+    covers (`covered_keys`, so the plan can detect when the committed set/promises change
+    and re-trigger), and the slip before/after for the informational note."""
+    get_store().kv_set(PROMISE_RECOVERY_KEY, json.dumps({"ranks": ranks, "meta": meta}))
+
+
+def load_promise_recovery():
+    """The applied promise-recovery as {"ranks": {...}, "meta": {...}}, or None. A
+    corrupt/empty value is treated as absent (committed orders fall back to date-order)."""
+    raw = get_store().kv_get(PROMISE_RECOVERY_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("ranks"), dict) or not data["ranks"]:
+        return None
+    return data
+
+
+def clear_promise_recovery() -> None:
+    get_store().delete_key(PROMISE_RECOVERY_KEY)
