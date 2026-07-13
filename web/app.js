@@ -485,12 +485,11 @@ function confirmUrgentWarning(list) {
         </div>
       </div>`;
     document.body.appendChild(ov);
-    const done = (v) => { ov.remove(); resolve(v); };
+    const escHandler = (e) => { if (e.key === "Escape") done(false); };
+    const done = (v) => { document.removeEventListener("keydown", escHandler); ov.remove(); resolve(v); };
     ov.querySelector("#warn-cancel").onclick = () => done(false);
     ov.querySelector("#warn-ok").onclick = () => done(true);
-    document.addEventListener("keydown", function esc(e) {
-      if (e.key === "Escape") { document.removeEventListener("keydown", esc); done(false); }
-    });
+    document.addEventListener("keydown", escHandler);
     ov.addEventListener("click", (e) => { if (e.target === ov) done(false); });
   });
 }
