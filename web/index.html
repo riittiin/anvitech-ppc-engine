@@ -41,7 +41,9 @@
       <strong>Optimize plan</strong> — tries many different job sequences on the current
       order book and keeps the best plan found (smaller delivery gaps first, fewer total
       days second). Same machines, same people — only the order in which jobs claim the
-      machines changes. Committed / urgent orders are never moved.
+      machines changes. Committed / urgent orders are never moved. Optimizing finds the
+      best job order globally, so it <strong>supersedes the “Expedite” tick</strong> (which
+      only nudges order locally) — an applied optimized plan runs with Expedite set aside.
     </div>
     <div class="optimize-controls">
       <label class="cfg-check"><input type="radio" name="opt-budget" value="quick" checked />

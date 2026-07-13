@@ -504,6 +504,14 @@ def _plan(config: Config):
     prio = book_store.load_plan_priority()
     ranks = prio["ranks"] if prio else None
 
+    # The optimized ranks ARE the prioritization. The Expedite window dynamically
+    # re-sorts ops by slack at schedule time, which would OVERRIDE the ranks and cancel
+    # the whole optimization out (the sequence stops mattering). So the ranked orders
+    # are planned in the pure non-delay model (expedite off) — the optimizer found the
+    # best order globally, which supersedes expedite's local tie-break. No ranks ->
+    # config unchanged (expedite behaves exactly as the Settings tick sets it).
+    ranked_config = replace(config, expedite_window_min=0) if ranks else config
+
     # The feedback loop is quantity-only: recorded times (downtime, actual setup) are
     # stored for the record and never affect the schedule.
     protected, open_lines = orderbook.split_committed_open(so_lines)
@@ -511,7 +519,7 @@ def _plan(config: Config):
         # Today's single pass — unchanged. Keeps the golden trace byte-identical
         # for an all-open book (no committed/urgent orders).
         plan_run = PlanRun(so_lines=so_lines)
-        trace = run_forward(plan_run, config, masters, priority_rank=ranks)
+        trace = run_forward(plan_run, ranked_config, masters, priority_rank=ranks)
     else:
         # Two-pass: committed/urgent orders are planned first, as if open orders
         # don't exist; open orders then backfill the gaps left by that pass —
@@ -521,7 +529,7 @@ def _plan(config: Config):
         reserved = _reservations_from_schedule(plan_protected.schedule)
 
         plan_open = PlanRun(so_lines=open_lines)
-        trace_open = run_forward(plan_open, config, masters, reserved=reserved,
+        trace_open = run_forward(plan_open, ranked_config, masters, reserved=reserved,
                                  priority_rank=ranks)
 
         # Rule 1 numbers batches B001.. fresh per run_forward, so pass 1 and pass 2
@@ -758,6 +766,15 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
             run_forward(plan_protected, config, masters)
             reserved = _reservations_from_schedule(plan_protected.schedule)
 
+        # The batch sequence only has leverage when Expedite is off: the expedite
+        # window dynamically re-sorts ops by slack and flattens every sequence into the
+        # same plan, so a search WITH expedite on finds "no improvement" for every book.
+        # Search in the pure non-delay model; the found ranks replace expedite (and the
+        # applied plan runs expedite-off too — see _plan). The baseline shown to the
+        # admin is still their REAL current plan (their config as set), so the
+        # before/after is honest.
+        search_config = replace(config, expedite_window_min=0)
+
         _OPTIMIZE.update(state="running", label=label, budget_evals=budget_evals,
                          evals=0, baseline=None, best=None, error=None, result=None,
                          elapsed_s=0.0, started_mono=time.monotonic(), cancel=False)
@@ -768,18 +785,26 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
                 _OPTIMIZE["evals"] = evals
                 _OPTIMIZE["best"] = best
 
-            res = optimizer.optimize(target, config, masters, reserved=reserved,
+            # Honest baseline = the admin's CURRENT plan for these orders, under their
+            # real config (expedite as set) — what they have if they DON'T optimize.
+            base_run = PlanRun(so_lines=list(target))
+            run_forward(base_run, config, masters, reserved=reserved)
+            real_baseline = optimizer.plan_metrics(base_run.schedule, target,
+                                                   config.plan_start_date)
+
+            res = optimizer.optimize(target, search_config, masters, reserved=reserved,
                                      budget_evals=budget_evals, seed=_OPT_SEED,
                                      on_progress=on_progress,
                                      should_cancel=lambda: _OPTIMIZE.get("cancel"))
+            improved = optimizer.score(res.best) < optimizer.score(real_baseline)
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE.update(
-                    state="done", evals=res.evals, baseline=res.baseline, best=res.best,
+                    state="done", evals=res.evals, baseline=real_baseline, best=res.best,
                     cancel=False,
                     elapsed_s=round(time.monotonic() - _OPTIMIZE["started_mono"], 1),
-                    result={"ranks": res.ranks, "improved": res.improved,
+                    result={"ranks": res.ranks, "improved": improved,
                             "cancelled": res.cancelled,
-                            "baseline": res.baseline, "best": res.best,
+                            "baseline": real_baseline, "best": res.best,
                             "budget": label, "seed": _OPT_SEED})
         except Exception as e:  # noqa: BLE001 — a failed search must report, not hang
             with _OPTIMIZE_LOCK:

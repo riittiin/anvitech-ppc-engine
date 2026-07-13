@@ -181,6 +181,21 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
+### Optimize ↔ Expedite bug (2026-07-13) — ✅ FIXED (committed to `main`; push when asked)
+
+**The owner ran Deep on the live site (Expedite tick ON) and got "No improvement found"
+— 43.54 d / 1015 late-days unchanged.** Root cause: `expedite_window_min > 0` makes Rule 6
+dynamically re-sort ops by slack at schedule time, which **overrides the batch sequence the
+optimizer controls** — so every sequence flattens to the same plan (no lever) and an applied
+optimization is neutralised the same way. This is why my laptop tests (expedite OFF) showed
+big gains but the owner's live plan (expedite ON) didn't move. **Fix:** the optimizer searches
+with expedite forced off (`search_config`) and reports the honest baseline = the admin's real
+current plan; `_plan` runs ranked orders with expedite forced off (`ranked_config`) so the
+ranks take effect. No ranks → config unchanged (golden untouched). Verified on real Test5 +
+the exact live config: 978 → 713 late-days, applied plan 713 (was stuck at 978). Regression:
+`tests/test_optimize_expedite_interaction.py`. **Lesson: always reproduce with the owner's
+actual saved config, not a clean laptop config.**
+
 ### Optimize follow-ups (2026-07-13, same second session) — ✅ SHIPPED to `main` and LIVE
 
 After the owner ran Deep on the live free-tier server, three issues surfaced and were
