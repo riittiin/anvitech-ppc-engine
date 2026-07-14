@@ -116,6 +116,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   Non-blocking and fail-localized; the run does not stop. (Unlike a missing machine,
   a missing routing can't be made provisional — you can't invent a recipe.) In the
   the current Test5/sample data there are 0 such cases; this is a future safety net.
+  **The banner is book-scoped** (`api.main._report_for_book`): NO_ROUTING rows are
+  derived from the *current order book* vs the current masters — never from the stored
+  workbook's own SO sheet, which can list orders that were never merged or were later
+  deleted (live 2026-07-15 bug: 5 ghost "orders without routing" while all real orders
+  planned fine).
 - **Time-unit inconsistency:** cycle/total times are in minutes in the Process
   Master but appear as tiny decimals in `Planning status monitoring`. Normalize
   to one unit in the loader and log coercions.
@@ -167,7 +172,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   "Expedite urgent orders"); 0 is byte-identical to the legacy non-delay plan. And
   `balance_operator_load` (default off): Rule 6's schedule-neutral operator-fairness
   post-process (Settings tick mark "Balance operator workload") — reassigns *who* runs
-  each op without moving any time, so makespan/lateness are unchanged.
+  each op without moving any time, so makespan/lateness are unchanged. A repair pass
+  guarantees it never double-books a person (2026-07-15 live fix; see
+  `tests/test_operator_invariants.py`). Related invariant: the shift-wise view /
+  Analytics never bill a busy person — overload segments become `rule6_allocate.UNSTAFFED`
+  and roll up as `headline.unstaffed_hrs`, so **no operator can ever show >100%**.
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
   `Order` and `SOLine` now carry `commitment` (open|committed|urgent), `promised_date`,
   and `committed_at` for promise protection.
@@ -230,7 +239,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (`anvitech:plan_priority`). API: `/optimize` (admin; quick=150/deep=1000 evals, one
   background thread at a time), `/optimize/status`, `/optimize/apply`, `/optimize/clear`;
   `_plan` passes the saved ranks to the open pass only (committed pass untouched) and
-  returns `optimize_meta` (active/saved_at/covered/uncovered) for the staleness banner.
+  returns `optimize_meta` (active/saved_at/covered/uncovered/**inputs_changed**) for the
+  staleness banner — `inputs_changed` compares the applied run's `inputs_sig` (sha of the
+  masters workbook + plan-shaping config, computed at `/optimize` start; schedule-neutral
+  knobs excluded) against the current inputs, so a masters re-upload or Settings change
+  after Apply is flagged instead of looking non-deterministic (2026-07-15 live fix).
 - **Promise recovery (auto committed re-sequencing)** — when a disruption makes committed
   orders slip past their promises, `api._plan`'s Pass 1 auto-triggers a **background**
   `optimize(objective="promise_slip")` on the committed set (its own slot `_RECOVERY`,

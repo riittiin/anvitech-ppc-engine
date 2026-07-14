@@ -325,9 +325,23 @@ qualified peer sits idle). When on, each already-scheduled operation is reassign
 the **qualified, same-shift operator who is free at that moment and has the least work
 so far** — spreading load evenly across interchangeable people. It **never changes any
 start/end time**, so **makespan and lateness are provably unchanged** (only *who* runs
-each job changes). It never double-books a person (an op whose operators are all busy
-keeps its original). Measured on Test5: peak operator 106%→97%, spread (stdev) 23→16,
-with an identical schedule. See `rule6_allocate._rebalance_operators`.
+each job changes). It **never double-books a person**: after the fairness walk, a
+repair pass reverts reassignments until no operator holds two overlapping ops (the
+walk's "keep the original when nobody is free" could otherwise collide with the walk's
+own earlier reassignments — found live 2026-07-15, one person on CNC1 + VMC3 at once;
+regression: `tests/test_operator_invariants.py`). Measured on Test5: peak operator
+106%→97%, spread (stdev) 23→16, with an identical schedule. See
+`rule6_allocate._rebalance_operators`.
+
+**Operator load can never exceed 100% (owner guarantee), and uncovered work is
+surfaced as UNSTAFFED.** The shift-wise view assigns each per-shift segment to a
+qualified person who is actually **free** at that moment; when a shift runs more
+machines than it has qualified people (e.g. three VMCs overnight with two night-shift
+VMC operators), the extra segment is marked **`⚠ Unstaffed`** instead of being billed
+to an already-busy person (that double-billing pushed operators to 107% live).
+Analytics rolls those segments into a headline **"unstaffed hours"** number with an
+explanatory note — the plan itself is untouched (reporting only); the note tells the
+owner where extra shift crew is genuinely needed.
 
 - **Source:** original Rule 4 + `Machine master` + `Operator & shift Master` +
   `Weekly off & holiday master`
@@ -451,7 +465,15 @@ keeps the best.
   searched, against the protected pass's reservations — an optimized plan can never
   move a promised date. All-open books search the whole book.
 - **Replay guarantee:** feeding the saved ranks back through the pipeline reproduces
-  exactly the metrics the search reported (tested).
+  exactly the metrics the search reported (tested) — **for the same inputs**. The
+  applied result carries a **fingerprint of the masters workbook + the plan-shaping
+  settings** it was computed on (`inputs_sig`); when the owner later re-uploads an
+  edited workbook or changes Settings, the replayed numbers legitimately differ, and
+  the banner says so ("Settings or masters have changed since this optimization —
+  run Optimize again") instead of looking non-deterministic (live 2026-07-15 finding:
+  "the same Deep run gave two results on two days" — the masters had changed between
+  them). Schedule-neutral knobs (balance workload; expedite, which is forced off under
+  ranks) are excluded from the fingerprint.
 - **Default: off.** With no applied optimization every plan is byte-identical to today
   (golden trace unchanged).
 
