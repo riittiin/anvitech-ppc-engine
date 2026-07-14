@@ -31,6 +31,12 @@ from ..orderbook import is_dispatch
 from . import rule4_setup_time as r4
 from . import rule5_overlap_mode as r5
 
+# Sentinel operator name for a shift segment NO qualified person is free to man
+# (the plan runs more machines in that shift than the crew can staff). Surfaced in
+# the shift-wise download and rolled up by Analytics as "unstaffed hours" — never
+# double-billed onto a busy person (that made operators exceed 100%).
+UNSTAFFED = "⚠ Unstaffed (no qualified operator free)"
+
 
 def _is_setup_machine(mid, masters=None) -> bool:
     """Setup time (``config.setup_time_min``) models the effort to PROGRAM/SET a CNC or
@@ -649,10 +655,11 @@ def _rebalance_operators(schedule, masters, config) -> int:
     touches start/end, makespan and lateness are provably unchanged. Returns the number
     of ops whose operator changed. No-op when operator logic is off (no operators)."""
     from ..operator_coverage import qualified_operators
+    ops = sorted((x for x in schedule if x.operator), key=lambda x: (x.start, x.end, x.batch_id))
+    original = {id(e): e.operator for e in ops}
     busy_until: dict = {}
     load: dict = {}
-    moved = 0
-    for e in sorted((x for x in schedule if x.operator), key=lambda x: (x.start, x.end)):
+    for e in ops:
         eligible = qualified_operators(e.machine, e.start, masters, config)
         free = [o for o in eligible if busy_until.get(o, e.start) <= e.start]
         if free:
@@ -661,13 +668,43 @@ def _rebalance_operators(schedule, masters, config) -> int:
                                             busy_until.get(o, e.start), o))
             if pick != e.operator:
                 e.operator = pick
-                moved += 1
-        # If nobody is free (should not happen on a feasible plan), keep the original
-        # operator — never double-book. Track whoever ends up assigned.
+        # If nobody is free, keep the original operator for now; the repair pass
+        # below guarantees the final assignment is conflict-free.
         op = e.operator
         busy_until[op] = e.end
         load[op] = load.get(op, 0.0) + (e.end - e.start).total_seconds() / 60.0
-    return moved
+
+    # SAFETY NET — never double-book. "Keep the original when nobody is free" is
+    # only safe if the walk didn't hand that original other work first (live bug:
+    # the walk moved a CNC op to Ankush, then a VMC op whose only qualified person
+    # was Ankush kept him too — one man on two machines). The original assignment
+    # is conflict-free by construction (Rule 6 allocates people one-at-a-time), so
+    # reverting reassigned ops back to their original owner strictly approaches a
+    # feasible state: repair until no person overlaps. Timing is never touched.
+    def _first_conflict():
+        by_op: dict = {}
+        for e in ops:
+            by_op.setdefault(e.operator, []).append(e)
+        for es in by_op.values():
+            es.sort(key=lambda x: (x.start, x.end, x.batch_id))
+            for a, b in zip(es, es[1:]):
+                if b.start < a.end:
+                    return a, b
+        return None
+
+    while True:
+        pair = _first_conflict()
+        if pair is None:
+            break
+        reverted = False
+        for e in (pair[1], pair[0]):          # prefer reverting the later op
+            if e.operator != original[id(e)]:
+                e.operator = original[id(e)]
+                reverted = True
+                break
+        if not reverted:
+            break   # both already original → input schedule itself was infeasible; bail
+    return sum(1 for e in ops if e.operator != original[id(e)])
 
 
 def build_shiftwise_timeline(schedule, masters, config, batches=None):
@@ -733,9 +770,17 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
     for s, en, label, e in segs:
         eligible = qualified_operators(e.machine, s, masters, config)
         free = [o for o in eligible if busy_until.get(o, s) <= s]
-        pool = free or eligible
-        op = min(pool, key=lambda o: (load.get(o, 0.0), busy_until.get(o, s), o)) if pool else e.operator
-        if op:
+        if free:
+            op = min(free, key=lambda o: (load.get(o, 0.0), busy_until.get(o, s), o))
+        elif eligible:
+            # Every qualified person for this shift is already on another machine.
+            # NEVER bill a busy person twice (that pushed operators past 100% —
+            # physically impossible); surface the gap honestly instead: the plan
+            # asks for more concurrent work in this shift than the crew can staff.
+            op = UNSTAFFED
+        else:
+            op = e.operator
+        if op and op != UNSTAFFED:
             busy_until[op] = en
             load[op] = load.get(op, 0.0) + (en - s).total_seconds() / 60.0
         b = batch_by_id.get(e.batch_id)

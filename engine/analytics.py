@@ -11,7 +11,7 @@ from collections import defaultdict
 from datetime import timedelta
 
 from .models import fmt_date
-from .rules.rule6_allocate import _clock_factory, build_shiftwise_timeline
+from .rules.rule6_allocate import _clock_factory, build_shiftwise_timeline, UNSTAFFED
 
 NON_MACHINE_LANES = {"OS / Outsourced", "Off-machine"}
 BOTTLENECK_PCT = 85.0
@@ -124,11 +124,18 @@ def build_analytics(schedule, masters, config, batches=None):
     # per-day, per-shift segments and crediting the operator actually manning each
     # shift keeps every person within their own shift capacity.
     operators = []
+    unstaffed_hrs = 0.0
     if getattr(config, "apply_operator_logic", False):
         segs = build_shiftwise_timeline(schedule, masters, config, batches)
         by_op = defaultdict(list)
         for r in segs:
-            if r["Operator"]:
+            if r["Operator"] == UNSTAFFED:
+                # No qualified person was free for this shift segment — the plan
+                # wants more concurrent work than the crew can staff. Surfaced as
+                # its own headline number; never billed to a person (a person
+                # cannot exceed 100% of their own shift).
+                unstaffed_hrs += r["Minutes"] / 60.0
+            elif r["Operator"]:
                 by_op[r["Operator"]].append(r)
         wdays = _working_days(masters.calendar, win_start, win_end)
         shift_of = {o.name: o.shift for o in masters.operators}
@@ -180,5 +187,6 @@ def build_analytics(schedule, masters, config, batches=None):
             "bottleneck": machines[0] if machines else None,
             "underused": [m for m in machines
                           if m["Utilization %"] is not None and m["Utilization %"] <= UNDERUSED_PCT],
+            "unstaffed_hrs": round(unstaffed_hrs, 1),
         },
     }
