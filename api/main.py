@@ -821,7 +821,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
 
         config = _load_plan_config()
         masters = _current_masters()
-        inputs_sig = _inputs_signature(config)   # what this search is computed on
+        base_config = config      # as saved — the basis for the inputs fingerprint
         actuals = book_store.load_actuals()
         so_lines = orderbook.active_so_lines(book_store.load_active_orders(),
                                              actuals, masters)
@@ -838,12 +838,6 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
                 detail="nothing to optimize — no open orders with work remaining"
                        + (" (all orders are promise-protected)" if protected else ""))
 
-        reserved = None
-        if protected:
-            plan_protected = PlanRun(so_lines=protected)
-            run_forward(plan_protected, config, masters)
-            reserved = _reservations_from_schedule(plan_protected.schedule)
-
         # The batch sequence only has leverage when Expedite is off: the expedite
         # window dynamically re-sorts ops by slack and flattens every sequence into the
         # same plan, so a search WITH expedite on finds "no improvement" for every book.
@@ -852,6 +846,30 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
         # admin is still their REAL current plan (their config as set), so the
         # before/after is honest.
         search_config = replace(config, expedite_window_min=0)
+
+        # Settings sweep (2026-07-15 spec): each candidate overlap gets its own
+        # committed-pass reservations, and — the promise guard — is eligible only
+        # if the committed orders keep their promises at least as well as under
+        # the CURRENT overlap. All-open books have no guard.
+        candidate_setup = None
+        reserved = None
+        if protected:
+            def _pass1(cfg):
+                plan_p = PlanRun(so_lines=list(protected))
+                run_forward(plan_p, cfg, masters)
+                slip = optimizer.promise_slip_metrics(plan_p.schedule, protected,
+                                                      cfg.plan_start_date)
+                return _reservations_from_schedule(plan_p.schedule), slip
+
+            reserved, cur_slip = _pass1(search_config)   # current overlap's pass 1
+
+            def candidate_setup(cfg):
+                if cfg.overlap_percent == search_config.overlap_percent:
+                    return reserved, True
+                res, slip = _pass1(cfg)
+                ok = (slip["promise_slip_days"] <= cur_slip["promise_slip_days"]
+                      and slip["promises_missed"] <= cur_slip["promises_missed"])
+                return res, ok
 
         _OPTIMIZE.update(state="running", label=label, budget_evals=budget_evals,
                          evals=0, baseline=None, best=None, error=None, result=None,
@@ -870,21 +888,31 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
             real_baseline = optimizer.plan_metrics(base_run.schedule, target,
                                                    config.plan_start_date)
 
-            res = optimizer.optimize(target, search_config, masters, reserved=reserved,
-                                     budget_evals=budget_evals, seed=_OPT_SEED,
-                                     on_progress=on_progress,
-                                     should_cancel=lambda: _OPTIMIZE.get("cancel"))
+            sw = optimizer.sweep_optimize(target, search_config, masters,
+                                          budget_evals=budget_evals, seed=_OPT_SEED,
+                                          on_progress=on_progress,
+                                          should_cancel=lambda: _OPTIMIZE.get("cancel"),
+                                          candidate_setup=candidate_setup)
+            res = sw.result
             improved = optimizer.score(res.best) < optimizer.score(real_baseline)
+            # Fingerprint against the WINNING settings: Apply persists the winning
+            # overlap into the saved plan config, so the staleness check must
+            # compare future plans against exactly that config.
+            inputs_sig = _inputs_signature(replace(base_config,
+                                                   overlap_percent=sw.overlap_percent))
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE.update(
-                    state="done", evals=res.evals, baseline=real_baseline, best=res.best,
+                    state="done", evals=sw.evals, baseline=real_baseline, best=res.best,
                     cancel=False,
                     elapsed_s=round(time.monotonic() - _OPTIMIZE["started_mono"], 1),
                     result={"ranks": res.ranks, "improved": improved,
-                            "cancelled": res.cancelled,
+                            "cancelled": sw.cancelled,
                             "baseline": real_baseline, "best": res.best,
                             "budget": label, "seed": _OPT_SEED,
-                            "inputs_sig": inputs_sig})
+                            "inputs_sig": inputs_sig,
+                            "best_overlap": sw.overlap_percent,
+                            "current_overlap": base_config.overlap_percent,
+                            "sweep_table": sw.table})
         except Exception as e:  # noqa: BLE001 — a failed search must report, not hang
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE.update(state="failed", error=str(e), cancel=False)
@@ -907,6 +935,8 @@ def _optimize_status():
                 "baseline": _OPTIMIZE["baseline"], "best": _OPTIMIZE["best"],
                 "error": _OPTIMIZE["error"], "elapsed_s": elapsed,
                 "improved": res.get("improved"), "cancelled": res.get("cancelled", False),
+                "best_overlap": res.get("best_overlap"),
+                "current_overlap": res.get("current_overlap"),
                 "stopping": bool(_OPTIMIZE.get("cancel")) and _OPTIMIZE["state"] == "running"}
 
 
@@ -932,8 +962,18 @@ def _optimize_apply():
                 "budget": res["budget"], "seed": res["seed"],
                 "baseline": res["baseline"], "best": res["best"],
                 "covered": len(res["ranks"]),
-                "inputs_sig": res.get("inputs_sig")}
+                "inputs_sig": res.get("inputs_sig"),
+                "best_overlap": res.get("best_overlap")}
         book_store.save_plan_priority(res["ranks"], meta)
+        # Settings sweep: the winning overlap becomes THE saved plan setting (the
+        # single config every Plan loads and the Settings panel shows). Unchanged
+        # winner -> no write, no churn.
+        best_ov = res.get("best_overlap")
+        if best_ov is not None:
+            cfg = _load_plan_config()
+            if cfg.overlap_percent != best_ov:
+                book_store.save_plan_config(json.dumps(
+                    replace(cfg, overlap_percent=best_ov).to_dict()))
         # Clear the in-memory job so a later page refresh doesn't re-show the
         # "Apply" panel for a plan that's already applied.
         _OPTIMIZE.update(state="idle", result=None, best=None, baseline=None)

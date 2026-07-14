@@ -454,6 +454,18 @@ keeps the best.
   result on any machine. The scheduler is memoized (invariant machine-name parsing and
   per-day work-windows are cached), so each plan evaluates ~3.5× faster with identical
   results.
+- **Settings sweep (2026-07-15).** The same click also auto-tunes the **overlap %**
+  (`optimizer.sweep_optimize`): candidates 50–100 step 10 plus the current value, all
+  inside the SAME eval budget — half probes every candidate identically, half deepens
+  the winner. The current setting is probed first and only a **strictly better** score
+  dethrones it (never worse; no setting churn on ties). With committed/urgent orders,
+  a candidate overlap must first prove — on the committed pass alone — that promise
+  slip and broken-promise count are **no worse than under the current setting**
+  (the promise guard; vetoed candidates are skipped). Apply persists the winning
+  overlap **into the saved plan config** (openly visible in Settings) alongside the
+  ranks, and the staleness fingerprint is computed against the winning settings.
+  Result panel reports "Best setting found: Overlap X%". Spec:
+  `docs/superpowers/specs/2026-07-15-optimize-settings-sweep-design.md`.
 - The admin sees a before/after table and chooses **Apply** or Discard. Apply persists
   a **rank per (SO No, Item Code)**; every subsequent Plan replays it
   (`pipeline.apply_priority_rank`): ranked batches reorder among the slots they already

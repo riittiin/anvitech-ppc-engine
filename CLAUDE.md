@@ -236,14 +236,20 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (ranked batches reorder among their own slots; unranked keep their Rule-3 slot).
   `run_forward(priority_rank=)` is the replay hook — `None` (all existing callers) is
   byte-identical. Persisted via `book_store.save/load/clear_plan_priority`
-  (`anvitech:plan_priority`). API: `/optimize` (admin; quick=150/deep=1000 evals, one
+  (`anvitech:plan_priority`). API: `/optimize` (admin; quick=150/deep=400 evals, one
   background thread at a time), `/optimize/status`, `/optimize/apply`, `/optimize/clear`;
   `_plan` passes the saved ranks to the open pass only (committed pass untouched) and
   returns `optimize_meta` (active/saved_at/covered/uncovered/**inputs_changed**) for the
   staleness banner — `inputs_changed` compares the applied run's `inputs_sig` (sha of the
-  masters workbook + plan-shaping config, computed at `/optimize` start; schedule-neutral
-  knobs excluded) against the current inputs, so a masters re-upload or Settings change
-  after Apply is flagged instead of looking non-deterministic (2026-07-15 live fix).
+  masters workbook + plan-shaping config; schedule-neutral knobs excluded) against the
+  current inputs, so a masters re-upload or Settings change after Apply is flagged
+  instead of looking non-deterministic (2026-07-15 live fix). **Settings sweep
+  (2026-07-15):** `optimizer.sweep_optimize` also auto-tunes the overlap % inside the
+  same budget (probe all candidates, deepen the winner; current setting probed first,
+  strict-better dethrones — never worse, no tie churn); the API's `candidate_setup`
+  hook rebuilds the committed pass per candidate and vetoes any overlap whose promise
+  slip/broken count worsens; Apply persists the winning overlap into the saved plan
+  config and `inputs_sig` is computed against the winning settings.
 - **Promise recovery (auto committed re-sequencing)** — when a disruption makes committed
   orders slip past their promises, `api._plan`'s Pass 1 auto-triggers a **background**
   `optimize(objective="promise_slip")` on the committed set (its own slot `_RECOVERY`,

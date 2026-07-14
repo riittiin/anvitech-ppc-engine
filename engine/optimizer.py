@@ -273,3 +273,112 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
         improved=_score(best_m) < _score(baseline_m),
         cancelled=cancelled[0],
     )
+
+
+# --------------------------------------------------------------------------- #
+# Settings sweep — auto-tune the overlap % inside the same Optimize click
+# (2026-07-15 spec). The sequence search only ever ran under whatever Settings
+# the admin had; this also searches the overlap dial and returns the best
+# (sequence, overlap) pair. Same total eval budget: probe every candidate
+# briefly, then spend the rest deepening the winner.
+# --------------------------------------------------------------------------- #
+OVERLAP_CANDIDATES = (50, 60, 70, 80, 90, 100)
+
+
+@dataclass
+class SweepResult:
+    """Winner of the (sequence, overlap) search. ``result`` is the winning
+    candidate's OptimizeResult (its ranks are the persistable artifact)."""
+
+    overlap_percent: int = 0            # the winning overlap
+    result: OptimizeResult = field(default_factory=OptimizeResult)
+    table: list = field(default_factory=list)   # per-candidate probe outcomes
+    evals: int = 0
+    cancelled: bool = False
+
+
+def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
+                   on_progress=None, should_cancel=None,
+                   candidate_setup=None, candidates=OVERLAP_CANDIDATES) -> SweepResult:
+    """Search batch sequence AND overlap %, spending ``budget_evals`` in total.
+
+    Budget shape (the never-worse contract): probes are CHEAP and noisy — measured
+    on the real book, a shallow probe can misrank settings vs a deep search. So the
+    CURRENT setting keeps the lion's share of the budget (~half — close to today's
+    depth), the other candidates share a ~quarter probe pool, and only the best
+    probe (the challenger) is deepened with the rest. The challenger replaces the
+    current setting only if its deepened score is STRICTLY better than the current
+    setting's deepened score — big setting differences still win; probe noise
+    cannot. Ties keep the current setting (no churn).
+
+    Determinism: ``optimize`` with the same seed evaluates the same plans in the
+    same order, so a longer run strictly extends a shorter one — the deepened
+    result always dominates its own probe.
+
+    ``candidate_setup(cfg) -> (reserved, eligible)`` is the API hook for promise
+    protection: build the committed pass's reservations under ``cfg`` and say
+    whether this overlap keeps every promise at least as well as the current one.
+    ``None`` (all-open books, tests) → ``(None, True)`` for every candidate.
+    """
+    from dataclasses import replace
+
+    cur = config.overlap_percent
+    others = sorted(v for v in dict.fromkeys(candidates) if v != cur)
+
+    spent = 0
+    cancelled = False
+    table = []
+
+    def _offset(base):
+        if on_progress is None:
+            return None
+        def cb(evals, best_m):
+            on_progress(base + evals, best_m)
+        return cb
+
+    def _run(ov, budget):
+        """One seeded search under overlap ``ov``; returns None if vetoed/cancelled."""
+        nonlocal spent, cancelled
+        if budget <= 0 or cancelled or (should_cancel and should_cancel()):
+            cancelled = cancelled or bool(should_cancel and should_cancel())
+            return None
+        cfg = replace(config, overlap_percent=ov)
+        reserved, eligible = candidate_setup(cfg) if candidate_setup else (None, True)
+        if not eligible:
+            table.append({"overlap": ov, "eligible": False})
+            return None
+        res = optimize(so_lines, cfg, masters, reserved=reserved,
+                       budget_evals=budget, seed=seed,
+                       on_progress=_offset(spent), should_cancel=should_cancel)
+        spent += res.evals
+        cancelled = cancelled or res.cancelled
+        table.append({"overlap": ov, "eligible": True, "best": res.best,
+                      "evals": res.evals})
+        return res
+
+    # 1) Probe pool (~quarter) for the non-current candidates.
+    probes = {}
+    if others:
+        probe_each = max(1, budget_evals // (4 * len(others)))
+        for ov in others:
+            r = _run(ov, min(probe_each, budget_evals - spent))
+            if r is not None:
+                probes[ov] = r
+
+    # 2) The current setting's deep run (~half the total budget — the closest
+    #    thing to what today's Optimize would have produced).
+    cur_res = _run(cur, min(max(1, budget_evals // 2), budget_evals - spent))
+
+    # 3) Deepen the best probe (the challenger) with everything left.
+    best_ov, best_res = cur, cur_res
+    if probes:
+        challenger = min(probes, key=lambda ov: (score(probes[ov].best), ov))
+        chal_res = _run(challenger, budget_evals - spent) or probes[challenger]
+        if best_res is None or score(chal_res.best) < score(best_res.best):
+            best_ov, best_res = challenger, chal_res     # strict: ties keep current
+
+    if best_res is None:                   # vetoed/cancelled before anything ran
+        return SweepResult(overlap_percent=cur, result=OptimizeResult(),
+                           table=table, evals=spent, cancelled=cancelled)
+    return SweepResult(overlap_percent=best_ov, result=best_res, table=table,
+                       evals=spent, cancelled=cancelled)

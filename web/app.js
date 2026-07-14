@@ -292,6 +292,12 @@ function renderOptimizeResult(st) {
   let h = st.improved
     ? `<p><strong>A better plan was found${stoppedNote}.</strong> Apply it to use this order in every plan from now on.</p>`
     : `<p><strong>No improvement found</strong> — the current plan already matches the best sequence tried.</p>`;
+  // Settings sweep: Optimize also tried the overlap % values.
+  if (st.best_overlap != null && st.current_overlap != null) {
+    h += st.best_overlap !== st.current_overlap
+      ? `<p>Best setting found: <strong>Overlap ${st.best_overlap}%</strong> (currently ${st.current_overlap}%). Applying this plan also sets Overlap to ${st.best_overlap}% in Settings.</p>`
+      : `<p>Your Overlap setting (${st.current_overlap}%) was also tested against ${escapeHtml("50–100%")} — it is already the best.</p>`;
+  }
   h += '<div class="table-wrap"><table><thead><tr><th></th><th>Standard plan</th><th>Optimized</th></tr></thead><tbody>';
   rows.forEach((r) => {
     h += `<tr><td>${escapeHtml(String(r[0]))}</td><td>${escapeHtml(String(r[1]))}</td><td><strong>${escapeHtml(String(r[2]))}</strong></td></tr>`;
