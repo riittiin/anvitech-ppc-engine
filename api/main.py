@@ -15,6 +15,7 @@ The web/ frontend is served at /.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -242,14 +243,59 @@ def _current_masters():
         masters = Masters()
     else:
         _, masters = load_all(io.BytesIO(raw))
-    _MASTERS_CACHE.update(key=key, masters=masters)
+    _MASTERS_CACHE.update(key=key, masters=masters,
+                          sha=hashlib.sha256(raw).hexdigest() if raw else "none")
     return masters
+
+
+def _masters_sha() -> str:
+    """Content hash of the stored masters workbook (cached with the parsed masters)."""
+    _current_masters()   # warms the cache (and refreshes sha after an upload)
+    return _MASTERS_CACHE.get("sha") or "none"
+
+
+def _inputs_signature(config: Config) -> str:
+    """Fingerprint of everything an applied optimization's numbers depend on: the
+    masters workbook + the schedule-shaping settings. When either changes after
+    Apply, replaying the saved ranks legitimately yields different numbers — the
+    UI must SAY so instead of looking non-deterministic (live 2026-07-15 finding:
+    the owner re-uploaded an edited workbook after Apply and saw "the same run"
+    produce different results). Schedule-neutral knobs are excluded:
+    balance_operator_load never moves timing, and expedite is forced off whenever
+    ranks replay, so neither can alter an optimized plan."""
+    d = config.to_dict()
+    d.pop("balance_operator_load", None)
+    d["expedite_window_min"] = 0
+    blob = json.dumps([_masters_sha(), d], sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()
 
 
 def _report_table(masters):
     return to_table([
         {"Kind": r["kind"], "Reference": r["ref"], "Message": r["message"]}
         for r in masters.report
+    ])
+
+
+def _report_for_book(masters, so_lines):
+    """The validation report scoped to the CURRENT order book. Loader-level rows
+    about the masters (pending machines, time coercions, …) pass through, but
+    NO_ROUTING is re-derived from the live book: the stored workbook's own SO
+    sheet can list orders that were never merged or were later deleted (live
+    2026-07-15 bug: a "5 orders without routing" banner for ghost orders while
+    every real order planned fine)."""
+    rows = [r for r in masters.report if r["kind"] != "NO_ROUTING"]
+    seen = set()
+    for l in so_lines:
+        if l.item_code not in masters.routings and l.item_code not in seen:
+            seen.add(l.item_code)
+            rows.append({"kind": "NO_ROUTING", "ref": l.item_code,
+                         "message": f"SO item '{l.item_code}' has no routing in "
+                                    f"Item's process Master; order skipped "
+                                    f"(cannot schedule without a recipe)"})
+    return to_table([
+        {"Kind": r["kind"], "Reference": r["ref"], "Message": r["message"]}
+        for r in rows
     ])
 
 
@@ -484,6 +530,9 @@ def _reservations_from_schedule(schedule):
 
 def _plan(config: Config):
     masters = _current_masters()
+    # Fingerprint of the plan-shaping inputs as REQUESTED (base config, before the
+    # actuals-driven start advance) — compared against the applied optimization's.
+    current_inputs_sig = _inputs_signature(config)
     active = book_store.load_active_orders()
     completed = book_store.load_completed_orders()
     actuals = book_store.load_actuals()
@@ -650,11 +699,15 @@ def _plan(config: Config):
     if prio:
         keys = {f"{l.so_no}{KEY_SEP}{l.item_code}" for l in so_lines}
         covered = sum(1 for k in keys if k in prio["ranks"])
+        saved_sig = (prio.get("meta") or {}).get("inputs_sig")
         optimize_meta = {"active": True,
                          "saved_at": (prio.get("meta") or {}).get("saved_at"),
-                         "covered": covered, "uncovered": len(keys) - covered}
+                         "covered": covered, "uncovered": len(keys) - covered,
+                         # True when the masters/settings differ from what the
+                         # optimization was computed on — its numbers will differ.
+                         "inputs_changed": bool(saved_sig and saved_sig != current_inputs_sig)}
 
-    return {"run_id": run_id, "trace": trace, "report": _report_table(masters),
+    return {"run_id": run_id, "trace": trace, "report": _report_for_book(masters, so_lines),
             "gantt": gantt, "orders": orders, "config": config.to_dict(),
             "expected_end": exp_end, "optimize_meta": optimize_meta,
             "recovery_meta": recovery_meta}
@@ -768,6 +821,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
 
         config = _load_plan_config()
         masters = _current_masters()
+        inputs_sig = _inputs_signature(config)   # what this search is computed on
         actuals = book_store.load_actuals()
         so_lines = orderbook.active_so_lines(book_store.load_active_orders(),
                                              actuals, masters)
@@ -829,7 +883,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
                     result={"ranks": res.ranks, "improved": improved,
                             "cancelled": res.cancelled,
                             "baseline": real_baseline, "best": res.best,
-                            "budget": label, "seed": _OPT_SEED})
+                            "budget": label, "seed": _OPT_SEED,
+                            "inputs_sig": inputs_sig})
         except Exception as e:  # noqa: BLE001 — a failed search must report, not hang
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE.update(state="failed", error=str(e), cancel=False)
@@ -876,7 +931,8 @@ def _optimize_apply():
         meta = {"saved_at": datetime.now().isoformat(timespec="seconds"),
                 "budget": res["budget"], "seed": res["seed"],
                 "baseline": res["baseline"], "best": res["best"],
-                "covered": len(res["ranks"])}
+                "covered": len(res["ranks"]),
+                "inputs_sig": res.get("inputs_sig")}
         book_store.save_plan_priority(res["ranks"], meta)
         # Clear the in-memory job so a later page refresh doesn't re-show the
         # "Apply" panel for a plan that's already applied.
@@ -986,13 +1042,15 @@ async def upload(request: Request, file: UploadFile = File(...)):
         so_lines, active, completed, first_seen=date.today().isoformat())
     book_store.add_orders(new_orders)
 
+    book_lines = orderbook.active_so_lines(book_store.load_active_orders(),
+                                           book_store.load_actuals(), masters)
     return {
         "name": file.filename,
         "added": len(new_orders),
         "flagged": flags,
         "masters_updated": masters_updated,
         "summary": {"items": len(masters.routings), "machines": len(masters.machines)},
-        "report": _report_table(masters),
+        "report": _report_for_book(masters, book_lines),
     }
 
 
@@ -1156,7 +1214,10 @@ def get_trace(run_id: str):
 
 @app.get("/report")
 def report():
-    return _report_table(_current_masters())
+    masters = _current_masters()
+    so_lines = orderbook.active_so_lines(book_store.load_active_orders(),
+                                         book_store.load_actuals(), masters)
+    return _report_for_book(masters, so_lines)
 
 
 @app.get("/items")

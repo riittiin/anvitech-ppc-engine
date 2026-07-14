@@ -184,6 +184,10 @@ function renderOptimizeBanner() {
     h += ` · <span class="pill-pending">${optimizeMeta.uncovered} order(s) added since — ` +
          `run Optimize again for the best plan</span>`;
   }
+  if (optimizeMeta.inputs_changed) {
+    h += ` · <span class="pill-pending">Settings or masters have changed since this ` +
+         `optimization was computed — its numbers will differ; run Optimize again</span>`;
+  }
   if (currentRole === "admin") {
     h += ` <button id="optimize-clear-btn" class="ghost-btn small">Remove optimization</button>`;
   }
@@ -881,6 +885,11 @@ function renderAnalytics() {
   const opBars = a.operators.length
     ? a.operators.map((o) => row(o.Operator, "", o["Utilization %"], o.Status)).join("")
     : '<p class="a-empty">Operator logic is off. Turn it on in <strong>Settings</strong> to see per-operator load.</p>';
+  // Honest capacity gap: shift segments no qualified operator was free to man
+  // (never billed to a person, so nobody can show over 100%).
+  const unstaffedNote = (h.unstaffed_hrs || 0) > 0
+    ? `<p class="a-empty">⚠ <strong>${Math.round(h.unstaffed_hrs)} hrs</strong> of scheduled machine time fall in shifts where every qualified operator is already busy on another machine — that work needs more crew on those shifts.</p>`
+    : "";
   const procBars = a.processes.map((p) => row(p.Process, p.Machines, p["Share %"], "process")).join("");
 
   root.innerHTML = `
@@ -900,6 +909,7 @@ function renderAnalytics() {
       <section class="a-card">
         <div class="a-card-head"><h3>Operator load</h3></div>
         <div class="au-list">${opBars}</div>
+        ${unstaffedNote}
         ${a.operators.length ? table(a.operators) : ""}
       </section>
       <section class="a-card a-span">
