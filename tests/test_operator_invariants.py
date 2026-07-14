@@ -125,6 +125,48 @@ def test_shiftwise_never_bills_a_busy_person():
     assert sum(1 for r in rows if r["Operator"] == rule6_allocate.UNSTAFFED) == 1
 
 
+def test_rebalance_respects_reserved_operator_intervals():
+    """Two-pass integration (2026-07-15 audit): pass 2's fairness rebalance must not
+    hand an op to a person the COMMITTED pass already has on another machine at that
+    time (live-style find: same person on CNC7 pass-1 and CNC4 pass-2 at once).
+    ``reserved`` operator intervals count as busy for the walk AND the repair."""
+    masters = _asymmetric_masters()          # Alpha (M,V), Beta (M only)
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    h = lambda hr: datetime(2025, 3, 5, hr, 0)
+    # Pass-2 schedule: one op on M, originally Beta's. Alpha has less load, so the
+    # blind walk would hand it to Alpha — but pass 1 has Alpha busy 8-12 elsewhere.
+    sched = [_entry("A", "M", h(9), h(11), "Beta")]
+    reserved = {"Alpha": [(h(8), h(12))]}
+
+    rule6_allocate._rebalance_operators(sched, masters, cfg, reserved=reserved)
+
+    assert sched[0].operator == "Beta", \
+        "rebalance must not steal a person who is reserved by the committed pass"
+
+
+def test_shiftwise_follows_the_schedule_operator_when_possible():
+    """Integration (2026-07-15 audit): the shift-wise download must name the SAME
+    person the schedule/Gantt shows, whenever that person covers the shift and is
+    free — a worker's printed sheet and the Gantt must not disagree. The fair walk
+    only takes over where the named person physically can't work (other shift,
+    already busy)."""
+    masters = _night_crunch_masters()
+    # Two first-shift people on machine M; the schedule assigned the SECOND-listed.
+    from engine.models import Operator
+    masters.operators.append(Operator(name="DayOp2", preferred_machines_raw="M,V",
+                                      machines=["M", "V"], shift="First shift"))
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    d = datetime(2025, 3, 5)
+    sched = [_entry("B1", "M", d.replace(hour=9), d.replace(hour=15), "DayOp2")]
+    batches = [Batch(batch_id="B1", item_code="X", item_name="X", qty=1,
+                     so_delivery_date=date(2025, 3, 20), source_so_refs=["B1"])]
+
+    rows = rule6_allocate.build_shiftwise_timeline(sched, masters, cfg, batches)
+
+    assert len(rows) == 1
+    assert rows[0]["Operator"] == "DayOp2"   # follows the plan, not the walk's favourite
+
+
 def test_analytics_operator_utilization_never_exceeds_100_even_when_overloaded():
     from engine.analytics import build_analytics
     masters = _night_crunch_masters()

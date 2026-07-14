@@ -636,7 +636,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
             )
 
     if getattr(config, "balance_operator_load", False):
-        moved = _rebalance_operators(schedule, masters, config)
+        moved = _rebalance_operators(schedule, masters, config, reserved=reserved)
         if moved:
             notes.append(
                 f"Operator load balancing ON: reassigned {moved} operation(s) to the "
@@ -647,7 +647,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     return schedule
 
 
-def _rebalance_operators(schedule, masters, config) -> int:
+def _rebalance_operators(schedule, masters, config, reserved=None) -> int:
     """Fairness POST-PROCESS. Timing is already fixed; only reassign *who* runs each
     operator-run op so load spreads evenly across interchangeable people. Walks ops in
     time order and hands each to the qualified, same-shift operator who is **free at
@@ -655,13 +655,23 @@ def _rebalance_operators(schedule, masters, config) -> int:
     touches start/end, makespan and lateness are provably unchanged. Returns the number
     of ops whose operator changed. No-op when operator logic is off (no operators)."""
     from ..operator_coverage import qualified_operators
+    reserved = reserved or {}
+
+    def _reserved_clash(o, s, en):
+        """True if person ``o`` is booked by another pass (the two-pass Plan's
+        committed reservations) anywhere inside [s, en) — such a person must never
+        be handed extra work here (2026-07-15 audit: pass-2 rebalance put a person
+        on two machines at once across the two passes)."""
+        return any(b0 < en and s < b1 for b0, b1 in reserved.get(o, []))
+
     ops = sorted((x for x in schedule if x.operator), key=lambda x: (x.start, x.end, x.batch_id))
     original = {id(e): e.operator for e in ops}
     busy_until: dict = {}
     load: dict = {}
     for e in ops:
         eligible = qualified_operators(e.machine, e.start, masters, config)
-        free = [o for o in eligible if busy_until.get(o, e.start) <= e.start]
+        free = [o for o in eligible if busy_until.get(o, e.start) <= e.start
+                and not _reserved_clash(o, e.start, e.end)]
         if free:
             # Least work so far; break ties by longest-idle then name (deterministic).
             pick = min(free, key=lambda o: (load.get(o, 0.0),
@@ -690,6 +700,11 @@ def _rebalance_operators(schedule, masters, config) -> int:
             for a, b in zip(es, es[1:]):
                 if b.start < a.end:
                     return a, b
+        # A reassignment that lands on a person another pass has reserved is a
+        # conflict too (the original assignment respected the reservations).
+        for e in ops:
+            if e.operator != original[id(e)] and _reserved_clash(e.operator, e.start, e.end):
+                return e, e
         return None
 
     while True:
@@ -764,14 +779,40 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
             d += timedelta(days=1)
     segs.sort(key=lambda x: (x[0], x[3].machine))
 
-    busy_until: dict = {}
+    # Two-phase assignment (2026-07-15 audit): the printed shift sheet must show the
+    # SAME person the schedule/Gantt names, wherever that person covers the shift —
+    # the fair walk must never lend a person out from under their own scheduled op.
+    #
+    # Phase A — follow the plan: every segment whose named operator is qualified for
+    # its shift gets that person (the schedule's one-at-a-time invariant means these
+    # can't collide; a defensive overlap check guards imperfect inputs).
+    # Phase B — fill the rest (segments in shifts the named person doesn't work) in
+    # time order with a qualified person who is genuinely free across BOTH phases;
+    # nobody free → UNSTAFFED (never double-billed; operators stay ≤ 100%).
+    def _overlaps(ivs, s, en):
+        return any(b0 < en and s < b1 for b0, b1 in ivs)
+
+    assigned: dict = {}
+    own_busy: dict = {}
     load: dict = {}
-    rows = []
-    for s, en, label, e in segs:
+    for idx, (s, en, label, e) in enumerate(segs):
         eligible = qualified_operators(e.machine, s, masters, config)
-        free = [o for o in eligible if busy_until.get(o, s) <= s]
+        if e.operator in eligible and not _overlaps(own_busy.get(e.operator, []), s, en):
+            assigned[idx] = e.operator
+            own_busy.setdefault(e.operator, []).append((s, en))
+            load[e.operator] = load.get(e.operator, 0.0) + (en - s).total_seconds() / 60.0
+
+    busy_until: dict = {}
+    for idx, (s, en, label, e) in enumerate(segs):
+        if idx in assigned:
+            continue
+        eligible = qualified_operators(e.machine, s, masters, config)
+        free = [o for o in eligible
+                if busy_until.get(o, s) <= s and not _overlaps(own_busy.get(o, []), s, en)]
         if free:
             op = min(free, key=lambda o: (load.get(o, 0.0), busy_until.get(o, s), o))
+            busy_until[op] = en
+            load[op] = load.get(op, 0.0) + (en - s).total_seconds() / 60.0
         elif eligible:
             # Every qualified person for this shift is already on another machine.
             # NEVER bill a busy person twice (that pushed operators past 100% —
@@ -780,9 +821,11 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
             op = UNSTAFFED
         else:
             op = e.operator
-        if op and op != UNSTAFFED:
-            busy_until[op] = en
-            load[op] = load.get(op, 0.0) + (en - s).total_seconds() / 60.0
+        assigned[idx] = op
+
+    rows = []
+    for idx, (s, en, label, e) in enumerate(segs):
+        op = assigned.get(idx)
         b = batch_by_id.get(e.batch_id)
         routing = masters.routings.get(e.item_code)
         rows.append({
