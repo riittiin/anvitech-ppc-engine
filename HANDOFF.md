@@ -18,8 +18,8 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0, 512 MB).
 - **Repo:** GitHub `riittiin/anvitech-ppc-engine` (private). Push to `main` →
   Render auto-redeploys (no separate deploy step).
-- **298 tests pass** (`pytest`). FastAPI backend + vanilla HTML/JS frontend, plain
-  Python engine. Python 3 (run as `python3` locally — there is no `python` alias).
+- **323 tests pass** (`pytest`, 1 skipped Mongo). FastAPI backend + vanilla HTML/JS
+  frontend, plain Python engine. Python 3 (run as `python3` locally — no `python` alias).
 - **Login is a two-role app-owned session** (admin / user) — see "Login & roles".
 - The engine has **8 business rules** (1–8). (Rule 8 = the Plan over the order book —
   there is no `rule8` module.) The UI now shows only **4 tabs** — **Orders**,
@@ -27,21 +27,25 @@ job shop. **Built, tested, deployed live, and actively iterated.**
   rules 1–5 debug tabs and the Rule 8 tab are hidden (the trace still records them).
 - **Order identity is the `(SO No, Item Code)` pair** — an SO number is NOT unique;
   one SO# can carry several item lines, each its own order. (Changed from SO#-only.)
-- **Data file is now `Test5.xlsx`** (supersedes `Test4.xlsx` → `Test3.xlsx`) —
-  gitignored real data. Test5 adds parallel manual stations (`MW1/MW2/MW3`, `MD1/MD2`,
-  `MPK1/MPK2/MPK3`) and a **+30% cycle/total time on every CNC/VMC step**.
-- **Most recent work (2026-07-13, second session — ✅ SHIPPED & LIVE):** the
-  **Optimize plan** feature (`engine/optimizer.py` + `/optimize` endpoints + admin
-  Optimize button): a deterministic sequence search that tries many batch orders
-  through the unchanged Rule 6 and keeps the best plan — on the real Test5 book a
-  90-second Quick run cut the plan **42.5 → 39.75 days** and total late-days
-  **1,026 → 792**; Apply persists a rank per (SO#, item) that every Plan replays
-  (open pass only — promises untouched; unranked new orders keep their Rule-3 slot).
-  Plus an **Analytics fix**: operator hours now billed **per shift** (a multi-shift op
-  no longer billed to one person — 120% utilization impossible; real bottleneck =
-  second-shift Saif/Mahesh ~88%). See "Latest session" below, the
-  `sequence-optimizer-findings` memory, and the 2026-07-13 optimize-plan spec.
-  Earlier the same day: **order commitment & promise protection** (three lanes
+- **Data files are gitignored real data (`Test*.xlsx`, `*_so_list.xlsx`).** ⚠️ **The
+  owner swaps these around** — the file named `Test5.xlsx` on disk changes. As of
+  2026-07-14: `Test5.xlsx` = **54 orders / 19 operators** (a newer, smaller book);
+  `Test6.xlsx` = **65 orders / 21 operators** (this is the book most of this project was
+  analysed on — the old "Test5"); `new_so_list.xlsx` = Test5's 54 orders but different
+  masters (27 machines). **Always confirm which file/how many orders before quoting a
+  number, and match the owner's exact config (plan start, operators) before comparing —
+  see the Test5-vs-Test6 lesson in the latest-session block.**
+- **Most recent work (2026-07-14 — ✅ SHIPPED & LIVE):** **Promise recovery** — when a
+  disruption makes committed orders slip past their promises, the planner **automatically**
+  (no setting/button) re-sequences the committed set in the **background** to protect the
+  most promises (`optimizer.optimize(objective="promise_slip")`), replayed on every Plan;
+  never worse than date-order; a quiet Orders-tab note. Also live from 2026-07-13/14: the
+  **Optimize plan** feature (multi-start sequence search, ~3.5× faster scheduler, Quick/Deep
+  + **Stop & keep best**), the **Expedite↔Optimize fix** (Optimize now ignores the Expedite
+  tick so it can't be cancelled out), and the **Analytics per-shift operator fix** (util can
+  no longer exceed 100%). Full details in the "Latest session" blocks below, the
+  `sequence-optimizer-findings` memory, and the two 2026-07-13/14 specs.
+  Earlier: **order commitment & promise protection** (three lanes
   Open/Committed/Urgent + **two-pass planning** so new orders can't push
   already-promised dates), plus optimization levers — **Overlap 80%**, **Expedite**
   tick, **Balance operator workload** tick, a **shift-wise schedule download**, and
@@ -181,7 +185,42 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
-### Promise recovery (2026-07-14) — ✅ BUILT on branch `promise-recovery` (not pushed)
+### Latest session (2026-07-14) — analysis, hard limits, and a debugging lesson
+
+Two things, both important context (no code shipped beyond what's listed in the feature
+blocks below — this was mostly investigation):
+
+**1. The software is near its optimization ceiling — remaining levers are BUSINESS, not
+code.** The owner pushed hard on "optimize more." Measured exhaustively on the 65-order
+book (now `Test6.xlsx`): sequencing is **converged** (400 and 2,500 evals both hit
+39.74 d / 713 late-days). The absolute floor (each order planned alone, whole shop to
+itself) is **311 late-days / 23 orders late even alone** (a runway problem — due dates at/
+before the plan start). **12 out-of-the-box directions were tested WITH the optimizer**
+(de-consolidation, overlap 90, lower split, late-days-only score, blanket + per-item
+machine flexibility incl. a joint sequence+machine-assignment prototype, cheaper setups) —
+all land 700–746; the biggest, a joint machine-assignment search, recovered only ~13 days.
+**Do NOT build a machine-assignment v2** (measured prize too small). Idle machines/operators
+are idle at the WRONG TIMES — utilization is a means, not the goal. The real remaining
+levers: realistic due-date quoting (the 311 unavoidable), family-changeover setups if real
+(≈2 days makespan; needs owner's floor knowledge), partial deliveries, temporary week-1/2
+capacity. Full data in the `sequence-optimizer-findings` memory.
+
+**2. LESSON — always match the owner's EXACT conditions before quoting/comparing numbers.**
+The owner reported a "paradox": `Test6` (65 orders) finished in ~40 days but `Test5` (54
+orders, fewer) in ~42, and suspected hard-coding. Investigation (verified, after I got it
+WRONG twice by using mismatched masters/start): **it is NOT hard-coding** (no baked-in
+numbers; the raw scheduler reproduces it; each file computes its own result). The real
+cause is entirely the **2 extra helper operators (HP4, HP5) in Test6**. With helpers held
+EQUAL (both books 19 ops, same July-14 start, both Deep-400 optimized): **Test5 = 41.4 d,
+Test6 = 43.5 d — the smaller book IS faster, as intuition expects.** The owner's live 40-vs-42
+was: Test6 ran with 21 ops (→~40), Test5 with 19 ops (→41.4≈42). Also note: **uploading a
+workbook MERGES orders (never auto-removes)** — the owner assumed a new upload replaces the
+old book; it does not, so a "smaller" upload can leave a larger merged book. And **the live
+site had NO optimization applied** at session end (`optimize_meta.active=False`). Takeaway
+for next session: reproduce the owner's exact file + config first; don't reach for
+explanations before matching conditions.
+
+### Promise recovery (2026-07-14) — ✅ SHIPPED to `main` and LIVE
 
 **Auto committed re-sequencing after a disruption.** When a worker absent / machine down
 makes committed orders slip past their promises, strict promised-date order is measurably
@@ -197,9 +236,9 @@ end-to-end on the real book (disruption → recovery → **17 promises protected
 377 → 315). Quiet `#recovery-note` on Orders (informational only). **323 tests.** 4 commits
 on `promise-recovery` (objective / store / _plan wiring / UI+docs). Spec + full findings:
 `2026-07-14-promise-recovery-...design.md` and the `sequence-optimizer-findings` memory.
-The branch is stacked on the unpushed Expedite fix, so "push to main" ships both + this.
+**All merged to `main` and pushed/live.**
 
-### Optimize ↔ Expedite bug (2026-07-13) — ✅ FIXED (committed to `main`; push when asked)
+### Optimize ↔ Expedite bug (2026-07-13) — ✅ FIXED, SHIPPED & LIVE
 
 **The owner ran Deep on the live site (Expedite tick ON) and got "No improvement found"
 — 43.54 d / 1015 late-days unchanged.** Root cause: `expedite_window_min > 0` makes Rule 6

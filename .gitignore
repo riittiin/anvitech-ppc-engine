@@ -30,3 +30,7 @@ anvitech-machine-schedule-*.csv
 *-machine-schedule-*.csv
 anvitech-schedule-*.csv
 anvitech-shiftwise-schedule-*.csv
+
+# Other real-data SO lists (never commit real data)
+new_so_list.xlsx
+*_so_list.xlsx
