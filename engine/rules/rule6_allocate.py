@@ -726,11 +726,13 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
     """Split every operator-run operation into its per-day, per-shift segments and name
     the **actual operator** working each shift. A two-shift machine runs 08:00–19:00
     (1st) + 19:00–05:00 (2nd); a single-shift/manual station runs 09:00–18:00 only.
-    Operators are assigned fairly (qualified for the machine + on that shift; the
-    free-now, least-loaded one), so the same machine hands off to different people at
-    shift change instead of crediting one person for a multi-day block. Returns a list
-    of detail rows (Machine, SO, Batch, Item, …, Date, Shift, Start, End, Minutes,
-    Operator). Timing is never changed — this is a reporting view of the fixed plan."""
+    Segments FOLLOW THE PLAN first: whenever the schedule's named operator covers the
+    segment's shift, the download shows that same name (the printed sheet must match
+    the Gantt — 2026-07-15 audit). Only segments the named person physically can't
+    work (the other shift of a multi-day block, an overloaded shift) are filled with
+    a free, least-loaded qualified person — or marked UNSTAFFED, never double-billed.
+    Returns a list of detail rows (Machine, SO, Batch, Item, …, Date, Shift, Start,
+    End, Minutes, Operator). Timing is never changed — a reporting view of the plan."""
     from ..operator_coverage import qualified_operators
     cal = masters.calendar
     thr = config.two_shift_threshold_hours

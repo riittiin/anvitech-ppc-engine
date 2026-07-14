@@ -334,11 +334,17 @@ regression: `tests/test_operator_invariants.py`). Measured on Test5: peak operat
 `rule6_allocate._rebalance_operators`.
 
 **Operator load can never exceed 100% (owner guarantee), and uncovered work is
-surfaced as UNSTAFFED.** The shift-wise view assigns each per-shift segment to a
-qualified person who is actually **free** at that moment; when a shift runs more
-machines than it has qualified people (e.g. three VMCs overnight with two night-shift
-VMC operators), the extra segment is marked **`⚠ Unstaffed`** instead of being billed
-to an already-busy person (that double-billing pushed operators to 107% live).
+surfaced as UNSTAFFED.** The shift-wise view **follows the plan first**: every
+segment whose named (Gantt) operator covers that shift shows that same person — the
+printed shift sheet and the Gantt never disagree (2026-07-15 audit fix). Segments the
+named person physically can't work (the other shift of a multi-day block) go to a
+qualified person who is actually **free**; when a shift runs more machines than it
+has qualified people (e.g. three VMCs overnight with two night-shift VMC operators),
+the extra segment is marked **`⚠ Unstaffed`** instead of being billed to an
+already-busy person (that double-billing pushed operators to 107% live). In the
+two-pass plan, the open pass's fairness rebalance also treats people **reserved by
+the committed pass** as busy (audit fix: one person could land on two machines at
+once across the passes).
 Analytics rolls those segments into a headline **"unstaffed hours"** number with an
 explanatory note — the plan itself is untouched (reporting only); the note tells the
 owner where extra shift crew is genuinely needed.
