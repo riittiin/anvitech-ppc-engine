@@ -277,12 +277,22 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
 
 # --------------------------------------------------------------------------- #
 # Settings sweep — auto-tune the overlap % inside the same Optimize click
-# (2026-07-15 spec). The sequence search only ever ran under whatever Settings
-# the admin had; this also searches the overlap dial and returns the best
-# (sequence, overlap) pair. Same total eval budget: probe every candidate
-# briefly, then spend the rest deepening the winner.
+# (2026-07-15 spec; budget contract strengthened the same day after a live
+# regression: at half depth the current setting lost to a challenger it beats
+# at full depth — Deep returned 753 late-days where the pre-sweep button found
+# 713). The CURRENT setting always gets the FULL advertised budget (the floor
+# = exactly the plain Optimize button's result); probing the other candidates
+# and deepening the best probe are bounded EXTRA evals on top.
 # --------------------------------------------------------------------------- #
 OVERLAP_CANDIDATES = (50, 60, 70, 80, 90, 100)
+
+
+def sweep_total_evals(budget_evals, candidates=OVERLAP_CANDIDATES):
+    """Upper bound on the evaluations one ``sweep_optimize`` call may spend:
+    the current setting's full-budget floor + the probe pool + the challenger's
+    deepening. The API sizes the progress display with this."""
+    probe_pool = max(budget_evals // 4, len(candidates))
+    return budget_evals + probe_pool + budget_evals // 4
 
 
 @dataclass
@@ -300,16 +310,22 @@ class SweepResult:
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None,
                    candidate_setup=None, candidates=OVERLAP_CANDIDATES) -> SweepResult:
-    """Search batch sequence AND overlap %, spending ``budget_evals`` in total.
+    """Search batch sequence AND overlap %. ``budget_evals`` is the CURRENT
+    setting's guaranteed full-depth budget; the sweep spends up to
+    ``sweep_total_evals(budget_evals)`` in total.
 
-    Budget shape (the never-worse contract): probes are CHEAP and noisy — measured
-    on the real book, a shallow probe can misrank settings vs a deep search. So the
-    CURRENT setting keeps the lion's share of the budget (~half — close to today's
-    depth), the other candidates share a ~quarter probe pool, and only the best
-    probe (the challenger) is deepened with the rest. The challenger replaces the
-    current setting only if its deepened score is STRICTLY better than the current
-    setting's deepened score — big setting differences still win; probe noise
-    cannot. Ties keep the current setting (no churn).
+    Budget shape (the never-worse contract, strengthened 2026-07-15): the
+    CURRENT setting runs FIRST at the FULL advertised budget — with a fixed
+    seed that run is identical to the plain (pre-sweep) Optimize button, so the
+    sweep's floor is exactly what that button produced, and an early Stop still
+    leaves the user's own setting as the most-searched candidate. Probes are
+    CHEAP and noisy — measured on the real book, a shallow probe can misrank
+    settings vs a deep search — so the other candidates share an EXTRA ~quarter
+    probe pool, and only the best probe (the challenger) is deepened with a
+    further ~quarter. The challenger replaces the current setting only if its
+    deepened score is STRICTLY better than the current setting's full-depth
+    score — big setting differences still win; probe noise cannot. Ties keep
+    the current setting (no churn).
 
     Determinism: ``optimize`` with the same seed evaluates the same plans in the
     same order, so a longer run strictly extends a shorter one — the deepened
@@ -356,24 +372,25 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                       "evals": res.evals})
         return res
 
-    # 1) Probe pool (~quarter) for the non-current candidates.
+    # 1) The current setting runs FIRST at the FULL advertised budget — the
+    #    never-worse floor (same seed ⇒ identical to the plain Optimize
+    #    button), and an early Stop keeps the user's own setting deepest.
+    cur_res = _run(cur, budget_evals)
+
+    # 2) Probe pool (an EXTRA ~quarter) for the non-current candidates.
     probes = {}
     if others:
-        probe_each = max(1, budget_evals // (4 * len(others)))
+        probe_each = max(1, (budget_evals // 4) // len(others))
         for ov in others:
-            r = _run(ov, min(probe_each, budget_evals - spent))
+            r = _run(ov, probe_each)
             if r is not None:
                 probes[ov] = r
 
-    # 2) The current setting's deep run (~half the total budget — the closest
-    #    thing to what today's Optimize would have produced).
-    cur_res = _run(cur, min(max(1, budget_evals // 2), budget_evals - spent))
-
-    # 3) Deepen the best probe (the challenger) with everything left.
+    # 3) Deepen the best probe (the challenger) with a further ~quarter.
     best_ov, best_res = cur, cur_res
     if probes:
         challenger = min(probes, key=lambda ov: (score(probes[ov].best), ov))
-        chal_res = _run(challenger, budget_evals - spent) or probes[challenger]
+        chal_res = _run(challenger, budget_evals // 4) or probes[challenger]
         if best_res is None or score(chal_res.best) < score(best_res.best):
             best_ov, best_res = challenger, chal_res     # strict: ties keep current
 

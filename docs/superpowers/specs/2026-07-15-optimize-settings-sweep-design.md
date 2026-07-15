@@ -19,23 +19,33 @@ Owner decisions (2026-07-15):
 - **Scope:** overlap % only (candidates 50–100 step 10, plus the current value).
   The sweep helper is written so another dial is a small addition later.
 
-## How the budget is spent (probe-then-deepen)
+## How the budget is spent (floor-first, probe, deepen)
 
-Total evaluations stay the SAME as today (Quick 150 / Deep 400) — no extra wall
-time on the site.
+> **CONTRACT STRENGTHENED (2026-07-15, same day, after a live regression).** The
+> shipped v1 gave the current setting only ~half the budget and let a challenger
+> dethrone that weakened result: on the real 65-order book (start 11-07) Deep
+> returned **753 late-days / winner "Overlap 60"** where the pre-sweep button
+> found **713 late-days at Overlap 80** — and at full depth Overlap 80 in fact
+> beats 60. The guarantee the owner expects is *"one click is never worse than
+> the pre-sweep Optimize button."* So the budget shape is now:
 
-1. **Probe:** each candidate overlap gets an identical short probe —
-   `probe_each = max(10, budget // (2 × n_candidates))` evaluations of the standard
-   search (Rule-3 baseline + strong dispatch starts + a little hill-climb). Setting
-   differences show up immediately in these early plans.
-2. **Deepen:** the whole remaining budget runs the full multi-start sequence search
-   under the winning overlap. Best of probe/deep wins (same config → comparable).
-3. **Deterministic:** candidates are visited in sorted order, all seeds fixed,
-   budgets are eval counts. **Never worse:** the current overlap is always a
-   candidate, and the honest baseline shown to the admin is still the real current
-   plan under the current settings.
-4. **Stop & keep best** works: cancellation is polled between evaluations across the
-   whole sweep; the best (sequence, overlap) found so far is kept.
+1. **Floor first:** the CURRENT overlap runs FIRST at the FULL advertised budget
+   (Quick 150 / Deep 400). With the fixed seed this run is *identical* to the
+   pre-sweep Optimize button, so the sweep's floor is exactly that result — and
+   an early **Stop** still leaves the user's own setting as the deepest-searched
+   candidate.
+2. **Probe (extra):** the non-current candidates share an EXTRA ~quarter pool —
+   `probe_each = max(1, (budget // 4) // n_others)` evaluations each. Probes are
+   cheap and noisy; they only nominate, never win outright.
+3. **Deepen (extra):** the best probe (the challenger) gets a further ~quarter.
+   It replaces the current setting **only if its deepened score strictly beats
+   the current setting's full-depth score** — ties keep the current setting.
+4. **Total** = `sweep_total_evals(budget)` ≈ 1.5 × the advertised budget
+   (Quick ~225 / Deep ~600 plans; the extra wall time is the price of tuning the
+   overlap without ever gambling away the plain button's quality).
+5. **Deterministic:** all seeds fixed, budgets are eval counts. **Stop & keep
+   best** works: cancellation is polled between evaluations across the whole
+   sweep; the best (sequence, overlap) found so far is kept.
 
 ## Promise guard (Pass-1 eligibility)
 

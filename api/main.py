@@ -871,7 +871,10 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
                       and slip["promises_missed"] <= cur_slip["promises_missed"])
                 return res, ok
 
-        _OPTIMIZE.update(state="running", label=label, budget_evals=budget_evals,
+        # The progress denominator is the sweep's true upper bound: the current
+        # setting's full-depth floor + the overlap probes + the challenger.
+        _OPTIMIZE.update(state="running", label=label,
+                         budget_evals=optimizer.sweep_total_evals(budget_evals),
                          evals=0, baseline=None, best=None, error=None, result=None,
                          elapsed_s=0.0, started_mono=time.monotonic(), cancel=False)
 

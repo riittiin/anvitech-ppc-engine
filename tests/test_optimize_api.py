@@ -38,7 +38,10 @@ def test_optimize_then_apply_persists_ranks():
     _seed_book()
     st = m._start_optimize(budget_evals=15, label="quick", background=False)
     assert st["state"] == "done"
-    assert st["evals"] <= 15
+    # The advertised budget is the current setting's full-depth floor; the
+    # overlap probes + challenger are bounded extras on top (sweep contract).
+    from engine import optimizer
+    assert st["evals"] <= optimizer.sweep_total_evals(15)
     assert st["baseline"] and st["best"]
 
     meta = m._optimize_apply()

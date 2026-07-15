@@ -1,8 +1,10 @@
-"""The Optimize settings sweep (2026-07-15 spec): one click also tunes the
-overlap %, spending the SAME total budget (probe every candidate, deepen the
-winner). Never worse than the current setting; ties keep the current setting;
-promise-guard hook can veto candidates; Apply persists the winning overlap into
-the saved plan config with a matching inputs fingerprint."""
+"""The Optimize settings sweep (2026-07-15 spec, contract strengthened same
+day): one click also tunes the overlap %. The CURRENT setting always gets the
+FULL advertised budget — the sweep's floor is exactly the pre-sweep Optimize
+button's result — and the probes + challenger deepening are bounded EXTRA evals
+on top (`sweep_total_evals`). Never worse than plain Optimize; ties keep the
+current setting; promise-guard hook can veto candidates; Apply persists the
+winning overlap into the saved plan config with a matching inputs fingerprint."""
 import io
 from dataclasses import replace
 from datetime import date
@@ -27,18 +29,27 @@ def _book(overlap=80):
 # --------------------------------------------------------------------------- #
 # Pure sweep mechanics
 # --------------------------------------------------------------------------- #
-def test_sweep_never_worse_than_the_current_setting_at_deep_budget():
-    """The never-worse contract: probes are noisy (measured on the real book — a
-    shallow probe misranked overlap 70 above 80), so the sweep's answer must be at
-    least as good as simply running the CURRENT setting at its guaranteed share
-    (~half the budget), and a different overlap may win only by beating that
-    strictly."""
+def test_sweep_never_worse_than_plain_optimize_at_the_same_budget():
+    """The never-worse contract, strengthened after a live regression
+    (2026-07-15: Deep on the real book returned 753 late-days where the
+    pre-sweep button found 713 — the current setting was searched at only half
+    depth and a shallower challenger dethroned it). The CURRENT setting must be
+    searched at the FULL advertised budget, so the sweep's result is at least as
+    good as the plain Optimize button's; a different overlap may win only by
+    strictly beating that full-depth result."""
     so, cfg, masters = _book(overlap=80)
     budget = 80
     sw = optimizer.sweep_optimize(so, cfg, masters, budget_evals=budget, seed=42)
 
-    assert sw.evals <= budget
-    cur_deep = optimizer.optimize(so, cfg, masters, budget_evals=budget // 2, seed=42)
+    # The current setting's own run must carry the full advertised budget.
+    cur_rows = [t for t in sw.table if t.get("overlap") == 80 and t.get("eligible")
+                and t["evals"] > budget // 4]
+    assert cur_rows and cur_rows[0]["evals"] == budget
+
+    # Probes + challenger deepening are bounded extras on top of the floor.
+    assert sw.evals <= optimizer.sweep_total_evals(budget)
+
+    cur_deep = optimizer.optimize(so, cfg, masters, budget_evals=budget, seed=42)
     assert score(sw.result.best) <= score(cur_deep.best)
     if sw.overlap_percent != 80:
         assert score(sw.result.best) < score(cur_deep.best)   # strictly better only
@@ -80,7 +91,7 @@ def test_sweep_progress_is_monotonic_across_candidates():
     optimizer.sweep_optimize(so, cfg, masters, budget_evals=60, seed=42,
                              on_progress=lambda done, best: seen.append(done))
     assert seen == sorted(seen)
-    assert seen[-1] <= 60
+    assert seen[-1] <= optimizer.sweep_total_evals(60)
 
 
 # --------------------------------------------------------------------------- #
