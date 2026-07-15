@@ -341,10 +341,12 @@ named person physically can't work (the other shift of a multi-day block) go to 
 qualified person who is actually **free**; when a shift runs more machines than it
 has qualified people (e.g. three VMCs overnight with two night-shift VMC operators),
 the extra segment is marked **`⚠ Unstaffed`** instead of being billed to an
-already-busy person (that double-billing pushed operators to 107% live). In the
-two-pass plan, the open pass's fairness rebalance also treats people **reserved by
-the committed pass** as busy (audit fix: one person could land on two machines at
-once across the passes).
+already-busy person (that double-billing pushed operators to 107% live). The fairness
+rebalance also treats people **reserved** (e.g. by an operator absence, above) as busy,
+so it never reassigns work onto someone unavailable at that time (originally an
+audit fix for the now-removed two-pass committed/open split, where a person could land
+on two machines at once across the passes; the same protection now guards the single
+pass's reservations).
 Analytics rolls those segments into a headline **"unstaffed hours"** number with an
 explanatory note — the plan itself is untouched (reporting only); the note tells the
 owner where extra shift crew is genuinely needed.
@@ -371,68 +373,67 @@ schedule — the feedback loop is driven **purely by quantity produced/rejected 
 process** (the director's spec). A power cut or over-long setup is logged for
 analysis but does not move the plan.
 
-### Order commitment (lanes) & two-pass promise protection *(feature)*
+### Order commitment (lanes) *(feature — informational only, owner pivot 2026-07-16)*
 
-Every order occupies exactly one **commitment lane**:
-- **Open** (default) — new or not yet promised; schedules after all protected work
-  into remaining machine/operator capacity.
-- **Committed** — promised to a client; locked at its **current expected completion
-  date**. Scheduled in the protected group, ordered by `promised_date` (first promised,
-  first served).
-- **Urgent** — must hit a specific delivery date (its SO delivery date). Scheduled in
-  the protected group, ordered by that date (just high enough to meet it).
+Every order occupies exactly one **commitment lane**, shown as a badge on the Orders tab:
+- **Open** (default) — new or not yet promised.
+- **Committed** — the admin has told a client this order is promised; snapshots its
+  **current expected completion date** as `promised_date`.
+- **Urgent** — driven by its own SO delivery date, which becomes `promised_date`.
 
-**Two-pass planning enforces the promise.** Pass 1 schedules the **protected orders
-(Committed + Urgent)** in isolation via the unchanged Rules 1–6, producing their
-schedule as if Open orders do not exist. Pass 2 runs Rules 1–6 on **Open orders only**,
-with machine/operator intervals reserved from Pass 1's schedule, so Open ops backfill
-idle windows but **never overrun a committed block**. New Open orders thus cannot
-push a promised order past its date — the protected schedule is frozen. An **Urgent
-order's promised date** is its SO delivery date; a **normal Commit snapshots** the
-order's current expected completion at commit time. The admin may **Uncommit** an
-order (returns it to Open) or view a **warning preview** before marking an order
-**Urgent**, showing any committed orders it would push past their promise.
+**Lanes are pure status labels — they have no effect on scheduling.** Every active
+order, in every lane, is planned together as ONE pool by the standard Rules 1–6 (least
+slack, non-delay allocation — see Rule 3/Rule 6 above); Committed/Urgent orders do not
+get reserved capacity, a separate pass, or priority over Open orders. `promised_date`
+is kept purely for **display**: the Orders tab shows Promised vs Current-expected side
+by side, with a **red drift flag** when the plan's current expected date has slipped
+past the promise — so the owner knows which customers to call. Nothing else reads it.
+The admin may **Commit**, **mark Urgent**, or **Uncommit** (returns to Open) an order at
+any time; none of these actions change the schedule.
 
-**Rule 6 reservation support (engine-side change).** Rule 6 gains an optional
-`reserved={machine|operator: [(start,end), …]}` argument: when placing an operation,
-skip windows that overlap a reservation and reject placement that would not finish
-before the next reserved interval. `reserved=None` (Pass 1 and all existing callers) is
-byte-identical to today.
+**A committed/promised book plans byte-identical to the same book all-open** — this is
+a regression, not an aspiration (`tests/test_replay_single_pass.py`).
 
-**Consolidation guard:** orders of the same item are merged only when they share the
-same lane and (for protected lanes) the same promised date — a batch must not
-straddle lanes. Cross-lane orders stay separate.
+> **Historical note (superseded 2026-07-16):** an earlier design (2026-07-13/14) made
+> lanes protective — a two-pass scheduler ran Committed+Urgent orders first and reserved
+> their machine/operator time so Open orders could never push a promise late, plus an
+> automatic "promise recovery" re-sequencer for disrupted committed orders (below). A
+> follow-on design added a hard promise **veto** (any candidate plan breaking a promise
+> scored infinite). Measured on both real books, the veto approach scored **~30% worse**
+> than the simple two-pass shape — zero-slack promises collapse the feasible search
+> region. The owner then redefined the model to the informational-only rule above; all
+> of that machinery (two-pass, the veto, promise recovery, the urgent push-warning
+> preview) was removed. See `docs/superpowers/specs/2026-07-15-self-tuning-plan-design.md`'s
+> SUPERSEDED Phase-2 block for the full account.
 
-**Default:** all orders are Open; with no committed orders the plan is byte-identical
-to today (no change in behaviour).
+### Self-tuning plan — the plan re-optimizes itself *(feature, 2026-07-16)*
 
-### Promise recovery — automatic committed re-sequencing after a disruption *(feature)*
+Rather than requiring the admin to remember to click Optimize, the plan **watches for
+changes and re-optimizes on its own**:
 
-When a disruption (a worker absent, a machine down) makes committed orders slip past their
-promises, scheduling them in strict promised-date order is measurably sub-optimal: it
-serves the earliest promise even when that needlessly breaks several others. Measured on a
-real disrupted book, **re-sequencing the committed set recovers ~a third of the promise
-damage** (e.g. a lost week: 344 → 242 promise-slip-days, 55 → 44 broken; a lost fortnight:
-637 → 511). This is done **automatically — no setting, no button**:
-
-- When Pass 1 (committed/urgent) shows any order finishing past its promise, the planner
-  kicks off a **background** search (`optimizer.optimize(..., objective="promise_slip")`)
-  that minimises total promise-slip (broken-promise count as tiebreak) on the committed set.
-- The result — a committed order **rank** — is persisted (`anvitech:promise_recovery`) and
-  **replayed on every Plan** (planned expedite-off so the order takes effect), until the
-  committed set or its promises change (a new commit/uncommit or changed promise re-triggers;
-  a mere feedback quantity change does not — the ORDER still replays).
-- **Safety:** the search is seeded with the promised-date order and keeps the best, so the
-  recovered plan is **never worse** than today's date-order. Deterministic. No committed
-  slip → no search → byte-identical to today (golden untouched).
-- **How it works (the logic):** it re-orders which committed job claims each shared machine
-  next. An order with slack is made to wait, yielding its machine slot to an at-risk order;
-  the slack order still makes its promise, the at-risk one is saved. It **redistributes** the
-  unavoidable slip to protect the most promises — it never invents lost capacity back.
-- **Equal weighting (owner decision):** every promise counts the same; **no per-order
-  "critical" flag** (kept off the surface for non-technical floor users — a truly critical
-  order is handled by marking it Urgent). A quiet Orders-tab note reports how many promises
-  were protected; there is no control to operate.
+- **What counts as a change:** a fingerprint (`book_signature`) of every active order's
+  remaining qty, per-process remaining, lane/promised date, and the current operator
+  absences. Any deliberate admin action that can change this — a masters upload, an
+  order delete/clear, a commit/urgent/uncommit, an absence added/removed, or a Settings
+  save — **immediately** kicks off a fresh Optimize contest in the background.
+- **Punches never auto-trigger.** Each punch still replans instantly (the facts always
+  flow), but the entry clerk presses a **"Done entering — update & optimize plan"**
+  button (either role) when finished for the day; that is the only thing that starts an
+  optimize contest from punched actuals. A contest already running just gets queued to
+  re-check the book once it finishes, so no change is silently dropped.
+- **Cloud-only.** The background contest only runs when the free GitHub Actions cloud
+  compute is configured (see "Optimize plan" below); if it isn't, the self-tuning check
+  is skipped with a note rather than burning the free web instance for 20-40 minutes.
+  The manual Optimize button is unaffected — it still falls back to local compute.
+- **Auto-apply only if strictly better.** When the contest finishes, its best plan is
+  compared against what the users currently see (today's applied plan, or the plain
+  plan if none is applied, replanned on today's book). It is applied automatically only
+  if it is **strictly** better (never on a tie or a worse result) — including the
+  overlap % if the settings sweep (below) found a better one. Either way a one-line note
+  appears on the Orders tab: *"Plan auto-re-optimized 18:12 — 445 late-days (was 471),
+  overlap 80 → 70"* or *"Checked 18:12 — current plan still best."*
+- **No off switch.** Self-tuning is always on in the deployed app; there is no button or
+  setting to turn it off.
 
 ### Optimize plan (sequence search) *(feature)*
 
@@ -460,28 +461,33 @@ keeps the best.
   result on any machine. The scheduler is memoized (invariant machine-name parsing and
   per-day work-windows are cached), so each plan evaluates ~3.5× faster with identical
   results.
-- **Settings sweep (2026-07-15).** The same click also auto-tunes the **overlap %**
-  (`optimizer.sweep_optimize`): candidates 50–100 step 10 plus the current value, all
-  inside the SAME eval budget — half probes every candidate identically, half deepens
-  the winner. The current setting is probed first and only a **strictly better** score
-  dethrones it (never worse; no setting churn on ties). With committed/urgent orders,
-  a candidate overlap must first prove — on the committed pass alone — that promise
-  slip and broken-promise count are **no worse than under the current setting**
-  (the promise guard; vetoed candidates are skipped). Apply persists the winning
-  overlap **into the saved plan config** (openly visible in Settings) alongside the
-  ranks, and the staleness fingerprint is computed against the winning settings.
-  Result panel reports "Best setting found: Overlap X%". Spec:
-  `docs/superpowers/specs/2026-07-15-optimize-settings-sweep-design.md`.
+- **Settings sweep (2026-07-15, fair contest).** The same click also auto-tunes the
+  **overlap %** (`optimizer.sweep_optimize`): the current overlap plus candidates
+  50/60/70/80 (90/100 dropped — they lost every measured contest on both real books)
+  each get the **SAME search depth** — the total budget split equally across the
+  contenders — and the best-scoring plan wins outright. The current setting runs first
+  (an early Stop still leaves it fully searched) and wins exact ties (no Settings
+  churn); that is its only privilege. Apply persists the winning overlap **into the
+  saved plan config** (openly visible in Settings) alongside the ranks, and the
+  staleness fingerprint is computed against the winning settings. Result panel reports
+  "Best setting found: Overlap X%". Spec:
+  `docs/superpowers/specs/2026-07-15-optimize-settings-sweep-design.md`. Every lane
+  competes in the same one pool (see "Order commitment (lanes)" above) — no lane gets
+  a promise guard or reserved capacity in the search; only operator absences (below)
+  reserve time.
+- **Cloud compute (2026-07-15).** When configured, clicking Optimize runs the full
+  2,400-plan fair contest on a free GitHub Actions runner (~8-10 min) instead of the
+  reduced 1,000-plan local fallback (~40 min on the free web instance) — same code,
+  byte-identical results either way. Falls back to local automatically if the cloud is
+  unavailable or times out.
 - The admin sees a before/after table and chooses **Apply** or Discard. Apply persists
   a **rank per (SO No, Item Code)**; every subsequent Plan replays it
   (`pipeline.apply_priority_rank`): ranked batches reorder among the slots they already
   occupy, **unranked (new) orders keep their natural Rule-3 slot** — a fresh urgent
   order is never pushed to the back. A banner flags how many orders were added since
   the last optimization ("re-optimize for the best plan"); **Remove optimization**
-  reverts to the pure Rule-3 order.
-- **Promises stay sacred:** with committed/urgent orders present, only the OPEN pass is
-  searched, against the protected pass's reservations — an optimized plan can never
-  move a promised date. All-open books search the whole book.
+  reverts to the pure Rule-3 order. Since 2026-07-16 a contest may also be started
+  automatically by the self-tuning plan (above) and auto-applied.
 - **Replay guarantee:** feeding the saved ranks back through the pipeline reproduces
   exactly the metrics the search reported (tested) — **for the same inputs**. The
   applied result carries a **fingerprint of the masters workbook + the plan-shaping
@@ -494,6 +500,27 @@ keeps the best.
   ranks) are excluded from the fingerprint.
 - **Default: off.** With no applied optimization every plan is byte-identical to today
   (golden trace unchanged).
+
+### Operator absences *(feature, 2026-07-16)*
+
+The admin can mark a named operator absent for a date range (day granularity), from a
+dropdown of the operators in the current masters — a genuinely physical constraint,
+unlike the informational commitment lanes above:
+
+- **The person is unavailable in every plan and every Optimize contest** for the whole
+  window (inclusive) — their scheduled work is pushed to a qualified, free colleague or
+  to after the absence, the same mechanism Rule 6 uses for any reserved time.
+- **Analytics stays honest:** an absent operator's available capacity for those days is
+  subtracted before computing their utilization %, so they don't show as "idle" while
+  actually on leave.
+- **Orphaned absences (masters re-upload removed the operator)** are ignored by
+  planning and reported as a non-blocking row in the validation banner
+  (`ABSENT_OPERATOR_UNKNOWN`) — never fatal, same forgiving pattern as a pending
+  machine/routing.
+- **Visibility:** the absence list is visible to both roles (Settings area); only the
+  admin can add or remove an entry. No password re-confirmation (reversible, not
+  destructive).
+- **Default:** no absences on file ⇒ every plan is byte-identical to today.
 
 ---
 

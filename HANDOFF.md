@@ -18,8 +18,13 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0, 512 MB).
 - **Repo:** GitHub `riittiin/anvitech-ppc-engine` (private). Push to `main` →
   Render auto-redeploys (no separate deploy step).
-- **339 tests pass** (`pytest`, 1 skipped Mongo). FastAPI backend + vanilla HTML/JS
-  frontend, plain Python engine. Python 3 (run as `python3` locally — no `python` alias).
+- **362 tests pass, 1 skipped** (`pytest`, the skip is Mongo). FastAPI backend + vanilla
+  HTML/JS frontend, plain Python engine. Python 3 (run as `python3` locally — no
+  `python` alias). ⚠️ **`main` is currently behind:** the self-tuning plan + operator
+  absences + cloud-Optimize work below is on branch `self-tuning-plan`, complete and
+  tested, but **NOT pushed to `main`** — the live site still runs the 2026-07-15
+  deploy-day code (see "Latest session (2026-07-15/16)" below for what's staged and
+  why it hasn't shipped yet).
 - **Login is a two-role app-owned session** (admin / user) — see "Login & roles".
 - The engine has **8 business rules** (1–8). (Rule 8 = the Plan over the order book —
   there is no `rule8` module.) The UI now shows only **4 tabs** — **Orders**,
@@ -193,6 +198,125 @@ middleware in `api/main.py` + `web/login.html`. Spec:
   config to `anvitech:plan_config`; users (and admin auto-load) plan with that config.
 
 ## What changed most recently (read these, newest first)
+
+### Latest session (2026-07-15/16) — cloud Optimize, self-tuning plan, promise-rule pivot, absences — ⚠️ BUILT & TESTED on branch `self-tuning-plan`, **NOT pushed to `main`**
+
+**Status:** 362 tests pass, 1 skipped; golden untouched throughout (no regen). Branch
+`self-tuning-plan`, 23 commits, fully TDD'd via a subagent-driven SDD ledger
+(`.superpowers/sdd/progress.md`). The live site is unaffected until the owner says
+"push to main" — everything below is staged, reviewed, and ready.
+
+**1. Cloud Optimize — the full 2,400-plan contest on free compute (shipped to `main`
+earlier the same day, 2026-07-15).** Render's free web instance is 0.1 CPU and can't
+run a big search fast; a free **GitHub Actions runner** (2 vCPU) can. Clicking Optimize
+now dispatches `optimize.yml` (`workflow_dispatch`) with a job id;
+`scripts/cloud_optimize_worker.py` fetches the book snapshot from `GET
+/optimize/job/{id}`, runs the fair contest (`engine/optimize_service.run_contest`,
+contenders fanned across cores), heartbeats `POST /optimize/progress`, and posts `POST
+/optimize/result` — all three authenticated via the `X-Worker-Secret` header
+(`OPTIMIZE_WORKER_SECRET`, constant-time compare, bypasses the session gatekeeper). One
+button (the old Quick/Deep split now maps to the same budget); local compute is the
+automatic fallback on dispatch failure, a worker error, or a timeout
+(`OPTIMIZE_CLOUD_TIMEOUT_MIN`, default 20) — the button always works, cloud or not.
+Deterministic: a cloud run is byte-identical to a local run of the same contest
+(E2E-verified 717/36.79 late-days/makespan on Test6@11-07). **GitHub billing facts** (so
+nobody worries about cost): 2,000 free Actions minutes/month on the repo's own account,
+a full 2,400-plan contest runs **~6-10 minutes**, and the repo's spending limit is set
+to **$0** — it is architecturally impossible to be billed.
+
+**2. The settings-sweep regression saga (same day, three rewrites — read this before
+touching `sweep_optimize` again).** The Settings-sweep feature (auto-tune overlap %
+alongside the sequence search) went through three contracts in one day:
+   - **v1 (shipped, then found broken):** the current overlap got roughly half the
+     total budget, challengers split the rest. On the real 65-order book this let a
+     *weaker* search dethrone a *stronger* one — Deep returned 753 late-days/"Overlap
+     60" where the pre-sweep button had found 713 at Overlap 80. Unequal search depths
+     misrank settings; this is why "current setting wins ties" alone isn't a safe rule.
+   - **v2 (owner: "the best setting must win"):** every candidate at the SAME full
+     depth — 6 overlaps × 400 plans = 2,400 total. Correct, but ~1.5 hr on Render's free
+     tier — too slow to use.
+   - **v3 (owner: "too slow — ONE option, ≤1,000 plans total"):** measured that a cheap
+     100-eval probe-then-deepen picks the wrong winner 2 times in 3, and that overlap
+     90/100 lost every contest ever measured on both real books — dropped them from the
+     candidate list entirely. Result: 4 contenders × 250 plans (budget split equally,
+     current setting probed first, wins ties) ≈ the 2,400-plan contest's quality at 42%
+     of the compute — this is `optimizer.sweep_optimize`'s shape today.
+   - **Then Cloud Optimize (above) made v2's "too slow" objection moot** — the owner got
+     the FULL 2,400-plan fair contest after all, just on GitHub's compute instead of
+     Render's. `sweep_optimize`'s 1,000-plan v3 shape is kept as the **local fallback**
+     when cloud is unavailable.
+
+**3. Self-tuning plan — the plan re-optimizes itself (this branch, Phase 1 of
+`docs/superpowers/specs/2026-07-15-self-tuning-plan-design.md`).** The owner's ask:
+"when production changes reality, the plan should re-optimize without anyone
+remembering to click." Built as: a book fingerprint
+(`optimize_service.book_signature` — order keys, remaining qty + per-process
+remaining, lane, promised date, absences); `api._bump_book_changed()` fires
+immediately after every **deliberate** admin mutation (upload, order delete/clear,
+commit/uncommit/urgent, absence add/remove, Settings save) and starts a background
+contest if the book actually changed since the last applied one; a change landing
+mid-run is queued (`_AUTO["pending"]`) and triggers a follow-up run when the current
+one finishes, so nothing is silently dropped. **Punches never auto-trigger** — the
+Capture Actuals tab got a **"Done entering — update & optimize plan"** button (`POST
+/optimize/done`, either role) as the only punch-side trigger, so a clerk mid-entry
+doesn't burn a contest per row. **Auto contests are cloud-only** — with no
+`GITHUB_DISPATCH_TOKEN`/`OPTIMIZE_WORKER_SECRET` configured the self-tuning check is
+skipped with a note rather than running a 20-40 minute local search in the background;
+the manual Optimize button is unaffected. **Auto-apply is strictly-better-or-nothing**:
+the finished contest's best plan is compared against what users currently see (the
+applied ranks, or none, replayed on TODAY'S book); it only applies on a strict
+improvement, and either way writes a one-line note (`anvitech:auto_note`) surfaced on
+`/run` and the Orders tab — *"Plan auto-re-optimized 18:12 — 445 late-days (was 471),
+overlap 80 → 70"* or *"Checked 18:12 — current plan still best."* **No user-facing off
+switch** (owner decision) — `AUTO_OPTIMIZE=0` exists only for test isolation, never
+documented or exposed.
+
+**4. The promise-rule gate FAILED — owner pivoted, discarding the whole feature (this
+branch, 2026-07-16).** The plan's Phase 2 was a "promise ceiling" — every order in one
+pool, a hard veto rejecting any candidate plan that breaks a committed/urgent promise.
+Built (6 commits), then measured against the spec's own shipping gate on both real
+books — and it **failed both**: Test5 scored 1364.2 (joint+veto) vs 1051.4 (the old
+two-pass) on the combined promise-slip metric; Test6 scored 1843.3 vs 1464.7. The joint
+winner's own replay showed `promises_ok=False` on both books. Root cause: **zero-slack
+promises collapse the feasible region** — when a promise has no slack left, a hard veto
+makes huge swaths of the search space score infinite, and the search can't find its way
+out. Escalated to the owner with options (hybrid contender, re-measure, or drop Phase 2
+entirely); **the owner dropped it** and redefined the model instead: **lanes
+(Open/Committed/Urgent) are pure status labels, not protection.** Commit/Urgent still
+snapshot a `promised_date` for **display only** (Orders tab: Promised vs
+Current-expected, red flag on drift) — nothing constrains the scheduler or Optimize
+anymore. Removal (Phase 2R, 2 commits): the veto (`promise_ceiling_ok`,
+`feasible=`), the sweep's per-candidate promise guard, `_plan`'s two-pass branch +
+committed-pass reservations, the promise-recovery auto-trigger (`_maybe_start_recovery`,
+`anvitech:promise_recovery`, shipped 2026-07-14, now fully removed), the urgent
+push-warning preview, and Rule 1/Rule 3's lane-aware special-casing — **every lane
+sorts/groups the same way again.** The core regression: a committed+promised book plans
+**byte-identical** to the same book all-open
+(`tests/test_replay_single_pass.py`, `tests/test_optimize_service.py::
+test_lanes_have_zero_scheduling_effect`). **Lesson for next time:** a hard constraint
+plus a real-world book with no slack is a bad combination — measure the gate on the
+REAL data before building the removal-resistant version, not after.
+
+**5. Operator absences (this branch, Phase 3, shipped alongside the above — unaffected
+by the pivot).** The admin can mark a named operator absent for a date range from
+Settings; `anvitech:absences` stores `{id, operator, from_date, to_date}`
+(day-granularity, ISO in the store, DD-MM-YYYY in the UI). The person becomes
+genuinely **unavailable** — a Rule 6 `reserved=` block — in every plan pass and every
+Optimize contest candidate (including the cloud payload, which round-trips absences).
+`engine/analytics.py` subtracts an absent operator's working days from their available
+capacity so utilization stays honest. A masters re-upload that removes an operator with
+absence rows on file doesn't break anything — the orphaned rows are ignored by planning
+and reported as a non-blocking `ABSENT_OPERATOR_UNKNOWN` row. UI: an always-visible
+panel (not nested in the admin-only toolbar, so the user role sees the read-only list;
+add/remove controls are CSS- and server-gated admin-only) — browser-verified live both
+roles via Chrome MCP.
+
+**Read next:** `CLAUDE.md`'s code-map bullets for `engine/optimizer.py`,
+`engine/optimize_service.py`, and `api/main.py` have the exact function/endpoint names;
+`RULES.md`'s "Order commitment (lanes)", "Self-tuning plan", "Operator absences" and
+"Optimize plan" sections have the business-rule version. The design history lives in
+`docs/superpowers/specs/2026-07-15-self-tuning-plan-design.md` (see its SUPERSEDED
+Phase-2 block) and `docs/superpowers/specs/2026-07-15-optimize-settings-sweep-design.md`.
 
 ### Latest session (2026-07-15) — deploy-day fixes, settings sweep, full-app audit — ✅ ALL SHIPPED & LIVE
 

@@ -182,8 +182,14 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   Analytics never bill a busy person — overload segments become `rule6_allocate.UNSTAFFED`
   and roll up as `headline.unstaffed_hrs`, so **no operator can ever show >100%**.
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
-  `Order` and `SOLine` now carry `commitment` (open|committed|urgent), `promised_date`,
-  and `committed_at` for promise protection.
+  `Order` and `SOLine` carry `commitment` (open|committed|urgent), `promised_date`,
+  and `committed_at`. **Informational only** (owner pivot 2026-07-16 — see the
+  self-tuning-plan spec's SUPERSEDED block): the lane is a status label, and
+  `promised_date` is a display-only snapshot (Orders tab shows Promised vs
+  Current-expected with a red drift flag when it slips) — neither constrains
+  the scheduler or Optimize. Historical note: an earlier design (2026-07-13/14)
+  had these fields drive a two-pass scheduler + a hard promise veto; that was
+  measured ~30% worse on both real books and discarded.
 - `engine/loaders.py` — read the uploaded workbook (Test4 format) → typed objects +
   non-blocking report. The 3 master sheets are read **header-driven** (`_locate_table`);
   resource-name normalization (`CNC 4` ≡ `CNC4`) and provisional-machine handling live here.
@@ -204,9 +210,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `order_rows` (dashboard). `Order`/`Actual`/`SOLine` each expose `.key = (so_no,
   item_code)`; the good-by-order / orders-with-actuals / per-process maps are all
   keyed by that pair. The DISPATCH gate (`finished_gate`) is matched via `is_dispatch`
-  (tolerates the `DISAPTCH` misspelling). `split_committed_open` separates protected
-  (Committed + Urgent) from Open orders for two-pass planning; carries
-  `commitment`/`promised_date` forward to `SOLine` so rules can see the lane.
+  (tolerates the `DISAPTCH` misspelling). `split_committed_open` (still present, still
+  tested) separates protected (Committed + Urgent) from Open orders — **kept as a
+  standalone helper but unused by planning**: `api._plan` and every contest are
+  single-pass over the whole book, so lanes carry `commitment`/`promised_date` onto
+  `SOLine` for display only, not for grouping.
 - `engine/book_store.py` — durable persistence of the book: active orders + the
   completed archive (hashes keyed by a composite **`"<so_no>\x1f<item_code>"`** field;
   `complete`/`uncomplete`/`delete` target one (SO#, item) line), actuals (append-only
@@ -214,7 +222,12 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `delete_orders` / `delete_all` (permanent deletes); `delete_actual` + `uncomplete_order`
   (per-entry **rollback**: each `Actual` has a uuid `id`, legacy backfilled);
   `set_commitment`/`clear_commitment` persist the `commitment`, `promised_date`,
-  `committed_at` fields for promise protection.
+  `committed_at` fields — informational only (see `engine/models.py` above).
+  `save_auto_note`/`load_auto_note` (`anvitech:auto_note`) hold the self-tuning
+  trigger's one-line status ("Plan auto-re-optimized …" / "Checked … still best").
+  `load_absences`/`save_absence`/`delete_absence` (`anvitech:absences`) — a plain
+  list of `{id, operator, from_date, to_date}`; `save_absence` assigns the uuid,
+  `delete_absence` returns `False` on an unknown id (→ 404 at the API).
 - `engine/storage.py` — the store interface (kv/hash/list) + backends:
   `MongoStore` / `UpstashStore` / `LocalStore`; `get_store()` picks by env.
   `MongoStore` **percent-encodes hash field names** (`_enc_field`/`_dec_field`)
@@ -230,9 +243,10 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `total_late_days + 10×makespan_days` (delivery gaps dominant — owner priority: fewest late
   deliveries, since shortest-makespan plans push more orders late). Deterministic (eval-count
   budget + fixed seed). `should_cancel()` is polled between evals so a run can be stopped
-  early keeping the best-so-far. **`objective="promise_slip"`** switches the scorecard to
-  promise recovery — `promise_slip_metrics` scores committed orders vs their `promised_date`
-  (not delivery date); used by the auto committed re-sequencing (below). **Speed:** the scheduler is memoized — `loaders`
+  early keeping the best-so-far. (Historical: an `objective="promise_slip"` mode scored
+  committed orders against their `promised_date` for the auto committed re-sequencing
+  feature; removed with the rest of the promise-rule machinery — see the Phase-2R note
+  below.) **Speed:** the scheduler is memoized — `loaders`
   `normalize_resource_id`/`parse_resource_candidates` (lru_cache on fixed routing text),
   Rule 6's `op_lookup` (per machine+shift, not per op), and `WorkClock._windows_for_day`
   (per-day window cache) — ~3.5× faster per plan, results byte-identical (golden unchanged). Returns `OptimizeResult`
@@ -242,8 +256,9 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   byte-identical. Persisted via `book_store.save/load/clear_plan_priority`
   (`anvitech:plan_priority`). API: `/optimize` (admin; quick=150/deep=400 evals, one
   background thread at a time), `/optimize/status`, `/optimize/apply`, `/optimize/clear`;
-  `_plan` passes the saved ranks to the open pass only (committed pass untouched) and
-  returns `optimize_meta` (active/saved_at/covered/uncovered/**inputs_changed**) for the
+  `_plan` replays the saved ranks over its single pass (every active line — see the
+  self-tuning/Phase-2 notes below for why there is no separate open/committed pass
+  anymore) and returns `optimize_meta` (active/saved_at/covered/uncovered/**inputs_changed**) for the
   staleness banner — `inputs_changed` compares the applied run's `inputs_sig` (sha of the
   masters workbook + plan-shaping config; schedule-neutral knobs excluded) against the
   current inputs, so a masters re-upload or Settings change after Apply is flagged
@@ -258,10 +273,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   plans total → 250/contender ≈ the 2,400-plan full contest at 42% compute (measured;
   a cheap rank-then-deepen shape was rejected — a 100-eval ranking picks the wrong
   winner 2/3). The current setting's only privileges: runs first (early Stop keeps it
-  fully searched) and wins exact ties (no churn). The API's `candidate_setup` hook
-  rebuilds the committed pass per candidate and vetoes any overlap whose promise
-  slip/broken count worsens; Apply persists the winning overlap into the saved plan
-  config and `inputs_sig` is computed against the winning settings.
+  fully searched) and wins exact ties (no churn). Apply persists the winning overlap
+  into the saved plan config and `inputs_sig` is computed against the winning settings.
+  (Historical: a per-candidate "promise guard" that vetoed overlaps worsening the
+  committed pass existed 2026-07-14→16 and was removed with the rest of the promise-rule
+  machinery — Phase 2R below; every candidate now searches the same one-pool book.)
   **Cloud compute (2026-07-15, owner decision):** with `GITHUB_DISPATCH_TOKEN` +
   `OPTIMIZE_WORKER_SECRET` set on Render, Start dispatches the FULL 2,400-plan
   contest (`optimize_service.CLOUD_OVERLAP_CANDIDATES` × 400) to a free GitHub
@@ -275,25 +291,81 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   failure / worker error / `OPTIMIZE_CLOUD_TIMEOUT_MIN` (20) exceeded → compute
   locally (1,000-total split), so the button always works; env unset → pure local.
   `GITHUB_DISPATCH_TOKEN=manual` skips the GitHub call (run the worker by hand).
-- **Promise recovery (auto committed re-sequencing)** — when a disruption makes committed
-  orders slip past their promises, `api._plan`'s Pass 1 auto-triggers a **background**
-  `optimize(objective="promise_slip")` on the committed set (its own slot `_RECOVERY`,
-  separate from the manual `_OPTIMIZE`), persists the result as ranks
-  (`book_store.save/load/clear_promise_recovery` → `anvitech:promise_recovery`), and replays
-  it on every Plan (expedite-off) until the committed set/promises change (freshness =
-  `_recovery_signature`, which includes each promise date). Never worse than date-order
-  (search seeded with it); no slip → no search → byte-identical. `_plan` returns
-  `recovery_meta` (active/promises_saved/slip_before-after/computing); `web/` shows a quiet
-  `#recovery-note` (informational only — no control). Design:
-  `docs/superpowers/specs/2026-07-14-promise-recovery-committed-resequencing-design.md`.
+- **Self-tuning plan (2026-07-16, `docs/superpowers/specs/2026-07-15-self-tuning-plan-design.md`
+  Phase 1) — the plan re-optimizes itself.** `optimize_service.book_signature(so_lines,
+  absences=)` fingerprints the active book (order keys, remaining qty + per-process
+  remaining, lane, promised date, absences); an applied optimization's `book_sig` is
+  saved alongside its ranks. `api.main._bump_book_changed()` is called at the end of
+  every **deliberate** admin mutation — `/upload`, `/orders/delete`, `/orders/clear`,
+  `/orders/commit`, `/orders/uncommit`, `/orders/urgent`, `/absences` POST/DELETE, and
+  a `persist=True` `/run` (Settings save) — and calls `_try_start_auto()`, which starts
+  a **background** contest (`_start_optimize(..., auto=True)`) only if the current
+  book_sig differs from the applied one and no contest is already running (else it sets
+  `_AUTO["pending"]`, drained by `_drain_pending_auto()` when the running contest
+  finishes, so a change mid-run gets a follow-up run rather than being silently lost).
+  **Punches never auto-trigger** — the Capture Actuals tab's "Done entering — update &
+  optimize plan" button (`POST /optimize/done`, any logged-in role) is the only punch-side
+  trigger. **Auto contests are cloud-only**: `_try_start_auto()` bails with a note
+  ("Auto-optimize skipped — cloud compute unavailable…") when `_cloud_config()` is
+  unset — never a 20-40 min local burn in the background; the manual Optimize button
+  keeps its local fallback. **Auto-apply is strictly-better-or-nothing**:
+  `_finalize_optimize` calls `_auto_apply_result()` for auto runs, which computes the
+  incumbent (`_incumbent_metrics` — the applied ranks, or none, replayed on TODAY'S book
+  via `_all_lines_schedule`, scored over ALL active lines so both sides are on the same
+  domain) and applies (`_optimize_apply()`) only if the contest's `best` strictly beats
+  it; either way it writes a one-line note via `book_store.save_auto_note`
+  (`anvitech:auto_note`) — *"Plan auto-re-optimized 18:12 — 445 late-days (was 471),
+  overlap 80 → 70"* or *"Checked 18:12 — current plan still best (471 late-days)"* —
+  surfaced on `/run`'s `auto_note` field and the Orders tab. `AUTO_OPTIMIZE=0` is an
+  **internal test-isolation env var only** (`_auto_enabled()`) — never documented or
+  exposed in the UI; there is no user-facing off switch by owner decision.
+- **Operator absences (Phase 3, same spec).** `anvitech:absences` (see `book_store.py`
+  above) — day-granularity `{operator, from_date, to_date}` rows, ISO in the store,
+  DD-MM-YYYY in the UI. `optimize_service.absence_reservations(absences)` turns them into
+  Rule 6 `reserved={operator: [(start,end),…]}` blocks (00:00 of `from_date` through 00:00
+  of the day after `to_date`) — **physical unavailability, not a promise reservation** —
+  merged (`merge_reservations`) into every plan pass and every contest candidate
+  (`ContestSetup.absence_reserved`; the cloud payload round-trips `absences` via
+  `build_payload`/`parse_payload`). `engine/analytics.py` subtracts absent working days from
+  an operator's available capacity so utilization stays honest. An absence whose operator
+  is no longer in the current masters (re-upload) is **orphaned**: ignored by planning,
+  listed in `GET /absences`'s `orphans` and as a non-blocking `ABSENT_OPERATOR_UNKNOWN` row
+  in the validation report (`api._absence_orphans`/`_report_for_book`) — never fatal.
+  API: `GET /absences` (any role) returns `{absences, orphans, operators}`; `POST
+  /absences` / `DELETE /absences/{id}` (admin) validate dates/operator, bump the
+  book-changed trigger, no password re-auth (non-destructive, reversible). UI: an
+  always-visible Settings-area panel (not nested in the admin-only toolbar, so the user
+  role sees the read-only list) with add/remove controls CSS- and server-gated admin-only.
+- **Phase 2 — promise ceiling — DISCARDED (owner pivot, 2026-07-16).** A one-pool contest
+  with a hard promise veto was built and measured on both real books: ~30% worse than
+  the (now-removed) two-pass approach, because zero-slack promises collapse the feasible
+  region. The owner redefined the model instead: **lanes are status labels, not
+  protection** (see `engine/models.py` above). Removed entirely: `optimizer.
+  promise_ceiling_ok`/`promise_score`/`promise_slip_metrics`, the `objective="promise_slip"`
+  branch, `sweep_optimize`'s `feasible=`/`candidate_setup=` guard, `_plan`'s two-pass
+  branch + its pass-1/pass-2 schedule merge (the api-level alias that fed
+  `optimize_service.reservations_from_schedule` into it is gone; the function itself is
+  kept, now unreferenced), the promise-recovery
+  auto-trigger/replay (`_maybe_start_recovery`, `_RECOVERY` slot, `anvitech:promise_recovery`),
+  the urgent push-warning preview (`_preview_urgent_pushes`), and Rule 1/Rule 3's
+  lane-aware special-casing (`rule1_consolidate`/`rule3_tiebreak_process_time` are uniform
+  again — every lane sorts/groups the same way). A regression pins the pivot: a committed
+  +promised book plans **byte-identical** to the same book all-open
+  (`tests/test_replay_single_pass.py`, `tests/test_optimize_service.py::
+  test_lanes_have_zero_scheduling_effect`). Design history:
+  `docs/superpowers/specs/2026-07-14-promise-recovery-committed-resequencing-design.md`
+  (superseded) and the self-tuning-plan spec's own SUPERSEDED Phase-2 block.
 - `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
   (per-order rows, time-positioned bars by machine, **operator** on each bar, split
   halves as separate bars, Pending/Running label).
-- `engine/analytics.py` — pure `build_analytics(schedule, masters, config, batches)`:
-  utilization & bottlenecks from the current plan. **Utilization = busy ÷ each resource's
-  OWN available time in the plan window** (`[min(start), max(end)]`), so every machine is
-  judged fairly against its own capacity. Machine capacity reuses Rule 6's `_clock_factory`
-  clock (same shifts/coverage/calendar as the schedule). Sections: per-machine (+ type
+- `engine/analytics.py` — pure `build_analytics(schedule, masters, config, batches,
+  absences=None)`: utilization & bottlenecks from the current plan. **Utilization =
+  busy ÷ each resource's OWN available time in the plan window** (`[min(start),
+  max(end)]`), so every machine is judged fairly against its own capacity. Machine
+  capacity reuses Rule 6's `_clock_factory` clock (same shifts/coverage/calendar as
+  the schedule). `absences` (2026-07-16) subtracts each operator's in-window working
+  absence days from their available capacity (`_absent_working_days`) so utilization
+  stays honest under a marked-absent operator. Sections: per-machine (+ type
   rollup), per-operator (busy vs shift capacity), per-process (work share, not %), and a
   headline (bottleneck / under-used ≤30% / totals). Surfaced as the **Analytics** tab
   (`trace.analytics`; CSS bars + tables in `web/`, no chart lib).
@@ -333,11 +405,16 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   runs to 100% before the block starts (no Rule 5 overlap *into* an OS step) and the
   successor waits for the whole block. A blank OS cycle stays a zero-duration
   milestone. OS/off-machine lanes are excluded from the machine-utilization view.
-  **Two-pass promise protection:** Rule 6 gains an optional `reserved={machine|operator:
-  [(start,end), …]}` argument for Pass 2 of the two-pass plan — when finding an op's
+  **Reservations:** Rule 6 has an optional `reserved={machine|operator:
+  [(start,end), ...]}` argument — when finding an op's
   earliest feasible start, skip windows that overlap a reservation, and reject
   placement that would not finish before the next reservation begins. `reserved=None`
-  (Pass 1 and all existing callers) is byte-identical to today.
+  is byte-identical to today; the one live caller today is **operator absences**
+  (`api._plan`/every contest pass `reserved=optimize_service.absence_reservations(...)`
+  — physical unavailability, not a promise). The mechanism was originally built for
+  the two-pass committed/open split (2026-07-13); that caller was removed in the
+  Phase-2R pivot (see the optimizer bullet above), leaving the generic `reserved=`
+  kwarg serving only absences now.
 - `api/auth.py` — accounts (2 roles), `authenticate`, signed-cookie
   `make_token`/`verify_token`, session secret, login rate limiter. Stdlib only.
 - `api/main.py` — FastAPI: `/login` `/logout` `/me`, `/upload` (merge, admin),
@@ -346,16 +423,33 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (+ `/actuals/rollback`), `/items` (`so_nos` for the SO dropdown), `/gantt`,
   `/report`, `/trace/{id}`. `gatekeeper` (session + CSRF) + `security_headers`
   middleware; `require_admin`; `require_password` (re-auth on destructive deletes);
-  helper-tab augmentation. **New admin-only endpoints for promise protection:**
-  `/orders/commit`, `/orders/urgent`, `/orders/uncommit` (role-gated, non-destructive).
-  **Two-pass `_plan`**: orchestrates Pass 1 (protected orders only) via `run_forward`,
-  extracts reservations from the schedule, then Pass 2 (`run_forward` on Open orders
-  with `reserved=` seeded), and merges both passes' schedules for display.
+  helper-tab augmentation. **Commitment endpoints (admin, role-gated, non-destructive,
+  no password re-auth):** `/orders/commit`, `/orders/urgent`, `/orders/uncommit` — set
+  status + snapshot an informational `promised_date` (Committed = current expected
+  completion from a fresh plan; Urgent = the SO delivery date) and call
+  `_bump_book_changed()`. They no longer gate on a push-preview/warning (the
+  `_preview_urgent_pushes` confirm-modal was removed with the rest of Phase 2R).
+  **`_plan` is a single pass, always** — every active line (all lanes) goes through
+  one `run_forward` call; operator absences are the only `reserved=` (see the Rule 6
+  bullet above); a saved Optimize/self-tuning result replays via `priority_rank=`
+  (expedite forced off while ranks exist). Returns `optimize_meta` (staleness banner)
+  and `auto_note` (`book_store.load_auto_note()`, the self-tuning trigger's status
+  line). **Self-tuning trigger** (see the optimizer bullet above for the full
+  mechanics): `_bump_book_changed()`/`_try_start_auto()`/`_AUTO`
+  (pending-chain)/`_drain_pending_auto()`/`_auto_apply_result()`, endpoint `POST
+  /optimize/done` (any role — the Capture Actuals "Done entering" button).
+  **Absences:** `GET /absences` (any role, `{absences, orphans, operators}`), `POST
+  /absences` / `DELETE /absences/{id}` (admin) — see the `book_store.py`/optimizer
+  bullets above; `_absence_orphans` feeds the `ABSENT_OPERATOR_UNKNOWN` rows
+  `_report_for_book` appends.
 - `web/` — `login.html` (self-contained login page), `📋 Orders` tab (order book +
-  delete, with a **password-confirm modal**), the per-rule tabs (Rule 7 = Capture
-  Actuals, with an **SO No dropdown** + per-entry **↺ Rollback** button), and a
-  `📊 Gantt` tab; `app.js` renders the trace and hides admin-only controls for the
-  user role (no per-rule UI code).
+  delete, with a **password-confirm modal**, the commit/urgent/uncommit lane
+  controls, and the auto-note line), the per-rule tabs (Rule 7 = Capture Actuals,
+  with an **SO No dropdown**, per-entry **↺ Rollback** button, and the **"Done
+  entering — update & optimize plan"** button for both roles), an always-visible
+  **Operator Absences** panel (list visible to both roles; add/remove controls
+  admin-only), and a `📊 Gantt` tab; `app.js` renders the trace and hides
+  admin-only controls for the user role (no per-rule UI code).
 
 ## Resolved design decision (data-confirmed)
 
