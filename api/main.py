@@ -587,10 +587,14 @@ def _plan(config: Config):
         if optimizer.promise_ceiling_ok(jr.schedule, so_lines):
             joint_plan = (jr, jt)          # keeps every promise -> use it as-is
         else:
-            # Drift: the applied sequence would break a promise. Discard it, fall
-            # back to today's two-pass (which protects promises by construction),
-            # and bump the book so a fresh contest re-fits the current book.
+            # Drift: the applied sequence would break a promise. Discard the ranks
+            # ENTIRELY — they were computed for a single-pass joint pool and must
+            # not drive the isolated open pass either — so the two-pass fallback
+            # below is byte-identical to a plan with no optimization applied.
+            # Bump the book so a fresh contest re-fits the current book.
             joint_fallback = True
+            ranks = None
+            ranked_config = config
             _bump_book_changed()
 
     if not protected or joint_plan is not None:

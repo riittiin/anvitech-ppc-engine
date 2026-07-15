@@ -74,6 +74,42 @@ def test_promise_drift_falls_back_to_two_pass():
     assert result["gantt"]["rows"], "the fallback plan must still produce a schedule"
 
 
+def test_drift_fallback_is_byte_identical_to_no_optimization():
+    """On the drift path the joint ranks must be IGNORED ENTIRELY: the fallback
+    two-pass plan is byte-identical to the plan with no saved optimization at
+    all (same rule6 table, same expected ends). Joint ranks were computed for a
+    single-pass all-lines pool — they must not drive an isolated open pass.
+
+    The book needs TWO open orders so a leaked rank map could actually reorder
+    the open pass; the saved ranks deliberately invert both natural orders."""
+    m = _api()
+    book_store.save_masters_bytes(build_sample_bytes())
+    book_store.add_orders([
+        # Impossible promise (before the plan start) → the joint replay can
+        # never satisfy the ceiling → the fallback path always runs.
+        Order("SO1", ITEM_A, ITEM_A, 10, date(2025, 3, 20),
+              commitment="committed", promised_date=date(2025, 1, 1)),
+        Order("SO2", ITEM_B, ITEM_B, 15, date(2025, 3, 21)),
+        Order("SO3", ITEM_A, ITEM_A, 8, date(2025, 3, 25)),
+    ])
+    # Joint-tagged ranks that invert the open orders' natural (Rule-3) order —
+    # if they leak into the open pass, its schedule visibly changes.
+    ranks = {f"SO3\x1f{ITEM_A}": 1, f"SO2\x1f{ITEM_B}": 2, f"SO1\x1f{ITEM_A}": 3}
+    book_store.save_plan_priority(ranks, {"saved_at": "t", "joint": True})
+
+    fallback = m._plan(m._load_plan_config())
+    assert fallback.get("joint_fallback") is True
+
+    book_store.clear_plan_priority()          # the no-optimization reference
+    clean = m._plan(m._load_plan_config())
+    assert "joint_fallback" not in clean
+
+    assert fallback["trace"]["rule6"]["output"] == clean["trace"]["rule6"]["output"], (
+        "the drift fallback's rule6 schedule must match a clean no-optimization two-pass")
+    assert fallback["expected_end"] == clean["expected_end"], (
+        "the drift fallback's expected ends must match a clean no-optimization two-pass")
+
+
 def test_legacy_open_only_ranks_are_untouched():
     """A saved plan_priority with ranks but NO joint flag (deployed today) keeps
     the current behavior: it never triggers the joint branch / fallback."""
