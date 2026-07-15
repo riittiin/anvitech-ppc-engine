@@ -114,6 +114,14 @@ class ContestSetup:
     protected: list = field(default_factory=list)
     reserved: dict = None                        # committed pass's busy time (cur overlap)
     candidate_setup: object = None               # cfg -> (reserved, eligible); None = all-open
+    # One-pool contest (2026-07-15): EVERY active line — committed included —
+    # competes in the SAME search space; a promise veto (not a reserved wall)
+    # keeps committed/urgent orders on time. ``joint_target`` is ALL active
+    # so_lines; ``feasible`` is None when there is nothing to protect (byte-
+    # identical to the open-only search), else the promise-ceiling gate over
+    # every so_line (so a candidate plan that breaks ANY promise scores inf).
+    joint_target: list = field(default_factory=list)
+    feasible: object = None
 
 
 def _pass1(protected, cfg, masters):
@@ -161,9 +169,16 @@ def prepare_contest(orders: dict, actuals, masters, config: Config) -> ContestSe
                   and slip["promises_missed"] <= cur_slip["promises_missed"])
             return res, ok
 
+    # Joint pool: everyone (committed lines included) competes for all time;
+    # the veto is the ONLY promise protection in this pool — no reservations.
+    joint_target = so_lines
+    feasible = ((lambda schedule: optimizer.promise_ceiling_ok(schedule, so_lines))
+                if protected else None)
+
     return ContestSetup(target=target, config=config, search_config=search_config,
                         protected=protected, reserved=reserved,
-                        candidate_setup=candidate_setup)
+                        candidate_setup=candidate_setup,
+                        joint_target=joint_target, feasible=feasible)
 
 
 # --------------------------------------------------------------------------- #
@@ -187,20 +202,18 @@ def pick_winner(current_overlap, rows):
 def run_candidate(payload: dict, overlap: int, *, on_progress=None,
                   should_cancel=None) -> dict:
     """One contender, fully self-contained (safe to run in a subprocess): it
-    rebuilds the book from the payload, applies the promise guard, and runs
-    the full-depth search. Returns a sweep-table row (+ ranks for the winner)."""
+    rebuilds the book from the payload and searches the JOINT pool (every
+    active line, committed included) under the promise veto (``feasible=``) —
+    the veto replaces the old per-candidate guard + reservations entirely, so
+    this always runs with ``reserved=None``. Returns a sweep-table row (+
+    ranks for the winner). All-open books: ``joint_target`` == the open-only
+    target and ``feasible`` is None, so this is byte-identical to before."""
     orders, actuals, masters, config = parse_payload(payload)
     setup = prepare_contest(orders, actuals, masters, config)
     cfg = replace(setup.search_config, overlap_percent=int(overlap))
-    if setup.candidate_setup is not None:
-        reserved, eligible = setup.candidate_setup(cfg)
-        if not eligible:
-            return {"overlap": int(overlap), "eligible": False}
-    else:
-        reserved = None
-    res = optimizer.optimize(setup.target, cfg, masters, reserved=reserved,
+    res = optimizer.optimize(setup.joint_target, cfg, masters, reserved=None,
                              budget_evals=int(payload["budget_per_candidate"]),
-                             seed=int(payload["seed"]),
+                             seed=int(payload["seed"]), feasible=setup.feasible,
                              on_progress=on_progress, should_cancel=should_cancel)
     return {"overlap": int(overlap), "eligible": True, "best": res.best,
             "evals": res.evals, "ranks": res.ranks, "cancelled": res.cancelled}

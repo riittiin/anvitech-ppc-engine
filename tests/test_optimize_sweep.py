@@ -97,6 +97,17 @@ def test_sweep_keeps_current_setting_when_guard_rejects_all_others():
     assert sw.result.ranks
 
 
+def test_sweep_forwards_feasible():
+    """``feasible`` must be forwarded to every candidate's optimize() call: a
+    gate that vetoes everything leaves every contender with best=None, so the
+    whole sweep must come back with no plan to offer — never crash."""
+    so, cfg, masters = _book()
+    sw = optimizer.sweep_optimize(so, cfg, masters, budget_evals=40, seed=42,
+                                  feasible=lambda schedule: False)
+    assert sw.result.best is None
+    assert not sw.result.ranks
+
+
 def test_sweep_progress_is_monotonic_across_candidates():
     so, cfg, masters = _book()
     seen = []

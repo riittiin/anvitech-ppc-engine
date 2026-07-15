@@ -366,7 +366,8 @@ class SweepResult:
 
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None,
-                   candidate_setup=None, candidates=OVERLAP_CANDIDATES) -> SweepResult:
+                   candidate_setup=None, candidates=OVERLAP_CANDIDATES,
+                   feasible=None) -> SweepResult:
     """Search batch sequence AND overlap %. ``budget_evals`` is the TOTAL
     budget for the whole contest; it is split EQUALLY across the contenders
     (the current setting + ``candidates``), ``budget_evals // n`` plans each.
@@ -385,6 +386,13 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
     protection: build the committed pass's reservations under ``cfg`` and say
     whether this overlap keeps every promise at least as well as the current one.
     ``None`` (all-open books, tests) → ``(None, True)`` for every candidate.
+
+    ``feasible`` (optional) is forwarded unchanged to every ``optimize()`` call
+    (the one-pool joint-search veto — see ``optimizer.promise_ceiling_ok``). A
+    candidate where every evaluated plan is infeasible comes back with
+    ``best=None``; such a candidate can never win (see the winner loop below).
+    If EVERY candidate is infeasible, the sweep returns an empty result
+    (``result.best is None``), same as "nothing eligible ran".
     """
     from dataclasses import replace
 
@@ -416,7 +424,7 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
             table.append({"overlap": ov, "eligible": False})
             return None
         res = optimize(so_lines, cfg, masters, reserved=reserved,
-                       budget_evals=budget, seed=seed,
+                       budget_evals=budget, seed=seed, feasible=feasible,
                        on_progress=_offset(spent), should_cancel=should_cancel)
         spent += res.evals
         cancelled = cancelled or res.cancelled
@@ -424,20 +432,30 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                       "evals": res.evals})
         return res
 
+    def _sc(res):
+        """A comparable score, or None for "no plan to offer" — either the
+        candidate never ran (guard-rejected/cancelled: _run returned None) or
+        every evaluated plan inside it was vetoed by ``feasible`` (best=None)."""
+        return score(res.best) if (res is not None and res.best is not None) else None
+
     # The current setting runs FIRST (an early Stop still leaves the user's
     # own setting fully searched), then every other contender gets the SAME
     # depth — a fair contest, no depth advantage for anyone.
     best_ov, best_res = cur, _run(cur, each)
+    best_score = _sc(best_res)
     for ov in others:
         r = _run(ov, each)
-        if r is None:
+        r_score = _sc(r)
+        if r_score is None:
             continue
         # Best plan wins; an exact tie keeps the current setting (no churn).
-        if best_res is None or score(r.best) < score(best_res.best):
-            best_ov, best_res = ov, r
+        if best_score is None or r_score < best_score:
+            best_ov, best_res, best_score = ov, r, r_score
 
-    if best_res is None:                   # vetoed/cancelled before anything ran
-        return SweepResult(overlap_percent=cur, result=OptimizeResult(),
+    if best_score is None:      # every contender vetoed/cancelled/infeasible
+        return SweepResult(overlap_percent=cur,
+                           result=OptimizeResult(evals=spent, cancelled=cancelled,
+                                                 best=None),
                            table=table, evals=spent, cancelled=cancelled)
     return SweepResult(overlap_percent=best_ov, result=best_res, table=table,
                        evals=spent, cancelled=cancelled)

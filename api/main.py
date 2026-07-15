@@ -1015,11 +1015,17 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                 real_baseline = optimizer.plan_metrics(base_run.schedule, setup.target,
                                                        setup.config.plan_start_date)
 
-            sw = optimizer.sweep_optimize(setup.target, setup.search_config, masters,
-                                          budget_evals=budget_evals, seed=_OPT_SEED,
-                                          on_progress=on_progress,
+            # One-pool contest (2026-07-15): search ALL active lines together —
+            # committed included — with the promise veto (``setup.feasible``)
+            # replacing the per-candidate reservation guard. All-open books:
+            # joint_target == target and feasible is None, so this is
+            # byte-identical to the old open-only sweep.
+            sw = optimizer.sweep_optimize(setup.joint_target, setup.search_config,
+                                          masters, budget_evals=budget_evals,
+                                          seed=_OPT_SEED, on_progress=on_progress,
                                           should_cancel=lambda: _OPTIMIZE.get("cancel"),
-                                          candidate_setup=setup.candidate_setup)
+                                          candidate_setup=None,
+                                          feasible=setup.feasible)
             res = sw.result
             _finalize_optimize(job_id, base_config, real_baseline, label,
                                winner_overlap=sw.overlap_percent, ranks=res.ranks,
@@ -1114,7 +1120,10 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                     "inputs_sig": inputs_sig,
                     "best_overlap": winner_overlap,
                     "current_overlap": base_config.overlap_percent,
-                    "sweep_table": table})
+                    "sweep_table": table,
+                    # Every contest is one-pool now (2026-07-15): ALL active
+                    # lines compete, promise veto instead of a reserved wall.
+                    "joint": True})
     if _OPTIMIZE.get("auto"):
         try:
             _auto_apply_result()
@@ -1219,7 +1228,8 @@ def _optimize_apply():
                 "covered": len(res["ranks"]),
                 "inputs_sig": res.get("inputs_sig"),
                 "best_overlap": res.get("best_overlap"),
-                "book_sig": _current_book_sig()}
+                "book_sig": _current_book_sig(),
+                "joint": res.get("joint")}
         book_store.save_plan_priority(res["ranks"], meta)
         # Settings sweep: the winning overlap becomes THE saved plan setting (the
         # single config every Plan loads and the Settings panel shows). Unchanged
