@@ -331,7 +331,8 @@ class UrgentRequest(BaseModel):
 
 
 class OptimizeRequest(BaseModel):
-    budget: str = "quick"   # "quick" (~150 plans tried) or "deep" (~1000)
+    budget: str = "deep"    # one option (owner decision): ~1,000 plans total.
+                            # Legacy "quick" (cached clients) maps to the same.
 
 
 class ActualRequest(BaseModel):
@@ -797,11 +798,12 @@ def _load_plan_config() -> Config:
 # APPLIED result is durable (book_store.save_plan_priority) — a process restart
 # mid-run just returns the job to idle, the applied ranks are unaffected.
 # --------------------------------------------------------------------------- #
-# Evaluation counts — deterministic. Kept modest because the free Render tier plans
-# ~9 s/plan (≈13× a laptop); Quick ≈ 20 min, Deep ≈ 60 min there. The user can Stop
-# any run and keep the best plan found so far (most of the gain lands in the first
-# ~150 plans anyway), so Deep is bounded rather than a multi-hour 1,000-plan run.
-_OPT_BUDGETS = {"quick": 150, "deep": 400}
+# Evaluation counts — deterministic. One option (owner cap, 2026-07-15): 1,000
+# plans TOTAL per click (~2.3 s/plan on the free 0.1-CPU Render tier ≈ 40 min),
+# split equally across the overlap contenders by sweep_optimize. Legacy "quick"
+# (a cached client's request) runs the same single budget. The user can Stop any
+# run and keep the best plan found so far.
+_OPT_BUDGETS = {"deep": 1000, "quick": 1000}
 _OPT_SEED = 42
 
 _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
@@ -871,8 +873,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
                       and slip["promises_missed"] <= cur_slip["promises_missed"])
                 return res, ok
 
-        # The progress denominator is the sweep's true total: every overlap
-        # candidate gets the full advertised budget (fair contest).
+        # The progress denominator is the sweep's true total: the budget split
+        # equally across the overlap contenders (fair contest).
         _OPTIMIZE.update(state="running", label=label,
                          budget_evals=optimizer.sweep_total_evals(
                              budget_evals, search_config.overlap_percent),

@@ -319,7 +319,7 @@ function renderOptimizeResult(st) {
 }
 
 async function startOptimize() {
-  const budget = (document.querySelector('input[name="opt-budget"]:checked') || {}).value || "quick";
+  const budget = "deep";   // one option (owner decision): ~1,000 plans total
   const prog = $("optimize-progress");
   const box = $("optimize-result");
   if (box) { box.classList.add("hidden"); box.innerHTML = ""; }

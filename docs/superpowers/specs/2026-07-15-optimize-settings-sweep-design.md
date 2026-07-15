@@ -19,30 +19,36 @@ Owner decisions (2026-07-15):
 - **Scope:** overlap % only (candidates 50–100 step 10, plus the current value).
   The sweep helper is written so another dial is a small addition later.
 
-## How the budget is spent (fair contest — every candidate at full depth)
+## How the budget is spent (fair contest — one total budget, equal shares)
 
-> **CONTRACT REWRITTEN (2026-07-15, same day, twice).** The shipped v1 gave the
-> current setting only ~half the budget and let a challenger dethrone that
-> weakened result: on the real 65-order book (start 11-07) Deep returned
-> **753 late-days / winner "Overlap 60"** where the pre-sweep button found
-> **713 late-days at Overlap 80** — unequal search depths misrank settings. A
-> first repair kept a full-depth floor for the current setting with cheap
-> probes on top; the owner then made the rule simpler and stronger: **"I want
-> the best setting to win"** — no favoritism for the current setting at all.
+> **CONTRACT REWRITTEN (2026-07-15, same day, three times — regression, then
+> two owner decisions).** (a) The shipped v1 gave the current setting only
+> ~half the budget and a challenger dethroned that weakened result: on the
+> real 65-order book (start 11-07) Deep returned **753 late-days / winner
+> "Overlap 60"** where the pre-sweep button found **713 at Overlap 80** —
+> unequal search depths misrank settings. (b) Owner: **"the best setting must
+> win"** → every candidate at full depth (6×400 = 2,400 plans, ~1.5 hr on
+> Render). (c) Owner: **too slow — ONE option, ≤ 1,000 plans total**, with as
+> little quality loss as possible. Measured facts that shaped the final
+> design: a cheap 100-eval ranking round picks the WRONG winner 2 times in 3
+> (rank-then-deepen rejected); overlap **90/100 ranked last or next-to-last in
+> every contest ever measured** on both real books → dropped from the
+> candidate list. Result: 4 contenders × 250 plans ≈ the 2,400-plan contest
+> (identical winner+plan on Test6@15-07; same winner −16 late-days on
+> Test5@15-07; on Test6@11-07 picks 713 late-d/39.7 d vs full depth's
+> 717/36.8) at 42 % of the compute.
 
-1. **Fair contest:** EVERY candidate overlap gets the SAME full-depth search
-   (`budget_evals` each — Quick 150 / Deep 400). The best-scoring
-   (sequence, overlap) pair wins outright.
-2. **The current setting runs first** — an early **Stop** still leaves the
+1. **One button:** `budget_evals` is the TOTAL (live: 1,000 ≈ 40 min on the
+   0.1-CPU Render tier; legacy "quick" requests map to the same budget).
+2. **Fair contest:** the budget splits EQUALLY across the contenders — the
+   current overlap plus `OVERLAP_CANDIDATES = (50, 60, 70, 80)` — via
+   `sweep_contenders`; `budget // n` plans each (1,000 → 250 each; a current
+   setting outside the list, e.g. 90, joins as a 5th contender → 200 each).
+   The best-scoring (sequence, overlap) pair wins outright.
+3. **The current setting runs first** — an early **Stop** still leaves the
    user's own setting fully searched — and wins **exact ties** (no Settings
    churn). That is its only privilege; it has no depth advantage.
-3. **Never-worse for free:** with the fixed seed, the current setting's run is
-   *identical* to the plain pre-sweep Optimize button, so the winner is always
-   at least that good.
-4. **Total** = `sweep_total_evals(budget, current)` = budget × number of
-   distinct candidates (Quick ~900 / Deep ~2,400 plans — the honest price of a
-   fair contest; Stop & keep best works throughout).
-5. **Deterministic:** all seeds fixed, budgets are eval counts; cancellation is
+4. **Deterministic:** all seeds fixed, budgets are eval counts; cancellation is
    polled between evaluations across the whole sweep and keeps the best
    (sequence, overlap) found so far.
 

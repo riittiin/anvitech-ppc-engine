@@ -277,29 +277,41 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
 
 # --------------------------------------------------------------------------- #
 # Settings sweep — auto-tune the overlap % inside the same Optimize click
-# (2026-07-15 spec; contract rewritten the same day, twice, after a live
-# regression and an owner decision). v1 gave the current setting ~half the
-# budget and a challenger dethroned that weakened result (Deep returned 753
-# late-days where the pre-sweep button found 713). The owner's rule is now the
-# simplest fair one: EVERY overlap candidate gets the SAME full-depth search
-# and the best plan wins, full stop. The current setting runs first (an early
-# Stop still leaves it fully searched) and wins exact ties (no Settings
-# churn) — but it has no depth advantage. Never-worse falls out for free: the
-# current setting's full-depth run is seed-identical to the plain pre-sweep
-# Optimize button, so the winner is always at least that good.
+# (2026-07-15 spec; contract rewritten the same day after a live regression
+# and two owner decisions). The rule is the simplest fair one: EVERY overlap
+# candidate gets the SAME search depth and the best plan wins, full stop. The
+# current setting runs first (an early Stop still leaves it the most-searched)
+# and wins exact ties (no Settings churn) — but it has no depth advantage.
+#
+# Budget (owner cap, 2026-07-15): ONE button, ~1,000 plans total (~40 min on
+# the 0.1-CPU Render instance), split EQUALLY across the contenders. The
+# candidate list holds only settings that have ever been competitive: overlap
+# 90/100 ranked last or next-to-last in every measured contest on both real
+# books (9 tables; matches the 2026-07-13 finding that high overlap adds
+# nothing once the sequence is optimized), so they are out — but a current
+# setting outside the list is always added as a contender, so no saved config
+# is ever excluded from its own contest. Measured vs the 6×400 full contest
+# (2,400 plans): identical winner+plan on Test6@15-07, same winner within 16
+# late-days on Test5@15-07, and on Test6@11-07 it picks 713 late-d/39.7 d
+# where full depth picks 717/36.8 — equal-or-near outcomes at 42% compute.
 # --------------------------------------------------------------------------- #
-OVERLAP_CANDIDATES = (50, 60, 70, 80, 90, 100)
+OVERLAP_CANDIDATES = (50, 60, 70, 80)
+
+
+def sweep_contenders(current_overlap=None, candidates=OVERLAP_CANDIDATES):
+    """The contest lineup: the current setting first (Stop-safety + tie
+    privilege), then the remaining candidates in ascending order."""
+    vals = [v for v in sorted(dict.fromkeys(candidates)) if v != current_overlap]
+    return ([current_overlap] if current_overlap is not None else []) + vals
 
 
 def sweep_total_evals(budget_evals, current_overlap=None,
                       candidates=OVERLAP_CANDIDATES):
-    """Total evaluations one ``sweep_optimize`` call may spend: every distinct
-    candidate (including the current setting) gets the full advertised budget.
-    The API sizes the progress display with this."""
-    vals = set(candidates)
-    if current_overlap is not None:
-        vals.add(current_overlap)
-    return budget_evals * len(vals)
+    """Total evaluations one ``sweep_optimize`` call spends: the budget split
+    equally across the contenders (integer division — the remainder is left
+    unspent). The API sizes the progress display with this."""
+    n = len(sweep_contenders(current_overlap, candidates))
+    return (budget_evals // n) * n if n else 0
 
 
 @dataclass
@@ -317,20 +329,19 @@ class SweepResult:
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None,
                    candidate_setup=None, candidates=OVERLAP_CANDIDATES) -> SweepResult:
-    """Search batch sequence AND overlap %. ``budget_evals`` is EACH
-    candidate's full-depth budget; the sweep spends
-    ``sweep_total_evals(budget_evals, config.overlap_percent)`` in total.
+    """Search batch sequence AND overlap %. ``budget_evals`` is the TOTAL
+    budget for the whole contest; it is split EQUALLY across the contenders
+    (the current setting + ``candidates``), ``budget_evals // n`` plans each.
 
-    The fair-contest contract (owner decision, 2026-07-15): every candidate
-    overlap gets the SAME full-depth search and the best-scoring plan wins —
-    the current setting has no depth advantage. It runs FIRST (an early Stop
-    still leaves the user's own setting fully searched) and wins exact ties
-    (no Settings churn), nothing more. Never-worse falls out for free: with a
-    fixed seed the current setting's run is identical to the plain (pre-sweep)
-    Optimize button, so the winner is always at least that good. (History: a
-    cheaper probe-then-deepen shape searched the current setting at half depth
-    and returned 753 late-days on the real book where the plain button found
-    713 — unequal depths misrank settings; equal depths cannot.)
+    The fair-contest contract (owner decisions, 2026-07-15): every contender
+    gets the SAME search depth and the best-scoring plan wins — the current
+    setting has no depth advantage. It runs FIRST (an early Stop still leaves
+    the user's own setting fully searched) and wins exact ties (no Settings
+    churn), nothing more. (History: a probe-then-deepen shape searched the
+    current setting at half depth and returned 753 late-days on the real book
+    where the plain button found 713 — unequal depths misrank settings; equal
+    depths cannot. A cheap-rank-then-deepen shape was measured and rejected
+    too: a 100-eval ranking picks the wrong winner 2 times in 3.)
 
     ``candidate_setup(cfg) -> (reserved, eligible)`` is the API hook for promise
     protection: build the committed pass's reservations under ``cfg`` and say
@@ -340,7 +351,9 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
     from dataclasses import replace
 
     cur = config.overlap_percent
-    others = sorted(v for v in dict.fromkeys(candidates) if v != cur)
+    lineup = sweep_contenders(cur, candidates)
+    others = lineup[1:]
+    each = budget_evals // len(lineup)
 
     spent = 0
     cancelled = False
@@ -373,13 +386,12 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                       "evals": res.evals})
         return res
 
-    # The current setting runs FIRST at the full budget (an early Stop still
-    # leaves the user's own setting fully searched; same seed ⇒ identical to
-    # the plain Optimize button), then every other candidate gets the SAME
-    # full budget — a fair contest, no depth advantage for anyone.
-    best_ov, best_res = cur, _run(cur, budget_evals)
+    # The current setting runs FIRST (an early Stop still leaves the user's
+    # own setting fully searched), then every other contender gets the SAME
+    # depth — a fair contest, no depth advantage for anyone.
+    best_ov, best_res = cur, _run(cur, each)
     for ov in others:
-        r = _run(ov, budget_evals)
+        r = _run(ov, each)
         if r is None:
             continue
         # Best plan wins; an exact tie keeps the current setting (no churn).

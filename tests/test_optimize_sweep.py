@@ -1,12 +1,12 @@
 """The Optimize settings sweep (2026-07-15 spec; fair-contest contract per the
-owner's decision the same day): one click also tunes the overlap %. EVERY
-candidate overlap gets the SAME full-depth search (`budget_evals` each,
-`sweep_total_evals` in total) and the best plan wins — the current setting has
-no depth advantage; it just runs first and wins exact ties (no churn). Never
-worse than plain Optimize falls out for free (the current setting's run is
-seed-identical to the plain button). Promise-guard hook can veto candidates;
-Apply persists the winning overlap into the saved plan config with a matching
-inputs fingerprint."""
+owner's decisions the same day): one click tunes the overlap % inside ONE
+total budget (~1,000 plans live). ``budget_evals`` is the TOTAL; it is split
+EQUALLY across the contenders — the current setting plus OVERLAP_CANDIDATES
+(50–80; 90/100 were dropped after losing every measured contest, but a current
+setting outside the list always joins its own contest) — and the best plan
+wins. The current setting has no depth advantage; it just runs first and wins
+exact ties (no churn). Promise-guard hook can veto candidates; Apply persists
+the winning overlap into the saved plan config with a matching fingerprint."""
 import io
 from dataclasses import replace
 from datetime import date
@@ -31,34 +31,41 @@ def _book(overlap=80):
 # --------------------------------------------------------------------------- #
 # Pure sweep mechanics
 # --------------------------------------------------------------------------- #
-def test_sweep_is_a_fair_contest_every_candidate_at_full_depth():
-    """The fair-contest contract (owner decision after a live regression —
-    2026-07-15: unequal depths misranked settings; Deep returned 753 late-days
-    where the pre-sweep button found 713 at the current overlap). EVERY
-    candidate gets the SAME full-depth search and the best plan wins; the
-    current setting's full-depth run doubles as the never-worse floor (it is
-    seed-identical to the plain Optimize button)."""
+def test_sweep_is_a_fair_contest_equal_split_of_one_total_budget():
+    """The fair-contest contract (owner decisions after a live regression —
+    unequal depths misrank settings, so every contender gets the SAME share of
+    ONE total budget and the best plan wins)."""
     so, cfg, masters = _book(overlap=80)
-    budget = 80
+    budget = 80                     # total; 4 contenders (80 ∈ candidates) → 20 each
     sw = optimizer.sweep_optimize(so, cfg, masters, budget_evals=budget, seed=42)
 
-    # Every eligible candidate — the current setting included — ran the full
-    # advertised budget: equal depth, no favoritism.
+    # Every eligible contender ran the same equal share: no favoritism.
     eligible = [t for t in sw.table if t.get("eligible")]
     assert {t["overlap"] for t in eligible} == set(optimizer.OVERLAP_CANDIDATES)
-    assert all(t["evals"] == budget for t in eligible)
+    each = budget // len(optimizer.sweep_contenders(cfg.overlap_percent))
+    assert all(t["evals"] == each for t in eligible)
     assert sw.evals == optimizer.sweep_total_evals(budget, cfg.overlap_percent)
 
-    # The winner is the best-scoring candidate outright.
+    # The winner is the best-scoring contender outright; equal seeds+depth mean
+    # the current setting's own run is reproducible by plain optimize().
     best_row = min(eligible, key=lambda t: score(t["best"]))
     assert score(sw.result.best) == score(best_row["best"])
-
-    # Never worse than the plain (pre-sweep) Optimize button.
-    cur_deep = optimizer.optimize(so, cfg, masters, budget_evals=budget, seed=42)
-    assert score(sw.result.best) <= score(cur_deep.best)
+    cur_same_depth = optimizer.optimize(so, cfg, masters, budget_evals=each, seed=42)
+    assert score(sw.result.best) <= score(cur_same_depth.best)
     if sw.overlap_percent != 80:
-        assert score(sw.result.best) < score(cur_deep.best)   # ties keep current
-    assert sw.result.ranks                                    # persistable artifact
+        assert score(sw.result.best) < score(cur_same_depth.best)  # ties keep current
+    assert sw.result.ranks                                         # persistable artifact
+
+
+def test_sweep_includes_a_current_setting_outside_the_candidate_list():
+    """A saved overlap not in OVERLAP_CANDIDATES (e.g. 90) must still be a
+    contender in its own contest — never silently excluded."""
+    so, cfg, masters = _book(overlap=90)
+    sw = optimizer.sweep_optimize(so, cfg, masters, budget_evals=100, seed=42)
+    eligible = {t["overlap"] for t in sw.table if t.get("eligible")}
+    assert eligible == set(optimizer.OVERLAP_CANDIDATES) | {90}
+    each = 100 // 5
+    assert all(t["evals"] == each for t in sw.table if t.get("eligible"))
 
 
 def test_sweep_is_deterministic():

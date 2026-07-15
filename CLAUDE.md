@@ -244,19 +244,20 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   masters workbook + plan-shaping config; schedule-neutral knobs excluded) against the
   current inputs, so a masters re-upload or Settings change after Apply is flagged
   instead of looking non-deterministic (2026-07-15 live fix). **Settings sweep
-  (2026-07-15; contract rewritten same day after a live regression + owner decision —
-  the v1 probe-then-deepen shape searched the current setting at half depth and Deep
-  returned 753 late-days where the plain button found 713; the owner's rule is now
-  "the best setting wins"):** `optimizer.sweep_optimize` also auto-tunes the overlap %
-  as a FAIR CONTEST — every candidate gets the SAME full-depth search (`budget_evals`
-  each; total = `sweep_total_evals(budget, current)`, Quick ~900 / Deep ~2,400 plans)
-  and the best plan wins outright. The current setting's only privileges: it runs
-  first (early Stop keeps it fully searched) and wins exact ties (no churn). Never
-  worse than the plain button falls out free (same seed ⇒ its run is byte-identical).
-  The API's `candidate_setup` hook rebuilds the committed pass per candidate and
-  vetoes any overlap whose promise slip/broken count worsens; Apply persists the
-  winning overlap into the saved plan config and `inputs_sig` is computed against
-  the winning settings.
+  (2026-07-15; contract rewritten same day — live regression, then two owner
+  decisions: "the best setting wins" + "ONE option, ≤1,000 plans total"):**
+  `optimizer.sweep_optimize` auto-tunes the overlap % as a FAIR CONTEST inside one
+  TOTAL budget — the budget splits EQUALLY across the contenders (the current overlap
+  + `OVERLAP_CANDIDATES = (50,60,70,80)`; 90/100 dropped after losing every measured
+  contest on both real books; an off-list current setting still joins its own
+  contest) and the best plan wins outright. Live: single "Deep search" button, 1,000
+  plans total → 250/contender ≈ the 2,400-plan full contest at 42% compute (measured;
+  a cheap rank-then-deepen shape was rejected — a 100-eval ranking picks the wrong
+  winner 2/3). The current setting's only privileges: runs first (early Stop keeps it
+  fully searched) and wins exact ties (no churn). The API's `candidate_setup` hook
+  rebuilds the committed pass per candidate and vetoes any overlap whose promise
+  slip/broken count worsens; Apply persists the winning overlap into the saved plan
+  config and `inputs_sig` is computed against the winning settings.
 - **Promise recovery (auto committed re-sequencing)** — when a disruption makes committed
   orders slip past their promises, `api._plan`'s Pass 1 auto-triggers a **background**
   `optimize(objective="promise_slip")` on the committed set (its own slot `_RECOVERY`,
