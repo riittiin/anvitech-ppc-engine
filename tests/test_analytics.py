@@ -1,11 +1,12 @@
 """Analytics — utilization computed from a plan (hand-verified numbers)."""
 import os
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pytest
 
 from engine.config import Config, OVERLAP_PERCENT
-from engine.models import Batch, Process, Routing, Machine, WorkCalendar, Masters, Operator
+from engine.models import (Batch, Process, Routing, Machine, WorkCalendar, Masters,
+                            Operator, ScheduleEntry)
 from engine.rules import rule6_allocate
 from engine import analytics
 
@@ -155,6 +156,85 @@ def test_empty_plan_returns_empty_analytics():
     masters = _masters([Process(1, "CNC", 4, 4, "M", None)], [("M", "CNC lathe", 19.5)])
     a = analytics.build_analytics([], masters, Config())
     assert a["machines"] == [] and a["headline"] == {} and a["window"] is None
+
+
+def test_operator_availability_reduced_by_absence():
+    # A wide plan window (16 calendar days / 13 working days) with a single
+    # short op for "Op One", so there is plenty of headroom: Available (hrs)
+    # must drop by exactly 2 x their per-day shift hours for a 2-working-day
+    # absence, and utilization must stay well under 100%.
+    procs = [Process(1, "CNC", 4, 4, "M", None)]
+    masters = _masters(procs, [("M", "CNC lathe", 19.5)])
+    masters.operators = [Operator("Op One", "M", machines=["M"], shift="First shift")]
+    cfg = Config(apply_operator_logic=True)
+
+    # A real op for Op One, plus a zero-duration, operator-less entry 15 days
+    # later purely to stretch the plan window (window = min start .. max end
+    # across ALL schedule entries) without adding any billable work.
+    e1 = ScheduleEntry(batch_id="B1", item_code="X", process_seq=1, process_name="CNC",
+                        machine="M", qty=10, occupancy_min=60,
+                        start=datetime(2025, 3, 5, 8, 0), end=datetime(2025, 3, 5, 9, 0),
+                        operator="Op One")
+    e2 = ScheduleEntry(batch_id="B2", item_code="X", process_seq=1, process_name="OS",
+                        machine="OS / Outsourced", qty=1, occupancy_min=0,
+                        start=datetime(2025, 3, 20, 8, 0), end=datetime(2025, 3, 20, 8, 0),
+                        operator="")
+    sched = [e1, e2]
+
+    a0 = analytics.build_analytics(sched, masters, cfg)
+    o0 = next(o for o in a0["operators"] if o["Operator"] == "Op One")
+
+    win_start = min(e.start for e in sched).date()
+    win_end = max(e.end for e in sched).date()
+    working_days = []
+    d = win_start
+    while d <= win_end:
+        if masters.calendar.is_working_day(d):
+            working_days.append(d)
+        d += timedelta(days=1)
+    assert len(working_days) >= 2, "need at least 2 working days in the plan window"
+    per_day = o0["Available (hrs)"] / len(working_days)
+
+    absence = [{"operator": "Op One", "from_date": working_days[1].isoformat(),
+                "to_date": working_days[2].isoformat()}]
+    a1 = analytics.build_analytics(sched, masters, cfg, absences=absence)
+    o1 = next(o for o in a1["operators"] if o["Operator"] == "Op One")
+
+    assert o1["Available (hrs)"] == pytest.approx(o0["Available (hrs)"] - 2 * per_day, abs=0.05)
+    for o in a1["operators"]:
+        assert o["Utilization %"] is None or o["Utilization %"] <= 100.0
+
+
+def test_absences_default_none_is_byte_identical():
+    procs = [Process(1, "CNC", 4, 4, "M", None)]
+    masters = _masters(procs, [("M", "CNC lathe", 19.5)])
+    masters.operators = [Operator("Op One", "M", machines=["M"], shift="First shift")]
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    sched = rule6_allocate.run([_batch(30)], config=cfg, masters=masters)
+    a_default = analytics.build_analytics(sched, masters, cfg)
+    a_explicit_none = analytics.build_analytics(sched, masters, cfg, absences=None)
+    assert a_default == a_explicit_none
+
+
+def test_absence_for_unrelated_operator_or_outside_window_is_ignored():
+    procs = [Process(1, "CNC", 4, 4, "M", None)]
+    masters = _masters(procs, [("M", "CNC lathe", 19.5)])
+    masters.operators = [Operator("Op One", "M", machines=["M"], shift="First shift")]
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    sched = rule6_allocate.run([_batch(30)], config=cfg, masters=masters)
+    a0 = analytics.build_analytics(sched, masters, cfg)
+    o0 = next(o for o in a0["operators"] if o["Operator"] == "Op One")
+
+    win_end = max(e.end for e in sched).date()
+    far_future = (win_end + timedelta(days=365)).isoformat()
+    absences = [
+        {"operator": "Someone Else", "from_date": "2025-03-05", "to_date": "2025-03-06"},
+        {"operator": "Op One", "from_date": far_future, "to_date": far_future},
+        {"operator": "Op One", "from_date": "not-a-date", "to_date": "also-not-a-date"},
+    ]
+    a1 = analytics.build_analytics(sched, masters, cfg, absences=absences)
+    o1 = next(o for o in a1["operators"] if o["Operator"] == "Op One")
+    assert o1["Available (hrs)"] == o0["Available (hrs)"]
 
 
 @pytest.mark.skipif(not os.path.exists("Test4.xlsx"), reason="real data file not present")

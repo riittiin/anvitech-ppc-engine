@@ -60,7 +60,33 @@ def _shift_hours(shift, config):
     return float(config.first_shift_end_hour - config.first_shift_start_hour)   # first: 08->19
 
 
-def build_analytics(schedule, masters, config, batches=None):
+def _absent_working_days(operator, absences, calendar, win_start, win_end):
+    """How many of ``operator``'s absence days fall on a working day inside the
+    plan window [win_start, win_end]. Tolerates malformed rows (skip), same as
+    ``optimize_service.absence_reservations``."""
+    from datetime import date as _date
+    win_start_d, win_end_d = win_start.date(), win_end.date()
+    n = 0
+    for a in absences or []:
+        if a.get("operator") != operator:
+            continue
+        try:
+            f = _date.fromisoformat(a["from_date"])
+            t = _date.fromisoformat(a["to_date"])
+        except (KeyError, ValueError, TypeError):
+            continue                                     # malformed row — skip
+        if t < f:
+            f, t = t, f
+        d = max(f, win_start_d)
+        last = min(t, win_end_d)
+        while d <= last:
+            if calendar.is_working_day(d):
+                n += 1
+            d += timedelta(days=1)
+    return n
+
+
+def build_analytics(schedule, masters, config, batches=None, absences=None):
     """Utilization analytics for one plan. Returns a JSON-able dict with keys:
     ``window``, ``machines``, ``machine_groups``, ``operators``, ``processes``, ``headline``."""
     if not schedule:
@@ -141,7 +167,10 @@ def build_analytics(schedule, masters, config, batches=None):
         shift_of = {o.name: o.shift for o in masters.operators}
         for name, rows in by_op.items():
             busy = sum(r["Minutes"] for r in rows) / 60.0
-            avail = wdays * _shift_hours(shift_of.get(name, ""), config)
+            per_day = _shift_hours(shift_of.get(name, ""), config)
+            absent_days = _absent_working_days(name, absences, masters.calendar,
+                                                win_start, win_end)
+            avail = max(0.0, (wdays - absent_days) * per_day)
             u = _util(busy, avail)
             # Distinct operations the person manned (a multi-shift op shared with
             # another shift's operator counts for each participant).

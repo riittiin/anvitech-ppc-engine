@@ -396,9 +396,12 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
             {"title": "Machine utilization", "table": to_table(summary)},
         ]
         # Analytics tab: utilization & bottlenecks derived from this plan.
+        # Operator absences reduce each person's Available (hrs) so utilization
+        # stays honest (Task 13 already keeps busy work out of absent days).
         from engine import analytics as _an
         trace["analytics"] = _an.build_analytics(
-            plan_run.schedule, masters, config, plan_run.batches_prioritized)
+            plan_run.schedule, masters, config, plan_run.batches_prioritized,
+            absences=book_store.load_absences())
         # Shift-wise timeline (download-only view): every op split into per-shift segments
         # with the real operator each shift. Not rendered as a panel (can be ~900 rows) —
         # attached under its own key for the "Download shift-wise schedule" button. Only
