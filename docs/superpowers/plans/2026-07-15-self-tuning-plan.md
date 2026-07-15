@@ -25,7 +25,7 @@ cloud-optimize plumbing (`engine/optimize_service.py`, `scripts/cloud_optimize_w
 - Run tests with `python3 -m pytest` (never `python`). Full suite green after every task.
 - Score = `optimizer.score` (late-days + 10×makespan) — never reweighted.
 - Promise comparison is DAY-level: `entry.end.date() <= promised_date`.
-- Env knobs (exact names): `AUTO_OPTIMIZE` (default "1"), `AUTO_OPTIMIZE_QUIET_MIN` (default "10"), `AUTO_OPTIMIZE_SPACING_MIN` (default "60").
+- Env knob (exact name): `AUTO_OPTIMIZE` (default "1") — INTERNAL test isolation only, never user-facing. NO quiet-window/spacing knobs: punch entry is gated by the "Done entering" button (`POST /optimize/done`, any role); deliberate admin actions trigger immediately.
 - Store keys (exact): `anvitech:absences`, `anvitech:auto_note`; plan-priority meta gains `book_sig` and `joint` fields.
 - Branch: all work on `self-tuning-plan`.
 

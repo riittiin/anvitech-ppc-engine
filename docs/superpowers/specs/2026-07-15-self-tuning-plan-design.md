@@ -42,19 +42,23 @@ order keys + each order's remaining qty and per-process remaining + commitment
 lane + promised dates + operator absences (Phase 3) — alongside the existing
 `inputs_sig` (masters + plan-shaping config). Book changed ⇒ `book_sig` differs.
 
-**Triggers.** After any state-changing action that alters the fingerprint:
-actuals save (incl. mark-complete + rollback), upload merge, order delete/clear,
-commitment change, absence change. Implementation: one `_maybe_auto_optimize()`
-hook called from those endpoints.
+**Triggers (owner revision, same day — no timers for punches).** Two kinds:
 
-**Debounce (protects the GitHub free budget).** Punches arrive in bursts. An auto
-contest starts only after a **quiet window** (default 10 min without further book
-changes) and with a **minimum spacing** (default 60 min between auto contest
-starts). One contest at a time (existing lock); a change landing mid-run schedules
-the next. Both knobs env-tunable (`AUTO_OPTIMIZE_QUIET_MIN`,
-`AUTO_OPTIMIZE_SPACING_MIN`). Manual Optimize is never throttled.
-Budget check: worst case ≈ 9-10 auto contests/day ≈ 60 GH-minutes/day — inside
-the 2,000 free minutes/month with margin.
+1. **Punch entry is button-gated.** Punches NEVER auto-trigger a contest.
+   The Capture Actuals tab gets a **"Done entering — update & optimize plan"**
+   button, visible to BOTH roles (the entry clerk presses it after the day's
+   punches; each punch still auto-REPLANS immediately as today — facts always
+   flow; only the *optimization* waits for the button). Never pressed ⇒ never
+   re-optimized from punches. Endpoint: `POST /optimize/done` (any logged-in
+   role; starts the auto-flavored contest; "already running" answered politely).
+2. **Deliberate admin actions trigger immediately** (they are one-shot, not
+   bursts): upload merge, order delete/clear, commitment change, absence
+   add/remove, Settings save. One contest at a time (existing lock); a change
+   landing mid-run makes the finished result fail its re-validation and a fresh
+   contest follows.
+
+Budget check: a button press + a handful of admin actions ≈ ≤10 contests/day
+≈ 60 GH-minutes/day — inside the 2,000 free minutes/month with margin.
 
 **Auto-apply.** When the contest finishes: compute the incumbent = today's plan
 as the users would see it (the applied optimization replayed on TODAY'S book, or
@@ -66,8 +70,10 @@ Otherwise nothing changes. Both outcomes write a one-line note (stored at
 *"Plan auto-re-optimized 18:12 — 445 late-days (was 471), overlap 80 → 70"* or
 *"Checked 18:12 — current plan still best."*
 
-**Kill switch.** `AUTO_OPTIMIZE=0` disables the trigger entirely (tests set this;
-the deployed default is on). **Auto contests are cloud-only**: with the cloud
+**No user-facing off switch (owner decision).** Auto-optimize is always on in
+the deployed app — no button or setting turns it off. The `AUTO_OPTIMIZE=0`
+env var exists ONLY as internal test isolation (the suite must not spawn
+background contests); it is not documented in the UI and not offered to users. **Auto contests are cloud-only**: with the cloud
 unavailable (dispatch fails, budget exhausted, env unset) the auto run is
 SKIPPED with a note ("will retry on the next change") — never a 40-min local
 burn of the free instance's 0.1 CPU in the background. The manual button keeps
