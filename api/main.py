@@ -815,7 +815,7 @@ _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              "baseline": None, "best": None, "error": None, "elapsed_s": 0.0,
              "started_mono": None, "result": None, "cancel": False,
              "mode": "local", "job_id": None, "cloud_payload": None,
-             "cloud_failed": False, "base_config": None}
+             "cloud_failed": False, "base_config": None, "auto": False}
 _OPTIMIZE_LOCK = threading.Lock()
 
 
@@ -867,7 +867,96 @@ def _worker_secret_ok(request: Request) -> bool:
     return bool(secret) and hmac.compare_digest(secret, given)
 
 
-def _start_optimize(budget_evals: int, label: str, background: bool = True):
+# --------------------------------------------------------------------------- #
+# Self-tuning trigger (spec 2026-07-15-self-tuning-plan, owner-revised):
+# deliberate admin actions re-optimize IMMEDIATELY; punch entry re-optimizes
+# only when the clerk presses "Done entering" (POST /optimize/done). No
+# timers. AUTO_OPTIMIZE=0 is internal test isolation only — never user-facing.
+# --------------------------------------------------------------------------- #
+_AUTO = {"pending": False}
+_AUTO_LOCK = threading.Lock()
+
+
+def _auto_enabled() -> bool:
+    return os.environ.get("AUTO_OPTIMIZE", "1") != "0"
+
+
+def _current_book_sig() -> str:
+    masters = _current_masters()
+    actuals = book_store.load_actuals()
+    lines = orderbook.active_so_lines(book_store.load_active_orders(),
+                                      actuals, masters)
+    absences = (book_store.load_absences()
+                if hasattr(book_store, "load_absences") else None)
+    return optimize_service.book_signature(lines, absences=absences)
+
+
+def _auto_note_write(text: str):
+    from datetime import datetime as _dt
+    book_store.save_auto_note({"text": text,
+                               "at": _dt.now().isoformat(timespec="seconds")})
+
+
+def _applied_book_sig():
+    """The book_sig recorded against the last applied optimization, read
+    directly (not via book_store.load_plan_priority(), which treats an empty
+    ranks dict as "nothing applied" for planning purposes — a different
+    concern from "does the last contest still match today's book")."""
+    raw = book_store.get_store().kv_get(book_store.PLAN_PRIORITY_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return (data.get("meta") or {}).get("book_sig")
+
+
+def _try_start_auto() -> bool:
+    """The one decision point: start an auto contest now if it makes sense."""
+    if not _auto_enabled():
+        return False
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] == "running":
+            with _AUTO_LOCK:
+                _AUTO["pending"] = True          # chain after the current run
+            return False
+    if _cloud_config() is None:
+        _auto_note_write("Auto-optimize skipped — cloud compute unavailable; "
+                         "will retry on the next change.")
+        return False                             # auto is cloud-only
+    applied_sig = _applied_book_sig()
+    try:
+        if applied_sig == _current_book_sig():
+            return False                         # nothing material changed
+    except Exception:
+        return False
+    try:
+        _start_optimize(_OPT_BUDGETS["deep"], "auto", background=True, auto=True)
+        return True
+    except HTTPException:
+        return False                             # e.g. nothing to optimize
+
+
+def _bump_book_changed():
+    """Call after DELIBERATE admin mutations (upload, delete, commitment,
+    absence, Settings save). Punch saves do NOT call this — the clerk's
+    Done button does."""
+    _try_start_auto()
+
+
+def _drain_pending_auto():
+    """Called when a contest finishes: if the book changed mid-run, follow up."""
+    with _AUTO_LOCK:
+        pending, _AUTO["pending"] = _AUTO["pending"], False
+    if pending:
+        _try_start_auto()
+
+
+def _start_optimize(budget_evals: int, label: str, background: bool = True,
+                    auto: bool = False):
     """Snapshot the book + config and run the settings-sweep contest. With
     committed/urgent orders present, only the OPEN pass is searched (against
     the protected pass's reservations) — a found plan can never disturb a
@@ -908,7 +997,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
                          elapsed_s=0.0, started_mono=time.monotonic(), cancel=False,
                          mode=("cloud" if cloud else "local"), job_id=job_id,
                          cloud_payload=payload, cloud_failed=False,
-                         base_config=base_config)
+                         base_config=base_config, auto=bool(auto))
 
     def local_job():
         try:
@@ -1025,6 +1114,7 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                     "best_overlap": winner_overlap,
                     "current_overlap": base_config.overlap_percent,
                     "sweep_table": table})
+    _drain_pending_auto()
     return True
 
 
@@ -1346,6 +1436,14 @@ def optimize_clear_ep(request: Request):
     """Remove the applied optimization (back to the pure Rule-3 order). Admin only."""
     require_admin(request)
     return _optimize_clear()
+
+
+@app.post("/optimize/done")
+def optimize_done_ep(request: Request):
+    """The Capture-tab 'Done entering' button — ANY logged-in role. Starts the
+    self-tuning contest over today's book (no-op when nothing changed)."""
+    started = _try_start_auto()
+    return {"started": started, "state": _optimize_status()["state"]}
 
 
 # --------------------------------------------------------------------------- #

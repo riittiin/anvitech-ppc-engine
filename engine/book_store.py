@@ -23,6 +23,7 @@ MASTERS_KEY = "anvitech:masters"           # kv: base64 of the latest workbook
 PLAN_CONFIG_KEY = "anvitech:plan_config"   # kv: json of the admin's saved Config
 PLAN_PRIORITY_KEY = "anvitech:plan_priority"  # kv: json {ranks, meta} of the applied Optimize run
 PROMISE_RECOVERY_KEY = "anvitech:promise_recovery"  # kv: json {ranks, meta} of the auto committed re-sequence
+AUTO_NOTE_KEY = "anvitech:auto_note"        # kv: json note from the self-tuning trigger (informational)
 
 _SEP = "\x1f"   # ASCII unit separator — never appears in an SO# or item code
 
@@ -239,3 +240,13 @@ def load_promise_recovery():
 
 def clear_promise_recovery() -> None:
     get_store().delete_key(PROMISE_RECOVERY_KEY)
+
+
+# --- self-tuning trigger note (informational, non-blocking) --- #
+def save_auto_note(note: dict) -> None:
+    get_store().kv_set(AUTO_NOTE_KEY, json.dumps(note))
+
+
+def load_auto_note():
+    raw = get_store().kv_get(AUTO_NOTE_KEY)
+    return json.loads(raw) if raw else None
