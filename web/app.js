@@ -223,7 +223,8 @@ function renderRecoveryNote() {
 }
 
 function optimizeProgressLine(st) {
-  const tried = `tried ${st.evals} of ${st.budget_evals} plans`;
+  const where = st.mode === "cloud" ? " in the cloud" : "";
+  const tried = `tried ${st.evals} of ${st.budget_evals} plans${where}`;
   const best = st.best ? ` — best so far: ${fmtMetrics(st.best)}` : "";
   return tried + best;
 }

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -40,6 +41,7 @@ from engine.loaders import load_all
 from engine.models import PlanRun, Actual, Masters, fmt_date
 from engine.pipeline import run_forward, to_table, KEY_SEP
 from engine import optimizer
+from engine import optimize_service
 from engine.gantt import build_gantt
 from engine import book_store, orderbook
 from engine.rules import (
@@ -103,6 +105,18 @@ async def gatekeeper(request: Request, call_next):
 
     if (method, path) in _PUBLIC:
         return await call_next(request)
+
+    # Cloud-optimize worker endpoints: authenticated by a shared secret header
+    # (server-to-server from the GitHub Actions runner — no session cookie).
+    # Constant-time compare; with no OPTIMIZE_WORKER_SECRET configured these
+    # paths simply fall through to the normal session gate (→ 401).
+    if ((method == "GET" and path.startswith("/optimize/job/"))
+            or (method == "POST" and path in ("/optimize/progress",
+                                              "/optimize/result"))):
+        if _worker_secret_ok(request):
+            request.state.user = "cloud-worker"
+            request.state.role = "worker"
+            return await call_next(request)
 
     payload = auth.verify_token(request.cookies.get(auth.COOKIE_NAME))
     if payload is None:
@@ -515,18 +529,9 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
 # --------------------------------------------------------------------------- #
 # Core: plan the active order book
 # --------------------------------------------------------------------------- #
-def _reservations_from_schedule(schedule):
-    """Machine id → busy intervals and operator name → busy intervals, from a plan
-    (used to reserve the committed pass's machine/operator time in the open pass)."""
-    res = {}
-    for e in schedule:
-        m = e.machine or ""
-        if m and "OS" not in m and "Off-machine" not in m and "Outsourced" not in m:
-            res.setdefault(m, []).append((e.start, e.end))
-        op = getattr(e, "operator", "") or ""
-        if op:
-            res.setdefault(op, []).append((e.start, e.end))
-    return res
+# Machine/operator busy intervals from a plan — moved to engine/optimize_service
+# so the cloud worker shares it; kept under the old name for _plan's use.
+_reservations_from_schedule = optimize_service.reservations_from_schedule
 
 
 def _plan(config: Config):
@@ -808,14 +813,66 @@ _OPT_SEED = 42
 
 _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              "baseline": None, "best": None, "error": None, "elapsed_s": 0.0,
-             "started_mono": None, "result": None, "cancel": False}
+             "started_mono": None, "result": None, "cancel": False,
+             "mode": "local", "job_id": None, "cloud_payload": None,
+             "cloud_failed": False, "base_config": None}
 _OPTIMIZE_LOCK = threading.Lock()
 
 
+# --------------------------------------------------------------------------- #
+# Cloud compute (GitHub Actions) — the full 2,400-plan contest runs on a free
+# GitHub runner (2 vCPU ≈ 40× the Render instance) in ~8-10 min. Enabled by two
+# env vars on Render; with either missing, Optimize computes locally exactly as
+# before. The worker authenticates with OPTIMIZE_WORKER_SECRET; if the cloud
+# never answers, a watchdog falls back to local compute so the button always
+# works. Spec: docs/superpowers/specs/2026-07-15-optimize-settings-sweep-design.md.
+# --------------------------------------------------------------------------- #
+def _cloud_config():
+    token = os.environ.get("GITHUB_DISPATCH_TOKEN", "").strip()
+    secret = os.environ.get("OPTIMIZE_WORKER_SECRET", "").strip()
+    if not token or not secret:
+        return None
+    return {"token": token, "secret": secret,
+            "repo": os.environ.get("GITHUB_REPO", "riittiin/anvitech-ppc-engine"),
+            "workflow": os.environ.get("OPTIMIZE_WORKFLOW", "optimize.yml"),
+            "timeout_min": float(os.environ.get("OPTIMIZE_CLOUD_TIMEOUT_MIN", "20"))}
+
+
+def _dispatch_workflow(cloud, job_id) -> bool:
+    """Trigger the optimize workflow on GitHub (workflow_dispatch). Stdlib only.
+    Token "manual" skips the GitHub call — the operator starts the worker
+    themselves (local E2E testing, or any non-GitHub compute box)."""
+    if cloud["token"] == "manual":
+        return True
+    import urllib.request
+    url = (f"https://api.github.com/repos/{cloud['repo']}"
+           f"/actions/workflows/{cloud['workflow']}/dispatches")
+    body = json.dumps({"ref": "main", "inputs": {"job_id": job_id}}).encode()
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "Authorization": f"Bearer {cloud['token']}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "User-Agent": "anvitech-ppc",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status == 204
+    except Exception:
+        return False
+
+
+def _worker_secret_ok(request: Request) -> bool:
+    secret = os.environ.get("OPTIMIZE_WORKER_SECRET", "")
+    given = request.headers.get("x-worker-secret", "")
+    return bool(secret) and hmac.compare_digest(secret, given)
+
+
 def _start_optimize(budget_evals: int, label: str, background: bool = True):
-    """Snapshot the book + config and run the sequence search. With committed/
-    urgent orders present, only the OPEN pass is searched (against the protected
-    pass's reservations) — a found plan can never disturb a promise."""
+    """Snapshot the book + config and run the settings-sweep contest. With
+    committed/urgent orders present, only the OPEN pass is searched (against
+    the protected pass's reservations) — a found plan can never disturb a
+    promise. Cloud-configured → dispatch the full contest to GitHub Actions;
+    otherwise (or on any cloud failure) compute locally."""
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["state"] == "running":
             raise HTTPException(status_code=409,
@@ -825,63 +882,35 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
         masters = _current_masters()
         base_config = config      # as saved — the basis for the inputs fingerprint
         actuals = book_store.load_actuals()
-        so_lines = orderbook.active_so_lines(book_store.load_active_orders(),
-                                             actuals, masters)
-        eff_start = orderbook.effective_plan_start_date(actuals, config.plan_start_date,
-                                                        masters.calendar)
-        if eff_start != config.plan_start_date:
-            config = replace(config, plan_start_date=eff_start)
+        orders = book_store.load_active_orders()
+        try:
+            setup = optimize_service.prepare_contest(orders, actuals, masters, config)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
-        protected, open_lines = orderbook.split_committed_open(so_lines)
-        target = open_lines if protected else so_lines
-        if not target:
-            raise HTTPException(
-                status_code=400,
-                detail="nothing to optimize — no open orders with work remaining"
-                       + (" (all orders are promise-protected)" if protected else ""))
+        cloud = _cloud_config()
+        job_id = uuid.uuid4().hex
+        if cloud:
+            payload = optimize_service.build_payload(
+                orders, actuals, book_store.load_masters_bytes(), base_config,
+                seed=_OPT_SEED)
+            denom = (optimize_service.CLOUD_BUDGET_PER_CANDIDATE
+                     * len(optimizer.sweep_contenders(
+                         setup.search_config.overlap_percent,
+                         optimize_service.CLOUD_OVERLAP_CANDIDATES)))
+        else:
+            payload = None
+            denom = optimizer.sweep_total_evals(budget_evals,
+                                                setup.search_config.overlap_percent)
 
-        # The batch sequence only has leverage when Expedite is off: the expedite
-        # window dynamically re-sorts ops by slack and flattens every sequence into the
-        # same plan, so a search WITH expedite on finds "no improvement" for every book.
-        # Search in the pure non-delay model; the found ranks replace expedite (and the
-        # applied plan runs expedite-off too — see _plan). The baseline shown to the
-        # admin is still their REAL current plan (their config as set), so the
-        # before/after is honest.
-        search_config = replace(config, expedite_window_min=0)
-
-        # Settings sweep (2026-07-15 spec): each candidate overlap gets its own
-        # committed-pass reservations, and — the promise guard — is eligible only
-        # if the committed orders keep their promises at least as well as under
-        # the CURRENT overlap. All-open books have no guard.
-        candidate_setup = None
-        reserved = None
-        if protected:
-            def _pass1(cfg):
-                plan_p = PlanRun(so_lines=list(protected))
-                run_forward(plan_p, cfg, masters)
-                slip = optimizer.promise_slip_metrics(plan_p.schedule, protected,
-                                                      cfg.plan_start_date)
-                return _reservations_from_schedule(plan_p.schedule), slip
-
-            reserved, cur_slip = _pass1(search_config)   # current overlap's pass 1
-
-            def candidate_setup(cfg):
-                if cfg.overlap_percent == search_config.overlap_percent:
-                    return reserved, True
-                res, slip = _pass1(cfg)
-                ok = (slip["promise_slip_days"] <= cur_slip["promise_slip_days"]
-                      and slip["promises_missed"] <= cur_slip["promises_missed"])
-                return res, ok
-
-        # The progress denominator is the sweep's true total: the budget split
-        # equally across the overlap contenders (fair contest).
-        _OPTIMIZE.update(state="running", label=label,
-                         budget_evals=optimizer.sweep_total_evals(
-                             budget_evals, search_config.overlap_percent),
+        _OPTIMIZE.update(state="running", label=label, budget_evals=denom,
                          evals=0, baseline=None, best=None, error=None, result=None,
-                         elapsed_s=0.0, started_mono=time.monotonic(), cancel=False)
+                         elapsed_s=0.0, started_mono=time.monotonic(), cancel=False,
+                         mode=("cloud" if cloud else "local"), job_id=job_id,
+                         cloud_payload=payload, cloud_failed=False,
+                         base_config=base_config)
 
-    def job():
+    def local_job():
         try:
             def on_progress(evals, best):
                 _OPTIMIZE["evals"] = evals
@@ -889,45 +918,114 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
 
             # Honest baseline = the admin's CURRENT plan for these orders, under their
             # real config (expedite as set) — what they have if they DON'T optimize.
-            base_run = PlanRun(so_lines=list(target))
-            run_forward(base_run, config, masters, reserved=reserved)
-            real_baseline = optimizer.plan_metrics(base_run.schedule, target,
-                                                   config.plan_start_date)
+            real_baseline = _OPTIMIZE.get("baseline")
+            if real_baseline is None:
+                base_run = PlanRun(so_lines=list(setup.target))
+                run_forward(base_run, setup.config, masters, reserved=setup.reserved)
+                real_baseline = optimizer.plan_metrics(base_run.schedule, setup.target,
+                                                       setup.config.plan_start_date)
 
-            sw = optimizer.sweep_optimize(target, search_config, masters,
+            sw = optimizer.sweep_optimize(setup.target, setup.search_config, masters,
                                           budget_evals=budget_evals, seed=_OPT_SEED,
                                           on_progress=on_progress,
                                           should_cancel=lambda: _OPTIMIZE.get("cancel"),
-                                          candidate_setup=candidate_setup)
+                                          candidate_setup=setup.candidate_setup)
             res = sw.result
-            improved = optimizer.score(res.best) < optimizer.score(real_baseline)
-            # Fingerprint against the WINNING settings: Apply persists the winning
-            # overlap into the saved plan config, so the staleness check must
-            # compare future plans against exactly that config.
-            inputs_sig = _inputs_signature(replace(base_config,
-                                                   overlap_percent=sw.overlap_percent))
-            with _OPTIMIZE_LOCK:
-                _OPTIMIZE.update(
-                    state="done", evals=sw.evals, baseline=real_baseline, best=res.best,
-                    cancel=False,
-                    elapsed_s=round(time.monotonic() - _OPTIMIZE["started_mono"], 1),
-                    result={"ranks": res.ranks, "improved": improved,
-                            "cancelled": sw.cancelled,
-                            "baseline": real_baseline, "best": res.best,
-                            "budget": label, "seed": _OPT_SEED,
-                            "inputs_sig": inputs_sig,
-                            "best_overlap": sw.overlap_percent,
-                            "current_overlap": base_config.overlap_percent,
-                            "sweep_table": sw.table})
+            _finalize_optimize(job_id, base_config, real_baseline, label,
+                               winner_overlap=sw.overlap_percent, ranks=res.ranks,
+                               best=res.best, evals=sw.evals, table=sw.table,
+                               cancelled=sw.cancelled)
         except Exception as e:  # noqa: BLE001 — a failed search must report, not hang
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE.update(state="failed", error=str(e), cancel=False)
 
+    def cloud_job():
+        try:
+            # Baseline is computed HERE (one plan, seconds) so the before/after
+            # is ready whatever the worker does.
+            base_run = PlanRun(so_lines=list(setup.target))
+            run_forward(base_run, setup.config, masters, reserved=setup.reserved)
+            real_baseline = optimizer.plan_metrics(base_run.schedule, setup.target,
+                                                   setup.config.plan_start_date)
+            with _OPTIMIZE_LOCK:
+                _OPTIMIZE["baseline"] = real_baseline
+
+            if not _dispatch_workflow(cloud, job_id):
+                with _OPTIMIZE_LOCK:
+                    still_mine = (_OPTIMIZE["state"] == "running"
+                                  and _OPTIMIZE["job_id"] == job_id)
+                    if still_mine:
+                        _OPTIMIZE["mode"] = "local"
+                        _OPTIMIZE["budget_evals"] = optimizer.sweep_total_evals(
+                            budget_evals, setup.search_config.overlap_percent)
+                if still_mine:
+                    local_job()
+                return
+
+            deadline = time.monotonic() + cloud["timeout_min"] * 60
+            while True:
+                time.sleep(2)
+                with _OPTIMIZE_LOCK:
+                    if (_OPTIMIZE["state"] != "running"
+                            or _OPTIMIZE["job_id"] != job_id):
+                        return           # the worker delivered (or the job was cleared)
+                    # A worker-reported failure short-circuits the deadline.
+                    timed_out = (time.monotonic() > deadline
+                                 or _OPTIMIZE.get("cloud_failed"))
+                    was_cancelled = _OPTIMIZE["cancel"]
+                    if timed_out:
+                        if was_cancelled:
+                            # Cancelled and the cloud never answered → just stop.
+                            _OPTIMIZE.update(state="failed", cancel=False,
+                                             error="stopped — the cloud run did not "
+                                                   "answer before the timeout")
+                            return
+                        _OPTIMIZE["mode"] = "local"
+                        _OPTIMIZE["budget_evals"] = optimizer.sweep_total_evals(
+                            budget_evals, setup.search_config.overlap_percent)
+                        _OPTIMIZE["evals"] = 0
+                if timed_out:
+                    local_job()          # cloud never answered → compute here
+                    return
+        except Exception as e:  # noqa: BLE001
+            with _OPTIMIZE_LOCK:
+                _OPTIMIZE.update(state="failed", error=str(e), cancel=False)
+
+    job = cloud_job if cloud else local_job
     if background:
         threading.Thread(target=job, daemon=True).start()
     else:
         job()
     return _optimize_status()
+
+
+def _finalize_optimize(job_id, base_config, real_baseline, label, *,
+                       winner_overlap, ranks, best, evals, table, cancelled):
+    """Store a finished contest (local sweep OR cloud worker result) as the
+    Optimize outcome — one place computes improved/inputs_sig for both paths."""
+    improved = (best is not None and real_baseline is not None
+                and optimizer.score(best) < optimizer.score(real_baseline))
+    # Fingerprint against the WINNING settings: Apply persists the winning
+    # overlap into the saved plan config, so the staleness check must
+    # compare future plans against exactly that config.
+    inputs_sig = _inputs_signature(replace(base_config,
+                                           overlap_percent=winner_overlap))
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["job_id"] != job_id:
+            return False
+        _OPTIMIZE.update(
+            state="done", evals=evals, baseline=real_baseline, best=best,
+            cancel=False, cloud_payload=None, error=None,
+            elapsed_s=round(time.monotonic() - _OPTIMIZE["started_mono"], 1),
+            result={"ranks": ranks, "improved": improved,
+                    "cancelled": cancelled,
+                    "baseline": real_baseline, "best": best,
+                    "budget": label, "seed": _OPT_SEED,
+                    "inputs_sig": inputs_sig,
+                    "best_overlap": winner_overlap,
+                    "current_overlap": base_config.overlap_percent,
+                    "sweep_table": table})
+    return True
 
 
 def _optimize_status():
@@ -943,6 +1041,10 @@ def _optimize_status():
                 "improved": res.get("improved"), "cancelled": res.get("cancelled", False),
                 "best_overlap": res.get("best_overlap"),
                 "current_overlap": res.get("current_overlap"),
+                "mode": _OPTIMIZE.get("mode", "local"),
+                # The job id is only useful together with the worker secret
+                # (manual-dispatch mode / debugging) — not sensitive by itself.
+                "job_id": _OPTIMIZE.get("job_id") if _OPTIMIZE["state"] == "running" else None,
                 "stopping": bool(_OPTIMIZE.get("cancel")) and _OPTIMIZE["state"] == "running"}
 
 
@@ -1244,6 +1346,85 @@ def optimize_clear_ep(request: Request):
     """Remove the applied optimization (back to the pure Rule-3 order). Admin only."""
     require_admin(request)
     return _optimize_clear()
+
+
+# --------------------------------------------------------------------------- #
+# Cloud-worker endpoints — called by the GitHub Actions runner, authenticated
+# by the OPTIMIZE_WORKER_SECRET header (see the gatekeeper bypass). They only
+# answer for the currently running job id.
+# --------------------------------------------------------------------------- #
+def _require_worker(request: Request):
+    if getattr(request.state, "role", None) != "worker":
+        raise HTTPException(status_code=403, detail="worker secret required")
+
+
+class WorkerProgress(BaseModel):
+    job_id: str
+    evals: int = 0
+    best: Optional[dict] = None
+
+
+class WorkerResult(BaseModel):
+    job_id: str
+    winner_overlap: Optional[int] = None
+    ranks: dict = Field(default_factory=dict)
+    best: Optional[dict] = None
+    rows: list = Field(default_factory=list)
+    evals: int = 0
+    cancelled: bool = False
+    error: Optional[str] = None
+
+
+@app.get("/optimize/job/{job_id}")
+def optimize_job_ep(job_id: str, request: Request):
+    """The contest payload for the worker (book snapshot + config + budget)."""
+    _require_worker(request)
+    with _OPTIMIZE_LOCK:
+        if (_OPTIMIZE["state"] == "running" and _OPTIMIZE.get("job_id") == job_id
+                and _OPTIMIZE.get("cloud_payload")):
+            return {"payload": _OPTIMIZE["cloud_payload"],
+                    "cancel": bool(_OPTIMIZE["cancel"])}
+    raise HTTPException(status_code=404, detail="no such running job")
+
+
+@app.post("/optimize/progress")
+def optimize_progress_ep(req: WorkerProgress, request: Request):
+    """Worker heartbeat: updates the progress bar; the response tells the
+    worker whether the admin pressed Stop (it then posts its best-so-far)."""
+    _require_worker(request)
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] == "running" and _OPTIMIZE.get("job_id") == req.job_id:
+            _OPTIMIZE["evals"] = max(int(req.evals), _OPTIMIZE["evals"])
+            if req.best:
+                _OPTIMIZE["best"] = req.best
+            return {"cancel": bool(_OPTIMIZE["cancel"])}
+    raise HTTPException(status_code=404, detail="no such running job")
+
+
+@app.post("/optimize/result")
+def optimize_result_ep(req: WorkerResult, request: Request):
+    """The finished contest from the worker. An error report makes the watchdog
+    fall back to local compute immediately (the button must always work)."""
+    _require_worker(request)
+    with _OPTIMIZE_LOCK:
+        running = (_OPTIMIZE["state"] == "running"
+                   and _OPTIMIZE.get("job_id") == req.job_id)
+        base_config = _OPTIMIZE.get("base_config")
+        baseline = _OPTIMIZE.get("baseline")
+        label = _OPTIMIZE.get("label")
+        if running and (req.error or req.best is None or req.winner_overlap is None):
+            _OPTIMIZE["cloud_failed"] = True     # watchdog → local fallback now
+            _OPTIMIZE["error"] = req.error or "cloud worker returned no result"
+            return {"ok": True, "fallback": "local"}
+    if not running:
+        raise HTTPException(status_code=404, detail="no such running job")
+    stored = _finalize_optimize(req.job_id, base_config, baseline, label,
+                                winner_overlap=req.winner_overlap,
+                                ranks=req.ranks, best=req.best, evals=req.evals,
+                                table=req.rows, cancelled=req.cancelled)
+    if not stored:
+        raise HTTPException(status_code=409, detail="job superseded")
+    return {"ok": True}
 
 
 @app.get("/gantt")

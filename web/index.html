@@ -46,16 +46,16 @@
       only nudges order locally) — an applied optimized plan runs with Expedite set aside.
     </div>
     <div class="optimize-controls">
-      <span class="cfg-check">Deep search (~1,000 plans, ~40 min on this server)</span>
+      <span class="cfg-check">Deep search — the full contest (~2,400 plans in the cloud,
+        ~10 min; ~1,000 plans on this server if the cloud is unavailable)</span>
       <button id="optimize-start" class="primary">Start</button>
       <button id="optimize-stop" class="ghost-btn hidden">Stop &amp; keep best</button>
       <span id="optimize-progress" class="status"></span>
     </div>
     <div class="optimize-note muted">
-      This runs on the server — you can leave this tab open and it keeps going. Every
-      Overlap % contender (50–80, plus your current setting) gets the same share of the
-      search and the best plan wins — your current setting is searched first. Watch
-      “best so far” improve and press <strong>Stop &amp; keep best</strong> whenever
+      You can leave this tab open and it keeps going. Every Overlap % contender gets the
+      same full search and the best plan wins — your current setting is searched first.
+      Watch “best so far” improve and press <strong>Stop &amp; keep best</strong> whenever
       you’re happy.
     </div>
     <div id="optimize-result" class="optimize-result hidden"></div>

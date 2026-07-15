@@ -38,8 +38,33 @@ Owner decisions (2026-07-15):
 > Test5@15-07; on Test6@11-07 picks 713 late-d/39.7 d vs full depth's
 > 717/36.8) at 42 % of the compute.
 
-1. **One button:** `budget_evals` is the TOTAL (live: 1,000 ≈ 40 min on the
-   0.1-CPU Render tier; legacy "quick" requests map to the same budget).
+> **CLOUD COMPUTE (same day, owner decision #3):** 1,000 plans is a compromise
+> the owner rejected — he wants the FULL 2,400-plan contest, and Render's
+> 0.1-CPU free tier can't parallelize (researched — no parallel capacity
+> exists at $0 on Render). Solution: the contest runs on a **free GitHub
+> Actions runner** (2 vCPU, 2,000 free min/month, the repo's own account).
+> `_start_optimize` dispatches `optimize.yml` (workflow_dispatch) with a job
+> id; the runner's `scripts/cloud_optimize_worker.py` fetches the book
+> snapshot from `GET /optimize/job/{id}`, runs
+> `optimize_service.run_contest` (contenders fanned across cores,
+> per-eval progress via a shared counter), heartbeats `POST
+> /optimize/progress` (the response carries the admin's Stop), and posts
+> `POST /optimize/result`. All three endpoints authenticate with the
+> `X-Worker-Secret` header (`OPTIMIZE_WORKER_SECRET`, constant-time compare,
+> gatekeeper bypass). **Fallbacks — the button must always work:** dispatch
+> failure → compute locally immediately; worker error report → local
+> immediately; no answer within `OPTIMIZE_CLOUD_TIMEOUT_MIN` (default 20) →
+> local. Cloud disabled (env vars unset) → pure local, exactly as before.
+> `GITHUB_DISPATCH_TOKEN=manual` skips the GitHub call (manual/local worker).
+> Cloud contest: `optimize_service.CLOUD_OVERLAP_CANDIDATES = (50…100)` ×
+> `CLOUD_BUDGET_PER_CANDIDATE = 400` = the full 2,400. Local fallback: the
+> 1,000-total split below. Deterministic ⇒ a cloud run is byte-identical to
+> the same contest run anywhere.
+
+1. **One button:** `budget_evals` is the TOTAL for LOCAL compute (1,000 ≈ 40
+   min on the 0.1-CPU Render tier; legacy "quick" requests map to the same
+   budget). With cloud compute configured the button runs the full 2,400-plan
+   contest on GitHub instead (~8–10 min).
 2. **Fair contest:** the budget splits EQUALLY across the contenders — the
    current overlap plus `OVERLAP_CANDIDATES = (50, 60, 70, 80)` — via
    `sweep_contenders`; `budget // n` plans each (1,000 → 250 each; a current

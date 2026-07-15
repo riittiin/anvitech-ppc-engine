@@ -163,7 +163,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   On Render set env vars: `APP_USERNAME`, `APP_PASSWORD`, and the store
   (`MONGODB_URI`, or the Upstash pair). Persistence is **opt-in** via those vars;
   with none set the app uses a local file store (`data/store/`). Pushing to `main`
-  auto-redeploys. See README "Free public deployment".
+  auto-redeploys. See README "Free public deployment". **Cloud Optimize** needs two
+  more Render env vars — `GITHUB_DISPATCH_TOKEN` (fine-grained PAT, Actions
+  read+write on the repo) and `OPTIMIZE_WORKER_SECRET` (must equal the GitHub repo
+  secret of the same name; repo secrets `APP_URL` + `OPTIMIZE_WORKER_SECRET` are
+  already set) — without them Optimize computes locally.
 
 ## Map of the code
 
@@ -258,6 +262,19 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   rebuilds the committed pass per candidate and vetoes any overlap whose promise
   slip/broken count worsens; Apply persists the winning overlap into the saved plan
   config and `inputs_sig` is computed against the winning settings.
+  **Cloud compute (2026-07-15, owner decision):** with `GITHUB_DISPATCH_TOKEN` +
+  `OPTIMIZE_WORKER_SECRET` set on Render, Start dispatches the FULL 2,400-plan
+  contest (`optimize_service.CLOUD_OVERLAP_CANDIDATES` × 400) to a free GitHub
+  Actions runner (~8-10 min; `.github/workflows/optimize.yml` →
+  `scripts/cloud_optimize_worker.py` → `engine/optimize_service.py`, the ONE shared
+  code path — payload round-trips the book via the models' own to/from_json, so a
+  cloud run is byte-identical to a local run of the same contest, E2E-verified
+  717/36.79 on Test6@11-07). Worker endpoints `GET /optimize/job/{id}` /
+  `POST /optimize/progress` / `POST /optimize/result` authenticate via the
+  `X-Worker-Secret` header (gatekeeper bypass, constant-time). Fallbacks: dispatch
+  failure / worker error / `OPTIMIZE_CLOUD_TIMEOUT_MIN` (20) exceeded → compute
+  locally (1,000-total split), so the button always works; env unset → pure local.
+  `GITHUB_DISPATCH_TOKEN=manual` skips the GitHub call (run the worker by hand).
 - **Promise recovery (auto committed re-sequencing)** — when a disruption makes committed
   orders slip past their promises, `api._plan`'s Pass 1 auto-triggers a **background**
   `optimize(objective="promise_slip")` on the committed set (its own slot `_RECOVERY`,
