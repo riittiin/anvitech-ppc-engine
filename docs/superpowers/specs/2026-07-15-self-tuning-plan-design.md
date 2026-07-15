@@ -81,7 +81,35 @@ its local fallback. A finished contest is re-validated on TODAY'S book before
 applying (feasible + strictly better) — a result made stale by mid-run book
 changes is discarded and a fresh contest scheduled.
 
-## Phase 2 — One-pool contest with the promise veto
+## Phase 2 — SUPERSEDED (owner pivot, 2026-07-16): the promise rule is DISCARDED
+
+> After the measurement gate failed on both real books (one-pool + hard veto
+> scored ~30% worse than two-pass — zero-slack promises collapse the feasible
+> region), the owner redefined the model: **lanes are status labels, not
+> protection**. Open = newly arrived, not yet released. Committed = released
+> to the floor. Urgent = driven by its Excel delivery date (no special
+> machinery). ONE pool, NO veto, NO two-pass, NO promise recovery: every
+> contest re-sequences the whole book to minimize the standard score against
+> Excel delivery dates. Promised dates are kept **as information only**: the
+> Commit button still snapshots the expected date, and the Orders tab still
+> shows Promised vs Current-expected with a red drift flag — so the owner
+> knows which customers to call — but nothing constrains the optimizer.
+> Daily rhythm: punches replan immediately (facts), the clerk's Done button
+> (or any admin action) triggers the auto contest, auto-apply only-if-better.
+>
+> Removal scope (Phase 2R): the veto plumbing (`feasible=`,
+> `promise_ceiling_ok`), the sweep's per-candidate promise guard
+> (`candidate_setup`), `_plan`'s two-pass + committed-pass reservations
+> (absence reservations REMAIN — physics, not promises), joint-replay
+> re-validation (plain rank replay remains), the promise-recovery
+> auto-trigger/replay/UI note, the urgent push-warning preview, and Rule 1/
+> Rule 3 lane-aware special-casing (uniform ordering for all lanes).
+> Kept: commit/urgent/uncommit endpoints (status + informational promise
+> snapshot), lane badges, Promised/Current-expected columns + red flag,
+> the absence feature, the entire Phase-1 self-tuning machinery.
+
+### The original Phase 2 design (historical — superseded above)
+
 
 **Search space.** The contest reorders **all active orders in one sequence**
 (open + committed + urgent interleaved), evaluated as ONE forward pass

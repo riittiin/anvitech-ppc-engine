@@ -291,13 +291,24 @@ def _report_table(masters):
     ])
 
 
+def _absence_orphans(masters) -> list:
+    """Names on file in operator absences that are no longer in the current
+    masters' Operator & shift Master (e.g. removed/renamed on a re-upload).
+    Sorted for stable output."""
+    names = {o.name for o in masters.operators}
+    return sorted({a["operator"] for a in book_store.load_absences()
+                  if a["operator"] not in names})
+
+
 def _report_for_book(masters, so_lines):
     """The validation report scoped to the CURRENT order book. Loader-level rows
     about the masters (pending machines, time coercions, …) pass through, but
     NO_ROUTING is re-derived from the live book: the stored workbook's own SO
     sheet can list orders that were never merged or were later deleted (live
     2026-07-15 bug: a "5 orders without routing" banner for ghost orders while
-    every real order planned fine)."""
+    every real order planned fine). Also appends a non-blocking row per absence
+    entry whose operator is no longer in the masters (ABSENT_OPERATOR_UNKNOWN) —
+    the entry is ignored by planning, not an error."""
     rows = [r for r in masters.report if r["kind"] != "NO_ROUTING"]
     seen = set()
     for l in so_lines:
@@ -307,6 +318,10 @@ def _report_for_book(masters, so_lines):
                          "message": f"SO item '{l.item_code}' has no routing in "
                                     f"Item's process Master; order skipped "
                                     f"(cannot schedule without a recipe)"})
+    for name in _absence_orphans(masters):
+        rows.append({"kind": "ABSENT_OPERATOR_UNKNOWN", "ref": name,
+                     "message": f"absence entry for an operator not in the "
+                                f"current masters — ignored"})
     return to_table([
         {"Kind": r["kind"], "Reference": r["ref"], "Message": r["message"]}
         for r in rows
@@ -342,6 +357,12 @@ class UrgentRequest(BaseModel):
     so: str
     item: str
     confirm: bool = False   # False = preview only; True = apply even if it pushes others
+
+
+class AbsenceRequest(BaseModel):
+    operator: str
+    from_date: str
+    to_date: str
 
 
 class OptimizeRequest(BaseModel):
@@ -1556,6 +1577,52 @@ def urgent_order_ep(req: UrgentRequest, request: Request):
                               datetime.now().isoformat(timespec="seconds"))
     _bump_book_changed()
     return {"urgent": True}
+
+
+@app.get("/absences")
+def get_absences():
+    """Operator absences on file, any logged-in role (read-only view feeds the
+    Task 16 UI dropdown/list). `orphans` flags absences whose operator name is
+    no longer in the current masters — informational, also surfaced in the
+    validation report as ABSENT_OPERATOR_UNKNOWN."""
+    masters = _current_masters()
+    return {"absences": book_store.load_absences(),
+            "orphans": _absence_orphans(masters),
+            "operators": sorted({o.name for o in masters.operators})}
+
+
+@app.post("/absences")
+def create_absence(req: AbsenceRequest, request: Request):
+    """Record an operator absence window. Admin only. Dates must parse
+    (YYYY-MM-DD); a reversed range is accepted and normalized (swapped) rather
+    than rejected. The operator must be a name in the current masters."""
+    require_admin(request)
+    try:
+        d_from = date.fromisoformat(req.from_date)
+        d_to = date.fromisoformat(req.to_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="dates must be YYYY-MM-DD")
+    if d_to < d_from:
+        d_from, d_to = d_to, d_from
+    names = {o.name for o in _current_masters().operators}
+    if req.operator not in names:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown operator '{req.operator}'")
+    saved = book_store.save_absence({"operator": req.operator,
+                                     "from_date": d_from.isoformat(),
+                                     "to_date": d_to.isoformat()})
+    _bump_book_changed()
+    return {"absence": saved}
+
+
+@app.delete("/absences/{absence_id}")
+def delete_absence_ep(absence_id: str, request: Request):
+    """Remove an absence entry. Admin only."""
+    require_admin(request)
+    if not book_store.delete_absence(absence_id):
+        raise HTTPException(status_code=404, detail="absence not found")
+    _bump_book_changed()
+    return {"deleted": True}
 
 
 @app.post("/optimize")

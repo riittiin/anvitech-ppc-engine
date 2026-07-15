@@ -943,3 +943,29 @@ into pass-1 and pass-2 `reserved=`.
 - [ ] Update `CLAUDE.md` (code map: auto trigger, veto, absences), `RULES.md` (feedback section: the three layers + the promise ceiling law), `HANDOFF.md` (latest-session block).
 - [ ] Full suite; `python3 -m pytest -q` green; golden untouched.
 - [ ] Commit: `git commit -am "docs: self-tuning plan — CLAUDE/RULES/HANDOFF in lockstep"`. Report to the owner with the phase-by-phase verification results; deploy only on the owner's "push to main".
+
+
+---
+
+## Phase 2R — Promise rule removal (owner pivot, 2026-07-16; supersedes Tasks 7-11's wiring)
+
+### Task 18: Engine — strip the veto, the guard, and lane-aware rules
+
+**Files:**
+- Modify: `engine/optimizer.py` (remove `promise_ceiling_ok`, the `feasible=` parameter and its plumbing, `sweep_optimize`'s `candidate_setup` parameter + guard docs), `engine/optimize_service.py` (ContestSetup loses feasible/candidate_setup/protected/reserved-from-pass1 — keeps absences/absence_reserved; `prepare_contest` = all-lines target + absence reservations only; delete `_pass1`), `engine/rules/rule1_consolidate.py` + `engine/rules/rule3_tiebreak_process_time.py` (revert lane-aware grouping/protected-sort to uniform ordering — check git history of the committed-orders feature for what was added).
+- Tests: DELETE `tests/test_promise_veto.py`; update `tests/test_optimize_sweep.py` (drop guard/veto tests), `tests/test_optimize_service.py` (drop protected/guard assertions; keep payload/parallel/pick_winner/book_signature), rule1/rule3 test files (drop lane cases), keep everything else green.
+- Keep: `orderbook.split_committed_open` (pure fn + tests, now unused by planning), `Order/SOLine` commitment fields (informational).
+
+Steps: RED-adjust tests → strip code → full suite → commit.
+
+### Task 19: API — single-pass plan always; remove two-pass, recovery, urgent preview
+
+**Files:**
+- Modify: `api/main.py` — `_plan`: ONE pass over all active lines always (absence reservations passed; saved ranks replayed via `priority_rank` — no joint/legacy distinction, no promise re-validation, no `joint_fallback`); delete the protected/two-pass branch, `_reservations_from_schedule` usage for pass-1 (keep the fn in optimize_service — absences path may still... it is now unused: remove alias), promise-recovery trigger/replay (`_maybe_start_recovery`, `_RECOVERY` slot, `recovery_meta` in the response — return `{"active": False}` stub or drop key; check app.js `#recovery-note` renderer and remove), urgent push-preview (`_preview_urgent_pushes` + its endpoint branch — `/orders/urgent` just sets status+promised=delivery date and bumps); `_all_lines_schedule`/`_incumbent_metrics` collapse to the same single-pass construction; `_start_optimize` baseline likewise.
+- Modify: `web/app.js`/`index.html` — remove the recovery note element/renderer and the urgent warning modal (commit/urgent buttons stay).
+- Tests: DELETE `tests/test_joint_replay.py` drift/two-pass cases that assert removed behavior — replace with: saved ranks replay single-pass + auto-apply comparison same-domain; DELETE/trim `tests/test_two_pass_gantt.py`, recovery tests (`test_promise_recovery*`), urgent-preview tests; update `tests/test_optimize_lanes_feedback.py` + commit-endpoint tests to the informational contract (commit sets status+promised; plan output IGNORES lanes — add an explicit regression: committed book plans byte-identical to the same book all-open).
+- Golden: untouched (all-open sample). Full suite green.
+
+Steps: RED-adjust tests → strip code → focused suites → full suite → commit.
+
+(Then Tasks 15, 16, 17 proceed as written — absences endpoints, absences UI, docs.)
