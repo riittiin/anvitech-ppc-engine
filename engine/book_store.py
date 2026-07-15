@@ -24,6 +24,7 @@ PLAN_CONFIG_KEY = "anvitech:plan_config"   # kv: json of the admin's saved Confi
 PLAN_PRIORITY_KEY = "anvitech:plan_priority"  # kv: json {ranks, meta} of the applied Optimize run
 PROMISE_RECOVERY_KEY = "anvitech:promise_recovery"  # kv: json {ranks, meta} of the auto committed re-sequence
 AUTO_NOTE_KEY = "anvitech:auto_note"        # kv: json note from the self-tuning trigger (informational)
+ABSENCES_KEY = "anvitech:absences"          # kv: json list of operator absences
 
 _SEP = "\x1f"   # ASCII unit separator — never appears in an SO# or item code
 
@@ -250,3 +251,26 @@ def save_auto_note(note: dict) -> None:
 def load_auto_note():
     raw = get_store().kv_get(AUTO_NOTE_KEY)
     return json.loads(raw) if raw else None
+
+
+# --- operator absences --- #
+def load_absences() -> list:
+    raw = get_store().kv_get(ABSENCES_KEY)
+    return json.loads(raw) if raw else []
+
+
+def save_absence(a: dict) -> dict:
+    a = {"id": uuid.uuid4().hex, "operator": a["operator"],
+         "from_date": a["from_date"], "to_date": a["to_date"]}
+    rows = load_absences() + [a]
+    get_store().kv_set(ABSENCES_KEY, json.dumps(rows))
+    return a
+
+
+def delete_absence(absence_id: str) -> bool:
+    rows = load_absences()
+    keep = [r for r in rows if r.get("id") != absence_id]
+    if len(keep) == len(rows):
+        return False
+    get_store().kv_set(ABSENCES_KEY, json.dumps(keep))
+    return True
