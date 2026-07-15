@@ -67,8 +67,13 @@ Otherwise nothing changes. Both outcomes write a one-line note (stored at
 *"Checked 18:12 — current plan still best."*
 
 **Kill switch.** `AUTO_OPTIMIZE=0` disables the trigger entirely (tests set this;
-the deployed default is on). Cloud unavailable → the auto contest uses the local
-fallback exactly like the manual button.
+the deployed default is on). **Auto contests are cloud-only**: with the cloud
+unavailable (dispatch fails, budget exhausted, env unset) the auto run is
+SKIPPED with a note ("will retry on the next change") — never a 40-min local
+burn of the free instance's 0.1 CPU in the background. The manual button keeps
+its local fallback. A finished contest is re-validated on TODAY'S book before
+applying (feasible + strictly better) — a result made stale by mid-run book
+changes is discarded and a fresh contest scheduled.
 
 ## Phase 2 — One-pool contest with the promise veto
 
@@ -93,8 +98,11 @@ fallback shape.
 
 **Impossible promises** (absence/disruption makes any-plan infeasible): the veto
 rejects everything ⇒ two-pass fallback + the existing promise-recovery search
-minimizes slip-days/broken count (unchanged); red Promised-vs-expected flags +
-recovery note show which customers to call and by how many days.
+in least-damage mode — **fewest broken promises first, then fewest slip-days**
+(keepable promises stay kept; only the unkeepable are minimized); red
+Promised-vs-expected flags + recovery note show which customers to call and by
+how many days. Auto-apply in this mode compares damage, not score: apply only
+on strictly fewer broken, or equal broken with strictly fewer slip-days.
 
 **Measurement gate before shipping Phase 2:** on the real book, the one-pool
 contest must beat or match today's open-only contest (score) while passing the
@@ -105,6 +113,10 @@ veto on 100% of applied plans. If it measures worse, stop and report — do not 
 **Store.** `anvitech:absences` in the book store: list of
 `{id, operator, from_date, to_date}` (dates inclusive, DD-MM-YYYY in UI, ISO in
 store). The masters workbook stays read-only.
+
+**Orphans.** If a masters re-upload removes an operator who still has absence
+rows, those rows are ignored and reported in the non-blocking report (same
+forgiving pattern as provisional machines) — never fatal to a plan.
 
 **Engine.** An absence becomes a **blocked interval for that person** in every
 plan: injected as operator reservations (the same `reserved=` mechanism Rule 6
