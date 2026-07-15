@@ -716,7 +716,8 @@ def _plan(config: Config):
     return {"run_id": run_id, "trace": trace, "report": _report_for_book(masters, so_lines),
             "gantt": gantt, "orders": orders, "config": config.to_dict(),
             "expected_end": exp_end, "optimize_meta": optimize_meta,
-            "recovery_meta": recovery_meta}
+            "recovery_meta": recovery_meta,
+            "auto_note": book_store.load_auto_note()}
 
 
 def _commit_orders(pairs):
@@ -1137,6 +1138,11 @@ def _optimize_status():
                 "best_overlap": res.get("best_overlap"),
                 "current_overlap": res.get("current_overlap"),
                 "mode": _OPTIMIZE.get("mode", "local"),
+                # Whether the current/last run was auto-triggered (self-tuning) rather
+                # than a manual admin Start click — the UI uses this to suppress a
+                # stale Apply/Discard panel after an auto contest has already applied
+                # (or discarded) itself.
+                "auto": bool(_OPTIMIZE.get("auto")),
                 # The job id is only useful together with the worker secret
                 # (manual-dispatch mode / debugging) — not sensitive by itself.
                 "job_id": _OPTIMIZE.get("job_id") if _OPTIMIZE["state"] == "running" else None,
@@ -1334,7 +1340,7 @@ async def upload(request: Request, file: UploadFile = File(...)):
 
     book_lines = orderbook.active_so_lines(book_store.load_active_orders(),
                                            book_store.load_actuals(), masters)
-    return {
+    result = {
         "name": file.filename,
         "added": len(new_orders),
         "flagged": flags,
@@ -1342,6 +1348,8 @@ async def upload(request: Request, file: UploadFile = File(...)):
         "summary": {"items": len(masters.routings), "machines": len(masters.machines)},
         "report": _report_for_book(masters, book_lines),
     }
+    _bump_book_changed()
+    return result
 
 
 @app.post("/run")
@@ -1364,6 +1372,7 @@ def run(request: Request, req: Optional[RunRequest] = None):
         except (ValueError, TypeError) as e:
             raise HTTPException(status_code=400, detail=f"invalid config: {e}")
         book_store.save_plan_config(json.dumps(config.to_dict()))
+        _bump_book_changed()
     elif book_store.load_plan_config():
         config = _load_plan_config()   # a saved plan exists → everyone sees it
     elif sent is not None:
@@ -1400,6 +1409,7 @@ def delete_orders(req: DeleteRequest, request: Request):
     require_password(request, req.password)
     pairs = [(o[0], o[1]) for o in req.orders if len(o) == 2]
     n = book_store.delete_orders(pairs)
+    _bump_book_changed()
     return {"deleted": n}
 
 
@@ -1410,6 +1420,7 @@ def clear_orders(req: ClearRequest, request: Request):
     require_admin(request)
     require_password(request, req.password)
     book_store.delete_all()
+    _bump_book_changed()
     return {"cleared": True}
 
 
@@ -1420,6 +1431,7 @@ def commit_orders_ep(req: CommitRequest, request: Request):
     only."""
     require_admin(request)
     _commit_orders([(o[0], o[1]) for o in req.orders if len(o) == 2])
+    _bump_book_changed()
     return {"committed": len(req.orders)}
 
 
@@ -1431,6 +1443,7 @@ def uncommit_orders_ep(req: CommitRequest, request: Request):
     for o in req.orders:
         if len(o) == 2:
             book_store.clear_commitment(o[0], o[1])
+    _bump_book_changed()
     return {"uncommitted": len(req.orders)}
 
 
@@ -1448,6 +1461,7 @@ def urgent_order_ep(req: UrgentRequest, request: Request):
     book_store.set_commitment(req.so, req.item, "urgent",
                               order.delivery_date if order else None,
                               datetime.now().isoformat(timespec="seconds"))
+    _bump_book_changed()
     return {"urgent": True}
 
 

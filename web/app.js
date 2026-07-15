@@ -25,6 +25,7 @@ let currentOrders = null;     // {columns, rows} from /run or /orders
 let currentExpected = null;   // {"SO\x1fITEM": "YYYY-MM-DD"} from /run's expected_end (Task 9)
 let optimizeMeta = null;      // /run's optimize_meta: applied optimization + staleness
 let recoveryMeta = null;      // /run's recovery_meta: auto committed re-sequence after a disruption
+let autoNote = null;          // /run's auto_note: self-tuning contest's latest note ({text, at} or null)
 let optimizePollTimer = null; // /optimize/status polling handle
 let ITEMS = null;
 let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour detail)
@@ -129,10 +130,12 @@ async function runPlan(persist = false) {
     currentExpected = data.expected_end || null;
     optimizeMeta = data.optimize_meta || null;
     recoveryMeta = data.recovery_meta || null;
+    autoNote = data.auto_note || null;
     if (currentRole === "admin" && data.config) applyConfig(data.config);
     renderReport(data.report);
     renderOptimizeBanner();
     renderRecoveryNote();
+    renderAutoNote();
     renderTabs();
     renderTab(activeTab);
     setStatus("Plan " + data.run_id + " complete.");
@@ -222,6 +225,16 @@ function renderRecoveryNote() {
   }
 }
 
+// Self-tuning contest's latest note (auto-triggered runs only) — informational,
+// no control, mirrors renderRecoveryNote().
+function renderAutoNote() {
+  const el = $("auto-note");
+  if (!el) return;
+  const n = autoNote;
+  if (n && n.text) { el.classList.remove("hidden"); el.textContent = n.text; }
+  else { el.classList.add("hidden"); el.textContent = ""; }
+}
+
 function optimizeProgressLine(st) {
   const where = st.mode === "cloud" ? " in the cloud" : "";
   const tried = `tried ${st.evals} of ${st.budget_evals} plans${where}`;
@@ -278,6 +291,14 @@ async function pollOptimizeStatus() {
 function renderOptimizeResult(st) {
   const box = $("optimize-result");
   if (!box) return;
+  if (st.auto) {
+    // An auto-triggered contest already applied itself (or found nothing better) —
+    // never show a stale Apply/Discard panel for a decision that's already made.
+    box.classList.remove("hidden");
+    box.innerHTML = "<p>Auto-optimize finished — the plan updated itself if a better one was found.</p>";
+    runPlan(false);
+    return;
+  }
   box.classList.remove("hidden");
   const rows = [
     ["Total days to finish", st.baseline ? st.baseline.makespan_days : "—",
@@ -961,7 +982,11 @@ function actualsFormHtml() {
     <div class="entry-legend"><span class="lg lg-y">Manual entry</span><span class="lg lg-r">Auto-prompt / dropdown</span></div>
     <div class="entry-grid"><div class="entry-col">${left}</div><div class="entry-col">${right}</div></div>
     <label class="complete-check"><input id="a-complete" type="checkbox" /> <strong>Mark this order (this SO No + item) complete</strong> — archives just this item line; the engine never auto-completes.</label>
-    <button id="a-save" class="primary">Save daily entry</button>`;
+    <button id="a-save" class="primary">Save daily entry</button>
+    <div class="optimize-done-row">
+      <button id="optimize-done" class="primary">Done entering — update &amp; optimize plan</button>
+      <span id="optimize-done-status" class="status"></span>
+    </div>`;
 }
 
 // Populate the SO No dropdown with every SO from the orders tab.
@@ -1103,6 +1128,27 @@ async function wireActualsForm() {
       setStatus("Save error: " + e.message); btn.disabled = false; btn.textContent = label;
     }
   };
+  // Clerk's "Done entering" — a manual trigger for the self-tuning re-optimize,
+  // since punch entries (unlike deliberate admin actions) don't bump on their own.
+  // Available to both roles.
+  const doneBtn = $("optimize-done");
+  if (doneBtn) {
+    doneBtn.onclick = async () => {
+      const st = $("optimize-done-status");
+      st.textContent = "starting…";
+      try {
+        const r = await fetch("/optimize/done", { method: "POST" });
+        const d = await r.json();
+        st.textContent = d.started
+          ? "Optimizing in the background — the plan updates itself when done."
+          : (d.state === "running"
+              ? "Already optimizing — your entries are included in the next run."
+              : "Nothing new to optimize.");
+      } catch (e) {
+        st.textContent = "Request failed: " + e.message;
+      }
+    };
+  }
 }
 
 // Capture-actuals table with a per-row Rollback button (uses the parallel ids).

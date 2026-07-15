@@ -137,3 +137,104 @@ def test_manual_apply_also_records_book_sig(monkeypatch):
     m._start_optimize(budget_evals=15, label="deep", background=False)
     m._optimize_apply()
     assert book_store.load_plan_priority()["meta"]["book_sig"] == m._current_book_sig()
+
+
+# --------------------------------------------------------------------------- #
+# Task 5: wiring the bumps + surfacing the auto note + the clerk's Done button
+# --------------------------------------------------------------------------- #
+
+def test_mutating_endpoints_bump_and_run_returns_note(monkeypatch):
+    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
+    m = _api()
+    _seed_book()
+    bumps = []
+    monkeypatch.setattr(m, "_bump_book_changed", lambda: bumps.append(1))
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    c.post("/actuals", json={"so_no": "SO1", "item_code": ITEM_A,
+                             "entry_date": "2025-03-05", "qty_produced": 1,
+                             "process": "", "shift": "A"})
+    assert not bumps                                   # punches do NOT bump
+    c.post("/orders/commit", json={"orders": [["SO2", ITEM_B]]})
+    assert bumps                                       # admin action bumped
+    book_store.save_auto_note({"text": "hello", "at": "t"})
+    r = c.post("/run", json={})
+    assert r.json()["auto_note"]["text"] == "hello"
+
+
+def test_rollback_does_not_bump(monkeypatch):
+    """The /actuals/rollback punch endpoint must not bump either."""
+    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
+    m = _api()
+    _seed_book()
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    r = c.post("/actuals", json={"so_no": "SO1", "item_code": ITEM_A,
+                                "entry_date": "2025-03-05", "qty_produced": 1,
+                                "process": "", "shift": "A"})
+    entry_id = r.json()["actuals_ids"][0]
+    bumps = []
+    monkeypatch.setattr(m, "_bump_book_changed", lambda: bumps.append(1))
+    c.post("/actuals/rollback", json={"id": entry_id})
+    assert not bumps
+
+
+def test_all_deliberate_admin_mutations_bump(monkeypatch):
+    """upload, delete, clear, commit, uncommit, urgent, and the persist=True
+    branch of /run each call _bump_book_changed() — every other admin
+    mutation the brief lists besides the one already covered above."""
+    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
+    m = _api()
+    _seed_book()
+    bumps = []
+    monkeypatch.setattr(m, "_bump_book_changed", lambda: bumps.append(1))
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+
+    bumps.clear()
+    c.post("/orders/urgent", json={"so": "SO1", "item": ITEM_A, "confirm": True})
+    assert bumps, "orders/urgent did not bump"
+
+    bumps.clear()
+    c.post("/orders/uncommit", json={"orders": [["SO1", ITEM_A]]})
+    assert bumps, "orders/uncommit did not bump"
+
+    bumps.clear()
+    r = c.post("/run", json={"config": {}, "persist": True})
+    assert r.status_code == 200
+    assert bumps, "/run persist=True did not bump"
+
+    bumps.clear()
+    r = c.post("/run", json={"config": {}, "persist": False})
+    assert r.status_code == 200
+    assert not bumps, "/run persist=False must NOT bump"
+
+    from tests.sample_workbook import build_sample_bytes
+    bumps.clear()
+    r = c.post("/upload", files={"file": ("sample.xlsx", build_sample_bytes(),
+               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+    assert r.status_code == 200
+    assert bumps, "/upload did not bump"
+
+    bumps.clear()
+    r = c.post("/orders/delete", json={"orders": [["SO1", ITEM_A]], "password": "1930rail"})
+    assert r.status_code == 200
+    assert bumps, "/orders/delete did not bump"
+
+    bumps.clear()
+    r = c.post("/orders/clear", json={"password": "1930rail"})
+    assert r.status_code == 200
+    assert bumps, "/orders/clear did not bump"
+
+
+def test_optimize_status_carries_auto_field(monkeypatch):
+    """/optimize/status must expose whether the current/last run was an
+    auto-triggered contest, so the UI can suppress a stale Apply panel."""
+    m = _api()
+    _seed_book()
+    st = m._optimize_status()
+    assert "auto" in st
+    assert st["auto"] is False
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["auto"] = True
+    assert m._optimize_status()["auto"] is True
