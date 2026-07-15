@@ -1114,6 +1114,11 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                     "best_overlap": winner_overlap,
                     "current_overlap": base_config.overlap_percent,
                     "sweep_table": table})
+    if _OPTIMIZE.get("auto"):
+        try:
+            _auto_apply_result()
+        except Exception:   # noqa: BLE001 — an auto note must never crash a result
+            pass
     _drain_pending_auto()
     return True
 
@@ -1147,6 +1152,52 @@ def _optimize_cancel():
     return _optimize_status()
 
 
+def _incumbent_metrics():
+    """Score of the plan users currently see: the applied ranks (if any)
+    replayed on TODAY'S book, else the plain plan. Expedite off when ranks
+    replay — mirrors _plan."""
+    config = _load_plan_config()
+    masters = _current_masters()
+    actuals = book_store.load_actuals()
+    orders = book_store.load_active_orders()
+    setup = optimize_service.prepare_contest(orders, actuals, masters, config)
+    prio = book_store.load_plan_priority()
+    ranks = (prio or {}).get("ranks") or None
+    pr = PlanRun(so_lines=list(setup.target))
+    run_forward(pr, setup.search_config if ranks else setup.config, masters,
+               reserved=setup.reserved, priority_rank=ranks)
+    return optimizer.plan_metrics(pr.schedule, setup.target,
+                                  setup.config.plan_start_date)
+
+
+def _auto_apply_result():
+    """Called after an auto contest lands in state=done: apply iff strictly
+    better than the incumbent; write the note either way."""
+    from datetime import datetime
+    with _OPTIMIZE_LOCK:
+        res = _OPTIMIZE.get("result") or {}
+        best = res.get("best")
+    if not best:
+        _auto_note_write("Auto-optimize finished with no plan — kept current.")
+        return
+    try:
+        inc = _incumbent_metrics()
+    except Exception as e:  # noqa: BLE001
+        _auto_note_write(f"Auto-optimize finished but could not compare: {e}")
+        return
+    stamp = datetime.now().strftime("%H:%M")
+    if optimizer.score(best) < optimizer.score(inc):
+        meta = _optimize_apply()          # persists ranks + overlap + inputs_sig + book_sig
+        ov = res.get("best_overlap"); cur = res.get("current_overlap")
+        ov_txt = f", overlap {cur} → {ov}" if ov != cur else ""
+        _auto_note_write(f"Plan auto-re-optimized {stamp} — "
+                         f"{best['total_late_days']} late-days "
+                         f"(was {inc['total_late_days']}){ov_txt}.")
+    else:
+        _auto_note_write(f"Checked {stamp} — current plan still best "
+                         f"({inc['total_late_days']} late-days).")
+
+
 def _optimize_apply():
     """Persist the last completed run's ranks — from then on every Plan replays
     them (admin, user, and the auto re-plan after actuals)."""
@@ -1161,7 +1212,8 @@ def _optimize_apply():
                 "baseline": res["baseline"], "best": res["best"],
                 "covered": len(res["ranks"]),
                 "inputs_sig": res.get("inputs_sig"),
-                "best_overlap": res.get("best_overlap")}
+                "best_overlap": res.get("best_overlap"),
+                "book_sig": _current_book_sig()}
         book_store.save_plan_priority(res["ranks"], meta)
         # Settings sweep: the winning overlap becomes THE saved plan setting (the
         # single config every Plan loads and the Settings panel shows). Unchanged

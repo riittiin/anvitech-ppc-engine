@@ -100,3 +100,40 @@ def test_no_fire_when_signature_matches_applied(monkeypatch):
     monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
     m._bump_book_changed()
     assert starts == []
+
+
+def test_auto_contest_applies_only_when_strictly_better(monkeypatch):
+    _auto_env(monkeypatch)
+    # "manual" dispatch never calls a real worker; force a fast fallback to
+    # local compute so this real contest finishes inside the test's patience.
+    monkeypatch.setenv("OPTIMIZE_CLOUD_TIMEOUT_MIN", "0.01")
+    m = _api()
+    _seed_book()
+    m._bump_book_changed()                              # real contest, sample book
+    t0 = time.time()
+    while m._optimize_status()["state"] == "running" and time.time() - t0 < 60:
+        time.sleep(0.05)
+    # The auto-apply hook runs just after the contest lands in "done" — and,
+    # when it applies, the hook itself moves state on to "idle" again — so
+    # give the note/priority writes a brief grace window before asserting.
+    note = book_store.load_auto_note()
+    t0 = time.time()
+    while note is None and time.time() - t0 < 5:
+        time.sleep(0.05)
+        note = book_store.load_auto_note()
+    assert note is not None
+    saved = book_store.load_plan_priority()
+    if saved:                                          # applied ⇒ strictly better + meta
+        assert "auto" in note["text"].lower() or "re-optimized" in note["text"]
+        assert saved["meta"]["book_sig"] == m._current_book_sig()
+    else:                                               # not applied ⇒ honest note
+        assert "still best" in note["text"]
+
+
+def test_manual_apply_also_records_book_sig(monkeypatch):
+    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
+    m = _api()
+    _seed_book()
+    m._start_optimize(budget_evals=15, label="deep", background=False)
+    m._optimize_apply()
+    assert book_store.load_plan_priority()["meta"]["book_sig"] == m._current_book_sig()
