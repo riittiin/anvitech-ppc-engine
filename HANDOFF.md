@@ -18,7 +18,7 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0, 512 MB).
 - **Repo:** GitHub `riittiin/anvitech-ppc-engine` (private). Push to `main` →
   Render auto-redeploys (no separate deploy step).
-- **323 tests pass** (`pytest`, 1 skipped Mongo). FastAPI backend + vanilla HTML/JS
+- **339 tests pass** (`pytest`, 1 skipped Mongo). FastAPI backend + vanilla HTML/JS
   frontend, plain Python engine. Python 3 (run as `python3` locally — no `python` alias).
 - **Login is a two-role app-owned session** (admin / user) — see "Login & roles".
 - The engine has **8 business rules** (1–8). (Rule 8 = the Plan over the order book —
@@ -35,7 +35,16 @@ job shop. **Built, tested, deployed live, and actively iterated.**
   masters (27 machines). **Always confirm which file/how many orders before quoting a
   number, and match the owner's exact config (plan start, operators) before comparing —
   see the Test5-vs-Test6 lesson in the latest-session block.**
-- **Most recent work (2026-07-14 — ✅ SHIPPED & LIVE):** **Promise recovery** — when a
+- **Most recent work (2026-07-15 — ✅ ALL SHIPPED & LIVE, deploy-verified):** the owner
+  **submitted the code to Anvitech on 2026-07-15** — treat the live site as production
+  in real use. Four shipped batches that day (see the "Latest session (2026-07-15)"
+  block below): **operator invariants** (nobody >100%, no double-booking, UNSTAFFED
+  surfacing), **optimize staleness fingerprint** (`inputs_changed` banner) + book-scoped
+  NO_ROUTING report, the **Optimize settings sweep** (one click also auto-tunes the
+  Overlap %, never-worse, promise-guarded), and the **full-app consistency audit fixes**
+  (shift-wise download names the same person as the Gantt; two-pass rebalance respects
+  the committed pass's people).
+- Earlier (2026-07-14 — ✅ SHIPPED & LIVE): **Promise recovery** — when a
   disruption makes committed orders slip past their promises, the planner **automatically**
   (no setting/button) re-sequences the committed set in the **background** to protect the
   most promises (`optimizer.optimize(objective="promise_slip")`), replayed on every Plan;
@@ -185,7 +194,59 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
-### Latest session (2026-07-14) — analysis, hard limits, and a debugging lesson
+### Latest session (2026-07-15) — deploy-day fixes, settings sweep, full-app audit — ✅ ALL SHIPPED & LIVE
+
+The owner **deployed/submitted the code to Anvitech this day**. Four batches, each
+built test-first on a branch, merged + pushed on his explicit "push to main", and
+**verified on the live site after deploy** (authenticated checks against the real
+plan — note: `app.js` is login-gated, so an unauthenticated `curl` reads a 401 page;
+that once caused a false "deploy is slow" alarm. Always verify with the session cookie).
+
+1. **Operator invariants (owner-reported: Mahesh 107%/Saif 106.3% + "same Deep run,
+   two results").** Root causes and fixes:
+   - `_rebalance_operators` could double-book a person under asymmetric machine
+     qualification (live: Ankush on CNC1 + VMC3 at once) → repair pass reverts
+     reassignments until no person overlaps; timing untouched.
+   - `build_shiftwise_timeline` billed a busy person when a shift ran more machines
+     than qualified people (`pool = free or eligible`) → such segments become
+     `rule6_allocate.UNSTAFFED`; Analytics rolls them up as `headline.unstaffed_hrs`
+     with an honest note ("needs more crew on those shifts"); **no operator can ever
+     show >100%** (regression: `tests/test_operator_invariants.py`). Schedule-neutral
+     (owner rule: reporting fixes must never move the plan — verified byte-identical).
+   - The "two different results" mystery = the owner **re-uploaded an edited workbook
+     after Apply** (optimizer is deterministic — proven twice-identical). Fix:
+     applied optimizations carry `inputs_sig` (sha of masters + plan-shaping config);
+     `/run`'s `optimize_meta.inputs_changed` + a banner explain it. Also: NO_ROUTING
+     report rows are now **book-scoped** (`_report_for_book`) — the live "5 orders
+     without routing" were ghosts from the workbook's own SO sheet.
+2. **Optimize settings sweep** (owner ask: "overlap should also be automated").
+   `optimizer.sweep_optimize`: same eval budget, current setting keeps ~half (probes
+   are noisy — a shallow probe misranked 70>80 on the real book; full-depth said
+   80 is better), challengers share a quarter, best probe deepened, **strictly
+   better** dethrones. Promise guard vetoes overlaps that worsen committed slip.
+   Apply persists the winning overlap into the saved plan config (visible in
+   Settings) + `inputs_sig` computed against winning settings. Spec:
+   `2026-07-15-optimize-settings-sweep-design.md`.
+3. **Full-app consistency audit** (owner ask: "everything integrated everywhere").
+   One harness cross-checked every surface on real Test5 with an applied optimization,
+   all-open AND two-pass: machine view, analytics, gantt, expected dates, downloads —
+   all consistent except two real bugs, both fixed:
+   - **Shift-wise download named a different person than the Gantt for 161/341 ops**
+     (it re-derived operators with its own fair walk). Now it **follows the plan's
+     named operator** wherever that person covers the shift; only impossible segments
+     (other shift, overload) are re-assigned or UNSTAFFED. 341/341 match after fix.
+   - **Two-pass rebalance was blind to pass-1's people** (one person on two machines
+     across passes). `_rebalance_operators(reserved=)` now treats committed-pass
+     people as busy (walk + repair). Zero cross-pass double-bookings after fix.
+4. **Optimizer-v3 research (ABANDONED mid-way — owner said "forget this").** Key
+   preserved facts (memory `optimizer-v3-research`): certified CP-SAT floor — **no
+   plan can beat 401 late-days on Test6** (contention-aware; the old 311 was
+   alone-orders only); better plans than the 713 champion EXIST beyond the site
+   budget (best found: 675 late-days, ranks preserved in the memory dir); at the
+   20-min site budget the CURRENT optimizer beat 5 challenger algorithms — do not
+   swap it. OR-Tools was installed locally only (NOT in requirements.txt).
+
+### Earlier session (2026-07-14) — analysis, hard limits, and a debugging lesson
 
 Two things, both important context (no code shipped beyond what's listed in the feature
 blocks below — this was mostly investigation):
@@ -454,7 +515,7 @@ Test2→Test3 migration) is in the git history and the design specs.
 
 ```bash
 pip install -r requirements.txt
-python3 -m pytest -q                          # 267 tests (266 pass + 1 skipped Mongo)
+python3 -m pytest -q                          # 339 pass + 1 skipped (Mongo)
 REGEN_GOLDEN=1 python3 -m pytest -k golden    # ONLY after an intentional logic change
 python3 -m uvicorn api.main:app --reload      # http://127.0.0.1:8000  (frontend at /)
 ```
