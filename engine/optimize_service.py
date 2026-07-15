@@ -33,6 +33,33 @@ CLOUD_OVERLAP_CANDIDATES = (50, 60, 70, 80, 90, 100)
 CLOUD_BUDGET_PER_CANDIDATE = 400
 
 
+def absence_reservations(absences):
+    """Absence rows -> Rule 6 operator reservations: the person is 'busy'
+    from 00:00 of from_date to 00:00 of the day AFTER to_date (inclusive)."""
+    from datetime import datetime, date, timedelta
+    res = {}
+    for a in absences or []:
+        try:
+            f = date.fromisoformat(a["from_date"])
+            t = date.fromisoformat(a["to_date"])
+        except (KeyError, ValueError):
+            continue                                   # malformed row — skip
+        if t < f:
+            f, t = t, f
+        interval = (datetime.combine(f, datetime.min.time()),
+                    datetime.combine(t + timedelta(days=1), datetime.min.time()))
+        res.setdefault(a.get("operator", ""), []).append(interval)
+    res.pop("", None)
+    return res
+
+
+def merge_reservations(a, b):
+    out = {k: list(v) for k, v in (a or {}).items()}
+    for k, v in (b or {}).items():
+        out.setdefault(k, []).extend(v)
+    return out
+
+
 def reservations_from_schedule(schedule):
     """Machine id → busy intervals and operator name → busy intervals, from a
     plan (used to reserve the committed pass's machine/operator time in the
@@ -71,7 +98,8 @@ def book_signature(so_lines, absences=None):
 # --------------------------------------------------------------------------- #
 def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
                   seed: int, candidates=CLOUD_OVERLAP_CANDIDATES,
-                  budget_per_candidate=CLOUD_BUDGET_PER_CANDIDATE) -> dict:
+                  budget_per_candidate=CLOUD_BUDGET_PER_CANDIDATE,
+                  absences=None) -> dict:
     """Snapshot everything one contest depends on. JSON-safe."""
     return {
         "orders": [o.to_json() for o in orders.values()],
@@ -82,12 +110,14 @@ def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
         "seed": seed,
         "candidates": list(candidates),
         "budget_per_candidate": budget_per_candidate,
+        "absences": list(absences or []),
     }
 
 
 def parse_payload(payload: dict):
-    """Rebuild (orders, actuals, masters, config) — the exact objects the API
-    planned with, via the models' own from_json and the normal loader."""
+    """Rebuild (orders, actuals, masters, config, absences) — the exact
+    objects the API planned with, via the models' own from_json and the
+    normal loader."""
     orders = {}
     for d in payload["orders"]:
         o = Order.from_json(d)
@@ -100,7 +130,8 @@ def parse_payload(payload: dict):
         masters = Masters()
     config = Config.from_dict(payload["config"])
     config.validate()
-    return orders, actuals, masters, config
+    absences = list(payload.get("absences") or [])
+    return orders, actuals, masters, config, absences
 
 
 # --------------------------------------------------------------------------- #
@@ -122,20 +153,31 @@ class ContestSetup:
     # every so_line (so a candidate plan that breaks ANY promise scores inf).
     joint_target: list = field(default_factory=list)
     feasible: object = None
+    # Operator absences (2026-07-15): physical unavailability, not a promise
+    # reservation — applies in EVERY mode (pass-1, two-pass, and the joint
+    # contest pool alike). ``absence_reserved`` is the raw
+    # ``absence_reservations(absences)`` dict (unmerged) so callers (the
+    # joint-mode contest, the API's helpers) can reuse it directly.
+    absences: list = field(default_factory=list)
+    absence_reserved: object = None
 
 
-def _pass1(protected, cfg, masters):
-    """The committed pass under ``cfg``: its reservations + its promise slip."""
+def _pass1(protected, cfg, masters, base_reserved=None):
+    """The committed pass under ``cfg``: its reservations + its promise slip.
+    ``base_reserved`` (absences) is folded in so the committed pass itself
+    never assigns an absent operator."""
     plan_p = PlanRun(so_lines=list(protected))
-    run_forward(plan_p, cfg, masters)
+    run_forward(plan_p, cfg, masters, reserved=base_reserved or None)
     slip = optimizer.promise_slip_metrics(plan_p.schedule, protected,
                                           cfg.plan_start_date)
     return reservations_from_schedule(plan_p.schedule), slip
 
 
-def prepare_contest(orders: dict, actuals, masters, config: Config) -> ContestSetup:
+def prepare_contest(orders: dict, actuals, masters, config: Config,
+                    absences=None) -> ContestSetup:
     """Everything the sweep needs, from the raw book. Raises ValueError when
     there is nothing to optimize (no open orders with work remaining)."""
+    ab = absence_reservations(absences)
     so_lines = orderbook.active_so_lines(orders, actuals, masters)
     eff = orderbook.effective_plan_start_date(actuals, config.plan_start_date,
                                               masters.calendar)
@@ -156,7 +198,8 @@ def prepare_contest(orders: dict, actuals, masters, config: Config) -> ContestSe
     reserved = None
     candidate_setup = None
     if protected:
-        reserved, cur_slip = _pass1(protected, search_config, masters)
+        reserved, cur_slip = _pass1(protected, search_config, masters, base_reserved=ab)
+        reserved = merge_reservations(reserved, ab) or None
 
         def candidate_setup(cfg):
             """Promise guard: a different overlap is eligible only if the
@@ -164,13 +207,15 @@ def prepare_contest(orders: dict, actuals, masters, config: Config) -> ContestSe
             the CURRENT overlap; each candidate uses its own pass-1."""
             if cfg.overlap_percent == search_config.overlap_percent:
                 return reserved, True
-            res, slip = _pass1(protected, cfg, masters)
+            res, slip = _pass1(protected, cfg, masters, base_reserved=ab)
+            res = merge_reservations(res, ab) or None
             ok = (slip["promise_slip_days"] <= cur_slip["promise_slip_days"]
                   and slip["promises_missed"] <= cur_slip["promises_missed"])
             return res, ok
 
     # Joint pool: everyone (committed lines included) competes for all time;
-    # the veto is the ONLY promise protection in this pool — no reservations.
+    # the veto is the ONLY promise protection in this pool — absences still
+    # bind (they are physical unavailability, not a promise reservation).
     joint_target = so_lines
     feasible = ((lambda schedule: optimizer.promise_ceiling_ok(schedule, so_lines))
                 if protected else None)
@@ -178,7 +223,8 @@ def prepare_contest(orders: dict, actuals, masters, config: Config) -> ContestSe
     return ContestSetup(target=target, config=config, search_config=search_config,
                         protected=protected, reserved=reserved,
                         candidate_setup=candidate_setup,
-                        joint_target=joint_target, feasible=feasible)
+                        joint_target=joint_target, feasible=feasible,
+                        absences=list(absences or []), absence_reserved=(ab or None))
 
 
 # --------------------------------------------------------------------------- #
@@ -205,13 +251,16 @@ def run_candidate(payload: dict, overlap: int, *, on_progress=None,
     rebuilds the book from the payload and searches the JOINT pool (every
     active line, committed included) under the promise veto (``feasible=``) —
     the veto replaces the old per-candidate guard + reservations entirely, so
-    this always runs with ``reserved=None``. Returns a sweep-table row (+
-    ranks for the winner). All-open books: ``joint_target`` == the open-only
-    target and ``feasible`` is None, so this is byte-identical to before."""
-    orders, actuals, masters, config = parse_payload(payload)
-    setup = prepare_contest(orders, actuals, masters, config)
+    this runs with ``reserved=`` only the operator absences (physical
+    unavailability, not a promise reservation — it binds in every mode).
+    Returns a sweep-table row (+ ranks for the winner). All-open, no-absence
+    books: ``joint_target`` == the open-only target, ``feasible`` is None, and
+    ``reserved`` is None, so this is byte-identical to before."""
+    orders, actuals, masters, config, absences = parse_payload(payload)
+    setup = prepare_contest(orders, actuals, masters, config, absences=absences)
     cfg = replace(setup.search_config, overlap_percent=int(overlap))
-    res = optimizer.optimize(setup.joint_target, cfg, masters, reserved=None,
+    res = optimizer.optimize(setup.joint_target, cfg, masters,
+                             reserved=setup.absence_reserved,
                              budget_evals=int(payload["budget_per_candidate"]),
                              seed=int(payload["seed"]), feasible=setup.feasible,
                              on_progress=on_progress, should_cancel=should_cancel)

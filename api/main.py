@@ -542,6 +542,10 @@ def _plan(config: Config):
     active = book_store.load_active_orders()
     completed = book_store.load_completed_orders()
     actuals = book_store.load_actuals()
+    # Operator absences: physical unavailability, not a promise reservation —
+    # merged into the reservations of EVERY pass below (single-pass, joint
+    # replay, and both passes of the two-pass plan).
+    ab = optimize_service.absence_reservations(book_store.load_absences())
 
     so_lines = orderbook.active_so_lines(active, actuals, masters)   # remaining = ordered − finished good
 
@@ -583,7 +587,8 @@ def _plan(config: Config):
     joint_plan = None
     if protected and joint and ranks:
         jr = PlanRun(so_lines=so_lines)
-        jt = run_forward(jr, ranked_config, masters, priority_rank=ranks)
+        jt = run_forward(jr, ranked_config, masters, reserved=ab or None,
+                         priority_rank=ranks)
         if optimizer.promise_ceiling_ok(jr.schedule, so_lines):
             joint_plan = (jr, jt)          # keeps every promise -> use it as-is
         else:
@@ -604,7 +609,8 @@ def _plan(config: Config):
             plan_run, trace = joint_plan
         else:
             plan_run = PlanRun(so_lines=so_lines)
-            trace = run_forward(plan_run, ranked_config, masters, priority_rank=ranks)
+            trace = run_forward(plan_run, ranked_config, masters, reserved=ab or None,
+                                priority_rank=ranks)
     else:
         # Two-pass: committed/urgent orders are planned first, as if open orders
         # don't exist; open orders then backfill the gaps left by that pass —
@@ -621,8 +627,10 @@ def _plan(config: Config):
         prot_config = replace(config, expedite_window_min=0) if rec_ranks else config
 
         plan_protected = PlanRun(so_lines=protected)
-        trace = run_forward(plan_protected, prot_config, masters, priority_rank=rec_ranks)
-        reserved = _reservations_from_schedule(plan_protected.schedule)
+        trace = run_forward(plan_protected, prot_config, masters, reserved=ab or None,
+                            priority_rank=rec_ranks)
+        reserved = optimize_service.merge_reservations(
+            _reservations_from_schedule(plan_protected.schedule), ab)
 
         # Detect a promise slip; with no fresh recovery in hand, start the search.
         slip_m = _committed_slip_metrics(plan_protected.schedule, protected, config.plan_start_date)
@@ -921,8 +929,7 @@ def _current_book_sig() -> str:
     actuals = book_store.load_actuals()
     lines = orderbook.active_so_lines(book_store.load_active_orders(),
                                       actuals, masters)
-    absences = (book_store.load_absences()
-                if hasattr(book_store, "load_absences") else None)
+    absences = book_store.load_absences()
     return optimize_service.book_signature(lines, absences=absences)
 
 
@@ -1007,8 +1014,10 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         base_config = config      # as saved — the basis for the inputs fingerprint
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()
+        absences = book_store.load_absences()
         try:
-            setup = optimize_service.prepare_contest(orders, actuals, masters, config)
+            setup = optimize_service.prepare_contest(orders, actuals, masters, config,
+                                                      absences=absences)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -1017,7 +1026,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         if cloud:
             payload = optimize_service.build_payload(
                 orders, actuals, book_store.load_masters_bytes(), base_config,
-                seed=_OPT_SEED)
+                seed=_OPT_SEED, absences=absences)
             denom = (optimize_service.CLOUD_BUDGET_PER_CANDIDATE
                      * len(optimizer.sweep_contenders(
                          setup.search_config.overlap_percent,
@@ -1058,7 +1067,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                                           seed=_OPT_SEED, on_progress=on_progress,
                                           should_cancel=lambda: _OPTIMIZE.get("cancel"),
                                           candidate_setup=None,
-                                          feasible=setup.feasible)
+                                          feasible=setup.feasible,
+                                          base_reserved=setup.absence_reserved)
             res = sw.result
             _finalize_optimize(job_id, base_config, real_baseline, label,
                                winner_overlap=sw.overlap_percent, ranks=res.ranks,
@@ -1219,17 +1229,19 @@ def _all_lines_schedule(setup, masters, ranks, joint):
     all_lines = list(setup.joint_target)
     protected = setup.protected
     ranked_config = replace(setup.config, expedite_window_min=0) if ranks else setup.config
+    ab = setup.absence_reserved   # operator absences bind in every branch below
 
     if not protected or (joint and ranks):
         pr = PlanRun(so_lines=list(all_lines))
-        run_forward(pr, ranked_config, masters, priority_rank=ranks)
+        run_forward(pr, ranked_config, masters, reserved=ab, priority_rank=ranks)
         if not protected or optimizer.promise_ceiling_ok(pr.schedule, all_lines):
             return pr.schedule, all_lines
         ranks, ranked_config = None, setup.config     # joint drift -> two-pass, no ranks
 
     p1 = PlanRun(so_lines=list(protected))
-    run_forward(p1, setup.config, masters)
+    run_forward(p1, setup.config, masters, reserved=ab)
     p2 = PlanRun(so_lines=list(setup.target))
+    # setup.reserved already has the absences merged in (prepare_contest).
     run_forward(p2, ranked_config, masters, reserved=setup.reserved, priority_rank=ranks)
     return p1.schedule + p2.schedule, all_lines
 
@@ -1242,7 +1254,9 @@ def _incumbent_metrics():
     masters = _current_masters()
     actuals = book_store.load_actuals()
     orders = book_store.load_active_orders()
-    setup = optimize_service.prepare_contest(orders, actuals, masters, config)
+    absences = book_store.load_absences()
+    setup = optimize_service.prepare_contest(orders, actuals, masters, config,
+                                             absences=absences)
     prio = book_store.load_plan_priority()
     ranks = (prio or {}).get("ranks") or None
     joint = bool(prio and (prio.get("meta") or {}).get("joint"))

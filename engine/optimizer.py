@@ -367,7 +367,7 @@ class SweepResult:
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None,
                    candidate_setup=None, candidates=OVERLAP_CANDIDATES,
-                   feasible=None) -> SweepResult:
+                   feasible=None, base_reserved=None) -> SweepResult:
     """Search batch sequence AND overlap %. ``budget_evals`` is the TOTAL
     budget for the whole contest; it is split EQUALLY across the contenders
     (the current setting + ``candidates``), ``budget_evals // n`` plans each.
@@ -393,8 +393,15 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
     ``best=None``; such a candidate can never win (see the winner loop below).
     If EVERY candidate is infeasible, the sweep returns an empty result
     (``result.best is None``), same as "nothing eligible ran".
+
+    ``base_reserved`` (optional) is merged into EVERY candidate's reservations
+    (operator absences — physical unavailability, not a promise reservation,
+    so it applies regardless of ``candidate_setup``/``feasible``). With
+    ``candidate_setup=None`` (joint mode) this is simply ``base_reserved``.
+    ``None`` (default, all existing callers) is a no-op merge.
     """
     from dataclasses import replace
+    from engine.optimize_service import merge_reservations
 
     cur = config.overlap_percent
     lineup = sweep_contenders(cur, candidates)
@@ -423,6 +430,7 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
         if not eligible:
             table.append({"overlap": ov, "eligible": False})
             return None
+        reserved = merge_reservations(reserved, base_reserved) or None
         res = optimize(so_lines, cfg, masters, reserved=reserved,
                        budget_evals=budget, seed=seed, feasible=feasible,
                        on_progress=_offset(spent), should_cancel=should_cancel)
