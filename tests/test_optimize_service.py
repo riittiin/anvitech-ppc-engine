@@ -113,3 +113,21 @@ def test_run_candidate_progress_and_cancel():
     assert seen == sorted(seen) and seen[-1] == row["evals"]
     stopped = svc.run_candidate(payload, 80, should_cancel=lambda: True)
     assert stopped["cancelled"] or stopped["evals"] <= 1
+
+
+def test_book_signature_tracks_material_changes():
+    orders, actuals, raw, masters, cfg = _book()
+    from engine import orderbook
+    lines = orderbook.active_so_lines(orders, actuals, masters)
+    s0 = svc.book_signature(lines)
+    assert s0 == svc.book_signature(list(reversed(lines)))   # order-insensitive
+    lines[0].qty -= 1                                        # production happened
+    assert svc.book_signature(lines) != s0
+    lines[0].qty += 1
+    lines[0].commitment = "committed"                        # lane change
+    lines[0].promised_date = date(2025, 4, 1)
+    assert svc.book_signature(lines) != s0
+    lines[0].commitment, lines[0].promised_date = "open", None
+    assert svc.book_signature(lines) == s0                   # restored ⇒ same sig
+    assert svc.book_signature(lines, absences=[{"operator": "X",
+        "from_date": "2025-03-02", "to_date": "2025-03-03"}]) != s0

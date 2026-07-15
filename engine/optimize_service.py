@@ -13,7 +13,9 @@ is never duplicated, and new surfaces must reuse the plan's own machinery).
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
+import json
 from dataclasses import dataclass, field, replace
 
 from engine import optimizer, orderbook
@@ -44,6 +46,24 @@ def reservations_from_schedule(schedule):
         if op:
             res.setdefault(op, []).append((e.start, e.end))
     return res
+
+
+def book_signature(so_lines, absences=None):
+    """Fingerprint of the BOOK state an optimization was computed on: which
+    orders, how much work each still needs (headline + per-process), their
+    lanes/promises, and the operator absences. When production moves any of
+    these, an applied optimization is stale — the auto trigger compares this
+    signature. (Masters + settings are covered by api._inputs_signature.)"""
+    rows = sorted(
+        (l.so_no, l.item_code, round(float(l.qty), 3),
+         json.dumps(l.process_qty or {}, sort_keys=True, default=str),
+         getattr(l, "commitment", "open") or "open",
+         str(getattr(l, "promised_date", None)))
+        for l in so_lines)
+    blob = json.dumps([rows, sorted((a.get("operator", ""), a.get("from_date", ""),
+                                     a.get("to_date", "")) for a in (absences or []))],
+                      default=str)
+    return hashlib.sha256(blob.encode()).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
