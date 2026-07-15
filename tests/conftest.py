@@ -42,3 +42,12 @@ def loaded(sample_bytes):
 @pytest.fixture
 def config():
     return Config()
+
+
+@pytest.fixture(autouse=True)
+def _no_auto_optimize(monkeypatch):
+    """The self-tuning trigger must never fire spontaneously inside tests —
+    endpoints bump the book-changed state, and without this the api module
+    would spawn background contest threads mid-suite. Dedicated auto tests
+    re-enable with monkeypatch.setenv('AUTO_OPTIMIZE', '1')."""
+    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
