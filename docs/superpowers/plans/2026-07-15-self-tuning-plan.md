@@ -121,27 +121,29 @@ def _no_auto_optimize(monkeypatch):
 - [ ] **Step 3: Run the full suite**: `python3 -m pytest -q` Expected: all pass (fixture is inert today).
 - [ ] **Step 4: Commit**: `git commit -am "test: default AUTO_OPTIMIZE=0 in the suite (isolation for the coming trigger)"`
 
-### Task 3: The trigger — `_bump_book_changed` + debounced auto loop
+### Task 3: The trigger — immediate on admin actions, button-gated for punches
 
 **Files:**
-- Modify: `api/main.py` (new section after `_worker_secret_ok`, ~line 880)
+- Modify: `api/main.py` (new section after `_worker_secret_ok`), `engine/book_store.py` (auto-note helpers)
 - Test: Create `tests/test_auto_optimize.py`
 
 **Interfaces:**
-- Consumes: `_start_optimize(budget_evals, label, background)` (existing), `_cloud_config()` (existing), `optimize_service.book_signature` (Task 1), `book_store.load_plan_priority()` (existing — meta dict).
-- Produces: `_bump_book_changed()` — call after any book mutation; `_AUTO` state dict; `_auto_note_write(text)` + `book_store.save_auto_note/load_auto_note`; `_start_optimize(..., auto=True)` keyword (behavior wired in Task 4); loop thread `_auto_loop` (daemon, singleton).
+- Consumes: `_start_optimize(budget_evals, label, background)` (existing), `_cloud_config()` (existing), `optimize_service.book_signature` (Task 1), `book_store.load_plan_priority()` (existing).
+- Produces: `_bump_book_changed()` — called by DELIBERATE admin mutations (upload, delete/clear, commit/urgent/uncommit, absence change, Settings save; NOT by punch saves) → tries to start an auto contest immediately; `_try_start_auto() -> bool` (the single decision point); `POST /optimize/done` endpoint, ANY logged-in role — the Capture-tab "Done entering" button; `_AUTO = {"pending": False}` — set when a change lands mid-run, drained by `_finalize_optimize` starting a follow-up contest; `book_store.save_auto_note/load_auto_note`; `_start_optimize(..., auto=True)` keyword.
 
 - [ ] **Step 1: Write failing tests** (`tests/test_auto_optimize.py`)
 
 ```python
-"""Phase 1: the self-tuning trigger. Debounce (quiet window + spacing),
-cloud-only rule, and the kill switch. The contest itself is stubbed."""
+"""Phase 1 trigger: admin actions start a contest immediately; punches never do
+(the Done button does); cloud-only; mid-run changes chain a follow-up; the
+AUTO_OPTIMIZE=0 env (internal, tests only) disables everything."""
 import time
 from datetime import date
 
 import pytest
 
 pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient
 from engine import book_store
 from engine.models import Order
 from tests.sample_workbook import build_sample_bytes, ITEM_A, ITEM_B
@@ -162,79 +164,82 @@ def _seed_book():
     ])
 
 
-def _auto_env(monkeypatch, quiet_s=0.2, spacing_s=0.5):
+def _auto_env(monkeypatch):
     monkeypatch.setenv("AUTO_OPTIMIZE", "1")
-    monkeypatch.setenv("AUTO_OPTIMIZE_QUIET_MIN", str(quiet_s / 60))
-    monkeypatch.setenv("AUTO_OPTIMIZE_SPACING_MIN", str(spacing_s / 60))
     monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "manual")
     monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3")
 
 
-def test_bump_then_quiet_window_starts_one_auto_contest(monkeypatch):
+def test_admin_bump_starts_contest_immediately(monkeypatch):
     _auto_env(monkeypatch)
-    m = _api()
-    _seed_book()
+    m = _api(); _seed_book()
     starts = []
     monkeypatch.setattr(m, "_start_optimize",
                         lambda budget_evals, label, background=True, auto=False:
                         starts.append((label, auto)))
     m._bump_book_changed()
-    m._bump_book_changed()          # burst — still one contest
-    time.sleep(0.35)                # quiet window (0.2 s) passes
-    m._auto_tick()                  # deterministic tick instead of the thread
     assert starts == [("auto", True)]
-    m._auto_tick()
-    assert len(starts) == 1         # no re-fire without a new bump
 
 
-def test_spacing_is_honored(monkeypatch):
-    _auto_env(monkeypatch, quiet_s=0.05, spacing_s=10)
-    m = _api()
-    _seed_book()
+def test_done_button_any_role_starts_contest(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
     starts = []
-    monkeypatch.setattr(m, "_start_optimize",
-                        lambda *a, **k: starts.append(1))
-    m._bump_book_changed(); time.sleep(0.1); m._auto_tick()
-    m._bump_book_changed(); time.sleep(0.1); m._auto_tick()   # inside spacing
-    assert len(starts) == 1
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech_user",
+                           "password": "anvitech12345678"})
+    r = c.post("/optimize/done")
+    assert r.status_code == 200 and starts
+
+
+def test_mid_run_change_sets_pending_and_chains(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["state"] = "running"          # simulate a running contest
+    m._bump_book_changed()
+    assert m._AUTO["pending"] is True
+    with m._OPTIMIZE_LOCK:                        # let it finish
+        m._OPTIMIZE["state"] = "idle"
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    m._drain_pending_auto()
+    assert starts and m._AUTO["pending"] is False
 
 
 def test_auto_is_cloud_only(monkeypatch):
     _auto_env(monkeypatch)
-    m = _api()
-    _seed_book()
-    monkeypatch.delenv("GITHUB_DISPATCH_TOKEN")               # no cloud
+    m = _api(); _seed_book()
+    monkeypatch.delenv("GITHUB_DISPATCH_TOKEN")
     starts = []
     monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    m._bump_book_changed(); time.sleep(0.35); m._auto_tick()
+    m._bump_book_changed()
     assert starts == []
     assert "retry" in (book_store.load_auto_note() or {}).get("text", "")
 
 
-def test_kill_switch(monkeypatch):
-    m = _api()                                                # AUTO_OPTIMIZE=0 fixture
-    _seed_book()
+def test_internal_env_disables_everything(monkeypatch):
+    m = _api(); _seed_book()                      # AUTO_OPTIMIZE=0 via fixture
     starts = []
     monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    m._bump_book_changed(); time.sleep(0.35); m._auto_tick()
+    m._bump_book_changed()
     assert starts == []
 
 
 def test_no_fire_when_signature_matches_applied(monkeypatch):
     _auto_env(monkeypatch)
-    m = _api()
-    _seed_book()
-    # Pretend an optimization was applied for exactly the current book state.
+    m = _api(); _seed_book()
     sig = m._current_book_sig()
     book_store.save_plan_priority({}, {"saved_at": "t", "book_sig": sig})
     starts = []
     monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    m._bump_book_changed(); time.sleep(0.35); m._auto_tick()
+    m._bump_book_changed()
     assert starts == []
 ```
 
-- [ ] **Step 2: Run to verify failure**: `python3 -m pytest tests/test_auto_optimize.py -v` — Expected: FAIL (`_bump_book_changed` undefined).
-- [ ] **Step 3: Implement in `api/main.py`.** Add to `engine/book_store.py`:
+- [ ] **Step 2: Run to verify failure**: `python3 -m pytest tests/test_auto_optimize.py -v` — FAIL (`_bump_book_changed` undefined).
+- [ ] **Step 3: Implement.** book_store auto-note helpers (unchanged from the original Task 3 draft):
 
 ```python
 AUTO_NOTE_KEY = "anvitech:auto_note"
@@ -249,15 +254,16 @@ def load_auto_note():
     return json.loads(raw) if raw else None
 ```
 
-Add to `api/main.py` (after `_worker_secret_ok`):
+api/main.py (after `_worker_secret_ok`):
 
 ```python
 # --------------------------------------------------------------------------- #
-# Self-tuning trigger (spec 2026-07-15-self-tuning-plan): production changes
-# the book -> after a quiet window (+ spacing), run the contest in the cloud
-# and auto-apply strictly-better results. AUTO_OPTIMIZE=0 kills everything.
+# Self-tuning trigger (spec 2026-07-15-self-tuning-plan, owner-revised):
+# deliberate admin actions re-optimize IMMEDIATELY; punch entry re-optimizes
+# only when the clerk presses "Done entering" (POST /optimize/done). No
+# timers. AUTO_OPTIMIZE=0 is internal test isolation only — never user-facing.
 # --------------------------------------------------------------------------- #
-_AUTO = {"changed_mono": None, "last_start_mono": 0.0, "thread": None}
+_AUTO = {"pending": False}
 _AUTO_LOCK = threading.Lock()
 
 
@@ -265,102 +271,80 @@ def _auto_enabled() -> bool:
     return os.environ.get("AUTO_OPTIMIZE", "1") != "0"
 
 
-def _auto_quiet_s() -> float:
-    return float(os.environ.get("AUTO_OPTIMIZE_QUIET_MIN", "10")) * 60
-
-
-def _auto_spacing_s() -> float:
-    return float(os.environ.get("AUTO_OPTIMIZE_SPACING_MIN", "60")) * 60
-
-
 def _current_book_sig() -> str:
     masters = _current_masters()
     actuals = book_store.load_actuals()
     lines = orderbook.active_so_lines(book_store.load_active_orders(),
                                       actuals, masters)
-    return optimize_service.book_signature(lines,
-                                           absences=book_store.load_absences()
-                                           if hasattr(book_store, "load_absences")
-                                           else None)
+    absences = (book_store.load_absences()
+                if hasattr(book_store, "load_absences") else None)
+    return optimize_service.book_signature(lines, absences=absences)
 
 
 def _auto_note_write(text: str):
+    from datetime import datetime as _dt
     book_store.save_auto_note({"text": text,
-                               "at": datetime.now().isoformat(timespec="seconds")})
+                               "at": _dt.now().isoformat(timespec="seconds")})
 
 
-def _bump_book_changed():
-    """Call after ANY action that changes the plannable book (punch, upload,
-    delete, commitment, absence, settings save). Cheap — just stamps time."""
-    if not _auto_enabled():
-        return
-    with _AUTO_LOCK:
-        _AUTO["changed_mono"] = time.monotonic()
-        if _AUTO["thread"] is None or not _AUTO["thread"].is_alive():
-            t = threading.Thread(target=_auto_loop, daemon=True)
-            _AUTO["thread"] = t
-            t.start()
-
-
-def _auto_tick() -> bool:
-    """One decision: should an auto contest start now? (Split from the loop so
-    tests drive it deterministically.) Returns True when one was started."""
+def _try_start_auto() -> bool:
+    """The one decision point: start an auto contest now if it makes sense."""
     if not _auto_enabled():
         return False
-    with _AUTO_LOCK:
-        changed = _AUTO["changed_mono"]
-        if changed is None:
-            return False
-        now = time.monotonic()
-        if now - changed < _auto_quiet_s():
-            return False                              # still inside the burst
-        if now - _AUTO["last_start_mono"] < _auto_spacing_s():
-            return False                              # spacing
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["state"] == "running":
-            return False                              # one at a time
+            with _AUTO_LOCK:
+                _AUTO["pending"] = True          # chain after the current run
+            return False
     if _cloud_config() is None:
-        with _AUTO_LOCK:
-            _AUTO["changed_mono"] = None
         _auto_note_write("Auto-optimize skipped — cloud compute unavailable; "
                          "will retry on the next change.")
-        return False                                  # auto is cloud-only
+        return False                             # auto is cloud-only
     prio = book_store.load_plan_priority()
     applied_sig = ((prio or {}).get("meta") or {}).get("book_sig")
     try:
-        cur_sig = _current_book_sig()
+        if applied_sig == _current_book_sig():
+            return False                         # nothing material changed
     except Exception:
         return False
-    if applied_sig == cur_sig:
-        with _AUTO_LOCK:
-            _AUTO["changed_mono"] = None              # nothing actually changed
-        return False
-    with _AUTO_LOCK:
-        _AUTO["changed_mono"] = None
-        _AUTO["last_start_mono"] = time.monotonic()
     try:
         _start_optimize(_OPT_BUDGETS["deep"], "auto", background=True, auto=True)
         return True
     except HTTPException:
-        return False                                  # e.g. nothing to optimize
+        return False                             # e.g. nothing to optimize
 
 
-def _auto_loop():
-    """Daemon: checks the tick every 15 s while a change is pending."""
-    while _auto_enabled():
-        time.sleep(15)
-        with _AUTO_LOCK:
-            pending = _AUTO["changed_mono"] is not None
-        if not pending:
-            return
-        _auto_tick()
+def _bump_book_changed():
+    """Call after DELIBERATE admin mutations (upload, delete, commitment,
+    absence, Settings save). Punch saves do NOT call this — the clerk's
+    Done button does."""
+    _try_start_auto()
+
+
+def _drain_pending_auto():
+    """Called when a contest finishes: if the book changed mid-run, follow up."""
+    with _AUTO_LOCK:
+        pending, _AUTO["pending"] = _AUTO["pending"], False
+    if pending:
+        _try_start_auto()
 ```
 
-Add the `auto=False` keyword to `_start_optimize(budget_evals, label, background=True, auto=False)` and stash it: in the `_OPTIMIZE.update(...)` running-state call add `auto=bool(auto)`; add `"auto": False` to the `_OPTIMIZE` init dict. Add `from datetime import datetime` if not imported (it is via `datetime` module usage — check; `_commit_orders` imports locally, so add `from datetime import datetime` at the top-level imports of the new code or reuse a local import inside `_auto_note_write`).
+Endpoint (near the other optimize endpoints):
 
-- [ ] **Step 4: Run**: `python3 -m pytest tests/test_auto_optimize.py -v` — Expected: PASS (5 tests). Note `test_no_fire_when_signature_matches_applied` needs `_current_book_sig` exactly as named.
-- [ ] **Step 5: Full suite**: `python3 -m pytest -q` — Expected: all pass.
-- [ ] **Step 6: Commit**: `git commit -am "feat: self-tuning trigger — book-change bump, quiet window + spacing debounce, cloud-only, kill switch"`
+```python
+@app.post("/optimize/done")
+def optimize_done_ep(request: Request):
+    """The Capture-tab 'Done entering' button — ANY logged-in role. Starts the
+    self-tuning contest over today's book (no-op when nothing changed)."""
+    started = _try_start_auto()
+    return {"started": started, "state": _optimize_status()["state"]}
+```
+
+Add `auto=False` keyword to `_start_optimize(...)`, stash `auto=bool(auto)` in the running `_OPTIMIZE.update(...)`, add `"auto": False` to the `_OPTIMIZE` init dict. At the very end of `_finalize_optimize` (after the auto-apply hook Task 4 adds) call `_drain_pending_auto()`.
+
+- [ ] **Step 4: Run**: `python3 -m pytest tests/test_auto_optimize.py -v` — PASS (6 tests).
+- [ ] **Step 5: Full suite**: `python3 -m pytest -q` — all pass.
+- [ ] **Step 6: Commit**: `git commit -am "feat: self-tuning trigger — immediate on admin actions, Done-button for punches, mid-run chaining, cloud-only"`
 
 ### Task 4: Auto-apply on contest completion
 
@@ -471,7 +455,7 @@ At the END of `_finalize_optimize` (after the lock block, before `return True`),
 ### Task 5: Wire the bumps + surface the note
 
 **Files:**
-- Modify: `api/main.py` — call `_bump_book_changed()` at the end of the mutating endpoints: `/actuals` save handler, `/actuals/rollback`, `/upload`, `/orders/delete`, `/orders/clear`, `/orders/commit`, `/orders/urgent`, `/orders/uncommit`, and the `persist=True` branch of `/run`. `_plan` return dict gains `"auto_note": book_store.load_auto_note()`.
+- Modify: `api/main.py` — call `_bump_book_changed()` at the end of the DELIBERATE admin mutations only: `/upload`, `/orders/delete`, `/orders/clear`, `/orders/commit`, `/orders/urgent`, `/orders/uncommit`, and the `persist=True` branch of `/run`. Punch endpoints (`/actuals`, `/actuals/rollback`) do NOT bump — the clerk's Done button covers them. `_plan` return dict gains `"auto_note": book_store.load_auto_note()`.
 - Modify: `web/app.js` — render the note; `web/index.html` — a `#auto-note` element next to `#recovery-note`.
 - Test: append to `tests/test_auto_optimize.py`
 
@@ -494,7 +478,9 @@ def test_mutating_endpoints_bump_and_run_returns_note(monkeypatch):
     c.post("/actuals", json={"so_no": "SO1", "item_code": ITEM_A,
                              "entry_date": "2025-03-05", "qty_produced": 1,
                              "process": "", "shift": "A"})
-    assert bumps                                       # punch bumped
+    assert not bumps                                   # punches do NOT bump
+    c.post("/orders/commit", json={"orders": [{"so": "SO2", "item": ITEM_B}]})
+    assert bumps                                       # admin action bumped
     book_store.save_auto_note({"text": "hello", "at": "t"})
     r = c.post("/run", json={})
     assert r.json()["auto_note"]["text"] == "hello"
@@ -521,13 +507,34 @@ function renderAutoNote(d) {
 }
 ```
 
-and call `renderAutoNote(data)` wherever the run payload is rendered (next to the existing recovery-note call).
+and call `renderAutoNote(data)` wherever the run payload is rendered (next to the existing recovery-note call). Also add the clerk's button to the Capture Actuals tab (visible to BOTH roles) in `web/index.html`:
+
+```html
+<button id="optimize-done" class="primary">Done entering — update &amp; optimize plan</button>
+<span id="optimize-done-status" class="status"></span>
+```
+
+and in `web/app.js`:
+
+```javascript
+$("optimize-done").onclick = async () => {
+  const st = $("optimize-done-status");
+  st.textContent = "starting…";
+  const r = await fetch("/optimize/done", { method: "POST" });
+  const d = await r.json();
+  st.textContent = d.started ? "Optimizing in the background — the plan updates itself when done."
+    : (d.state === "running" ? "Already optimizing — your entries are included in the next run."
+                             : "Nothing new to optimize.");
+};
+```
+
+(Adjust the /orders/commit body in the Step-1 test to the real CommitRequest fields — check `class CommitRequest` in api/main.py.)
 
 - [ ] **Step 4: Run tests; Step 5: full suite; Step 6: Commit**: `git commit -am "feat: book-change bumps on all mutating endpoints; auto note surfaced on /run + Orders tab"`
 
 ### Task 6: Phase-1 verification gate (manual, no code)
 
-- [ ] Local server dress rehearsal with `GITHUB_DISPATCH_TOKEN=manual`, `AUTO_OPTIMIZE=1`, `AUTO_OPTIMIZE_QUIET_MIN=0.1`, `AUTO_OPTIMIZE_SPACING_MIN=0.1`: upload the real file (ask the owner which), punch one actual via the API, wait ~30 s, confirm `/optimize/status` shows an auto run; run the worker script manually; confirm auto-apply + note in `/run`.
+- [ ] Local server dress rehearsal with `GITHUB_DISPATCH_TOKEN=manual`, `AUTO_OPTIMIZE=1`: upload the real file (ask the owner which), punch one actual via the API (no auto run must start), then `POST /optimize/done` and confirm `/optimize/status` shows the auto run; run the worker script manually; confirm auto-apply + note in `/run`; also verify an `/upload` triggers immediately.
 - [ ] Full suite green; golden untouched (`git diff --stat tests/golden_trace.json` empty).
 - [ ] Commit any fixes; report Phase-1 results to the owner before starting Phase 2.
 
