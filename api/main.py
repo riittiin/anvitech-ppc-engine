@@ -553,11 +553,14 @@ def _plan(config: Config):
     if eff_start != config.plan_start_date:
         config = replace(config, plan_start_date=eff_start)
 
-    # An applied Optimize run (the saved rank map) replays over the OPEN pass only:
-    # committed orders keep their promise order; unranked (new) orders keep their
-    # natural Rule-3 slot. No saved optimization -> plans are byte-identical.
+    # An applied Optimize run (the saved rank map). A JOINT contest (2026-07-15)
+    # ranked ALL active lines together — committed included — so its ranks replay
+    # as ONE pass over every line (below). A LEGACY meta (no "joint" flag, ranks
+    # computed open-only, still deployed) keeps today's open-pass replay inside the
+    # two-pass plan. No saved optimization -> plans are byte-identical.
     prio = book_store.load_plan_priority()
     ranks = prio["ranks"] if prio else None
+    joint = bool(prio and (prio.get("meta") or {}).get("joint"))
 
     # The optimized ranks ARE the prioritization. The Expedite window dynamically
     # re-sorts ops by slack at schedule time, which would OVERRIDE the ranks and cancel
@@ -570,12 +573,34 @@ def _plan(config: Config):
     # The feedback loop is quantity-only: recorded times (downtime, actual setup) are
     # stored for the record and never affect the schedule.
     recovery_meta = {"active": False}
+    joint_fallback = False
     protected, open_lines = orderbook.split_committed_open(so_lines)
-    if not protected:
-        # Today's single pass — unchanged. Keeps the golden trace byte-identical
-        # for an all-open book (no committed/urgent orders).
-        plan_run = PlanRun(so_lines=so_lines)
-        trace = run_forward(plan_run, ranked_config, masters, priority_rank=ranks)
+
+    # Joint replay: the contest ranked committed lines in the same pool, so replay
+    # its sequence over ALL active lines in one pass, then RE-VALIDATE the promise
+    # ceiling on the produced schedule. The book can have drifted since the contest
+    # (a tighter promise, more work) so the applied sequence is not trusted blindly.
+    joint_plan = None
+    if protected and joint and ranks:
+        jr = PlanRun(so_lines=so_lines)
+        jt = run_forward(jr, ranked_config, masters, priority_rank=ranks)
+        if optimizer.promise_ceiling_ok(jr.schedule, so_lines):
+            joint_plan = (jr, jt)          # keeps every promise -> use it as-is
+        else:
+            # Drift: the applied sequence would break a promise. Discard it, fall
+            # back to today's two-pass (which protects promises by construction),
+            # and bump the book so a fresh contest re-fits the current book.
+            joint_fallback = True
+            _bump_book_changed()
+
+    if not protected or joint_plan is not None:
+        # Single pass. Either an all-open book (unchanged — keeps the golden trace
+        # byte-identical) or a validated joint replay over every active line.
+        if joint_plan is not None:
+            plan_run, trace = joint_plan
+        else:
+            plan_run = PlanRun(so_lines=so_lines)
+            trace = run_forward(plan_run, ranked_config, masters, priority_rank=ranks)
     else:
         # Two-pass: committed/urgent orders are planned first, as if open orders
         # don't exist; open orders then backfill the gaps left by that pass —
@@ -713,11 +738,16 @@ def _plan(config: Config):
                          # optimization was computed on — its numbers will differ.
                          "inputs_changed": bool(saved_sig and saved_sig != current_inputs_sig)}
 
-    return {"run_id": run_id, "trace": trace, "report": _report_for_book(masters, so_lines),
-            "gantt": gantt, "orders": orders, "config": config.to_dict(),
-            "expected_end": exp_end, "optimize_meta": optimize_meta,
-            "recovery_meta": recovery_meta,
-            "auto_note": book_store.load_auto_note()}
+    result = {"run_id": run_id, "trace": trace, "report": _report_for_book(masters, so_lines),
+              "gantt": gantt, "orders": orders, "config": config.to_dict(),
+              "expected_end": exp_end, "optimize_meta": optimize_meta,
+              "recovery_meta": recovery_meta,
+              "auto_note": book_store.load_auto_note()}
+    if joint_fallback:
+        # Applied joint ranks drifted out of promise-feasibility; the two-pass
+        # plan above ran instead. Surfaced so callers/tests can see the guard fired.
+        result["joint_fallback"] = True
+    return result
 
 
 def _commit_orders(pairs):
@@ -1010,9 +1040,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             # real config (expedite as set) — what they have if they DON'T optimize.
             real_baseline = _OPTIMIZE.get("baseline")
             if real_baseline is None:
-                base_run = PlanRun(so_lines=list(setup.target))
-                run_forward(base_run, setup.config, masters, reserved=setup.reserved)
-                real_baseline = optimizer.plan_metrics(base_run.schedule, setup.target,
+                base_sched, base_lines = _all_lines_schedule(setup, masters, None, False)
+                real_baseline = optimizer.plan_metrics(base_sched, base_lines,
                                                        setup.config.plan_start_date)
 
             # One-pool contest (2026-07-15): search ALL active lines together —
@@ -1039,9 +1068,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         try:
             # Baseline is computed HERE (one plan, seconds) so the before/after
             # is ready whatever the worker does.
-            base_run = PlanRun(so_lines=list(setup.target))
-            run_forward(base_run, setup.config, masters, reserved=setup.reserved)
-            real_baseline = optimizer.plan_metrics(base_run.schedule, setup.target,
+            base_sched, base_lines = _all_lines_schedule(setup, masters, None, False)
+            real_baseline = optimizer.plan_metrics(base_sched, base_lines,
                                                    setup.config.plan_start_date)
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE["baseline"] = real_baseline
@@ -1167,10 +1195,45 @@ def _optimize_cancel():
     return _optimize_status()
 
 
+def _all_lines_schedule(setup, masters, ranks, joint):
+    """A schedule covering ALL active lines, built the SAME way for both sides of
+    the Optimize before/after (baseline and incumbent) so their scores are
+    same-domain (the previous open-only-vs-all-lines mismatch is the bug this fixes).
+
+    - No protected orders, or a JOINT rank set: one pass over every line with the
+      ranks (expedite off). A joint set is re-validated against the promise ceiling;
+      on drift the ranks are dropped and the two-pass build below is used (mirrors
+      ``_plan``).
+    - Legacy open-only ranks / no ranks with protected present: two-pass — pass 1 =
+      protected under ``setup.config``, pass 2 = the open target under the ranked
+      config with ``setup.reserved`` + the ranks — schedules merged.
+
+    Pass 1 here approximates ``_plan``'s protected pass (it does NOT replay the
+    promise-recovery ranks). That is acceptable: BOTH the baseline and the incumbent
+    are built through this one helper, so the comparison stays internally consistent.
+    Returns (schedule, all_lines)."""
+    all_lines = list(setup.joint_target)
+    protected = setup.protected
+    ranked_config = replace(setup.config, expedite_window_min=0) if ranks else setup.config
+
+    if not protected or (joint and ranks):
+        pr = PlanRun(so_lines=list(all_lines))
+        run_forward(pr, ranked_config, masters, priority_rank=ranks)
+        if not protected or optimizer.promise_ceiling_ok(pr.schedule, all_lines):
+            return pr.schedule, all_lines
+        ranks, ranked_config = None, setup.config     # joint drift -> two-pass, no ranks
+
+    p1 = PlanRun(so_lines=list(protected))
+    run_forward(p1, setup.config, masters)
+    p2 = PlanRun(so_lines=list(setup.target))
+    run_forward(p2, ranked_config, masters, reserved=setup.reserved, priority_rank=ranks)
+    return p1.schedule + p2.schedule, all_lines
+
+
 def _incumbent_metrics():
-    """Score of the plan users currently see: the applied ranks (if any)
-    replayed on TODAY'S book, else the plain plan. Expedite off when ranks
-    replay — mirrors _plan."""
+    """Score of the plan users currently see: the applied ranks (if any) replayed
+    on TODAY'S book, measured over ALL active lines (committed + open) — the same
+    domain the contest's ``best`` is scored on. Expedite off when ranks replay."""
     config = _load_plan_config()
     masters = _current_masters()
     actuals = book_store.load_actuals()
@@ -1178,11 +1241,9 @@ def _incumbent_metrics():
     setup = optimize_service.prepare_contest(orders, actuals, masters, config)
     prio = book_store.load_plan_priority()
     ranks = (prio or {}).get("ranks") or None
-    pr = PlanRun(so_lines=list(setup.target))
-    run_forward(pr, setup.search_config if ranks else setup.config, masters,
-               reserved=setup.reserved, priority_rank=ranks)
-    return optimizer.plan_metrics(pr.schedule, setup.target,
-                                  setup.config.plan_start_date)
+    joint = bool(prio and (prio.get("meta") or {}).get("joint"))
+    schedule, all_lines = _all_lines_schedule(setup, masters, ranks, joint)
+    return optimizer.plan_metrics(schedule, all_lines, setup.config.plan_start_date)
 
 
 def _auto_apply_result():
