@@ -41,6 +41,23 @@ def test_promise_ceiling_ok_day_level():
     assert optimizer.promise_ceiling_ok(pr.schedule, so)          # open = never vetoed
 
 
+def test_promise_ceiling_fails_closed_when_order_missing_from_schedule():
+    """A promised (committed/urgent) order with NO schedule entries is a
+    violation, not a pass — Rule 6 can block a batch non-fatally with zero
+    entries emitted, and an unschedulable committed order must not sail
+    past the veto as "on time"."""
+    so, masters, cfg = _lines()
+    pr = PlanRun(so_lines=list(so)); run_forward(pr, cfg, masters)
+    k = (so[0].so_no, so[0].item_code)
+    end = _end_date(pr.schedule, k)
+    so[0].commitment, so[0].promised_date = "committed", end
+    # Remove every entry carrying this order's key from the schedule.
+    filtered = [e for e in pr.schedule
+                if not (e.item_code == k[1] and k[0] in (e.so_refs or []))]
+    assert _end_date(filtered, k) is None                   # really absent now
+    assert not optimizer.promise_ceiling_ok(filtered, so)   # fail CLOSED
+
+
 def test_optimize_feasible_gate_yields_none_when_all_vetoed():
     so, masters, cfg = _lines()
     r = optimizer.optimize(so, cfg, masters, budget_evals=8, seed=42,

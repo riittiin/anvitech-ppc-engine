@@ -148,7 +148,9 @@ def _atc_key(batch, masters, plan_start):
 def promise_ceiling_ok(schedule, so_lines) -> bool:
     """The owner's law (spec 2026-07-15): no committed/urgent order may END
     after its promised date. Day-level: end.date() <= promised. Orders without
-    a promise are never vetoed."""
+    a promise are never vetoed. FAIL CLOSED: a promised order with NO schedule
+    entries at all (e.g. Rule 6 blocked its batch non-fatally) is a violation —
+    an unschedulable committed order must never pass the veto as "on time"."""
     promised = {(l.so_no, l.item_code): l.promised_date for l in so_lines
                 if getattr(l, "commitment", "open") in ("committed", "urgent")
                 and getattr(l, "promised_date", None)}
@@ -162,7 +164,7 @@ def promise_ceiling_ok(schedule, so_lines) -> bool:
                 d = e.end.date()
                 if k not in ends or d > ends[k]:
                     ends[k] = d
-    return all(ends.get(k, promised[k]) <= promised[k] for k in promised)
+    return all(k in ends and ends[k] <= promised[k] for k in promised)
 
 
 def ranks_for(seq) -> dict:
