@@ -47,17 +47,18 @@
     </div>
     <div class="optimize-controls">
       <label class="cfg-check"><input type="radio" name="opt-budget" value="quick" checked />
-        Quick (~225 plans, ~20 min on this server)</label>
+        Quick (~900 plans, ~35 min on this server)</label>
       <label class="cfg-check"><input type="radio" name="opt-budget" value="deep" />
-        Deep (~600 plans, ~1 hr — more thorough)</label>
+        Deep (~2,400 plans, ~1.5 hr — more thorough)</label>
       <button id="optimize-start" class="primary">Start</button>
       <button id="optimize-stop" class="ghost-btn hidden">Stop &amp; keep best</button>
       <span id="optimize-progress" class="status"></span>
     </div>
     <div class="optimize-note muted">
-      This runs on the server — you can leave this tab open and it keeps going. Watch
-      “best so far” improve and press <strong>Stop &amp; keep best</strong> whenever you’re
-      happy; most of the gain comes in the first ~150 plans.
+      This runs on the server — you can leave this tab open and it keeps going. Every
+      Overlap % setting gets the same full search and the best plan wins (your current
+      setting is searched first). Watch “best so far” improve and press
+      <strong>Stop &amp; keep best</strong> whenever you’re happy.
     </div>
     <div id="optimize-result" class="optimize-result hidden"></div>
   </section>

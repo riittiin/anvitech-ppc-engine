@@ -1,10 +1,12 @@
-"""The Optimize settings sweep (2026-07-15 spec, contract strengthened same
-day): one click also tunes the overlap %. The CURRENT setting always gets the
-FULL advertised budget — the sweep's floor is exactly the pre-sweep Optimize
-button's result — and the probes + challenger deepening are bounded EXTRA evals
-on top (`sweep_total_evals`). Never worse than plain Optimize; ties keep the
-current setting; promise-guard hook can veto candidates; Apply persists the
-winning overlap into the saved plan config with a matching inputs fingerprint."""
+"""The Optimize settings sweep (2026-07-15 spec; fair-contest contract per the
+owner's decision the same day): one click also tunes the overlap %. EVERY
+candidate overlap gets the SAME full-depth search (`budget_evals` each,
+`sweep_total_evals` in total) and the best plan wins — the current setting has
+no depth advantage; it just runs first and wins exact ties (no churn). Never
+worse than plain Optimize falls out for free (the current setting's run is
+seed-identical to the plain button). Promise-guard hook can veto candidates;
+Apply persists the winning overlap into the saved plan config with a matching
+inputs fingerprint."""
 import io
 from dataclasses import replace
 from datetime import date
@@ -29,30 +31,33 @@ def _book(overlap=80):
 # --------------------------------------------------------------------------- #
 # Pure sweep mechanics
 # --------------------------------------------------------------------------- #
-def test_sweep_never_worse_than_plain_optimize_at_the_same_budget():
-    """The never-worse contract, strengthened after a live regression
-    (2026-07-15: Deep on the real book returned 753 late-days where the
-    pre-sweep button found 713 — the current setting was searched at only half
-    depth and a shallower challenger dethroned it). The CURRENT setting must be
-    searched at the FULL advertised budget, so the sweep's result is at least as
-    good as the plain Optimize button's; a different overlap may win only by
-    strictly beating that full-depth result."""
+def test_sweep_is_a_fair_contest_every_candidate_at_full_depth():
+    """The fair-contest contract (owner decision after a live regression —
+    2026-07-15: unequal depths misranked settings; Deep returned 753 late-days
+    where the pre-sweep button found 713 at the current overlap). EVERY
+    candidate gets the SAME full-depth search and the best plan wins; the
+    current setting's full-depth run doubles as the never-worse floor (it is
+    seed-identical to the plain Optimize button)."""
     so, cfg, masters = _book(overlap=80)
     budget = 80
     sw = optimizer.sweep_optimize(so, cfg, masters, budget_evals=budget, seed=42)
 
-    # The current setting's own run must carry the full advertised budget.
-    cur_rows = [t for t in sw.table if t.get("overlap") == 80 and t.get("eligible")
-                and t["evals"] > budget // 4]
-    assert cur_rows and cur_rows[0]["evals"] == budget
+    # Every eligible candidate — the current setting included — ran the full
+    # advertised budget: equal depth, no favoritism.
+    eligible = [t for t in sw.table if t.get("eligible")]
+    assert {t["overlap"] for t in eligible} == set(optimizer.OVERLAP_CANDIDATES)
+    assert all(t["evals"] == budget for t in eligible)
+    assert sw.evals == optimizer.sweep_total_evals(budget, cfg.overlap_percent)
 
-    # Probes + challenger deepening are bounded extras on top of the floor.
-    assert sw.evals <= optimizer.sweep_total_evals(budget)
+    # The winner is the best-scoring candidate outright.
+    best_row = min(eligible, key=lambda t: score(t["best"]))
+    assert score(sw.result.best) == score(best_row["best"])
 
+    # Never worse than the plain (pre-sweep) Optimize button.
     cur_deep = optimizer.optimize(so, cfg, masters, budget_evals=budget, seed=42)
     assert score(sw.result.best) <= score(cur_deep.best)
     if sw.overlap_percent != 80:
-        assert score(sw.result.best) < score(cur_deep.best)   # strictly better only
+        assert score(sw.result.best) < score(cur_deep.best)   # ties keep current
     assert sw.result.ranks                                    # persistable artifact
 
 

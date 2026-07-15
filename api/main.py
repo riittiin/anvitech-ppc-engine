@@ -871,10 +871,11 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True):
                       and slip["promises_missed"] <= cur_slip["promises_missed"])
                 return res, ok
 
-        # The progress denominator is the sweep's true upper bound: the current
-        # setting's full-depth floor + the overlap probes + the challenger.
+        # The progress denominator is the sweep's true total: every overlap
+        # candidate gets the full advertised budget (fair contest).
         _OPTIMIZE.update(state="running", label=label,
-                         budget_evals=optimizer.sweep_total_evals(budget_evals),
+                         budget_evals=optimizer.sweep_total_evals(
+                             budget_evals, search_config.overlap_percent),
                          evals=0, baseline=None, best=None, error=None, result=None,
                          elapsed_s=0.0, started_mono=time.monotonic(), cancel=False)
 

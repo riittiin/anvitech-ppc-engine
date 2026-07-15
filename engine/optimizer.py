@@ -277,22 +277,29 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
 
 # --------------------------------------------------------------------------- #
 # Settings sweep — auto-tune the overlap % inside the same Optimize click
-# (2026-07-15 spec; budget contract strengthened the same day after a live
-# regression: at half depth the current setting lost to a challenger it beats
-# at full depth — Deep returned 753 late-days where the pre-sweep button found
-# 713). The CURRENT setting always gets the FULL advertised budget (the floor
-# = exactly the plain Optimize button's result); probing the other candidates
-# and deepening the best probe are bounded EXTRA evals on top.
+# (2026-07-15 spec; contract rewritten the same day, twice, after a live
+# regression and an owner decision). v1 gave the current setting ~half the
+# budget and a challenger dethroned that weakened result (Deep returned 753
+# late-days where the pre-sweep button found 713). The owner's rule is now the
+# simplest fair one: EVERY overlap candidate gets the SAME full-depth search
+# and the best plan wins, full stop. The current setting runs first (an early
+# Stop still leaves it fully searched) and wins exact ties (no Settings
+# churn) — but it has no depth advantage. Never-worse falls out for free: the
+# current setting's full-depth run is seed-identical to the plain pre-sweep
+# Optimize button, so the winner is always at least that good.
 # --------------------------------------------------------------------------- #
 OVERLAP_CANDIDATES = (50, 60, 70, 80, 90, 100)
 
 
-def sweep_total_evals(budget_evals, candidates=OVERLAP_CANDIDATES):
-    """Upper bound on the evaluations one ``sweep_optimize`` call may spend:
-    the current setting's full-budget floor + the probe pool + the challenger's
-    deepening. The API sizes the progress display with this."""
-    probe_pool = max(budget_evals // 4, len(candidates))
-    return budget_evals + probe_pool + budget_evals // 4
+def sweep_total_evals(budget_evals, current_overlap=None,
+                      candidates=OVERLAP_CANDIDATES):
+    """Total evaluations one ``sweep_optimize`` call may spend: every distinct
+    candidate (including the current setting) gets the full advertised budget.
+    The API sizes the progress display with this."""
+    vals = set(candidates)
+    if current_overlap is not None:
+        vals.add(current_overlap)
+    return budget_evals * len(vals)
 
 
 @dataclass
@@ -310,26 +317,20 @@ class SweepResult:
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None,
                    candidate_setup=None, candidates=OVERLAP_CANDIDATES) -> SweepResult:
-    """Search batch sequence AND overlap %. ``budget_evals`` is the CURRENT
-    setting's guaranteed full-depth budget; the sweep spends up to
-    ``sweep_total_evals(budget_evals)`` in total.
+    """Search batch sequence AND overlap %. ``budget_evals`` is EACH
+    candidate's full-depth budget; the sweep spends
+    ``sweep_total_evals(budget_evals, config.overlap_percent)`` in total.
 
-    Budget shape (the never-worse contract, strengthened 2026-07-15): the
-    CURRENT setting runs FIRST at the FULL advertised budget — with a fixed
-    seed that run is identical to the plain (pre-sweep) Optimize button, so the
-    sweep's floor is exactly what that button produced, and an early Stop still
-    leaves the user's own setting as the most-searched candidate. Probes are
-    CHEAP and noisy — measured on the real book, a shallow probe can misrank
-    settings vs a deep search — so the other candidates share an EXTRA ~quarter
-    probe pool, and only the best probe (the challenger) is deepened with a
-    further ~quarter. The challenger replaces the current setting only if its
-    deepened score is STRICTLY better than the current setting's full-depth
-    score — big setting differences still win; probe noise cannot. Ties keep
-    the current setting (no churn).
-
-    Determinism: ``optimize`` with the same seed evaluates the same plans in the
-    same order, so a longer run strictly extends a shorter one — the deepened
-    result always dominates its own probe.
+    The fair-contest contract (owner decision, 2026-07-15): every candidate
+    overlap gets the SAME full-depth search and the best-scoring plan wins —
+    the current setting has no depth advantage. It runs FIRST (an early Stop
+    still leaves the user's own setting fully searched) and wins exact ties
+    (no Settings churn), nothing more. Never-worse falls out for free: with a
+    fixed seed the current setting's run is identical to the plain (pre-sweep)
+    Optimize button, so the winner is always at least that good. (History: a
+    cheaper probe-then-deepen shape searched the current setting at half depth
+    and returned 753 late-days on the real book where the plain button found
+    713 — unequal depths misrank settings; equal depths cannot.)
 
     ``candidate_setup(cfg) -> (reserved, eligible)`` is the API hook for promise
     protection: build the committed pass's reservations under ``cfg`` and say
@@ -372,27 +373,18 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                       "evals": res.evals})
         return res
 
-    # 1) The current setting runs FIRST at the FULL advertised budget — the
-    #    never-worse floor (same seed ⇒ identical to the plain Optimize
-    #    button), and an early Stop keeps the user's own setting deepest.
-    cur_res = _run(cur, budget_evals)
-
-    # 2) Probe pool (an EXTRA ~quarter) for the non-current candidates.
-    probes = {}
-    if others:
-        probe_each = max(1, (budget_evals // 4) // len(others))
-        for ov in others:
-            r = _run(ov, probe_each)
-            if r is not None:
-                probes[ov] = r
-
-    # 3) Deepen the best probe (the challenger) with a further ~quarter.
-    best_ov, best_res = cur, cur_res
-    if probes:
-        challenger = min(probes, key=lambda ov: (score(probes[ov].best), ov))
-        chal_res = _run(challenger, budget_evals // 4) or probes[challenger]
-        if best_res is None or score(chal_res.best) < score(best_res.best):
-            best_ov, best_res = challenger, chal_res     # strict: ties keep current
+    # The current setting runs FIRST at the full budget (an early Stop still
+    # leaves the user's own setting fully searched; same seed ⇒ identical to
+    # the plain Optimize button), then every other candidate gets the SAME
+    # full budget — a fair contest, no depth advantage for anyone.
+    best_ov, best_res = cur, _run(cur, budget_evals)
+    for ov in others:
+        r = _run(ov, budget_evals)
+        if r is None:
+            continue
+        # Best plan wins; an exact tie keeps the current setting (no churn).
+        if best_res is None or score(r.best) < score(best_res.best):
+            best_ov, best_res = ov, r
 
     if best_res is None:                   # vetoed/cancelled before anything ran
         return SweepResult(overlap_percent=cur, result=OptimizeResult(),
