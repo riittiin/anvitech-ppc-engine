@@ -1258,7 +1258,8 @@ def _auto_apply_result():
         res = _OPTIMIZE.get("result") or {}
         best = res.get("best")
     if not best:
-        _auto_note_write("Auto-optimize finished with no plan — kept current.")
+        _auto_note_write("Auto-optimize: promises can't all be kept — "
+                         "least-damage mode active (see red flags); kept current plan.")
         return
     try:
         inc = _incumbent_metrics()
