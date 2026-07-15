@@ -127,6 +127,21 @@
     <div id="report-detail" class="hidden"></div>
   </section>
 
+  <section id="absence-panel" class="settings-panel">
+    <div class="settings-grid">
+      <fieldset class="settings-group">
+        <legend>Operator absences</legend>
+        <div class="cfg-row admin-only">
+          <select id="absence-operator"></select>
+          <input type="date" id="absence-from" />
+          <input type="date" id="absence-to" />
+          <button id="absence-add" class="ghost-btn" type="button">Mark absent</button>
+        </div>
+        <ul id="absence-list" class="absence-list"></ul>
+      </fieldset>
+    </div>
+  </section>
+
   <nav id="tabs" class="tabs"></nav>
 
   <main id="tab-content" class="tab-content">

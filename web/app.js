@@ -1156,6 +1156,67 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// ---- Operator absences (Settings-area block; list is visible to both roles,
+// add/remove controls are admin-only via CSS). GET /absences is role-open. ----
+function renderAbsenceList(absences) {
+  const ul = $("absence-list");
+  if (!ul) return;
+  if (!absences || absences.length === 0) {
+    ul.innerHTML = '<li class="muted">No operators currently marked absent.</li>';
+    return;
+  }
+  ul.innerHTML = absences.map((a) => `
+    <li>
+      <span>${escapeHtml(a.operator)} — ${isoToDdmmyyyy(a.from_date)} to ${isoToDdmmyyyy(a.to_date)}</span>
+      <button type="button" class="ghost-btn absence-remove admin-only" data-id="${escapeHtml(a.id)}">✕</button>
+    </li>`).join("");
+  ul.querySelectorAll(".absence-remove").forEach((btn) => {
+    btn.onclick = () => removeAbsence(btn.dataset.id);
+  });
+}
+
+async function loadAbsences() {
+  try {
+    const res = await fetch("/absences");
+    if (!res.ok) return;
+    const data = await res.json();
+    const sel = $("absence-operator");
+    if (sel) {
+      const prev = sel.value;
+      sel.innerHTML = (data.operators || []).map((o) => `<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join("");
+      if (prev && (data.operators || []).includes(prev)) sel.value = prev;
+    }
+    renderAbsenceList(data.absences || []);
+  } catch (e) { /* the list is a convenience view — a fetch hiccup shouldn't block the page */ }
+}
+
+async function addAbsence() {
+  const op = $("absence-operator"), from = $("absence-from"), to = $("absence-to");
+  if (!op || !op.value) { setStatus("Pick an operator to mark absent."); return; }
+  if (!from.value || !to.value) { setStatus("Pick both absence dates."); return; }
+  try {
+    const res = await fetch("/absences", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operator: op.value, from_date: from.value, to_date: to.value }),
+    });
+    if (!res.ok) { setStatus("Mark absent failed: " + (await res.text())); return; }
+    setStatus(`Marked ${op.value} absent.`);
+    from.value = ""; to.value = "";
+    await loadAbsences();
+    await runPlan(false);
+  } catch (e) { setStatus("Mark absent error: " + e.message); }
+}
+
+async function removeAbsence(id) {
+  try {
+    const res = await fetch(`/absences/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) { setStatus("Remove absence failed: " + (await res.text())); return; }
+    setStatus("Absence removed.");
+    await loadAbsences();
+    await runPlan(false);
+  } catch (e) { setStatus("Remove absence error: " + e.message); }
+}
+
 // Wire the admin controls (null-guarded — they're absent/hidden for the user role).
 const _runBtn = $("run-btn");
 if (_runBtn) _runBtn.onclick = () => runPlan(true);   // explicit admin Plan → persist
@@ -1184,6 +1245,10 @@ const _optStart = $("optimize-start");
 if (_optStart) _optStart.onclick = startOptimize;
 const _optStop = $("optimize-stop");
 if (_optStop) _optStop.onclick = stopOptimize;
+// Operator absences: add is admin-only (button is CSS-hidden for the user role,
+// but the handler is harmless to wire either way — the server enforces the role).
+const _absAdd = $("absence-add");
+if (_absAdd) _absAdd.onclick = addAbsence;
 
 // Boot: learn the role, render the shell, then auto-load the current plan (no
 // persist) so the schedule/Gantt/rule tabs populate without a Plan click.
@@ -1191,6 +1256,7 @@ if (_optStop) _optStop.onclick = stopOptimize;
   await initSession();
   renderTabs();
   renderTab(activeTab);
+  loadAbsences();   // independent of the plan; visible to both roles (GET is role-open)
   await runPlan(false);
   // A search may still be running (or have finished) from before a page reload.
   // Re-open the panel and either resume the progress display or show the result the
