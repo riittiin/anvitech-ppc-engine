@@ -146,7 +146,11 @@ def _atc_key(batch, masters, plan_start):
 
 
 def promise_ceiling_ok(schedule, so_lines) -> bool:
-    """The owner's law (spec 2026-07-15): no committed/urgent order may END
+    """DEAD — the promise rule was discarded (owner pivot, 2026-07-15); lanes are
+    pure status labels now. Retained only because ``api.main`` still calls it; it
+    is removed together with that caller in the next task.
+
+    The owner's law (spec 2026-07-15): no committed/urgent order may END
     after its promised date. Day-level: end.date() <= promised. Orders without
     a promise are never vetoed. FAIL CLOSED: a promised order with NO schedule
     entries at all (e.g. Rule 6 blocked its batch non-fatally) is a violation —
@@ -179,7 +183,7 @@ def ranks_for(seq) -> dict:
 
 def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
              seed=42, on_progress=None, should_cancel=None,
-             objective="lateness", feasible=None) -> OptimizeResult:
+             objective="lateness") -> OptimizeResult:
     """Search for a better batch sequence for THIS book (rolling: call it on
     whatever the order book holds today; the result is disposable and re-computable).
 
@@ -188,13 +192,6 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
       * ``"promise_slip"`` — promise recovery: minimise how far COMMITTED orders finish
         past their ``promised_date`` (used after a disruption; see the promise-recovery
         design). Same search, different scorecard.
-
-    ``feasible(schedule) -> bool`` (optional; default ``None`` = no gate, byte-identical
-    to before this parameter existed) vetoes a candidate plan outright — its score
-    becomes ``inf`` and it can never become (or stay) the search's best, regardless of
-    its lateness/makespan numbers. If every candidate evaluated is infeasible, the
-    search has no plan to offer: it returns an empty ``OptimizeResult`` with
-    ``best=None`` and no ranks. See ``promise_ceiling_ok`` for the promise-protection use.
 
     ``on_progress(evals_done, best_metrics)`` is called after every evaluation.
     ``should_cancel()`` (optional) is polled between evaluations; when it returns True the
@@ -223,31 +220,28 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
         return cancelled[0]
 
     def _sc(m) -> float:
-        """Score of a metrics dict, or inf for a vetoed (None) candidate — inf
-        never beats a finite score, so an infeasible plan can never win."""
-        return _score(m) if m is not None else float("inf")
+        return _score(m)
 
     def evaluate(seq) -> dict:
         nonlocal evals
         sched = rule6_allocate.run(list(seq), config=config, masters=masters,
                                    reserved=reserved)
         evals += 1
-        m = None if (feasible is not None and not feasible(sched)) \
-            else _metrics(sched, so_lines, config.plan_start_date)
+        m = _metrics(sched, so_lines, config.plan_start_date)
         if on_progress:
             on_progress(evals, best_m if best_m and _sc(best_m) <= _sc(m) else m)
         return m
 
-    best_seq, best_m = None, None      # GLOBAL best across every restart (feasible only)
+    best_seq, best_m = None, None      # GLOBAL best across every restart
 
     def consider(seq, m):
         nonlocal best_seq, best_m
-        if m is not None and (best_m is None or _score(m) < _score(best_m)):
+        if best_m is None or _score(m) < _score(best_m):
             best_seq, best_m = list(seq), m
 
     # The Rule-3 order is the BASELINE (what we're trying to beat) — evaluate it first.
     baseline_m = evaluate(list(pri0))
-    consider(pri0, baseline_m)
+    consider(pri0, baseline_m)  # baseline is always feasible -> best_m is set
 
     # Restart starting points: the strong dispatch heuristics first (SPT, ATC), then an
     # unlimited stream of fresh random permutations. A single trajectory from one seed
@@ -300,15 +294,12 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
                     break            # basin exhausted → next restart from a fresh start
         restart += 1
 
-    if best_m is None:      # every evaluated candidate was vetoed — no plan to offer
-        return OptimizeResult(evals=evals, cancelled=cancelled[0], best=None)
-
     return OptimizeResult(
         ranks=ranks_for(best_seq),
-        baseline=baseline_m if baseline_m is not None else {},
+        baseline=baseline_m,
         best=best_m,
         evals=evals,
-        improved=_score(best_m) < _sc(baseline_m),
+        improved=_score(best_m) < _score(baseline_m),
         cancelled=cancelled[0],
     )
 
@@ -376,29 +367,15 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
     gets the SAME search depth and the best-scoring plan wins — the current
     setting has no depth advantage. It runs FIRST (an early Stop still leaves
     the user's own setting fully searched) and wins exact ties (no Settings
-    churn), nothing more. (History: a probe-then-deepen shape searched the
-    current setting at half depth and returned 753 late-days on the real book
-    where the plain button found 713 — unequal depths misrank settings; equal
-    depths cannot. A cheap-rank-then-deepen shape was measured and rejected
-    too: a 100-eval ranking picks the wrong winner 2 times in 3.)
-
-    ``candidate_setup(cfg) -> (reserved, eligible)`` is the API hook for promise
-    protection: build the committed pass's reservations under ``cfg`` and say
-    whether this overlap keeps every promise at least as well as the current one.
-    ``None`` (all-open books, tests) → ``(None, True)`` for every candidate.
-
-    ``feasible`` (optional) is forwarded unchanged to every ``optimize()`` call
-    (the one-pool joint-search veto — see ``optimizer.promise_ceiling_ok``). A
-    candidate where every evaluated plan is infeasible comes back with
-    ``best=None``; such a candidate can never win (see the winner loop below).
-    If EVERY candidate is infeasible, the sweep returns an empty result
-    (``result.best is None``), same as "nothing eligible ran".
+    churn), nothing more.
 
     ``base_reserved`` (optional) is merged into EVERY candidate's reservations
-    (operator absences — physical unavailability, not a promise reservation,
-    so it applies regardless of ``candidate_setup``/``feasible``). With
-    ``candidate_setup=None`` (joint mode) this is simply ``base_reserved``.
-    ``None`` (default, all existing callers) is a no-op merge.
+    (operator absences — physical unavailability). ``None`` (default) is a no-op.
+
+    ``candidate_setup`` and ``feasible`` are accepted (some callers still pass
+    them as ``None``) but no longer have any effect — the promise rule was
+    discarded (owner pivot, 2026-07-15); lanes are pure status labels. These
+    dead parameters are removed with the caller in the next task.
     """
     from dataclasses import replace
     from engine.optimize_service import merge_reservations
@@ -420,19 +397,15 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
         return cb
 
     def _run(ov, budget):
-        """One seeded search under overlap ``ov``; returns None if vetoed/cancelled."""
+        """One seeded search under overlap ``ov``; returns None if cancelled."""
         nonlocal spent, cancelled
         if budget <= 0 or cancelled or (should_cancel and should_cancel()):
             cancelled = cancelled or bool(should_cancel and should_cancel())
             return None
         cfg = replace(config, overlap_percent=ov)
-        reserved, eligible = candidate_setup(cfg) if candidate_setup else (None, True)
-        if not eligible:
-            table.append({"overlap": ov, "eligible": False})
-            return None
-        reserved = merge_reservations(reserved, base_reserved) or None
+        reserved = merge_reservations(None, base_reserved) or None
         res = optimize(so_lines, cfg, masters, reserved=reserved,
-                       budget_evals=budget, seed=seed, feasible=feasible,
+                       budget_evals=budget, seed=seed,
                        on_progress=_offset(spent), should_cancel=should_cancel)
         spent += res.evals
         cancelled = cancelled or res.cancelled
@@ -441,9 +414,8 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
         return res
 
     def _sc(res):
-        """A comparable score, or None for "no plan to offer" — either the
-        candidate never ran (guard-rejected/cancelled: _run returned None) or
-        every evaluated plan inside it was vetoed by ``feasible`` (best=None)."""
+        """A comparable score, or None when the candidate never ran (cancelled:
+        _run returned None)."""
         return score(res.best) if (res is not None and res.best is not None) else None
 
     # The current setting runs FIRST (an early Stop still leaves the user's

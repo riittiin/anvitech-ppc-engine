@@ -115,6 +115,34 @@ def test_run_candidate_progress_and_cancel():
     assert stopped["cancelled"] or stopped["evals"] <= 1
 
 
+def test_lanes_have_zero_scheduling_effect():
+    """The pivot's core promise (2026-07-15): commitment lanes are pure status
+    labels. A book with committed lines (each with a promised date) must produce
+    the SAME prepare_contest target membership and a BYTE-IDENTICAL run_forward
+    schedule as the identical book with every line open."""
+    # All-open baseline.
+    orders_o, actuals_o, raw_o, masters_o, cfg_o = _book()
+    setup_o = svc.prepare_contest(orders_o, actuals_o, masters_o, cfg_o)
+    pr_o = PlanRun(so_lines=list(setup_o.target))
+    run_forward(pr_o, setup_o.config, masters_o)
+
+    # Same book, half the lines committed with promises.
+    orders_c, actuals_c, raw_c, masters_c, cfg_c = _book()
+    for i, o in enumerate(orders_c.values()):
+        if i % 2 == 0:
+            o.commitment = "committed"
+            o.promised_date = o.delivery_date
+    setup_c = svc.prepare_contest(orders_c, actuals_c, masters_c, cfg_c)
+    pr_c = PlanRun(so_lines=list(setup_c.target))
+    run_forward(pr_c, setup_c.config, masters_c)
+
+    # Target is EVERY active line either way (no lane gates the pool).
+    assert {(l.so_no, l.item_code, l.qty) for l in setup_c.target} == \
+           {(l.so_no, l.item_code, l.qty) for l in setup_o.target}
+    # Byte-identical schedule — lanes have zero scheduling effect.
+    assert [e.as_row() for e in pr_c.schedule] == [e.as_row() for e in pr_o.schedule]
+
+
 def test_book_signature_tracks_material_changes():
     orders, actuals, raw, masters, cfg = _book()
     from engine import orderbook

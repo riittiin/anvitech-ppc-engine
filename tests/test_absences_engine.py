@@ -92,10 +92,13 @@ def test_absence_reservations_shapes():
     assert svc.absence_reservations(None) == {}
 
 
-def test_prepare_contest_merges_absences_into_reserved():
+def test_prepare_contest_reserves_only_absences():
+    """Post-pivot (2026-07-15): the promise rule is gone — lanes have no
+    scheduling effect, so ``reserved`` is EXACTLY the operator absences
+    (== ``absence_reserved``). A committed lane no longer adds a pass-1 wall."""
     orders, cfg, masters = _book()
     committed_order = next(iter(orders.values()))
-    committed_order.commitment = "committed"
+    committed_order.commitment = "committed"          # lane is now just a label
     committed_order.promised_date = committed_order.delivery_date
 
     absence = [{"operator": "Nobody-Else", "from_date": "2025-03-05",
@@ -103,10 +106,9 @@ def test_prepare_contest_merges_absences_into_reserved():
 
     setup = svc.prepare_contest(orders, [], masters, cfg, absences=absence)
 
-    assert setup.protected                                  # the commit took effect
-    assert setup.reserved is not None
+    assert setup.protected == []                       # no lane is protected anymore
+    assert setup.reserved == setup.absence_reserved    # only physical unavailability
     assert "Nobody-Else" in setup.reserved
     interval = setup.reserved["Nobody-Else"][0]
     assert interval == (datetime(2025, 3, 5), datetime(2025, 3, 7))
-    # Pass-1's own machine/operator reservations are still present alongside it.
-    assert len(setup.reserved) > 1
+    assert set(setup.reserved) == {"Nobody-Else"}      # nothing else reserves time

@@ -80,15 +80,16 @@ def test_empty_book_is_400():
     assert e.value.status_code == 400
 
 
-def test_all_committed_book_is_400():
+def test_all_committed_book_optimizes_like_open():
+    """Post-pivot (2026-07-15): commitment lanes are pure status labels, so an
+    all-committed book is optimized exactly like an all-open one — every active
+    line competes in the same pool (no 'all promise-protected' rejection)."""
     m = _api()
     _seed_book()
     book_store.set_commitment("SO1", ITEM_A, "committed", date(2025, 3, 25), "t")
     book_store.set_commitment("SO2", ITEM_B, "committed", date(2025, 3, 26), "t")
-    from fastapi import HTTPException
-    with pytest.raises(HTTPException) as e:
-        m._start_optimize(budget_evals=5, label="quick", background=False)
-    assert e.value.status_code == 400
+    st = m._start_optimize(budget_evals=5, label="quick", background=False)
+    assert st["state"] == "done"
 
 
 def test_clear_removes_applied_optimization():
