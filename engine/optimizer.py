@@ -145,6 +145,26 @@ def _atc_key(batch, masters, plan_start):
     return -((1.0 / p) * math.exp(-max(slack_days, 0) / 14.0))
 
 
+def promise_ceiling_ok(schedule, so_lines) -> bool:
+    """The owner's law (spec 2026-07-15): no committed/urgent order may END
+    after its promised date. Day-level: end.date() <= promised. Orders without
+    a promise are never vetoed."""
+    promised = {(l.so_no, l.item_code): l.promised_date for l in so_lines
+                if getattr(l, "commitment", "open") in ("committed", "urgent")
+                and getattr(l, "promised_date", None)}
+    if not promised:
+        return True
+    ends = {}
+    for e in schedule:
+        for r in (e.so_refs or []):
+            k = (r, e.item_code)
+            if k in promised:
+                d = e.end.date()
+                if k not in ends or d > ends[k]:
+                    ends[k] = d
+    return all(ends.get(k, promised[k]) <= promised[k] for k in promised)
+
+
 def ranks_for(seq) -> dict:
     """The persistable artifact: every member order of the i-th batch gets rank i+1
     (batch members share a rank; ``apply_priority_rank`` replays by min member rank)."""
@@ -157,7 +177,7 @@ def ranks_for(seq) -> dict:
 
 def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
              seed=42, on_progress=None, should_cancel=None,
-             objective="lateness") -> OptimizeResult:
+             objective="lateness", feasible=None) -> OptimizeResult:
     """Search for a better batch sequence for THIS book (rolling: call it on
     whatever the order book holds today; the result is disposable and re-computable).
 
@@ -166,6 +186,13 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
       * ``"promise_slip"`` — promise recovery: minimise how far COMMITTED orders finish
         past their ``promised_date`` (used after a disruption; see the promise-recovery
         design). Same search, different scorecard.
+
+    ``feasible(schedule) -> bool`` (optional; default ``None`` = no gate, byte-identical
+    to before this parameter existed) vetoes a candidate plan outright — its score
+    becomes ``inf`` and it can never become (or stay) the search's best, regardless of
+    its lateness/makespan numbers. If every candidate evaluated is infeasible, the
+    search has no plan to offer: it returns an empty ``OptimizeResult`` with
+    ``best=None`` and no ranks. See ``promise_ceiling_ok`` for the promise-protection use.
 
     ``on_progress(evals_done, best_metrics)`` is called after every evaluation.
     ``should_cancel()`` (optional) is polled between evaluations; when it returns True the
@@ -193,21 +220,27 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
             cancelled[0] = True
         return cancelled[0]
 
+    def _sc(m) -> float:
+        """Score of a metrics dict, or inf for a vetoed (None) candidate — inf
+        never beats a finite score, so an infeasible plan can never win."""
+        return _score(m) if m is not None else float("inf")
+
     def evaluate(seq) -> dict:
         nonlocal evals
         sched = rule6_allocate.run(list(seq), config=config, masters=masters,
                                    reserved=reserved)
         evals += 1
-        m = _metrics(sched, so_lines, config.plan_start_date)
+        m = None if (feasible is not None and not feasible(sched)) \
+            else _metrics(sched, so_lines, config.plan_start_date)
         if on_progress:
-            on_progress(evals, best_m if best_m and _score(best_m) <= _score(m) else m)
+            on_progress(evals, best_m if best_m and _sc(best_m) <= _sc(m) else m)
         return m
 
-    best_seq, best_m = None, None      # GLOBAL best across every restart
+    best_seq, best_m = None, None      # GLOBAL best across every restart (feasible only)
 
     def consider(seq, m):
         nonlocal best_seq, best_m
-        if best_m is None or _score(m) < _score(best_m):
+        if m is not None and (best_m is None or _score(m) < _score(best_m)):
             best_seq, best_m = list(seq), m
 
     # The Rule-3 order is the BASELINE (what we're trying to beat) — evaluate it first.
@@ -254,8 +287,8 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
                 del cand[i:i + 3]
                 cand[j:j] = blk
             m = evaluate(cand)
-            if _score(m) < _score(cur_m) or (_score(m) == _score(cur_m) and rng.random() < 0.5):
-                if _score(m) < _score(cur_m):
+            if _sc(m) < _sc(cur_m) or (_sc(m) == _sc(cur_m) and rng.random() < 0.5):
+                if _sc(m) < _sc(cur_m):
                     since_improve = 0
                 cur_seq, cur_m = cand, m
                 consider(cand, m)
@@ -265,12 +298,15 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
                     break            # basin exhausted → next restart from a fresh start
         restart += 1
 
+    if best_m is None:      # every evaluated candidate was vetoed — no plan to offer
+        return OptimizeResult(evals=evals, cancelled=cancelled[0], best=None)
+
     return OptimizeResult(
         ranks=ranks_for(best_seq),
-        baseline=baseline_m,
+        baseline=baseline_m if baseline_m is not None else {},
         best=best_m,
         evals=evals,
-        improved=_score(best_m) < _score(baseline_m),
+        improved=_score(best_m) < _sc(baseline_m),
         cancelled=cancelled[0],
     )
 
