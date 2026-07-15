@@ -60,9 +60,11 @@ def merge_reservations(a, b):
 
 
 def reservations_from_schedule(schedule):
-    """Machine id → busy intervals and operator name → busy intervals, from a
-    plan (used to reserve the committed pass's machine/operator time in the
-    open pass). Moved here from api.main so the cloud worker shares it."""
+    """Machine id → busy intervals and operator name → busy intervals, computed
+    from a plan's schedule. Currently unused (the planner is single-pass and
+    lanes never reserve time) — kept deliberately as a general-purpose utility
+    for turning a schedule into ``reserved=``-shaped blocked intervals. Moved
+    here from api.main so the cloud worker shares it."""
     res = {}
     for e in schedule:
         m = e.machine or ""

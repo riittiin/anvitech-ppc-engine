@@ -240,25 +240,26 @@ def test_optimize_status_carries_auto_field(monkeypatch):
     assert m._optimize_status()["auto"] is True
 
 
-def test_least_damage_mode_when_all_vetoed(monkeypatch):
-    """When the contest finishes with best=None (all candidates vetoed),
-    _auto_apply_result writes 'least-damage' note and leaves plan_priority unchanged."""
+def test_auto_apply_keeps_current_when_no_plan(monkeypatch):
+    """When the contest finishes with best=None (e.g. cancelled/empty),
+    _auto_apply_result writes a 'kept the current plan' note and leaves
+    plan_priority unchanged."""
     monkeypatch.setenv("AUTO_OPTIMIZE", "0")
     m = _api()
     _seed_book()
     # Save a known plan priority
     saved_ranks = {"k": 1}
     book_store.save_plan_priority(saved_ranks, {"saved_at": "t"})
-    # Stub the contest result: best=None (all vetoed)
+    # Stub the contest result: best=None
     with m._OPTIMIZE_LOCK:
         m._OPTIMIZE["result"] = {"best": None}
         m._OPTIMIZE["auto"] = True
     # Call _auto_apply_result
     m._auto_apply_result()
-    # Check: note contains "least-damage"
+    # Check: note reflects "no plan"
     note = book_store.load_auto_note()
     assert note is not None
-    assert "least-damage" in note["text"]
+    assert "no plan" in note["text"]
     # Check: plan_priority unchanged
     loaded_ranks = book_store.load_plan_priority()
     assert loaded_ranks is not None

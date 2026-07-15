@@ -180,8 +180,8 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
     lost time loops back into the plan. ``None`` → no effect (default).
 
     ``reserved`` (optional) maps machine id / operator name → busy intervals
-    that Rule 6 must treat as already occupied (the two-pass Plan's committed
-    pass reserving time for the open pass). ``None`` → no effect (default).
+    that Rule 6 must treat as already occupied — blocked machine/operator
+    intervals (today: operator absences). ``None`` → no effect (default).
 
     ``priority_rank`` (optional) maps composite order keys "<so>\\x1f<item>" → rank
     from a saved Optimize run; ranked batches replay in that order among the slots

@@ -291,16 +291,20 @@ def _report_table(masters):
     ])
 
 
-def _absence_orphans(masters) -> list:
+def _absence_orphans(masters, absences=None) -> list:
     """Names on file in operator absences that are no longer in the current
     masters' Operator & shift Master (e.g. removed/renamed on a re-upload).
-    Sorted for stable output."""
+    Sorted for stable output. ``absences`` (optional) is the already-loaded
+    list — pass it when the caller has one, to avoid a redundant store read;
+    ``None`` (default) loads it here."""
     names = {o.name for o in masters.operators}
-    return sorted({a["operator"] for a in book_store.load_absences()
+    if absences is None:
+        absences = book_store.load_absences()
+    return sorted({a["operator"] for a in absences
                   if a["operator"] not in names})
 
 
-def _report_for_book(masters, so_lines):
+def _report_for_book(masters, so_lines, absences=None):
     """The validation report scoped to the CURRENT order book. Loader-level rows
     about the masters (pending machines, time coercions, …) pass through, but
     NO_ROUTING is re-derived from the live book: the stored workbook's own SO
@@ -308,7 +312,9 @@ def _report_for_book(masters, so_lines):
     2026-07-15 bug: a "5 orders without routing" banner for ghost orders while
     every real order planned fine). Also appends a non-blocking row per absence
     entry whose operator is no longer in the masters (ABSENT_OPERATOR_UNKNOWN) —
-    the entry is ignored by planning, not an error."""
+    the entry is ignored by planning, not an error. ``absences`` (optional) is
+    the already-loaded list — pass it when the caller has one (e.g. `/run`),
+    to avoid a redundant store read; ``None`` (default) loads it here."""
     rows = [r for r in masters.report if r["kind"] != "NO_ROUTING"]
     seen = set()
     for l in so_lines:
@@ -318,7 +324,7 @@ def _report_for_book(masters, so_lines):
                          "message": f"SO item '{l.item_code}' has no routing in "
                                     f"Item's process Master; order skipped "
                                     f"(cannot schedule without a recipe)"})
-    for name in _absence_orphans(masters):
+    for name in _absence_orphans(masters, absences=absences):
         rows.append({"kind": "ABSENT_OPERATOR_UNKNOWN", "ref": name,
                      "message": f"absence entry for an operator not in the "
                                 f"current masters — ignored"})
@@ -561,8 +567,10 @@ def _plan(config: Config):
     completed = book_store.load_completed_orders()
     actuals = book_store.load_actuals()
     # Operator absences: physical unavailability, not a promise reservation —
-    # reserved in the single plan pass. Lanes never reserve time.
-    ab = optimize_service.absence_reservations(book_store.load_absences())
+    # reserved in the single plan pass. Lanes never reserve time. Loaded once
+    # and reused below for the validation report (ABSENT_OPERATOR_UNKNOWN).
+    absences_raw = book_store.load_absences()
+    ab = optimize_service.absence_reservations(absences_raw)
 
     so_lines = orderbook.active_so_lines(active, actuals, masters)   # remaining = ordered − finished good
 
@@ -667,7 +675,8 @@ def _plan(config: Config):
                          # optimization was computed on — its numbers will differ.
                          "inputs_changed": bool(saved_sig and saved_sig != current_inputs_sig)}
 
-    result = {"run_id": run_id, "trace": trace, "report": _report_for_book(masters, so_lines),
+    result = {"run_id": run_id, "trace": trace,
+              "report": _report_for_book(masters, so_lines, absences=absences_raw),
               "gantt": gantt, "orders": orders, "config": config.to_dict(),
               "expected_end": exp_end, "optimize_meta": optimize_meta,
               "auto_note": book_store.load_auto_note()}
@@ -863,11 +872,12 @@ def _drain_pending_auto():
 
 def _start_optimize(budget_evals: int, label: str, background: bool = True,
                     auto: bool = False):
-    """Snapshot the book + config and run the settings-sweep contest. With
-    committed/urgent orders present, only the OPEN pass is searched (against
-    the protected pass's reservations) — a found plan can never disturb a
-    promise. Cloud-configured → dispatch the full contest to GitHub Actions;
-    otherwise (or on any cloud failure) compute locally."""
+    """Snapshot the book + config and run the settings-sweep contest. ONE pool
+    over every active line — lanes (Open/Committed/Urgent) are status labels
+    with no scheduling effect. Operator absences are reserved as blocked
+    machine/operator intervals, same as in a normal Plan. Cloud-configured →
+    dispatch the full contest to GitHub Actions; otherwise (or on any cloud
+    failure) compute locally."""
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["state"] == "running":
             raise HTTPException(status_code=409,
@@ -1103,10 +1113,16 @@ def _auto_apply_result():
         res = _OPTIMIZE.get("result") or {}
         best = res.get("best")
     if not best:
-        _auto_note_write("Auto-optimize: promises can't all be kept — "
-                         "least-damage mode active (see red flags); kept current plan.")
+        _auto_note_write("Auto-optimize found no plan — kept the current plan.")
         return
     try:
+        # `best` was scored on the book as it stood when this contest started
+        # (its snapshot); `_incumbent_metrics()` below scores the incumbent
+        # against TODAY's book. If production punched an actual mid-run, that's
+        # a transiently mismatched comparison — but a mutation during a run
+        # also flips `_AUTO["pending"]`, so `_drain_pending_auto()` immediately
+        # starts a follow-up contest on the new book, which re-compares
+        # correctly and self-heals.
         inc = _incumbent_metrics()
     except Exception as e:  # noqa: BLE001
         _auto_note_write(f"Auto-optimize finished but could not compare: {e}")
@@ -1323,8 +1339,9 @@ def get_absences():
     no longer in the current masters — informational, also surfaced in the
     validation report as ABSENT_OPERATOR_UNKNOWN."""
     masters = _current_masters()
-    return {"absences": book_store.load_absences(),
-            "orphans": _absence_orphans(masters),
+    absences = book_store.load_absences()
+    return {"absences": absences,
+            "orphans": _absence_orphans(masters, absences=absences),
             "operators": sorted({o.name for o in masters.operators})}
 
 

@@ -385,9 +385,10 @@ button.danger:hover { opacity: 0.9; }
 }
 .optimize-banner .ghost-btn.small { font-size: 12px; padding: 2px 8px; margin-left: 8px; }
 
-/* ---- Promise recovery (automatic; informational only) ---- */
-.recovery-note {
+/* ---- Auto-optimize note (automatic; informational only) ---- */
+.auto-note {
   padding: 8px 24px; font-size: 13px; color: var(--text);
   background: rgba(46,91,234,0.06); border-bottom: 1px solid var(--border);
 }
-.recovery-note strong { color: var(--accent); }
+.auto-note strong { color: var(--accent); }
+.optimize-done-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }

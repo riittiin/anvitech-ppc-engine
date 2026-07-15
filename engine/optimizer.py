@@ -16,8 +16,8 @@ Design contract (see the 2026-07-13 optimize-plan spec):
   * The result is a rank per composite order key "<SO No>\x1f<Item Code>";
     ``pipeline.apply_priority_rank`` replays it, and replaying reproduces exactly
     the metrics reported here (the "what you Apply is what you get" guarantee).
-  * ``reserved`` (the two-pass Plan's committed-pass reservations) is passed
-    through to every Rule 6 evaluation, so committed orders are never disturbed.
+  * ``reserved`` (blocked machine/operator intervals — today: operator absences)
+    is passed through to every Rule 6 evaluation, so those windows stay clear.
 """
 from __future__ import annotations
 
@@ -127,8 +127,6 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
     not caught: a book that cannot plan at all should fail loud exactly like Plan does.
     """
     config.validate()
-    _metrics = plan_metrics
-    _score = score
 
     batches = rule1_consolidate.run(list(so_lines), config=config, masters=masters)
     batches = rule2_sort_by_date.run(batches, config=config, masters=masters)
@@ -147,24 +145,21 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
             cancelled[0] = True
         return cancelled[0]
 
-    def _sc(m) -> float:
-        return _score(m)
-
     def evaluate(seq) -> dict:
         nonlocal evals
         sched = rule6_allocate.run(list(seq), config=config, masters=masters,
                                    reserved=reserved)
         evals += 1
-        m = _metrics(sched, so_lines, config.plan_start_date)
+        m = plan_metrics(sched, so_lines, config.plan_start_date)
         if on_progress:
-            on_progress(evals, best_m if best_m and _sc(best_m) <= _sc(m) else m)
+            on_progress(evals, best_m if best_m and score(best_m) <= score(m) else m)
         return m
 
     best_seq, best_m = None, None      # GLOBAL best across every restart
 
     def consider(seq, m):
         nonlocal best_seq, best_m
-        if best_m is None or _score(m) < _score(best_m):
+        if best_m is None or score(m) < score(best_m):
             best_seq, best_m = list(seq), m
 
     # The Rule-3 order is the BASELINE (what we're trying to beat) — evaluate it first.
@@ -211,8 +206,8 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
                 del cand[i:i + 3]
                 cand[j:j] = blk
             m = evaluate(cand)
-            if _sc(m) < _sc(cur_m) or (_sc(m) == _sc(cur_m) and rng.random() < 0.5):
-                if _sc(m) < _sc(cur_m):
+            if score(m) < score(cur_m) or (score(m) == score(cur_m) and rng.random() < 0.5):
+                if score(m) < score(cur_m):
                     since_improve = 0
                 cur_seq, cur_m = cand, m
                 consider(cand, m)
@@ -227,7 +222,7 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
         baseline=baseline_m,
         best=best_m,
         evals=evals,
-        improved=_score(best_m) < _score(baseline_m),
+        improved=score(best_m) < score(baseline_m),
         cancelled=cancelled[0],
     )
 
