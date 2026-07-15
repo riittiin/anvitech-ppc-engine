@@ -24,7 +24,6 @@ let currentGantt = null;
 let currentOrders = null;     // {columns, rows} from /run or /orders
 let currentExpected = null;   // {"SO\x1fITEM": "YYYY-MM-DD"} from /run's expected_end (Task 9)
 let optimizeMeta = null;      // /run's optimize_meta: applied optimization + staleness
-let recoveryMeta = null;      // /run's recovery_meta: auto committed re-sequence after a disruption
 let autoNote = null;          // /run's auto_note: self-tuning contest's latest note ({text, at} or null)
 let optimizePollTimer = null; // /optimize/status polling handle
 let ITEMS = null;
@@ -129,12 +128,10 @@ async function runPlan(persist = false) {
     currentOrders = data.orders || null;
     currentExpected = data.expected_end || null;
     optimizeMeta = data.optimize_meta || null;
-    recoveryMeta = data.recovery_meta || null;
     autoNote = data.auto_note || null;
     if (currentRole === "admin" && data.config) applyConfig(data.config);
     renderReport(data.report);
     renderOptimizeBanner();
-    renderRecoveryNote();
     renderAutoNote();
     renderTabs();
     renderTab(activeTab);
@@ -204,29 +201,8 @@ function renderOptimizeBanner() {
   };
 }
 
-// Promise recovery is automatic (no control) — this is just an informational line that
-// appears when a disruption has made committed orders slip and the plan is protecting them.
-function renderRecoveryNote() {
-  const el = $("recovery-note");
-  if (!el) return;
-  const rm = recoveryMeta;
-  if (!rm) { el.classList.add("hidden"); el.innerHTML = ""; return; }
-  if (rm.active) {
-    const saved = rm.promises_saved || 0;
-    el.classList.remove("hidden");
-    el.innerHTML = saved > 0
-      ? `Committed orders re-sequenced to protect <strong>${saved} more promise${saved === 1 ? "" : "s"}</strong> after the delay.`
-      : `Committed orders re-sequenced to limit the delay to your promised dates.`;
-  } else if (rm.computing) {
-    el.classList.remove("hidden");
-    el.innerHTML = `Some committed orders have slipped — re-sequencing them to protect your promises… (updates shortly)`;
-  } else {
-    el.classList.add("hidden"); el.innerHTML = "";
-  }
-}
-
 // Self-tuning contest's latest note (auto-triggered runs only) — informational,
-// no control, mirrors renderRecoveryNote().
+// no control.
 function renderAutoNote() {
   const el = $("auto-note");
   if (!el) return;
@@ -539,7 +515,7 @@ async function renderOrders() {
   }
   html += orderTableHtml(currentOrders, isAdmin);
   html += '<p class="g-note">Pending = not started · Running = production logged · Complete = marked complete on a Rule 7 entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty. '
-    + 'Lane: <strong>open</strong> = normal planning · <strong>committed</strong> = promised date locked in · <strong>urgent</strong> = jumps the queue (may push other promises).</p>';
+    + 'Lane: status labels only (no scheduling effect) — <strong>open</strong> = newly arrived · <strong>committed</strong> = released, promised date snapshotted · <strong>urgent</strong> = flagged, promised = delivery date. The plan sequences all orders together by delivery date.</p>';
   root.innerHTML = html;
   if (isAdmin) { wireOrdersDelete(); wireOrdersCommit(); }
 }
@@ -682,37 +658,6 @@ function selectedOrderPairs() {
   return [...document.querySelectorAll(".ordsel:checked")].map((c) => [c.dataset.so, c.dataset.item]);
 }
 
-// A non-destructive confirmation modal — mirrors deleteWithPassword's overlay/modal
-// pattern but with no password field. Lists each promise that would be pushed by
-// marking an order urgent. Resolves true on Proceed, false on Cancel/Escape/click-out.
-function confirmUrgentWarning(list) {
-  return new Promise((resolve) => {
-    const ov = document.createElement("div");
-    ov.className = "modal-overlay";
-    const items = list.map((p) =>
-      `<li>${escapeHtml(p.so)} (${escapeHtml(p.item)}): ${escapeHtml(isoToDdmmyyyy(p.promised))} → `
-      + `${escapeHtml(isoToDdmmyyyy(p.new))} <span class="muted">(past its promise)</span></li>`).join("");
-    ov.innerHTML = `
-      <div class="modal">
-        <h3>⚠ This will push committed promises</h3>
-        <p>Marking this order urgent pushes the following already-promised order(s) later:</p>
-        <ul class="warn-list">${items}</ul>
-        <p class="muted">Proceed anyway, or cancel and keep the current plan.</p>
-        <div class="modal-actions">
-          <button id="warn-cancel">Cancel</button>
-          <button id="warn-ok" class="danger">Proceed</button>
-        </div>
-      </div>`;
-    document.body.appendChild(ov);
-    const escHandler = (e) => { if (e.key === "Escape") done(false); };
-    const done = (v) => { document.removeEventListener("keydown", escHandler); ov.remove(); resolve(v); };
-    ov.querySelector("#warn-cancel").onclick = () => done(false);
-    ov.querySelector("#warn-ok").onclick = () => done(true);
-    document.addEventListener("keydown", escHandler);
-    ov.addEventListener("click", (e) => { if (e.target === ov) done(false); });
-  });
-}
-
 // Wire the Commit / Mark Urgent / Uncommit toolbar buttons (admin only).
 function wireOrdersCommit() {
   const commitBtn = $("ord-commit-sel");
@@ -751,21 +696,11 @@ function wireOrdersCommit() {
     if (sel.length !== 1) { setStatus("Select exactly one order to mark urgent."); return; }
     const [so, item] = sel[0];
     try {
-      let res = await fetch("/orders/urgent", {
+      const res = await fetch("/orders/urgent", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ so, item, confirm: false }),
+        body: JSON.stringify({ so, item }),
       });
       if (!res.ok) { setStatus("Mark urgent failed: " + (await res.text())); return; }
-      let d = await res.json();
-      if (d.warning && d.warning.length) {
-        const proceed = await confirmUrgentWarning(d.warning);
-        if (!proceed) { setStatus("Urgent cancelled."); return; }
-        res = await fetch("/orders/urgent", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ so, item, confirm: true }),
-        });
-        if (!res.ok) { setStatus("Mark urgent failed: " + (await res.text())); return; }
-      }
       setStatus(`Marked ${so} (${item}) urgent.`);
       currentOrders = null; await runPlan();
     } catch (e) { setStatus("Mark urgent error: " + e.message); }

@@ -356,7 +356,6 @@ class CommitRequest(BaseModel):
 class UrgentRequest(BaseModel):
     so: str
     item: str
-    confirm: bool = False   # False = preview only; True = apply even if it pushes others
 
 
 class AbsenceRequest(BaseModel):
@@ -553,11 +552,6 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
 # --------------------------------------------------------------------------- #
 # Core: plan the active order book
 # --------------------------------------------------------------------------- #
-# Machine/operator busy intervals from a plan — moved to engine/optimize_service
-# so the cloud worker shares it; kept under the old name for _plan's use.
-_reservations_from_schedule = optimize_service.reservations_from_schedule
-
-
 def _plan(config: Config):
     masters = _current_masters()
     # Fingerprint of the plan-shaping inputs as REQUESTED (base config, before the
@@ -567,8 +561,7 @@ def _plan(config: Config):
     completed = book_store.load_completed_orders()
     actuals = book_store.load_actuals()
     # Operator absences: physical unavailability, not a promise reservation —
-    # merged into the reservations of EVERY pass below (single-pass, joint
-    # replay, and both passes of the two-pass plan).
+    # reserved in the single plan pass. Lanes never reserve time.
     ab = optimize_service.absence_reservations(book_store.load_absences())
 
     so_lines = orderbook.active_so_lines(active, actuals, masters)   # remaining = ordered − finished good
@@ -581,14 +574,12 @@ def _plan(config: Config):
     if eff_start != config.plan_start_date:
         config = replace(config, plan_start_date=eff_start)
 
-    # An applied Optimize run (the saved rank map). A JOINT contest (2026-07-15)
-    # ranked ALL active lines together — committed included — so its ranks replay
-    # as ONE pass over every line (below). A LEGACY meta (no "joint" flag, ranks
-    # computed open-only, still deployed) keeps today's open-pass replay inside the
-    # two-pass plan. No saved optimization -> plans are byte-identical.
+    # An applied Optimize run (the saved rank map) is replayed as ONE pass over
+    # every active line. Lanes (open/committed/urgent) are pure status labels —
+    # they have no scheduling effect (owner pivot, 2026-07-16). No saved
+    # optimization -> plans are byte-identical to the pre-optimize plan.
     prio = book_store.load_plan_priority()
     ranks = prio["ranks"] if prio else None
-    joint = bool(prio and (prio.get("meta") or {}).get("joint"))
 
     # The optimized ranks ARE the prioritization. The Expedite window dynamically
     # re-sorts ops by slack at schedule time, which would OVERRIDE the ranks and cancel
@@ -598,110 +589,12 @@ def _plan(config: Config):
     # config unchanged (expedite behaves exactly as the Settings tick sets it).
     ranked_config = replace(config, expedite_window_min=0) if ranks else config
 
-    # The feedback loop is quantity-only: recorded times (downtime, actual setup) are
-    # stored for the record and never affect the schedule.
-    recovery_meta = {"active": False}
-    joint_fallback = False
-    protected, open_lines = orderbook.split_committed_open(so_lines)
-
-    # Joint replay: the contest ranked committed lines in the same pool, so replay
-    # its sequence over ALL active lines in one pass, then RE-VALIDATE the promise
-    # ceiling on the produced schedule. The book can have drifted since the contest
-    # (a tighter promise, more work) so the applied sequence is not trusted blindly.
-    joint_plan = None
-    if protected and joint and ranks:
-        jr = PlanRun(so_lines=so_lines)
-        jt = run_forward(jr, ranked_config, masters, reserved=ab or None,
-                         priority_rank=ranks)
-        if optimizer.promise_ceiling_ok(jr.schedule, so_lines):
-            joint_plan = (jr, jt)          # keeps every promise -> use it as-is
-        else:
-            # Drift: the applied sequence would break a promise. Discard the ranks
-            # ENTIRELY — they were computed for a single-pass joint pool and must
-            # not drive the isolated open pass either — so the two-pass fallback
-            # below is byte-identical to a plan with no optimization applied.
-            # Bump the book so a fresh contest re-fits the current book.
-            joint_fallback = True
-            ranks = None
-            ranked_config = config
-            _bump_book_changed()
-
-    if not protected or joint_plan is not None:
-        # Single pass. Either an all-open book (unchanged — keeps the golden trace
-        # byte-identical) or a validated joint replay over every active line.
-        if joint_plan is not None:
-            plan_run, trace = joint_plan
-        else:
-            plan_run = PlanRun(so_lines=so_lines)
-            trace = run_forward(plan_run, ranked_config, masters, reserved=ab or None,
-                                priority_rank=ranks)
-    else:
-        # Two-pass: committed/urgent orders are planned first, as if open orders
-        # don't exist; open orders then backfill the gaps left by that pass —
-        # so a later, larger open order can never push a committed order's plan.
-        #
-        # Promise recovery: if a disruption has made committed orders slip past their
-        # promises, replay the auto-recovered committed order (a re-sequence that
-        # protects the most promises). Fresh only when its signature matches this exact
-        # committed set + promises; otherwise it is ignored and (if slip exists) a fresh
-        # recovery search is kicked off in the background.
-        rec = book_store.load_promise_recovery()
-        rec_sig = _recovery_signature(protected)
-        rec_ranks = rec["ranks"] if (rec and rec.get("meta", {}).get("signature") == rec_sig) else None
-        prot_config = replace(config, expedite_window_min=0) if rec_ranks else config
-
-        plan_protected = PlanRun(so_lines=protected)
-        trace = run_forward(plan_protected, prot_config, masters, reserved=ab or None,
-                            priority_rank=rec_ranks)
-        reserved = optimize_service.merge_reservations(
-            _reservations_from_schedule(plan_protected.schedule), ab)
-
-        # Detect a promise slip; with no fresh recovery in hand, start the search.
-        slip_m = _committed_slip_metrics(plan_protected.schedule, protected, config.plan_start_date)
-        if rec_ranks and rec:
-            m = rec.get("meta", {})
-            recovery_meta = {"active": True, "saved_at": m.get("saved_at"),
-                             "promises_saved": m.get("promises_saved", 0),
-                             "slip_before": m.get("slip_before"), "slip_after": m.get("slip_after")}
-        elif slip_m["promise_slip_days"] > 0:
-            _maybe_start_recovery(protected, config, masters)
-            recovery_meta = {"active": False, "computing": True}   # search running in the background
-
-        plan_open = PlanRun(so_lines=open_lines)
-        trace_open = run_forward(plan_open, ranked_config, masters, reserved=reserved,
-                                 priority_rank=ranks)
-
-        # Rule 1 numbers batches B001.. fresh per run_forward, so pass 1 and pass 2
-        # both produce the same ids. The Gantt keys on batch_id, so a collision would
-        # drop committed rows. Namespace the open pass's ids to keep them globally unique.
-        for e in plan_open.schedule:
-            e.batch_id = "O-" + e.batch_id
-        for lst in (plan_open.batches, plan_open.batches_sorted, plan_open.batches_prioritized):
-            for b in lst:
-                if not b.batch_id.startswith("O-"):
-                    b.batch_id = "O-" + b.batch_id
-
-        # Merge for the downstream views (protected first).
-        plan_run = PlanRun(so_lines=so_lines)
-        plan_run.batches = plan_protected.batches + plan_open.batches
-        plan_run.batches_sorted = plan_protected.batches_sorted + plan_open.batches_sorted
-        plan_run.batches_prioritized = plan_protected.batches_prioritized + plan_open.batches_prioritized
-        plan_run.schedule = plan_protected.schedule + plan_open.schedule
-
-        # Merge the per-rule trace tables so each tab shows the full plan (rows concatenated).
-        # rule1/2/3 have fixed keys → safe to concat rows. rule6's Operator column is
-        # conditional, so rebuild its table from the merged schedule (union-of-keys columns).
-        for rk in ("rule1", "rule2", "rule3"):
-            base = trace.get(rk, {}).get("output")
-            add = trace_open.get(rk, {}).get("output")
-            if base and add and "rows" in base and "rows" in add:
-                base["rows"] = base["rows"] + add["rows"]
-        # Surface the open pass's "Optimized sequence applied" note on the visible tab.
-        for n in trace_open.get("rule3", {}).get("notes", []):
-            if n not in trace["rule3"]["notes"]:
-                trace["rule3"]["notes"].append(n)
-        if "rule6" in trace and trace["rule6"].get("output") is not None:
-            trace["rule6"]["output"] = to_table([e.as_row() for e in plan_run.schedule])
+    # ONE pass over all active lines. Operator absences (physical unavailability)
+    # reserve time; lanes never do. The feedback loop is quantity-only: recorded
+    # times (downtime, actual setup) are stored for the record, never scheduled.
+    plan_run = PlanRun(so_lines=so_lines)
+    trace = run_forward(plan_run, ranked_config, masters, reserved=ab or None,
+                        priority_rank=ranks)
 
     _augment_helpers(trace, plan_run, config, masters, actuals=actuals)
 
@@ -777,12 +670,7 @@ def _plan(config: Config):
     result = {"run_id": run_id, "trace": trace, "report": _report_for_book(masters, so_lines),
               "gantt": gantt, "orders": orders, "config": config.to_dict(),
               "expected_end": exp_end, "optimize_meta": optimize_meta,
-              "recovery_meta": recovery_meta,
               "auto_note": book_store.load_auto_note()}
-    if joint_fallback:
-        # Applied joint ranks drifted out of promise-feasibility; the two-pass
-        # plan above ran instead. Surfaced so callers/tests can see the guard fired.
-        result["joint_fallback"] = True
     return result
 
 
@@ -798,54 +686,6 @@ def _commit_orders(pairs):
         iso = exp.get(f"{so}\x1f{item}")
         promised = _date.fromisoformat(iso) if iso else None
         book_store.set_commitment(so, item, "committed", promised, now)
-
-
-def _preview_urgent_pushes(so, item):
-    """If (so, item) is made urgent, which OTHER protected (committed/urgent)
-    orders would get pushed past their already-promised date? Re-plans PASS 1
-    (protected orders only, the same set `_plan` uses) on a scratch copy of the
-    order book with the target order flipped to urgent, and compares each other
-    protected order's new expected completion against its stored promise.
-
-    Pure preview — never touches the durable store."""
-    import copy as _copy
-
-    masters = _current_masters()
-    actuals = book_store.load_actuals()
-    config = _load_plan_config()
-
-    scratch = {k: _copy.copy(o) for k, o in book_store.load_active_orders().items()}
-    tgt = scratch.get((so, item))
-    if tgt is None:
-        return []
-    tgt.commitment = "urgent"
-    tgt.promised_date = tgt.delivery_date
-
-    lines = orderbook.active_so_lines(scratch, actuals, masters)
-    protected, _open = orderbook.split_committed_open(lines)
-
-    plan_run = PlanRun(so_lines=protected)
-    run_forward(plan_run, config, masters)
-
-    exp = {}
-    for e in plan_run.schedule:
-        for r in (e.so_refs or []):
-            k = (r, e.item_code)
-            d = e.end.date()
-            if k not in exp or d > exp[k]:
-                exp[k] = d
-
-    pushed = []
-    for k, o in scratch.items():
-        if k == (so, item):
-            continue
-        if o.commitment in ("committed", "urgent") and o.promised_date:
-            newd = exp.get(k)
-            if newd and newd > o.promised_date:
-                pushed.append({"so": o.so_no, "item": o.item_code,
-                               "promised": o.promised_date.isoformat(),
-                               "new": newd.isoformat()})
-    return pushed
 
 
 def _load_plan_config() -> Config:
@@ -1077,21 +917,16 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             # real config (expedite as set) — what they have if they DON'T optimize.
             real_baseline = _OPTIMIZE.get("baseline")
             if real_baseline is None:
-                base_sched, base_lines = _all_lines_schedule(setup, masters, None, False)
+                base_sched, base_lines = _all_lines_schedule(setup, masters, None)
                 real_baseline = optimizer.plan_metrics(base_sched, base_lines,
                                                        setup.config.plan_start_date)
 
-            # One-pool contest (2026-07-15): search ALL active lines together —
-            # committed included — with the promise veto (``setup.feasible``)
-            # replacing the per-candidate reservation guard. All-open books:
-            # joint_target == target and feasible is None, so this is
-            # byte-identical to the old open-only sweep.
-            sw = optimizer.sweep_optimize(setup.joint_target, setup.search_config,
+            # One pool: search ALL active lines together (lanes are status labels
+            # with no scheduling effect). Only operator absences reserve time.
+            sw = optimizer.sweep_optimize(setup.target, setup.search_config,
                                           masters, budget_evals=budget_evals,
                                           seed=_OPT_SEED, on_progress=on_progress,
                                           should_cancel=lambda: _OPTIMIZE.get("cancel"),
-                                          candidate_setup=None,
-                                          feasible=setup.feasible,
                                           base_reserved=setup.absence_reserved)
             res = sw.result
             _finalize_optimize(job_id, base_config, real_baseline, label,
@@ -1106,7 +941,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         try:
             # Baseline is computed HERE (one plan, seconds) so the before/after
             # is ready whatever the worker does.
-            base_sched, base_lines = _all_lines_schedule(setup, masters, None, False)
+            base_sched, base_lines = _all_lines_schedule(setup, masters, None)
             real_baseline = optimizer.plan_metrics(base_sched, base_lines,
                                                    setup.config.plan_start_date)
             with _OPTIMIZE_LOCK:
@@ -1186,10 +1021,7 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                     "inputs_sig": inputs_sig,
                     "best_overlap": winner_overlap,
                     "current_overlap": base_config.overlap_percent,
-                    "sweep_table": table,
-                    # Every contest is one-pool now (2026-07-15): ALL active
-                    # lines compete, promise veto instead of a reserved wall.
-                    "joint": True})
+                    "sweep_table": table})
     if _OPTIMIZE.get("auto"):
         try:
             _auto_apply_result()
@@ -1233,47 +1065,23 @@ def _optimize_cancel():
     return _optimize_status()
 
 
-def _all_lines_schedule(setup, masters, ranks, joint):
-    """A schedule covering ALL active lines, built the SAME way for both sides of
-    the Optimize before/after (baseline and incumbent) so their scores are
-    same-domain (the previous open-only-vs-all-lines mismatch is the bug this fixes).
-
-    - No protected orders, or a JOINT rank set: one pass over every line with the
-      ranks (expedite off). A joint set is re-validated against the promise ceiling;
-      on drift the ranks are dropped and the two-pass build below is used (mirrors
-      ``_plan``).
-    - Legacy open-only ranks / no ranks with protected present: two-pass — pass 1 =
-      protected under ``setup.config``, pass 2 = the open target under the ranked
-      config with ``setup.reserved`` + the ranks — schedules merged.
-
-    Pass 1 here approximates ``_plan``'s protected pass (it does NOT replay the
-    promise-recovery ranks). That is acceptable: BOTH the baseline and the incumbent
-    are built through this one helper, so the comparison stays internally consistent.
+def _all_lines_schedule(setup, masters, ranks):
+    """A schedule covering ALL active lines, built the SAME way `_plan` builds it
+    (one pass, saved ranks replayed with expedite off, operator absences reserved)
+    so both sides of the Optimize before/after are scored on the same domain.
     Returns (schedule, all_lines)."""
-    all_lines = list(setup.joint_target)
-    protected = setup.protected
+    all_lines = list(setup.target)
     ranked_config = replace(setup.config, expedite_window_min=0) if ranks else setup.config
-    ab = setup.absence_reserved   # operator absences bind in every branch below
-
-    if not protected or (joint and ranks):
-        pr = PlanRun(so_lines=list(all_lines))
-        run_forward(pr, ranked_config, masters, reserved=ab, priority_rank=ranks)
-        if not protected or optimizer.promise_ceiling_ok(pr.schedule, all_lines):
-            return pr.schedule, all_lines
-        ranks, ranked_config = None, setup.config     # joint drift -> two-pass, no ranks
-
-    p1 = PlanRun(so_lines=list(protected))
-    run_forward(p1, setup.config, masters, reserved=ab)
-    p2 = PlanRun(so_lines=list(setup.target))
-    # setup.reserved already has the absences merged in (prepare_contest).
-    run_forward(p2, ranked_config, masters, reserved=setup.reserved, priority_rank=ranks)
-    return p1.schedule + p2.schedule, all_lines
+    pr = PlanRun(so_lines=list(all_lines))
+    run_forward(pr, ranked_config, masters, reserved=setup.absence_reserved,
+                priority_rank=ranks)
+    return pr.schedule, all_lines
 
 
 def _incumbent_metrics():
     """Score of the plan users currently see: the applied ranks (if any) replayed
-    on TODAY'S book, measured over ALL active lines (committed + open) — the same
-    domain the contest's ``best`` is scored on. Expedite off when ranks replay."""
+    on TODAY'S book, measured over ALL active lines — the same domain the contest's
+    ``best`` is scored on. Expedite off when ranks replay."""
     config = _load_plan_config()
     masters = _current_masters()
     actuals = book_store.load_actuals()
@@ -1283,8 +1091,7 @@ def _incumbent_metrics():
                                              absences=absences)
     prio = book_store.load_plan_priority()
     ranks = (prio or {}).get("ranks") or None
-    joint = bool(prio and (prio.get("meta") or {}).get("joint"))
-    schedule, all_lines = _all_lines_schedule(setup, masters, ranks, joint)
+    schedule, all_lines = _all_lines_schedule(setup, masters, ranks)
     return optimizer.plan_metrics(schedule, all_lines, setup.config.plan_start_date)
 
 
@@ -1332,8 +1139,7 @@ def _optimize_apply():
                 "covered": len(res["ranks"]),
                 "inputs_sig": res.get("inputs_sig"),
                 "best_overlap": res.get("best_overlap"),
-                "book_sig": _current_book_sig(),
-                "joint": res.get("joint")}
+                "book_sig": _current_book_sig()}
         book_store.save_plan_priority(res["ranks"], meta)
         # Settings sweep: the winning overlap becomes THE saved plan setting (the
         # single config every Plan loads and the Settings panel shows). Unchanged
@@ -1353,72 +1159,6 @@ def _optimize_apply():
 def _optimize_clear():
     book_store.clear_plan_priority()
     return {"cleared": True}
-
-
-# --------------------------------------------------------------------------- #
-# Promise recovery: when a disruption makes committed orders slip, automatically
-# re-sequence the committed set to protect the most promises. No control — the
-# planner triggers it. Runs in its OWN background slot (separate from the manual
-# Optimize) so the two never collide. Only the persisted ranks are durable.
-# --------------------------------------------------------------------------- #
-_RECOVERY_BUDGET = 150   # promise-recovery search depth (most of the prize; see the design)
-_RECOVERY = {"state": "idle", "signature": None}
-_RECOVERY_LOCK = threading.Lock()
-
-
-def _recovery_signature(protected):
-    """A committed set's identity for cache freshness: each order's key AND its promised
-    date. A new commit/uncommit or a changed promise changes the signature and re-triggers;
-    a mere quantity change (feedback) does not — the recovered ORDER still replays."""
-    return sorted(
-        f"{l.so_no}{KEY_SEP}{l.item_code}\x1e{l.promised_date.isoformat() if l.promised_date else ''}"
-        for l in protected)
-
-
-def _committed_slip_metrics(schedule, protected, plan_start):
-    return optimizer.promise_slip_metrics(schedule, protected, plan_start)
-
-
-def _maybe_start_recovery(protected, config, masters):
-    """Kick off the background promise-recovery search for THIS committed set, unless one
-    is already running or a recovery for exactly this signature already exists."""
-    sig = _recovery_signature(protected)
-    with _RECOVERY_LOCK:
-        if _RECOVERY["state"] == "running":
-            return
-        existing = book_store.load_promise_recovery()
-        if existing and existing.get("meta", {}).get("signature") == sig:
-            return                      # already recovered for this exact committed set
-        _RECOVERY.update(state="running", signature=sig)
-
-    lines, cfg, ms = list(protected), config, masters
-    # Expedite would dynamically re-sort ops and cancel the recovered order (same as the
-    # open-order optimizer) — search & replay in the pure non-delay model.
-    search_cfg = replace(cfg, expedite_window_min=0)
-
-    def job():
-        try:
-            from datetime import datetime
-            base = PlanRun(so_lines=list(lines))
-            run_forward(base, search_cfg, ms)
-            bm = optimizer.promise_slip_metrics(base.schedule, lines, search_cfg.plan_start_date)
-            res = optimizer.optimize(lines, search_cfg, ms, budget_evals=_RECOVERY_BUDGET,
-                                     seed=_OPT_SEED, objective="promise_slip")
-            meta = {"saved_at": datetime.now().isoformat(timespec="seconds"),
-                    "signature": sig,
-                    "slip_before": bm["promise_slip_days"], "slip_after": res.best["promise_slip_days"],
-                    "promises_saved": max(bm["promises_missed"] - res.best["promises_missed"], 0)}
-            # Safety: res.best <= baseline (seeded with promised-date order), so replaying
-            # the ranks can never make committed orders worse. Save unconditionally so the
-            # signature check stops us re-triggering the same search.
-            book_store.save_promise_recovery(res.ranks, meta)
-        except Exception:  # noqa: BLE001 — a failed recovery must not break planning
-            pass
-        finally:
-            with _RECOVERY_LOCK:
-                _RECOVERY["state"] = "idle"
-
-    threading.Thread(target=job, daemon=True).start()
 
 
 # --------------------------------------------------------------------------- #
@@ -1563,14 +1303,11 @@ def uncommit_orders_ep(req: CommitRequest, request: Request):
 
 @app.post("/orders/urgent")
 def urgent_order_ep(req: UrgentRequest, request: Request):
-    """Mark one order urgent. Previews which other committed/urgent orders would
-    get pushed past their promise; without `confirm`, a non-empty preview is
-    returned as a warning instead of being applied. Admin only."""
+    """Mark one order urgent: set its commitment to urgent and snapshot its SO
+    delivery date as the informational promise. Lanes are status labels only —
+    urgent has no scheduling effect. Admin only."""
     require_admin(request)
     from datetime import datetime
-    pushed = _preview_urgent_pushes(req.so, req.item)
-    if pushed and not req.confirm:
-        return {"warning": pushed}
     order = book_store.load_active_orders().get((req.so, req.item))
     book_store.set_commitment(req.so, req.item, "urgent",
                               order.delivery_date if order else None,

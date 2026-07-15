@@ -141,21 +141,9 @@ class ContestSetup:
     target: list = field(default_factory=list)   # the lines the search may reorder (ALL active)
     config: Config = None                        # effective (start advanced), expedite as saved
     search_config: Config = None                 # effective, expedite forced off
-    # The promise rule was discarded (owner pivot, 2026-07-15): lanes are pure
-    # status labels with no scheduling effect. These fields survive only so the
-    # not-yet-updated ``api.main`` keeps its field surface; they are now inert:
-    #   protected      — always ``[]`` (no lane is protected)
-    #   reserved       — == ``absence_reserved`` (only physical unavailability)
-    #   candidate_setup / feasible — always ``None`` (no guard, no veto)
-    #   joint_target   — == ``target`` (every active line competes as one pool)
-    # The next task deletes these dead fields together with their api callers.
-    protected: list = field(default_factory=list)
-    reserved: dict = None
-    candidate_setup: object = None
-    joint_target: list = field(default_factory=list)
-    feasible: object = None
     # Operator absences: physical unavailability (not a promise reservation).
-    # ``absence_reserved`` is the raw ``absence_reservations(absences)`` dict.
+    # Lanes (open/committed/urgent) are pure status labels — they never reserve
+    # time. ``absence_reserved`` is the raw ``absence_reservations(absences)`` dict.
     absences: list = field(default_factory=list)
     absence_reserved: object = None
 
@@ -181,12 +169,7 @@ def prepare_contest(orders: dict, actuals, masters, config: Config,
     # 2026-07-13 Expedite↔Optimize fix) — search in the pure non-delay model.
     search_config = replace(config, expedite_window_min=0)
 
-    reserved = ab or None   # only physical unavailability reserves time now
-
     return ContestSetup(target=target, config=config, search_config=search_config,
-                        protected=[], reserved=reserved,
-                        candidate_setup=None,
-                        joint_target=target, feasible=None,
                         absences=list(absences or []), absence_reserved=(ab or None))
 
 

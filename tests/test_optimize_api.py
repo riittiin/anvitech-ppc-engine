@@ -1,5 +1,5 @@
 """The Optimize feature's API layer: job lifecycle (start → status → apply/clear),
-role gating, the two-pass guard, and the optimize_meta staleness info on /run.
+role gating, single-pass rank replay, and the optimize_meta staleness info on /run.
 
 Job logic is driven through the internal helpers (like the commit-endpoint tests);
 HTTP role gating is exercised with the TestClient."""
@@ -152,17 +152,18 @@ def test_plan_counts_new_orders_as_uncovered():
     assert meta["covered"] == 1 and meta["uncovered"] == 2   # SO2 + the new SO9
 
 
-def test_committed_orders_are_not_resequenced_by_ranks():
-    # A rank map naming a COMMITTED order must not disturb pass 1: the protected
-    # pass plans in its own order; ranks apply to the open pass only.
+def test_ranks_resequence_the_whole_book_including_committed():
+    # Post-pivot (2026-07-16): lanes are status labels. A rank map naming a
+    # committed order replays over the WHOLE book in one pass — the committed
+    # order is sequenced by its rank like any other. It still schedules.
     m = _api()
     _seed_book()
     book_store.set_commitment("SO1", ITEM_A, "committed", date(2025, 3, 25), "t")
     book_store.save_plan_priority(
         {f"SO1{KEY_SEP}{ITEM_A}": 2, f"SO2{KEY_SEP}{ITEM_B}": 1}, {"saved_at": "t"})
-    result = m._plan(m._load_plan_config())   # must not raise; two-pass path
+    result = m._plan(m._load_plan_config())   # must not raise; single pass
     assert result["optimize_meta"]["active"] is True
-    # The committed order still schedules (it is in the plan, pass 1).
+    # The committed order still schedules (it is in the one-pool plan).
     r8_rows = result["trace"]["rule8"]["output"]["rows"]
     assert any("SO1" in str(r) for r in r8_rows)
 

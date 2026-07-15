@@ -58,12 +58,6 @@ def score(metrics: dict) -> float:
     return metrics["total_late_days"] + MAKESPAN_WEIGHT * metrics["makespan_days"]
 
 
-def promise_score(metrics: dict) -> float:
-    """Lower is better (promise-recovery objective: promise-slip dominant, broken-promise
-    count as the tiebreak — matches the disruption experiment)."""
-    return metrics["promise_slip_days"] * 100 + metrics["promises_missed"]
-
-
 def plan_metrics(schedule, so_lines, plan_start) -> dict:
     """Owner-facing quality of one plan: makespan + lateness vs SO delivery dates.
 
@@ -96,42 +90,6 @@ def plan_metrics(schedule, so_lines, plan_start) -> dict:
     }
 
 
-def promise_slip_metrics(schedule, so_lines, plan_start) -> dict:
-    """Promise-recovery quality: how far committed orders finish PAST THEIR PROMISE
-    (``SOLine.promised_date``), not their SO delivery date. Orders with no promise are
-    ignored. Carries the standard fields too so results display consistently."""
-    from datetime import datetime
-    promised = {(l.so_no, l.item_code): l.promised_date
-                for l in so_lines if getattr(l, "promised_date", None) is not None}
-    expected: dict = {}
-    last_end = None
-    for e in schedule:
-        if last_end is None or e.end > last_end:
-            last_end = e.end
-        d = e.end.date()
-        for ref in (e.so_refs or []):
-            k = (ref, e.item_code)
-            if k not in expected or d > expected[k]:
-                expected[k] = d
-    t0 = datetime.combine(plan_start, datetime.min.time())
-    makespan = ((last_end - t0).total_seconds() / 86400.0) if last_end else 0.0
-    slips = [(expected[k] - promised[k]).days for k in promised if k in expected]
-    missed = [s for s in slips if s > 0]
-    return {
-        "makespan_days": round(makespan, 2),
-        "promise_slip_days": int(sum(missed)),
-        "promises_missed": len(missed),
-        "max_slip_days": int(max(missed)) if missed else 0,
-        "promised_orders": len(slips),
-        # standard aliases so downstream display code that reads late_orders/total_late_days
-        # still works when it renders a promise-recovery result:
-        "late_orders": len(missed),
-        "total_late_days": int(sum(missed)),
-        "max_late_days": int(max(missed)) if missed else 0,
-        "orders": len(slips),
-    }
-
-
 def _work(batch, masters) -> float:
     r = masters.routings.get(batch.item_code)
     return (r.total_cycle_time() if r else 0.0) * batch.qty
@@ -145,32 +103,6 @@ def _atc_key(batch, masters, plan_start):
     return -((1.0 / p) * math.exp(-max(slack_days, 0) / 14.0))
 
 
-def promise_ceiling_ok(schedule, so_lines) -> bool:
-    """DEAD — the promise rule was discarded (owner pivot, 2026-07-15); lanes are
-    pure status labels now. Retained only because ``api.main`` still calls it; it
-    is removed together with that caller in the next task.
-
-    The owner's law (spec 2026-07-15): no committed/urgent order may END
-    after its promised date. Day-level: end.date() <= promised. Orders without
-    a promise are never vetoed. FAIL CLOSED: a promised order with NO schedule
-    entries at all (e.g. Rule 6 blocked its batch non-fatally) is a violation —
-    an unschedulable committed order must never pass the veto as "on time"."""
-    promised = {(l.so_no, l.item_code): l.promised_date for l in so_lines
-                if getattr(l, "commitment", "open") in ("committed", "urgent")
-                and getattr(l, "promised_date", None)}
-    if not promised:
-        return True
-    ends = {}
-    for e in schedule:
-        for r in (e.so_refs or []):
-            k = (r, e.item_code)
-            if k in promised:
-                d = e.end.date()
-                if k not in ends or d > ends[k]:
-                    ends[k] = d
-    return all(k in ends and ends[k] <= promised[k] for k in promised)
-
-
 def ranks_for(seq) -> dict:
     """The persistable artifact: every member order of the i-th batch gets rank i+1
     (batch members share a rank; ``apply_priority_rank`` replays by min member rank)."""
@@ -182,16 +114,12 @@ def ranks_for(seq) -> dict:
 
 
 def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
-             seed=42, on_progress=None, should_cancel=None,
-             objective="lateness") -> OptimizeResult:
+             seed=42, on_progress=None, should_cancel=None) -> OptimizeResult:
     """Search for a better batch sequence for THIS book (rolling: call it on
     whatever the order book holds today; the result is disposable and re-computable).
 
-    ``objective`` selects what "better" means:
-      * ``"lateness"`` (default) — open-order optimization: delivery lateness + makespan.
-      * ``"promise_slip"`` — promise recovery: minimise how far COMMITTED orders finish
-        past their ``promised_date`` (used after a disruption; see the promise-recovery
-        design). Same search, different scorecard.
+    "Better" = lower ``score`` (delivery lateness + makespan) — every active line
+    competes in one pool (lanes are pure status labels, no scheduling effect).
 
     ``on_progress(evals_done, best_metrics)`` is called after every evaluation.
     ``should_cancel()`` (optional) is polled between evaluations; when it returns True the
@@ -199,8 +127,8 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
     not caught: a book that cannot plan at all should fail loud exactly like Plan does.
     """
     config.validate()
-    _metrics = promise_slip_metrics if objective == "promise_slip" else plan_metrics
-    _score = promise_score if objective == "promise_slip" else score
+    _metrics = plan_metrics
+    _score = score
 
     batches = rule1_consolidate.run(list(so_lines), config=config, masters=masters)
     batches = rule2_sort_by_date.run(batches, config=config, masters=masters)
@@ -357,8 +285,7 @@ class SweepResult:
 
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None,
-                   candidate_setup=None, candidates=OVERLAP_CANDIDATES,
-                   feasible=None, base_reserved=None) -> SweepResult:
+                   candidates=OVERLAP_CANDIDATES, base_reserved=None) -> SweepResult:
     """Search batch sequence AND overlap %. ``budget_evals`` is the TOTAL
     budget for the whole contest; it is split EQUALLY across the contenders
     (the current setting + ``candidates``), ``budget_evals // n`` plans each.
@@ -371,11 +298,6 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
 
     ``base_reserved`` (optional) is merged into EVERY candidate's reservations
     (operator absences — physical unavailability). ``None`` (default) is a no-op.
-
-    ``candidate_setup`` and ``feasible`` are accepted (some callers still pass
-    them as ``None``) but no longer have any effect — the promise rule was
-    discarded (owner pivot, 2026-07-15); lanes are pure status labels. These
-    dead parameters are removed with the caller in the next task.
     """
     from dataclasses import replace
     from engine.optimize_service import merge_reservations

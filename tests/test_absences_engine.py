@@ -45,7 +45,7 @@ def test_absent_operator_gets_no_work_in_window():
     win_end = datetime.combine(max(ends).date() + timedelta(days=1), datetime.min.time())
 
     setup = svc.prepare_contest(orders, [], masters, cfg, absences=absence)
-    pr = PlanRun(so_lines=list(setup.joint_target))
+    pr = PlanRun(so_lines=list(setup.target))
     run_forward(pr, setup.config, masters, reserved=setup.absence_reserved)
 
     assert any(e.operator == op for e in baseline.schedule if getattr(e, "operator", ""))
@@ -106,9 +106,8 @@ def test_prepare_contest_reserves_only_absences():
 
     setup = svc.prepare_contest(orders, [], masters, cfg, absences=absence)
 
-    assert setup.protected == []                       # no lane is protected anymore
-    assert setup.reserved == setup.absence_reserved    # only physical unavailability
-    assert "Nobody-Else" in setup.reserved
-    interval = setup.reserved["Nobody-Else"][0]
+    # Only physical unavailability reserves time — a committed lane adds no wall.
+    assert "Nobody-Else" in setup.absence_reserved
+    interval = setup.absence_reserved["Nobody-Else"][0]
     assert interval == (datetime(2025, 3, 5), datetime(2025, 3, 7))
-    assert set(setup.reserved) == {"Nobody-Else"}      # nothing else reserves time
+    assert set(setup.absence_reserved) == {"Nobody-Else"}   # nothing else reserves time
