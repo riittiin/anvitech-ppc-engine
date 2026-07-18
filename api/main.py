@@ -306,16 +306,20 @@ def _inputs_signature(config: Config) -> str:
     d.pop("balance_operator_load", None)
     d["expedite_window_min"] = 0
     # Operators live in the store now, so the masters sha no longer covers them.
-    # Fold the table CONTENT (name/machines/shift/pin) + week_anchor into the
-    # blob so a rotation advance or an operator edit correctly flags the applied
-    # optimization stale (spec 2026-07-18). ids are excluded (churn only).
+    # Fold ONLY the table's sorted row CONTENT (name/machines/shift/pin) into
+    # the blob so a rotation or an operator edit correctly flags the applied
+    # optimization stale (spec 2026-07-18). ids are excluded (churn only) — and
+    # so is week_anchor: a net-no-op double-Friday catch-up advances the anchor
+    # while leaving every shift identical, and hashing it would make the
+    # signature differ from the applied meta until the next Apply, firing a full
+    # (non-applying) scheduled contest on every tick. A genuine single rotation
+    # still changes the persisted shift content, so it is still caught.
     table = book_store.load_operator_table()
     op_blob = None
     if table:
-        op_blob = [table.get("week_anchor"),
-                   sorted([[r.get("name", ""), r.get("machines_raw", ""),
-                            r.get("shift", ""), bool(r.get("pinned"))]
-                           for r in table.get("operators", [])])]
+        op_blob = sorted([[r.get("name", ""), r.get("machines_raw", ""),
+                           r.get("shift", ""), bool(r.get("pinned"))]
+                          for r in table.get("operators", [])])
     blob = json.dumps([_masters_sha(), d, op_blob], sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 

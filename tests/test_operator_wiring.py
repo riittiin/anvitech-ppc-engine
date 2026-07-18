@@ -229,6 +229,35 @@ def test_inputs_signature_reflects_the_operator_table():
     assert m._inputs_signature(cfg) != s0
 
 
+def test_inputs_signature_ignores_a_pure_anchor_advance():
+    """A net-no-op double-Friday catch-up advances week_anchor while every
+    shift stays identical. The signature must NOT move — otherwise every
+    scheduled tick after such a catch-up would fire a full contest that then
+    doesn't apply, forever until the next Apply (reviewer finding). A real
+    content change (a flipped shift) must still move it."""
+    from datetime import timedelta
+    m = _api()
+    book_store.save_masters_bytes(build_sample_bytes())
+    m._current_masters()                            # seed
+    cfg = m._load_plan_config()
+    s0 = m._inputs_signature(cfg)
+
+    # Advance ONLY the anchor by 14 days (2 Fridays = content-identical table).
+    table = book_store.load_operator_table()
+    anchor = date.fromisoformat(table["week_anchor"])
+    table["week_anchor"] = (anchor + timedelta(days=14)).isoformat()
+    book_store.save_operator_table(table)
+    assert m._inputs_signature(cfg) == s0           # anchor alone: EQUAL
+
+    # A genuine shift flip still changes it.
+    table = book_store.load_operator_table()
+    table["operators"][0]["shift"] = ("Second shift"
+                                      if table["operators"][0]["shift"] == "First shift"
+                                      else "First shift")
+    book_store.save_operator_table(table)
+    assert m._inputs_signature(cfg) != s0           # content change: DIFFERS
+
+
 # --------------------------------------------------------------------------- #
 # Scheduled-skip: run when EITHER the book OR the inputs fingerprint differs.
 # --------------------------------------------------------------------------- #
