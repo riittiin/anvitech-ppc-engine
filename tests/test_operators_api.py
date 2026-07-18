@@ -123,6 +123,27 @@ def test_post_defaults_machines_raw_and_shift_to_blank(monkeypatch):
     assert row["shift"] == ""
 
 
+def test_post_before_any_masters_access_seeds_from_workbook_first(monkeypatch):
+    """Regression (reviewer, 2026-07-18): a direct POST on a fresh deploy —
+    BEFORE any GET/_current_masters call — must NOT build a bare table and
+    permanently suppress the seed-once migration of the stored workbook's
+    operators. POST calls _current_masters() first, so the stored table ends
+    up with the workbook's operators PLUS the new one."""
+    m = _api(); _seed_book()
+    admin = _admin_client(m)
+    assert book_store.load_operator_table() is None  # no prior masters access
+
+    r = admin.post("/operators", json={"name": "New Hire"})
+    assert r.status_code == 200
+
+    table = book_store.load_operator_table()
+    names = {row["name"] for row in table["operators"]}
+    assert "Operator One" in names          # workbook operators were seeded
+    assert "Operator Two" in names
+    assert "New Hire" in names              # ...and the POSTed row appended
+    assert len(table["operators"]) > 1
+
+
 def test_post_appends_to_existing_table(monkeypatch):
     m = _api(); _seed_book()
     admin = _admin_client(m)

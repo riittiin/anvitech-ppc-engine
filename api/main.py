@@ -272,7 +272,6 @@ def _with_operator_overlay(base):
     mutated. Seeds the store the first time masters carry operators and no table
     exists yet; persists a lazy rotation advance (flips>0). Empty store + no
     workbook operators → the base is returned unchanged (nothing to overlay)."""
-    from engine import operator_master
     today = date.today()
     table = book_store.load_operator_table()
     if table is None:
@@ -642,7 +641,6 @@ def _plan(config: Config):
     # schedule, Gantt, and analytics all agree. Pure view — nothing persisted.
     op_table = book_store.load_operator_table()
     if op_table:
-        from engine import operator_master
         masters = replace(masters, operators=operator_master.operators_as_of(
             op_table, eff_start))
 
@@ -1459,9 +1457,13 @@ def get_operators():
 def create_operator(req: OperatorRequest, request: Request):
     """Add a new operator to the app-owned table. Admin only. `name` must be
     non-empty and unique among existing rows (case-insensitive, stripped);
-    `shift` must be one of the 3 exact values. If the table has never been
-    created, POST creates it (`week_anchor` = the most recent Friday). No
-    optimize trigger — scheduled-only contest rules stand."""
+    `shift` must be one of the 3 exact values. `_current_masters()` runs FIRST
+    so the seed-once-from-workbook path can never be suppressed by a direct
+    POST on a fresh deploy (a bare table here would permanently skip migrating
+    the workbook's operators). After that, a still-None table means there is
+    genuinely nothing to seed from (fresh install, no workbook) — POST then
+    creates it (`week_anchor` = the most recent Friday). No optimize trigger —
+    scheduled-only contest rules stand."""
     require_admin(request)
     name = req.name.strip()
     if not name:
@@ -1469,6 +1471,7 @@ def create_operator(req: OperatorRequest, request: Request):
     if req.shift not in _VALID_SHIFTS:
         raise HTTPException(status_code=400,
                             detail="shift must be 'First shift', 'Second shift', or ''")
+    _current_masters()   # seed-once + lazy rotation before we read the table
     table = book_store.load_operator_table()
     if table is None:
         table = {"week_anchor": operator_master.last_friday(date.today()).isoformat(),
@@ -1488,11 +1491,13 @@ def create_operator(req: OperatorRequest, request: Request):
 def update_operator(operator_id: str, req: OperatorPatchRequest, request: Request):
     """Partially update an operator's `machines_raw`/`shift`/`pinned`. Admin
     only. 404 if the id is unknown (including when no table exists yet);
-    `shift`, if given, is validated the same as POST."""
+    `shift`, if given, is validated the same as POST. `_current_masters()`
+    runs first (same seed-once guarantee as POST/GET, call-order independent)."""
     require_admin(request)
     if req.shift is not None and req.shift not in _VALID_SHIFTS:
         raise HTTPException(status_code=400,
                             detail="shift must be 'First shift', 'Second shift', or ''")
+    _current_masters()   # seed-once + lazy rotation before we read the table
     table = book_store.load_operator_table()
     rows = table.get("operators", []) if table else []
     for row in rows:
@@ -1513,8 +1518,11 @@ def delete_operator(operator_id: str, request: Request):
     """Remove an operator. Admin only. 404 if the id is unknown (including
     when no table exists yet). Absences referencing the removed name become
     orphans — non-blocking, covered by the existing ABSENT_OPERATOR_UNKNOWN
-    report row (same as a masters re-upload that drops an operator)."""
+    report row (same as a masters re-upload that drops an operator).
+    `_current_masters()` runs first (same seed-once guarantee as POST/GET,
+    call-order independent)."""
     require_admin(request)
+    _current_masters()   # seed-once + lazy rotation before we read the table
     table = book_store.load_operator_table()
     rows = table.get("operators", []) if table else []
     keep = [r for r in rows if r.get("id") != operator_id]
