@@ -146,6 +146,47 @@ def test_blank_shift_uses_manual_window():
 
 
 # --------------------------------------------------------------------------- #
+# Real capture-form vocabulary: "1st shift" / "2nd shift" (not "First"/"Second")
+# --------------------------------------------------------------------------- #
+def test_1st_shift_text_uses_first_window_not_manual():
+    masters = _masters([_routing("A", [("TURNING", 10.0)])])
+    rows = monthly_report(
+        [_actual(shift="1st shift", qty_produced=60)], [], masters, CFG, 2025, 8)
+    r = _row(rows, "Ravi")
+    assert r["Attended (min)"] == float(FIRST_MIN)          # 660, not 540 (manual)
+    assert r["Earned (min)"] == 600.0
+    assert r["Efficiency %"] == round(600.0 / FIRST_MIN * 100, 1)   # ~90.9
+
+
+def test_2nd_shift_text_uses_second_window_not_manual():
+    masters = _masters([_routing("A", [("TURNING", 10.0)])])
+    rows = monthly_report(
+        [_actual(shift="2nd shift", qty_produced=60)], [], masters, CFG, 2025, 8)
+    r = _row(rows, "Ravi")
+    assert r["Attended (min)"] == float(SECOND_MIN)         # 600, not 540 (manual)
+    assert r["Earned (min)"] == 600.0
+    assert r["Efficiency %"] == 100.0
+
+
+def test_mixed_shift_vocabulary_same_day_one_window():
+    """"1st shift" and "First shift" both normalize to 'first' — one shift,
+    one window, not two, even though the raw text differs."""
+    masters = _masters([
+        _routing("A", [("TURNING", 10.0)]),
+        _routing("B", [("MILLING", 5.0)]),
+    ])
+    actuals = [
+        _actual(item_code="A", process="TURNING", shift="1st shift", qty_produced=10),
+        _actual(item_code="B", process="MILLING", shift="First shift", qty_produced=20,
+                so_no="SO2"),
+    ]
+    rows = monthly_report(actuals, [], masters, CFG, 2025, 8)
+    r = _row(rows, "Ravi")
+    assert r["Attended (min)"] == float(FIRST_MIN)          # ONE window, not two
+    assert r["Jobs handled"] == 2
+
+
+# --------------------------------------------------------------------------- #
 # Downtime + setup neutrality (subtract from attended, never earn/penalize)
 # --------------------------------------------------------------------------- #
 def test_downtime_and_setup_subtract_from_attended():

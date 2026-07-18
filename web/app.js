@@ -914,7 +914,7 @@ function actualsFormHtml() {
   const today = new Date().toISOString().slice(0, 10);
   const left =
     fy("Date", `<input id="a-date" type="date" value="${today}" /> <span id="a-date-echo" class="date-echo"></span>`) +
-    fy("Shift", `<input id="a-shift" value="1st shift" />`) +
+    fy("Shift", `<select id="a-shift"><option value="1st shift">1st shift</option><option value="2nd shift">2nd shift</option></select>`) +
     fr("Operator <span class=auto>(required)</span>", `<select id="a-operator"><option value="">— select operator —</option></select>`) +
     fr("SO No <span class=auto>(step 1 — pick from orders)</span>", `<select id="a-so"><option value="">— select SO No —</option></select>`) +
     fr("Item Code <span class=auto>(step 2 — pick this SO's item)</span>", `<select id="a-item"><option value="">— select SO No first —</option></select>`) +
@@ -957,6 +957,18 @@ async function fillOperatorDropdown() {
       + rows.map((o) => `<option value="${escapeHtml(o.name)}">${escapeHtml(o.name)}</option>`).join("");
     if (keep) sel.value = keep;
   } catch (e) { /* dropdown stays empty; required-field check + server 400 are the backstop */ }
+}
+
+// Populate the Shift dropdown with exactly the values /items advertises (falls
+// back to the current two-shift vocabulary if the fetch hasn't landed yet), so
+// the operator can no longer free-type shift text the report can't recognize.
+function fillShiftDropdown() {
+  const sel = $("a-shift");
+  if (!sel) return;
+  const list = (ITEMS && ITEMS.shifts && ITEMS.shifts.length) ? ITEMS.shifts : ["1st shift", "2nd shift"];
+  const keep = sel.value;
+  sel.innerHTML = list.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
+  sel.value = list.includes(keep) ? keep : list[0];
 }
 
 // Populate the SO No dropdown with every SO from the orders tab.
@@ -1030,6 +1042,7 @@ function actualIsDuplicate(body) {
 async function wireActualsForm() {
   ITEMS = null;                 // refetch so the SO dropdown reflects the latest orders
   await ensureItems();
+  fillShiftDropdown();
   fillSoDropdown();
   await fillOperatorDropdown();
   $("a-so").addEventListener("change", fillItemFromSO);   // step 1: pick SO No -> fill Item dropdown

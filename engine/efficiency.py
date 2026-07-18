@@ -62,11 +62,23 @@ def _cycle_for(masters, item_code, process_name):
 def _norm_shift(shift):
     """Canonical shift key for grouping the attended window: 'first' / 'second' /
     'manual'. Any blank or unrecognised shift text maps to the manual (day)
-    window, per the spec."""
+    window, per the spec.
+
+    NOTE: this is deliberately its OWN normalizer, not shared with
+    ``engine.operator_coverage._shift_kind`` (which governs Rule 6 scheduling
+    off the Operator MASTER's ``shift`` field — real data there is literally
+    "First shift"/"Second shift"). This function instead classifies the
+    Capture-form's free-text ``Actual.shift`` field, whose real vocabulary is
+    "1st shift"/"2nd shift" (see web/app.js's Capture form + the ``/items``
+    response in api/main.py). Broadening ``_shift_kind`` to also match "1st"/
+    "2nd" would risk changing Rule 6's machine-window/scheduling output for no
+    benefit (it already correctly matches its own real inputs) — so this stays
+    a separate, reporting-only normalizer scoped to efficiency.py.
+    """
     s = (shift or "").strip().lower()
-    if "first" in s:
+    if "first" in s or "1st" in s or s.startswith("1"):
         return "first"
-    if "second" in s:
+    if "second" in s or "2nd" in s or s.startswith("2"):
         return "second"
     return "manual"
 

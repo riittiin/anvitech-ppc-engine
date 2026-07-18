@@ -632,6 +632,12 @@ Fairness guarantees baked into the formula:
 | Approved leave | A separate **Days absent** column, from the absence list — never mixed into the pace calculation |
 | Old entries from before this feature | Grouped into one **"Unattributed"** row (no operator name was captured back then) |
 
+**Shift text is normalized** (case-insensitive: "1st shift"/"first"/"1" → first,
+"2nd shift"/"second"/"2" → second — the Capture form's Shift field is a
+dropdown limited to "1st shift"/"2nd shift" so it can't be free-typed);
+unrecognized/blank shift text falls to the manual (day) window, a documented
+fallback rather than a silent miscount.
+
 **Report columns** (one row per operator, for a chosen calendar month): Operator ·
 Days worked · Days absent · Attended (min) · Earned (min) · Efficiency % · Pace
 vs standard (attended ÷ earned) · Good qty · Rejected qty · Reject % · Downtime

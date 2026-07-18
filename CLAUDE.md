@@ -475,7 +475,12 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   shift window nor its downtime/setup) — and counted in "No-standard
   punches" (nobody is judged against a standard that doesn't exist); absence
   days are their own column from the absence table, never folded into pace;
-  legacy punches with no operator name land in an "Unattributed" row.
+  legacy punches with no operator name land in an "Unattributed" row. Shift
+  text is normalized case-insensitively ("1st shift"/"first"/"1" → first,
+  "2nd shift"/"second"/"2" → second — the Capture form's Shift field is now a
+  `<select>` constrained to "1st shift"/"2nd shift" so free text can't drift);
+  any other/unrecognized shift text falls to the manual (day) window, a
+  documented fallback for legacy free-text punches.
   **Review-caught fairness bug (fixed same task, RED-first regression
   pins):** the first cut excluded no-standard punches from Earned only,
   still charging their shift window (minus their downtime/setup) to
