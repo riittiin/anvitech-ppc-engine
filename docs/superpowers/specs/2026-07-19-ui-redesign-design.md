@@ -1,6 +1,6 @@
 # UI/UX redesign — clean, simple, idiot-proof
 
-**Date:** 2026-07-19 · **Status:** AWAITING OWNER APPROVAL ·
+**Date:** 2026-07-19 · **Status:** APPROVED by the owner (Team card removed per his direction) ·
 **Hard constraint:** the backend does not change — same endpoints, same request/
 response shapes, same role gating, same features. Frontend files only
 (`web/index.html`, `web/app.js`, `web/style.css`).
@@ -52,12 +52,15 @@ first-class card inside Settings.** Detail per view below.
    Apply/Discard, applied/staleness banner + Remove); then the Rule 6
    allocation table + both CSV downloads (full + shift-wise).
 3. **Gantt** (both) — unchanged Gantt, full width.
-4. **Daily Entry** (both) — the floor's page, three stacked cards:
+4. **Daily Entry** (both) — the floor's page, two stacked cards:
    the entry form (SO → Item → Process pickers, Operator dropdown, Shift
    dropdown, date, produced/rejected qty, downtime fields, remarks,
-   mark-complete, one big "Save entry" button); "Today's saved entries"
-   with per-entry rollback; and the read-only **Team this week** card
-   (who is on which shift + who is absent) for both roles.
+   mark-complete, one big "Save entry" button) and "Today's saved
+   entries" with per-entry rollback. NO Team card (owner decision
+   2026-07-19): operators/shifts/absences are admin-only knowledge; the
+   admin conveys shift timings to the floor personally. The user role
+   sees operator NAMES only inside the entry form's dropdown (required
+   for punching), never the master table, shifts, pins, or absences.
 5. **Analytics** (both) — the utilization/bottleneck tab as today.
 6. **Settings** (admin only in nav; absent for users) — one scrollable page,
    four cards in order:
@@ -74,9 +77,8 @@ first-class card inside Settings.** Detail per view below.
       on-screen preview, "Download CSV".
    Delete order / clear book stay ON the Orders view (bottom, visually
    separated danger strip, password modal unchanged).
-   Users' read-only visibility of operators/absences moves to a compact
-   "Team this week" card on Daily Entry (see view 4) — list only, no
-   controls — so workers lose nothing they can see today.
+   The user role has NO operator/shift/absence surface anywhere (owner
+   decision — admin conveys shifts verbally).
 
 ## The status strip (always visible, both roles)
 
