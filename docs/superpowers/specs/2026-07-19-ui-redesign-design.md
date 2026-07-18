@@ -35,26 +35,48 @@ into Settings — so a worker sees exactly one thing: their work.
 └────────────────────────────────────────────────────────────────┘
 ```
 
+## FULL placement map — every existing feature's new home
+
+**Optimize moves to the Schedule view** (it changes the schedule — that's
+where its effect is seen), not Settings. **The Operator & shift master is a
+first-class card inside Settings.** Detail per view below.
+
 ## The six destinations
 
 1. **Orders** (landing view, both roles) — the order book table as today, plus
    the Upload control at the top (admin; it belongs where orders arrive).
    Lane badges, promised/expected columns unchanged. Empty state: "Upload
    your Excel to begin."
-2. **Schedule** (both) — the Rule 6 allocation table + its CSV downloads
-   (full + shift-wise), exactly today's data.
+2. **Schedule** (both) — [admin] the OPTIMIZE card at top (explainer, Start
+   "Deep search", Stop & keep best, progress, before/after result with
+   Apply/Discard, applied/staleness banner + Remove); then the Rule 6
+   allocation table + both CSV downloads (full + shift-wise).
 3. **Gantt** (both) — unchanged Gantt, full width.
-4. **Daily Entry** (both) — Capture Actuals: the entry form (operator +
-   shift dropdowns, qty, downtime) with the saved-entries list and rollback.
-   Big, obvious, finger-friendly — this is the floor's page.
+4. **Daily Entry** (both) — the floor's page, three stacked cards:
+   the entry form (SO → Item → Process pickers, Operator dropdown, Shift
+   dropdown, date, produced/rejected qty, downtime fields, remarks,
+   mark-complete, one big "Save entry" button); "Today's saved entries"
+   with per-entry rollback; and the read-only **Team this week** card
+   (who is on which shift + who is absent) for both roles.
 5. **Analytics** (both) — the utilization/bottleneck tab as today.
-6. **Settings** (admin only in nav; hidden for users) — sub-sections on one
-   scrollable page with clear cards: Plan settings (incl. "Start from
-   today") · Optimize (the panel + banners) · Operators & shifts ·
-   Absences · Efficiency report (month picker + download). Users who need
-   read-only operator/absence visibility get a compact read-only "Team"
-   card at the bottom of Daily Entry instead (list only, no controls) — so
-   nothing users could previously see is lost.
+6. **Settings** (admin only in nav; absent for users) — one scrollable page,
+   four cards in order:
+   a. **Plan settings** — Start-from-today checkbox + date, consolidation
+      window, setup time, overlap %, priority metric/window, the four
+      option ticks (operator logic, split parallel, expedite, balance
+      load), and the "Save & re-plan" button.
+   b. **Operators & shifts** (the master) — the full table (name, machines,
+      shift dropdown, "Stays" pin, remove), the add-operator row, and the
+      "Shifts rotate every Friday — next rotation: DD-MM" line.
+   c. **Absences** — operator + from/to date pickers, "Mark absent", and
+      the current-absence list with one-click remove.
+   d. **Efficiency report** — month picker (defaults to last month),
+      on-screen preview, "Download CSV".
+   Delete order / clear book stay ON the Orders view (bottom, visually
+   separated danger strip, password modal unchanged).
+   Users' read-only visibility of operators/absences moves to a compact
+   "Team this week" card on Daily Entry (see view 4) — list only, no
+   controls — so workers lose nothing they can see today.
 
 ## The status strip (always visible, both roles)
 
