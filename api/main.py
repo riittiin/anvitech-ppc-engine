@@ -333,6 +333,28 @@ def _report_table(masters):
     ])
 
 
+def _report_after_upload(masters):
+    """The validation report for the FILE just uploaded (upload endpoint only).
+
+    Unlike ``_report_for_book`` (book-scoped, used by /run|/gantt|/report), this
+    is deliberately loader-scoped: it returns ``masters.report`` AS-IS, so it
+    keeps the loader's NO_ROUTING rows for every SO item the file's routings
+    can't cover — those items are dropped before they ever reach the order book,
+    so the book-scoped report never sees them and the admin would otherwise have
+    no way to learn which item codes need a routing added. Also appends the
+    absence-orphan rows (ABSENT_OPERATOR_UNKNOWN) for parity with the plan
+    report. Does not touch or replay `_report_for_book`; /run stays book-scoped."""
+    rows = list(masters.report)
+    for name in _absence_orphans(masters):
+        rows.append({"kind": "ABSENT_OPERATOR_UNKNOWN", "ref": name,
+                     "message": f"absence entry for an operator not in the "
+                                f"current masters: ignored"})
+    return to_table([
+        {"Kind": r["kind"], "Reference": r["ref"], "Message": r["message"]}
+        for r in rows
+    ])
+
+
 def _absence_orphans(masters, absences=None) -> list:
     """Names on file in operator absences that are no longer in the current
     masters' Operator & shift Master (e.g. removed/renamed on a re-upload).
@@ -1308,15 +1330,13 @@ async def upload(request: Request, file: UploadFile = File(...)):
         so_lines, active, completed, first_seen=_ist_today().isoformat())
     book_store.add_orders(new_orders)
 
-    book_lines = orderbook.active_so_lines(book_store.load_active_orders(),
-                                           book_store.load_actuals(), masters)
     result = {
         "name": file.filename,
         "added": len(new_orders),
         "flagged": flags,
         "masters_updated": masters_updated,
         "summary": {"items": len(masters.routings), "machines": len(masters.machines)},
-        "report": _report_for_book(masters, book_lines),
+        "report": _report_after_upload(masters),
     }
     return result
 

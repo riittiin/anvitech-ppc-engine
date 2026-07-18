@@ -16,10 +16,11 @@ from datetime import date
 import pytest
 
 pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient  # noqa: E402
 
 from engine import book_store
 from engine.models import Order
-from tests.sample_workbook import build_sample_bytes, ITEM_A, ITEM_B
+from tests.sample_workbook import build_sample_bytes, build_workbook, ITEM_A, ITEM_B
 
 
 def _api():
@@ -61,6 +62,65 @@ def test_plan_report_shows_no_ghost_no_routing_rows():
     _seed_book()
     payload = m._plan(m._load_plan_config())
     assert [r for r in payload["report"]["rows"] if r[0] == "NO_ROUTING"] == []
+
+
+# --------------------------------------------------------------------------- #
+# 2026-07-18 — the upload response must show the FILE's own dropped (no-routing)
+# item codes; /run|/gantt|/report stay book-scoped (the ghost fix above).
+# --------------------------------------------------------------------------- #
+def test_upload_report_contains_no_routing_for_the_files_dropped_item():
+    """A SO line whose item has no routing is dropped before it ever reaches the
+    order book, so the book-scoped /run report can never show it. The upload
+    endpoint must surface it directly from the loader's own report so the admin
+    knows which item code to add to the Item's process Master."""
+    import io
+
+    m = _api()
+    from api import auth
+
+    client = TestClient(m.app)
+    accts = auth._accounts()
+    admin = next(u for u, a in accts.items() if a["role"] == auth.ADMIN)
+    pwd = accts[admin]["password"]
+    assert client.post("/login", data={"username": admin, "password": pwd}).status_code == 200
+
+    wb = build_workbook()
+    ws = wb["Sales Order (SO) list"]
+    row = ws.max_row + 1
+    # Same column layout sample_workbook.build_workbook uses for SO rows
+    # (0-based col -> 1-based openpyxl col): SONo=6, Customer=9, Item code=20,
+    # Item name=21, Qty=22, Delivery=24, Remarks=25, Pend Qty=28.
+    ws.cell(row=row, column=6, value="SO-404")
+    ws.cell(row=row, column=9, value="ALFA LAVAL")
+    ws.cell(row=row, column=20, value="NOROUTE-ITEM")
+    ws.cell(row=row, column=21, value="No Routing Item")
+    ws.cell(row=row, column=22, value=3)
+    ws.cell(row=row, column=24, value=date(2025, 3, 30))
+    ws.cell(row=row, column=25, value="")
+    ws.cell(row=row, column=28, value=3)
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = client.post("/upload", files={"file": ("t.xlsx", buf.getvalue(), xlsx_mime)})
+    assert resp.status_code == 200
+    report = resp.json()["report"]
+    no_routing = [r for r in report["rows"] if r[0] == "NO_ROUTING"]
+    assert any(r[1] == "NOROUTE-ITEM" for r in no_routing), no_routing
+
+
+def test_report_after_upload_unit_keeps_masters_report_no_routing():
+    """`_report_after_upload` returns masters.report AS-IS (no book-scoping)."""
+    m = _api()
+    from engine.models import Masters
+
+    masters = Masters()
+    masters.add_report("NO_ROUTING", "SOME-ITEM",
+                        "SO item 'SOME-ITEM' has no routing in Item's process "
+                        "Master; order skipped (cannot schedule without a recipe)")
+    table = m._report_after_upload(masters)
+    no_routing = [r for r in table["rows"] if r[0] == "NO_ROUTING"]
+    assert ["NO_ROUTING", "SOME-ITEM"] == [no_routing[0][0], no_routing[0][1]]
 
 
 # --------------------------------------------------------------------------- #

@@ -239,6 +239,11 @@ async function uploadExcel() {
     }
     if (d.masters_updated) msg += " · masters updated";
     setDatasetStatus(msg);
+    // The upload's OWN (loader-scoped) report drives the always-visible
+    // missing-routings note — it still shows any item codes the file dropped
+    // for having no routing, which the runPlan() call below never can (its
+    // /run report is book-scoped and those codes never reached the book).
+    renderMissingRoutings(d.report);
     await runPlan();           // refresh the book + schedule
     showView("orders", true);
   } catch (e) { setDatasetStatus("Upload error: " + e.message); }
@@ -524,6 +529,23 @@ function renderReport(report) {
   detail.innerHTML = tableHtml(report, true);
   detail.classList.add("hidden"); toggle.classList.remove("open");
   toggle.onclick = () => { const open = !detail.classList.toggle("hidden"); toggle.classList.toggle("open", open); };
+}
+
+// Always-visible missing-routings note (no click needed): the item codes the
+// uploaded file couldn't schedule because the Item's process Master has no
+// recipe for them. Deliberately called ONLY from uploadExcel with the
+// upload's OWN (loader-scoped) report — never from runPlan()'s book-scoped
+// /run report, which can never see these codes (they're dropped before they
+// ever reach the order book) and would otherwise wipe this note the instant
+// the automatic post-upload Plan runs.
+function renderMissingRoutings(report) {
+  const noroute = $("report-noroute");
+  const rows = (report && report.rows) || [];
+  const codes = [...new Set(rows.filter((r) => r[0] === "NO_ROUTING").map((r) => r[1]))];
+  if (!codes.length) { noroute.classList.add("hidden"); noroute.textContent = ""; return; }
+  noroute.textContent = "Missing routings. Add these item codes to the Item's "
+    + "process Master so they can be scheduled: " + codes.join(", ") + ".";
+  noroute.classList.remove("hidden");
 }
 
 // ---- Per-view content (rule6 = Schedule, rule7 = Daily Entry) ----

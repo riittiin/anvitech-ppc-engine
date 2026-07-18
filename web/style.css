@@ -213,6 +213,11 @@ button.danger:hover { filter: brightness(1.05); color: #fff; }
 .report-summary .chev { display: inline-block; transition: transform .15s; }
 .report-summary.open .chev { transform: rotate(90deg); }
 .report-detail { margin-top: 10px; }
+.report-noroute {
+  background: rgba(210, 153, 34, .1); border: 1px solid var(--warn);
+  color: var(--ink); border-radius: var(--radius); padding: 10px 12px;
+  font-size: 13px; line-height: 1.5; margin-bottom: 10px;
+}
 
 /* ---------------- Generic content blocks (rule views) ---------------- */
 .rule-header h2 { margin: 0 0 16px; font-size: 17px; }
