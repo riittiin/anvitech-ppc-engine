@@ -1237,7 +1237,7 @@ function renderOperatorsTable(operators) {
   if (!tbody) return;
   const isAdmin = currentRole === "admin";
   if (!operators || operators.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="${isAdmin ? 5 : 3}" class="empty">No operators yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${isAdmin ? 5 : 4}" class="empty">No operators yet.</td></tr>`;
     return;
   }
   tbody.innerHTML = operators.map((o) => {
@@ -1248,6 +1248,7 @@ function renderOperatorsTable(operators) {
         <td>${escapeHtml(o.name)}</td>
         <td>${escapeHtml(o.machines_raw || "")}</td>
         <td>${shiftLabel}</td>
+        <td>${o.pinned ? "Yes" : "—"}</td>
       </tr>`;
     }
     const shiftOpts = ["", "First shift", "Second shift"].map((v) =>
@@ -1257,7 +1258,7 @@ function renderOperatorsTable(operators) {
       <td>${escapeHtml(o.name)}</td>
       <td><input type="text" class="op-machines" data-id="${id}" value="${escapeHtml(o.machines_raw || "")}" /></td>
       <td><select class="op-shift" data-id="${id}">${shiftOpts}</select></td>
-      <td class="admin-only"><input type="checkbox" class="op-pinned" data-id="${id}" ${o.pinned ? "checked" : ""} /></td>
+      <td><input type="checkbox" class="op-pinned" data-id="${id}" ${o.pinned ? "checked" : ""} /></td>
       <td class="admin-only"><button type="button" class="ghost-btn op-remove" data-id="${id}">✕</button></td>
     </tr>`;
   }).join("");
