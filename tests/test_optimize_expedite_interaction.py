@@ -48,6 +48,10 @@ def test_optimize_beats_the_current_plan_even_with_expedite_on():
     with open("Test5.xlsx", "rb") as f:
         book_store.save_masters_bytes(f.read())
     so_lines, _ = load_all("Test5.xlsx")
+    if not so_lines:
+        # The owner swaps/edits the real data file; an emptied SO sheet (e.g.
+        # the go-live cleanup of 2026-07-18) leaves nothing to optimize.
+        pytest.skip("Test5.xlsx present but has no sales orders")
     book_store.add_orders([Order(s.so_no, s.item_code, s.item_name, s.qty, s.delivery_date)
                            for s in so_lines])
     # The exact live config: Expedite AND Balance both ON.
