@@ -620,8 +620,15 @@ def _plan(config: Config):
     # Computed on the SAVED (unresolved) config: an auto plan_start_date is None
     # here, so a moving 'today' can never look like a settings change.
     current_inputs_sig = _inputs_signature(config)
+    # The response echoes the SAVED (unresolved) config — auto mode (null) must
+    # survive the round-trip, or the Settings UI would reflect today back as a
+    # FIXED date and the next save would silently lose auto (live 2026-07-18 bug).
+    saved_config_dict = config.to_dict()
     # Resolve auto (None) plan start -> today (IST) so the engine never sees None.
     config = _resolve_config(config)
+    # What the auto/fixed start resolved to — a separate, display-only response
+    # key (the date the plan clock starts from, before any actuals advance).
+    resolved_plan_start = config.plan_start_date.isoformat()
     active = book_store.load_active_orders()
     completed = book_store.load_completed_orders()
     actuals = book_store.load_actuals()
@@ -746,7 +753,11 @@ def _plan(config: Config):
 
     result = {"run_id": run_id, "trace": trace,
               "report": _report_for_book(masters, so_lines, absences=absences_raw),
-              "gantt": gantt, "orders": orders, "config": config.to_dict(),
+              "gantt": gantt, "orders": orders,
+              # SAVED (unresolved) config — null plan_start_date = auto survives
+              # the round-trip; the resolved start is a separate display key.
+              "config": saved_config_dict,
+              "resolved_plan_start": resolved_plan_start,
               "expected_end": exp_end, "optimize_meta": optimize_meta,
               "auto_note": book_store.load_auto_note()}
     return result

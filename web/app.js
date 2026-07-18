@@ -64,19 +64,21 @@ function readConfig() {
   return cfgObj;
 }
 
-// Today's date as ISO (browser local) — for the disabled auto-mode display only;
-// the authoritative start date is resolved server-side in IST.
+// Today's date as ISO (browser local) — a FALLBACK for the disabled auto-mode
+// display only; the authoritative start is the server-resolved IST date carried
+// in the /run response (resolved_plan_start, cached below).
 function todayIso() {
   const d = new Date(), p = (n) => String(n).padStart(2, "0");
   return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
 }
+let lastResolvedStart = null;   // resolved_plan_start from the latest /run response
 
 function updatePlanStartEcho() {
   const auto = $("cfg-start-auto"), inp = $("cfg-plan-start"), e = $("cfg-plan-start-echo");
   const isAuto = !!(auto && auto.checked);
   if (inp) {
     inp.disabled = isAuto;             // auto mode: the picker is display-only
-    if (isAuto) inp.value = todayIso();  // show today (server uses IST today)
+    if (isAuto) inp.value = lastResolvedStart || todayIso();  // server IST today
   }
   const v = inp && inp.value;
   if (e) e.textContent = v ? "= " + isoToDdmmyyyy(v) : "";
@@ -106,17 +108,21 @@ function renderSessionInfo(username, role) {
     + `<form method="post" action="/logout" class="logout-form"><button type="submit">Logout</button></form>`;
 }
 
-// Reflect the (server) effective plan config back into the admin's config bar so
-// it shows the last-saved plan settings.
-function applyConfig(cfg) {
+// Reflect the (server) SAVED plan config back into the admin's config bar so it
+// shows the last-saved plan settings. `resolvedStart` (response key
+// resolved_plan_start) = the ISO date the server's plan clock actually started
+// from — shown in the disabled picker when auto ("start from today") is on.
+function applyConfig(cfg, resolvedStart) {
   if (!cfg) return;
   const setVal = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
   const setSel = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
-  // null plan_start_date = auto ("start from today"): tick the box, show today.
+  // null plan_start_date = auto ("start from today"): tick the box, show the
+  // server-resolved start (IST today; browser-local today as a fallback).
   const _auto = $("cfg-start-auto");
   const _isAuto = (cfg.plan_start_date === null || cfg.plan_start_date === undefined);
   if (_auto) _auto.checked = _isAuto;
-  setVal("cfg-plan-start", _isAuto ? todayIso() : cfg.plan_start_date);  // ISO from server
+  if (resolvedStart) lastResolvedStart = resolvedStart;
+  setVal("cfg-plan-start", _isAuto ? (resolvedStart || todayIso()) : cfg.plan_start_date);
   updatePlanStartEcho();
   setVal("cfg-window", cfg.consolidation_window_days);
   setVal("cfg-setup", cfg.setup_time_min);
@@ -154,7 +160,7 @@ async function runPlan(persist = false) {
     currentExpected = data.expected_end || null;
     optimizeMeta = data.optimize_meta || null;
     autoNote = data.auto_note || null;
-    if (currentRole === "admin" && data.config) applyConfig(data.config);
+    if (currentRole === "admin" && data.config) applyConfig(data.config, data.resolved_plan_start);
     renderReport(data.report);
     renderOptimizeBanner();
     renderAutoNote();

@@ -72,6 +72,32 @@ def test_plan_with_auto_config_starts_from_ist_today(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Response contract: the /run response must echo the SAVED (unresolved) config —
+# auto mode must survive a page reload. The resolved start is a SEPARATE display
+# key. (Live 2026-07-18 bug: returning the resolved config made the UI's auto
+# checkbox untick itself, and the next Settings save persisted today as a FIXED
+# date — auto mode silently lost.)
+# --------------------------------------------------------------------------- #
+def test_plan_response_config_keeps_null_and_carries_resolved_start(monkeypatch):
+    m = _api()
+    _seed_book()
+    fixed = date(2030, 6, 3)
+    monkeypatch.setattr(m, "_ist_today", lambda: fixed)
+    result = m._plan(Config())  # auto config (plan_start_date None)
+    assert result["config"]["plan_start_date"] is None
+    assert result["resolved_plan_start"] == fixed.isoformat()
+
+
+def test_plan_response_config_echoes_explicit_date(monkeypatch):
+    m = _api()
+    _seed_book()
+    monkeypatch.setattr(m, "_ist_today", lambda: date(2030, 6, 3))
+    result = m._plan(Config(plan_start_date=date(2025, 3, 1)))
+    assert result["config"]["plan_start_date"] == "2025-03-01"
+    assert result["resolved_plan_start"] == "2025-03-01"
+
+
+# --------------------------------------------------------------------------- #
 # Persist path saves null for auto mode
 # --------------------------------------------------------------------------- #
 def test_persist_saves_null_for_auto_config():
