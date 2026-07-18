@@ -174,6 +174,139 @@ def _push_clear(clk, start, qty, cyc, setup, res_lists):
     return start, end
 
 
+def _next_shift_boundary(cursor, config):
+    """The next instant the OPERATOR shift changes at/after ``cursor``.
+
+    First shift is ``[first_shift_start_hour, first_shift_end_hour)`` (08:00–19:00);
+    everything else is the second shift (19:00 → 08:00 next morning). So the change
+    points are ``first_shift_end_hour`` (day → night) and ``first_shift_start_hour``
+    (night → day). Returns a datetime strictly after ``cursor``. Used to cap a
+    machine-op segment so one operator never spans a shift change."""
+    from ..operator_coverage import _shift_of
+    if _shift_of(cursor, config) == "first":
+        b = cursor.replace(hour=config.first_shift_end_hour, minute=0, second=0, microsecond=0)
+        if b <= cursor:
+            b += timedelta(days=1)
+        return b
+    b = cursor.replace(hour=config.first_shift_start_hour, minute=0, second=0, microsecond=0)
+    if b <= cursor:
+        b += timedelta(days=1)
+    return b
+
+
+def _reservation_end_covering(intervals, t):
+    """If any reserved ``(s, e)`` covers instant ``t`` (``s <= t < e``), return the
+    latest such ``e``; else None."""
+    end = None
+    for s, e in intervals:
+        if s <= t < e and (end is None or e > end):
+            end = e
+    return end
+
+
+def _reservation_start_within(intervals, s, e):
+    """Earliest reserved-interval START strictly inside ``(s, e)``, else None — the
+    point a segment must be cut short so it does not run into a reservation."""
+    best = None
+    for rs, _re in intervals:
+        if s < rs < e and (best is None or rs < best):
+            best = rs
+    return best
+
+
+def _advance_clear(clk, t, intervals):
+    """First working instant at/after ``t`` that is not inside any reserved interval
+    in ``intervals`` (skips both non-working windows and reserved blocks)."""
+    cur = clk.advance(t, 0)
+    for _ in range(512):
+        cov = _reservation_end_covering(intervals, cur)
+        if cov is None:
+            return cur
+        cur = clk.advance(cov, 0)
+    return cur
+
+
+def _lay_segments(machine, clk, start, run_min, op_lookup, local_free,
+                  reserved_intervals, plan_start, config):
+    """Lay one machine-op of ``run_min`` machine-minutes down SHIFT-SEGMENT by
+    shift-segment starting no earlier than ``start``, booking a fresh qualified
+    operator for each shift the run crosses.
+
+    Returns ``(end, segments)`` where ``segments`` is a list of
+    ``(seg_start, seg_end, operator)``. ``local_free`` (``{operator: free_dt}``) is
+    MUTATED — each chosen operator is booked busy until their segment end, so a later
+    call (a split sibling, a subsequent op) sees them occupied and never double-books.
+
+    Operator selection is earliest-free with sheet-order tie-break — byte-identical to
+    the legacy single-operator pick, so a single-shift op is unchanged. When no
+    qualified operator is free at the shift's start the machine PAUSES (the op extends)
+    until one frees. When ``op_lookup`` yields no crew (operator logic off, or a
+    provisional/no-crew machine) the op runs as one operator-less block — the legacy
+    ``_push_clear`` behaviour, so reservation handling stays byte-identical."""
+    m_res = reserved_intervals.get(machine, []) if reserved_intervals else []
+    cursor = _advance_clear(clk, start, m_res)
+    remaining = float(run_min)
+    segments = []
+    guard = 0
+    while remaining > 1e-9 and guard < 20000:
+        guard += 1
+        names = op_lookup(machine, cursor)
+        if not names:
+            # No operator constraint (logic off / provisional): run the remaining as
+            # one block, clear of the machine's own reservations (legacy semantics).
+            ss, se = _push_clear(clk, cursor, remaining, 1, 0, [m_res])
+            segments.append((ss, se, ""))
+            return se, segments
+        free = [o for o in names
+                if local_free.get(o, plan_start) <= cursor
+                and _reservation_end_covering(reserved_intervals.get(o, []) if reserved_intervals else [], cursor) is None]
+        if not free:
+            # No qualified operator free on this shift — pause the machine until the
+            # earliest one frees (never bill a person outside their shift / when busy).
+            nxt = None
+            for o in names:
+                t = max(local_free.get(o, plan_start), cursor)
+                cov = _reservation_end_covering(
+                    reserved_intervals.get(o, []) if reserved_intervals else [], t)
+                if cov is not None:
+                    t = max(t, cov)
+                if nxt is None or t < nxt:
+                    nxt = t
+            newc = _advance_clear(clk, nxt, m_res)
+            if newc <= cursor:
+                newc = _advance_clear(clk, cursor + timedelta(minutes=1), m_res)
+            cursor = newc
+            continue
+        op = min(free, key=lambda o: local_free.get(o, plan_start))
+        boundary = _next_shift_boundary(cursor, config)
+        avail_min = clk.working_minutes_between(cursor, boundary)
+        if avail_min <= 1e-9:
+            # No machine time before the shift change (cursor sits at a window edge) —
+            # step to the next working instant and re-evaluate (defensive; rare).
+            cursor = clk.advance(cursor + timedelta(minutes=1), 0)
+            continue
+        seg_min = remaining if remaining <= avail_min + 1e-9 else avail_min
+        seg_end = clk.advance(cursor, seg_min)
+        cut = _reservation_start_within(
+            list(m_res) + list(reserved_intervals.get(op, []) if reserved_intervals else []),
+            cursor, seg_end)
+        if cut is not None:
+            cut_min = clk.working_minutes_between(cursor, cut)
+            if cut_min <= 1e-9:
+                cursor = _advance_clear(
+                    clk, cursor,
+                    list(m_res) + list(reserved_intervals.get(op, []) if reserved_intervals else []))
+                continue
+            seg_min = min(seg_min, cut_min)
+            seg_end = clk.advance(cursor, seg_min)
+        segments.append((cursor, seg_end, op))
+        local_free[op] = seg_end
+        remaining -= seg_min
+        cursor = clk.advance(seg_end, 0) if remaining > 1e-9 else seg_end
+    end = segments[-1][1] if segments else _advance_clear(clk, start, m_res)
+    return end, segments
+
+
 def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_for, config,
                  operator_free=None, op_lookup=None, reserved_intervals=None):
     """Decide how to run one operation. Returns ``(entries, blocked)`` where
@@ -225,17 +358,19 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
     def end_of(clk, f, q):
         return clk.advance(f, cyc * q + setup)
 
+    # Lay the whole quantity on the earliest-free machine, shift-segment by shift-segment
+    # (operators handed off per shift; the op may extend when a shift's crew is all busy).
     bm, bclk, bf, bop = cands[0]
-    if reserved_intervals:
-        bf, bend = _push_clear(bclk, bf, qty, cyc, setup,
-                               [reserved_intervals.get(bm, []), reserved_intervals.get(bop, [])])
-    else:
-        bend = end_of(bclk, bf, qty)
-    single = [(bm, qty, bf, bend, bop)]
+    lf0 = dict(operator_free)
+    bend, bsegs = _lay_segments(bm, bclk, bf, cyc * qty + setup, op_lookup, lf0,
+                                reserved_intervals, plan_start, config)
+    bstart = bsegs[0][0] if bsegs else bf
+    bop = bsegs[0][2] if bsegs else bop
+    single = [(bm, qty, bstart, bend, bop, bsegs)]
     if (not getattr(config, "split_parallel", False) or len(cands) < 2
             or qty < getattr(config, "split_min_qty", 2) or cyc <= 0):
         return single, False
-    single_end = single[0][3]
+    single_end = bend
 
     def capacities(T):
         """Whole pieces each machine can finish by time T (from its free time, incl.
@@ -272,17 +407,20 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
             break
     if rem > 0:
         return single, False
+    # Lay each split sibling shift-segment by shift-segment, threading one shared
+    # ``local_free`` so concurrent siblings never grab the same operator (a person
+    # cannot run two machines at once).
+    lf = dict(operator_free)
     entries = []
     for i in range(len(cands)):
         if shares[i] <= 0:
             continue
-        m_i, clk_i, st_i, op_i = cands[i][0], cands[i][1], cands[i][2], cands[i][3]
-        if reserved_intervals:
-            st_i, en_i = _push_clear(clk_i, st_i, shares[i], cyc, setup,
-                                     [reserved_intervals.get(m_i, []), reserved_intervals.get(op_i, [])])
-        else:
-            en_i = end_of(clk_i, st_i, shares[i])
-        entries.append((m_i, shares[i], st_i, en_i, op_i))
+        m_i, clk_i, st_i = cands[i][0], cands[i][1], cands[i][2]
+        en_i, segs_i = _lay_segments(m_i, clk_i, st_i, cyc * shares[i] + setup,
+                                     op_lookup, lf, reserved_intervals, plan_start, config)
+        start_i = segs_i[0][0] if segs_i else st_i
+        op_i = segs_i[0][2] if segs_i else ""
+        entries.append((m_i, shares[i], start_i, en_i, op_i, segs_i))
     # Split only if it genuinely beats one machine and uses 2+ machines.
     if len(entries) < 2 or max(e[3] for e in entries) >= single_end:
         return single, False
@@ -542,17 +680,26 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
         # Work (occupancy) is unchanged — only the span grows (idle waiting for pieces).
         prev_end = max((e.end for e in schedule if e.batch_id == batch.batch_id), default=None)
         if prev_end is not None and entries:
-            naive_end = max(en for _, _, _, en, _ in entries)
+            naive_end = max(en for _, _, _, en, _, _ in entries)
             if prev_end > naive_end:
-                entries = [(m, q, st, prev_end, op) for (m, q, st, en, op) in entries]
+                # Extend only the machine SPAN (idle waiting for pieces); the operator
+                # segments stay at their real machining minutes — nobody is billed for
+                # the pacing idle, and no operator is stretched past their shift.
+                entries = [(m, q, st, prev_end, op, segs)
+                           for (m, q, st, en, op, segs) in entries]
         split = len(entries) > 1
 
         # Emit an entry per machine; track the slowest portion (it decides recombine).
         slow = None  # (end, clock, start, run_min, occ)
-        for m, q, st, en, op in entries:
+        for m, q, st, en, op, segs in entries:
             machine_free[m] = en
-            if op:
-                operator_free[op] = en          # this person is busy until the op ends
+            # Book each operator ONLY for their own shift segment (not the whole op):
+            # the day person frees at 19:00, the night person is booked for the night.
+            for (ss, se, so) in segs:
+                if so:
+                    prev = operator_free.get(so)
+                    if prev is None or se > prev:
+                        operator_free[so] = se
             if split:
                 e_note = f"parallel split: {q} of {int(proc_qty)} on {m} ({'/'.join(cands_list)})"
             else:
@@ -563,6 +710,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
                 qty=q, occupancy_min=cyc * q + setup, start=st, end=en, notes=e_note,
                 so_refs=list(batch.source_so_refs),
                 operator=op,
+                op_segments=list(segs),
             ))
             if slow is None or en > slow[0]:
                 slow = (en, clock_for(m), st, cyc * q, cyc * q + setup)
@@ -649,13 +797,41 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     return schedule
 
 
+class _Slot:
+    """A reassignable operator booking for the fairness rebalance: one SHIFT SEGMENT
+    of a machine-op (when the entry carries ``op_segments``) or a whole entry (legacy
+    schedules with no segments). ``flush`` writes the chosen operator back."""
+
+    __slots__ = ("entry", "seg_idx", "machine", "start", "end", "op", "batch_id")
+
+    def __init__(self, entry, seg_idx, machine, start, end, op):
+        self.entry = entry
+        self.seg_idx = seg_idx
+        self.machine = machine
+        self.start = start
+        self.end = end
+        self.op = op
+        self.batch_id = entry.batch_id
+
+    def flush(self):
+        if self.seg_idx is None:
+            self.entry.operator = self.op
+        else:
+            ss, se, _old = self.entry.op_segments[self.seg_idx]
+            self.entry.op_segments[self.seg_idx] = (ss, se, self.op)
+            if self.seg_idx == 0:
+                self.entry.operator = self.op
+
+
 def _rebalance_operators(schedule, masters, config, reserved=None) -> int:
     """Fairness POST-PROCESS. Timing is already fixed; only reassign *who* runs each
-    operator-run op so load spreads evenly across interchangeable people. Walks ops in
-    time order and hands each to the qualified, same-shift operator who is **free at
-    that op's start** and has the **least accumulated work** so far. Because it never
-    touches start/end, makespan and lateness are provably unchanged. Returns the number
-    of ops whose operator changed. No-op when operator logic is off (no operators)."""
+    operator SHIFT SEGMENT so load spreads evenly across interchangeable people. Walks
+    segments in time order and hands each to the qualified, same-shift operator who is
+    **free at that segment's start** and has the **least accumulated work** so far.
+    Because it never touches start/end, makespan and lateness are provably unchanged.
+    Returns the number of segments whose operator changed. No-op when operator logic is
+    off (no operators). A single-shift op has exactly one segment, so this reduces to
+    the legacy per-op rebalance — byte-identical when the crew is plentiful."""
     from ..operator_coverage import qualified_operators
     reserved = reserved or {}
 
@@ -666,37 +842,48 @@ def _rebalance_operators(schedule, masters, config, reserved=None) -> int:
         on two machines at once across the two passes)."""
         return any(b0 < en and s < b1 for b0, b1 in reserved.get(o, []))
 
-    ops = sorted((x for x in schedule if x.operator), key=lambda x: (x.start, x.end, x.batch_id))
-    original = {id(e): e.operator for e in ops}
+    # One slot per shift segment (op_segments) or per whole entry (no segments).
+    slots = []
+    for e in schedule:
+        segs = getattr(e, "op_segments", None)
+        if segs:
+            for i, (ss, se, op) in enumerate(segs):
+                if op and se > ss:
+                    slots.append(_Slot(e, i, e.machine, ss, se, op))
+        elif e.operator:
+            slots.append(_Slot(e, None, e.machine, e.start, e.end, e.operator))
+
+    slots.sort(key=lambda sl: (sl.start, sl.end, sl.batch_id))
+    original = {id(sl): sl.op for sl in slots}
     busy_until: dict = {}
     load: dict = {}
-    for e in ops:
-        eligible = qualified_operators(e.machine, e.start, masters, config)
-        free = [o for o in eligible if busy_until.get(o, e.start) <= e.start
-                and not _reserved_clash(o, e.start, e.end)]
+    for sl in slots:
+        eligible = qualified_operators(sl.machine, sl.start, masters, config)
+        free = [o for o in eligible if busy_until.get(o, sl.start) <= sl.start
+                and not _reserved_clash(o, sl.start, sl.end)]
         if free:
             # Least work so far; break ties by longest-idle then name (deterministic).
             pick = min(free, key=lambda o: (load.get(o, 0.0),
-                                            busy_until.get(o, e.start), o))
-            if pick != e.operator:
-                e.operator = pick
+                                            busy_until.get(o, sl.start), o))
+            if pick != sl.op:
+                sl.op = pick
         # If nobody is free, keep the original operator for now; the repair pass
         # below guarantees the final assignment is conflict-free.
-        op = e.operator
-        busy_until[op] = e.end
-        load[op] = load.get(op, 0.0) + (e.end - e.start).total_seconds() / 60.0
+        op = sl.op
+        busy_until[op] = sl.end
+        load[op] = load.get(op, 0.0) + (sl.end - sl.start).total_seconds() / 60.0
 
     # SAFETY NET — never double-book. "Keep the original when nobody is free" is
     # only safe if the walk didn't hand that original other work first (live bug:
     # the walk moved a CNC op to Ankush, then a VMC op whose only qualified person
     # was Ankush kept him too — one man on two machines). The original assignment
     # is conflict-free by construction (Rule 6 allocates people one-at-a-time), so
-    # reverting reassigned ops back to their original owner strictly approaches a
+    # reverting reassigned segments back to their original owner strictly approaches a
     # feasible state: repair until no person overlaps. Timing is never touched.
     def _first_conflict():
         by_op: dict = {}
-        for e in ops:
-            by_op.setdefault(e.operator, []).append(e)
+        for sl in slots:
+            by_op.setdefault(sl.op, []).append(sl)
         for es in by_op.values():
             es.sort(key=lambda x: (x.start, x.end, x.batch_id))
             for a, b in zip(es, es[1:]):
@@ -704,9 +891,9 @@ def _rebalance_operators(schedule, masters, config, reserved=None) -> int:
                     return a, b
         # A reassignment that lands on a person another pass has reserved is a
         # conflict too (the original assignment respected the reservations).
-        for e in ops:
-            if e.operator != original[id(e)] and _reserved_clash(e.operator, e.start, e.end):
-                return e, e
+        for sl in slots:
+            if sl.op != original[id(sl)] and _reserved_clash(sl.op, sl.start, sl.end):
+                return sl, sl
         return None
 
     while True:
@@ -714,14 +901,20 @@ def _rebalance_operators(schedule, masters, config, reserved=None) -> int:
         if pair is None:
             break
         reverted = False
-        for e in (pair[1], pair[0]):          # prefer reverting the later op
-            if e.operator != original[id(e)]:
-                e.operator = original[id(e)]
+        for sl in (pair[1], pair[0]):          # prefer reverting the later segment
+            if sl.op != original[id(sl)]:
+                sl.op = original[id(sl)]
                 reverted = True
                 break
         if not reverted:
             break   # both already original → input schedule itself was infeasible; bail
-    return sum(1 for e in ops if e.operator != original[id(e)])
+
+    moved = 0
+    for sl in slots:
+        if sl.op != original[id(sl)]:
+            moved += 1
+        sl.flush()
+    return moved
 
 
 def build_shiftwise_timeline(schedule, masters, config, batches=None):
@@ -766,6 +959,50 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
     for e in schedule:
         if e.end > end_by_batch.get(e.batch_id, e.end - timedelta(days=1)):
             end_by_batch[e.batch_id] = e.end
+
+    def _row(s, en, label, e, op):
+        b = batch_by_id.get(e.batch_id)
+        routing = masters.routings.get(e.item_code)
+        return {
+            "Machine": e.machine,
+            "SO No": ", ".join(e.so_refs),
+            "Batch": e.batch_id,
+            "Item Code": e.item_code,
+            "Item Description": routing.description if routing else "",
+            "SO Del date": b.so_delivery_date if b else "",
+            "Expected completion": end_by_batch.get(e.batch_id, e.end).date(),
+            "Process": f"{e.process_seq}. {e.process_name}",
+            "Qty": int(e.qty),
+            "Date": s.date(),
+            "Shift": label,
+            "Start": s.strftime("%H:%M"),
+            "End": en.strftime("%d-%m %H:%M"),
+            "Minutes": round((en - s).total_seconds() / 60),
+            "Operator": op,
+        }
+
+    # FAST PATH — the scheduler already booked a real qualified operator PER SHIFT
+    # SEGMENT (handoff at the shift change; the machine paused rather than run a shift
+    # with no free crew). Trust those bookings verbatim: they never bill a person
+    # outside their shift or on two machines at once, so there is nothing to re-derive
+    # and no UNSTAFFED can arise here. (Manually-built schedules with no op_segments —
+    # e.g. some unit tests — fall through to the legacy two-phase derivation below.)
+    if any(getattr(e, "op_segments", None) for e in schedule):
+        from ..operator_coverage import _shift_of
+
+        def _label(mid, dt):
+            if _two_shift(mid):
+                return "First shift" if _shift_of(dt, config) == "first" else "Second shift"
+            return (f"Day shift ({config.manual_start_hour:02d}:00–"
+                    f"{config.manual_end_hour:02d}:00)")
+
+        segs = []
+        for e in schedule:
+            for (ss, se, op) in (getattr(e, "op_segments", None) or []):
+                if op and se > ss:
+                    segs.append((ss, se, _label(e.machine, ss), e, op))
+        segs.sort(key=lambda x: (x[0], x[3].machine, x[4]))
+        return [_row(s, en, label, e, op) for (s, en, label, e, op) in segs]
 
     # Collect every shift-segment of every operator-run op, then assign operators in time
     # order (fair: free-now least-loaded qualified person for that machine + shift).

@@ -256,6 +256,14 @@ class ScheduleEntry:
     notes: str = ""
     so_refs: list = field(default_factory=list)   # SO number(s) this batch came from
     operator: str = ""                            # assigned operator (operator logic on)
+    # Per-shift operator bookings for this machine-op (operator logic on): a list of
+    # (segment_start, segment_end, operator) — the op is handed off to a fresh
+    # qualified operator on each shift it crosses (an operator is booked only for
+    # their own shift, never stretched across the 19:00/05:00 change). Empty when
+    # operator logic is off (byte-identical to the legacy single-operator model) or
+    # for a provisional/no-crew machine (operator ""). `operator` above mirrors the
+    # FIRST segment's person for a single-line display; the segments are the truth.
+    op_segments: list = field(default_factory=list)
 
     def as_row(self):
         row = {
