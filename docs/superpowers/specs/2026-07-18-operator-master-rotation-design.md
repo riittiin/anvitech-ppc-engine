@@ -38,12 +38,20 @@ fresh install — seeds from that upload, once.)
 
 ## Rotation (lazy, never missed, idempotent)
 
-`ensure_rotation(today)` runs before masters are served: count Fridays in
-(`week_anchor`, today]; for each, flip `shift` for every non-pinned two-shift
-operator (First↔Second); advance `week_anchor` to the last applied Friday;
-persist. Two missed Fridays = two flips (net no-op for unpinned, correct for
-mixed pins). Rotation boundary = Friday (date), effective from the first plan
-computed on/after it.
+**Effectiveness rule (owner, 2026-07-18): the swap takes effect at Friday
+SHIFT 1.** Operationally: a plan whose schedule BEGINS on/after Friday uses the
+rotated shifts — even if it is computed on Thursday (the off day). So rotation
+is applied **as-of the plan's effective start date**, not the wall clock:
+
+- Planning/contests: effective operators = `rotate_table(stored, as_of=
+  effective_plan_start_date)` — a PURE view; nothing persisted by planning.
+- Display (`GET /operators`, the Settings panel): as_of = today.
+- Persistence: the stored `week_anchor` advances lazily whenever any request
+  observes today ≥ an unapplied Friday (idempotent catch-up; two missed
+  Fridays = two flips, net no-op for unpinned).
+- The cloud payload carries the ALREADY-EFFECTIVE operator rows (computed
+  as-of the plan start at payload build) — the worker applies them directly,
+  no anchor logic worker-side. Local == cloud byte-identical.
 
 ## Wiring (ONE application point)
 
