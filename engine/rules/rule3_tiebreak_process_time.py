@@ -42,6 +42,11 @@ from . import rule4_setup_time as r4
 def _plan_start(config):
     # config.plan_start_date is never None: the API resolves "auto" (None) to
     # today (IST) at the boundary (_resolve_config) before any rule runs.
+    if config.plan_start_date is None:
+        # Fail loud (project law) instead of a cryptic AttributeError deep in
+        # the rules if a future caller forgets to resolve auto-mode first.
+        raise ValueError("plan_start_date is unresolved (None) — resolve "
+                         "auto-mode to a real date before running the rules")
     return datetime(
         config.plan_start_date.year,
         config.plan_start_date.month,
