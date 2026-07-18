@@ -109,6 +109,14 @@ def rotate_table(table: dict, today: date):
     return new_table, len(fridays)
 
 
+def operators_as_of(table: dict, as_of: date) -> list:
+    """The effective ``Operator`` objects for a plan/display computed **as of**
+    ``as_of`` — a PURE view (rotation applied, nothing persisted). Combines
+    ``rotate_table`` + ``to_operators`` so every wiring site (display overlay,
+    contest setup, ``_plan``) shares one expression instead of duplicating it."""
+    return to_operators(rotate_table(table, as_of)[0].get("operators", []))
+
+
 def to_operators(rows: list) -> list:
     """Convert stored operator rows to ``Operator`` objects, parsing
     ``machines_raw`` exactly the way the Excel loader does (same helper:

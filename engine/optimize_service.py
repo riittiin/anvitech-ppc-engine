@@ -100,8 +100,11 @@ def book_signature(so_lines, absences=None):
 def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
                   seed: int, candidates=CLOUD_OVERLAP_CANDIDATES,
                   budget_per_candidate=CLOUD_BUDGET_PER_CANDIDATE,
-                  absences=None) -> dict:
-    """Snapshot everything one contest depends on. JSON-safe."""
+                  absences=None, operator_table=None) -> dict:
+    """Snapshot everything one contest depends on. JSON-safe. ``operator_table``
+    (the app-owned {week_anchor, operators} dict) is carried verbatim — the
+    worker applies the SAME as-of-effective-start rotation the API does, so a
+    cloud run is byte-identical to a local one."""
     return {
         "orders": [o.to_json() for o in orders.values()],
         "actuals": [a.to_json() for a in actuals],
@@ -112,13 +115,15 @@ def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
         "candidates": list(candidates),
         "budget_per_candidate": budget_per_candidate,
         "absences": list(absences or []),
+        "operator_table": operator_table,
     }
 
 
 def parse_payload(payload: dict):
-    """Rebuild (orders, actuals, masters, config, absences) — the exact
-    objects the API planned with, via the models' own from_json and the
-    normal loader."""
+    """Rebuild (orders, actuals, masters, config, absences, operator_table) —
+    the exact objects the API planned with, via the models' own from_json and
+    the normal loader. ``operator_table`` is the raw stored dict (or None); the
+    contest applies the as-of-effective-start rotation onto masters.operators."""
     orders = {}
     for d in payload["orders"]:
         o = Order.from_json(d)
@@ -132,7 +137,8 @@ def parse_payload(payload: dict):
     config = Config.from_dict(payload["config"])
     config.validate()
     absences = list(payload.get("absences") or [])
-    return orders, actuals, masters, config, absences
+    operator_table = payload.get("operator_table")
+    return orders, actuals, masters, config, absences, operator_table
 
 
 # --------------------------------------------------------------------------- #
@@ -148,20 +154,34 @@ class ContestSetup:
     # time. ``absence_reserved`` is the raw ``absence_reservations(absences)`` dict.
     absences: list = field(default_factory=list)
     absence_reserved: object = None
+    # The masters the contest must schedule against. Identical to the object
+    # handed in UNLESS an operator table was supplied — then it is a shallow
+    # copy carrying the as-of-effective-start rotated operators (the cached
+    # masters object is never mutated). ALL callers plan against ``setup.masters``.
+    masters: object = None
 
 
 def prepare_contest(orders: dict, actuals, masters, config: Config,
-                    absences=None) -> ContestSetup:
+                    absences=None, operator_table=None) -> ContestSetup:
     """Everything the sweep needs, from the raw book. Every active line competes
     in ONE pool — lanes (open/committed/urgent) have no scheduling effect. Only
     operator absences reserve time. Raises ValueError when there is nothing to
-    optimize (no active orders with work remaining)."""
+    optimize (no active orders with work remaining).
+
+    ``operator_table`` (the app-owned {week_anchor, operators} dict) overrides
+    ``masters.operators`` with the shifts effective **as of the plan's effective
+    start date** (Friday shift-1 rule) — applied onto a SHALLOW COPY so the
+    caller's (cached) masters object is never mutated."""
     ab = absence_reservations(absences)
     so_lines = orderbook.active_so_lines(orders, actuals, masters)
     eff = orderbook.effective_plan_start_date(actuals, config.plan_start_date,
                                               masters.calendar)
     if eff != config.plan_start_date:
         config = replace(config, plan_start_date=eff)
+
+    if operator_table:
+        from engine.operator_master import operators_as_of
+        masters = replace(masters, operators=operators_as_of(operator_table, eff))
 
     target = so_lines
     if not target:
@@ -172,7 +192,8 @@ def prepare_contest(orders: dict, actuals, masters, config: Config,
     search_config = replace(config, expedite_window_min=0)
 
     return ContestSetup(target=target, config=config, search_config=search_config,
-                        absences=list(absences or []), absence_reserved=(ab or None))
+                        absences=list(absences or []), absence_reserved=(ab or None),
+                        masters=masters)
 
 
 # --------------------------------------------------------------------------- #
@@ -200,10 +221,11 @@ def run_candidate(payload: dict, overlap: int, *, on_progress=None,
     pool (lanes have no scheduling effect). ``reserved=`` is only the operator
     absences (physical unavailability). Returns a sweep-table row (+ ranks for
     the winner)."""
-    orders, actuals, masters, config, absences = parse_payload(payload)
-    setup = prepare_contest(orders, actuals, masters, config, absences=absences)
+    orders, actuals, masters, config, absences, operator_table = parse_payload(payload)
+    setup = prepare_contest(orders, actuals, masters, config, absences=absences,
+                            operator_table=operator_table)
     cfg = replace(setup.search_config, overlap_percent=int(overlap))
-    res = optimizer.optimize(setup.target, cfg, masters,
+    res = optimizer.optimize(setup.target, cfg, setup.masters,
                              reserved=setup.absence_reserved,
                              budget_evals=int(payload["budget_per_candidate"]),
                              seed=int(payload["seed"]),

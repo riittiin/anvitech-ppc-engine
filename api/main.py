@@ -243,24 +243,48 @@ def _store_env_key():
 
 
 def _current_masters():
-    """Masters from the latest uploaded workbook, else the bundled test file.
+    """Masters from the latest uploaded workbook, else empty masters.
 
-    Parsed once and cached in-process; only re-read from the durable store when a
-    new workbook is uploaded (which clears the cache) or the store config changes.
-    Avoids pulling + re-parsing the (large) workbook blob on every request."""
+    The PARSED WORKBOOK is cached in-process (keyed by content hash / store
+    config); the app-owned operator table is overlaid on EVERY call so display
+    always reflects today's rotation and a freshly-emptied store re-seeds. The
+    cache never holds operators — they belong to the store, not the workbook."""
     key = _store_env_key()
     if _MASTERS_CACHE["masters"] is not None and _MASTERS_CACHE["key"] == key:
-        return _MASTERS_CACHE["masters"]
-    raw = book_store.load_masters_bytes()
-    if raw is None:
-        # No workbook uploaded yet → empty masters; the UI prompts to upload.
-        # (There is no bundled demo file anymore — production runs on uploads.)
-        masters = Masters()
+        base = _MASTERS_CACHE["masters"]
     else:
-        _, masters = load_all(io.BytesIO(raw))
-    _MASTERS_CACHE.update(key=key, masters=masters,
-                          sha=hashlib.sha256(raw).hexdigest() if raw else "none")
-    return masters
+        raw = book_store.load_masters_bytes()
+        if raw is None:
+            # No workbook uploaded yet → empty masters; the UI prompts to upload.
+            # (There is no bundled demo file anymore — production runs on uploads.)
+            base = Masters()
+        else:
+            _, base = load_all(io.BytesIO(raw))
+        _MASTERS_CACHE.update(key=key, masters=base,
+                              sha=hashlib.sha256(raw).hexdigest() if raw else "none")
+    return _with_operator_overlay(base)
+
+
+def _with_operator_overlay(base):
+    """Overlay the app-owned operator table (seed-once, rotate as-of TODAY for
+    display) onto a COPY of the cached workbook masters — the cache is never
+    mutated. Seeds the store the first time masters carry operators and no table
+    exists yet; persists a lazy rotation advance (flips>0). Empty store + no
+    workbook operators → the base is returned unchanged (nothing to overlay)."""
+    from engine import operator_master
+    today = date.today()
+    table = book_store.load_operator_table()
+    if table is None:
+        if not base.operators:
+            return base                       # nothing to seed from yet
+        table = {"week_anchor": operator_master.last_friday(today).isoformat(),
+                 "operators": operator_master.seed_rows_from_masters(base)}
+        book_store.save_operator_table(table)
+    rotated, flips = operator_master.rotate_table(table, today)
+    if flips > 0:
+        book_store.save_operator_table(rotated)   # lazy catch-up, idempotent
+    return replace(base, operators=operator_master.to_operators(
+        rotated.get("operators", [])))
 
 
 def _masters_sha() -> str:
@@ -281,7 +305,18 @@ def _inputs_signature(config: Config) -> str:
     d = config.to_dict()
     d.pop("balance_operator_load", None)
     d["expedite_window_min"] = 0
-    blob = json.dumps([_masters_sha(), d], sort_keys=True, default=str)
+    # Operators live in the store now, so the masters sha no longer covers them.
+    # Fold the table CONTENT (name/machines/shift/pin) + week_anchor into the
+    # blob so a rotation advance or an operator edit correctly flags the applied
+    # optimization stale (spec 2026-07-18). ids are excluded (churn only).
+    table = book_store.load_operator_table()
+    op_blob = None
+    if table:
+        op_blob = [table.get("week_anchor"),
+                   sorted([[r.get("name", ""), r.get("machines_raw", ""),
+                            r.get("shift", ""), bool(r.get("pinned"))]
+                           for r in table.get("operators", [])])]
+    blob = json.dumps([_masters_sha(), d, op_blob], sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -583,6 +618,17 @@ def _plan(config: Config):
     if eff_start != config.plan_start_date:
         config = replace(config, plan_start_date=eff_start)
 
+    # Operators effective AS OF the plan's start (Friday shift-1 rule): a plan
+    # that BEGINS on/after a rotation Friday runs the rotated shifts, even when
+    # computed on the off day. `_current_masters()` already overlaid as-of TODAY;
+    # re-overlay as-of `eff_start` onto this (already fresh) masters copy so the
+    # schedule, Gantt, and analytics all agree. Pure view — nothing persisted.
+    op_table = book_store.load_operator_table()
+    if op_table:
+        from engine import operator_master
+        masters = replace(masters, operators=operator_master.operators_as_of(
+            op_table, eff_start))
+
     # An applied Optimize run (the saved rank map) is replayed as ONE pass over
     # every active line. Lanes (open/committed/urgent) are pure status labels —
     # they have no scheduling effect (owner pivot, 2026-07-16). No saved
@@ -818,11 +864,12 @@ def _auto_note_write(text: str):
                                "at": _ist_now().isoformat(timespec="seconds")})
 
 
-def _applied_book_sig():
-    """The book_sig recorded against the last applied optimization, read
+def _applied_plan_meta():
+    """The meta dict recorded against the last applied optimization, read
     directly (not via book_store.load_plan_priority(), which treats an empty
-    ranks dict as "nothing applied" for planning purposes — a different
-    concern from "does the last contest still match today's book")."""
+    ranks dict as "nothing applied" for planning purposes — a different concern
+    from "does the last contest still match today's book/inputs"). ``None`` when
+    nothing has ever been applied."""
     raw = book_store.get_store().kv_get(book_store.PLAN_PRIORITY_KEY)
     if not raw:
         return None
@@ -832,7 +879,11 @@ def _applied_book_sig():
         return None
     if not isinstance(data, dict):
         return None
-    return (data.get("meta") or {}).get("book_sig")
+    return data.get("meta") or {}
+
+
+def _applied_book_sig():
+    return (_applied_plan_meta() or {}).get("book_sig")
 
 
 def _try_start_auto() -> bool:
@@ -847,9 +898,19 @@ def _try_start_auto() -> bool:
         _auto_note_write("Auto-optimize skipped — cloud compute unavailable; "
                          "will retry on the next scheduled run.")
         return False                             # auto is cloud-only
-    applied_sig = _applied_book_sig()
+    # Skip only when NOTHING material changed since the last applied plan — and
+    # "material" now includes the inputs fingerprint (masters + settings +
+    # operator rotation/edits), not just the book. After a Friday rotation the
+    # book_sig is unchanged but the operators differ, so a book-only check would
+    # wrongly skip the re-optimize (spec 2026-07-18 DECISION). A legacy applied
+    # meta without an inputs_sig doesn't force a run on the missing field alone.
+    meta = _applied_plan_meta() or {}
     try:
-        if applied_sig == _current_book_sig():
+        book_same = (meta.get("book_sig") == _current_book_sig())
+        applied_inputs = meta.get("inputs_sig")
+        inputs_same = (applied_inputs is None
+                       or applied_inputs == _inputs_signature(_load_plan_config()))
+        if book_same and inputs_same:
             return False                         # nothing material changed
     except Exception:
         return False
@@ -879,9 +940,11 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()
         absences = book_store.load_absences()
+        operator_table = book_store.load_operator_table()
         try:
             setup = optimize_service.prepare_contest(orders, actuals, masters, config,
-                                                      absences=absences)
+                                                     absences=absences,
+                                                     operator_table=operator_table)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -890,7 +953,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         if cloud:
             payload = optimize_service.build_payload(
                 orders, actuals, book_store.load_masters_bytes(), base_config,
-                seed=_OPT_SEED, absences=absences)
+                seed=_OPT_SEED, absences=absences, operator_table=operator_table)
             denom = (optimize_service.CLOUD_BUDGET_PER_CANDIDATE
                      * len(optimizer.sweep_contenders(
                          setup.search_config.overlap_percent,
@@ -917,14 +980,14 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             # real config (expedite as set) — what they have if they DON'T optimize.
             real_baseline = _OPTIMIZE.get("baseline")
             if real_baseline is None:
-                base_sched, base_lines = _all_lines_schedule(setup, masters, None)
+                base_sched, base_lines = _all_lines_schedule(setup, setup.masters, None)
                 real_baseline = optimizer.plan_metrics(base_sched, base_lines,
                                                        setup.config.plan_start_date)
 
             # One pool: search ALL active lines together (lanes are status labels
             # with no scheduling effect). Only operator absences reserve time.
             sw = optimizer.sweep_optimize(setup.target, setup.search_config,
-                                          masters, budget_evals=budget_evals,
+                                          setup.masters, budget_evals=budget_evals,
                                           seed=_OPT_SEED, on_progress=on_progress,
                                           should_cancel=lambda: _OPTIMIZE.get("cancel"),
                                           base_reserved=setup.absence_reserved)
@@ -941,7 +1004,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         try:
             # Baseline is computed HERE (one plan, seconds) so the before/after
             # is ready whatever the worker does.
-            base_sched, base_lines = _all_lines_schedule(setup, masters, None)
+            base_sched, base_lines = _all_lines_schedule(setup, setup.masters, None)
             real_baseline = optimizer.plan_metrics(base_sched, base_lines,
                                                    setup.config.plan_start_date)
             with _OPTIMIZE_LOCK:
@@ -1087,10 +1150,11 @@ def _incumbent_metrics():
     orders = book_store.load_active_orders()
     absences = book_store.load_absences()
     setup = optimize_service.prepare_contest(orders, actuals, masters, config,
-                                             absences=absences)
+                                             absences=absences,
+                                             operator_table=book_store.load_operator_table())
     prio = book_store.load_plan_priority()
     ranks = (prio or {}).get("ranks") or None
-    schedule, all_lines = _all_lines_schedule(setup, masters, ranks)
+    schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks)
     return optimizer.plan_metrics(schedule, all_lines, setup.config.plan_start_date)
 
 
