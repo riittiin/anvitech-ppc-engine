@@ -303,6 +303,14 @@ def _lay_segments(machine, clk, start, run_min, op_lookup, local_free,
         local_free[op] = seg_end
         remaining -= seg_min
         cursor = clk.advance(seg_end, 0) if remaining > 1e-9 else seg_end
+    if remaining > 1e-9:
+        # Guard exhausted with quantity still to lay: FAIL LOUD rather than return a
+        # silently under-scheduled op (dropped machine-minutes). Surfaced through
+        # run()'s lazy RuleError import; keyed on the machine (no batch/proc id here).
+        from ..pipeline import RuleError
+        raise RuleError(
+            "rule6", machine,
+            "operation could not be fully staffed/scheduled (guard exhausted)")
     end = segments[-1][1] if segments else _advance_clear(clk, start, m_res)
     return end, segments
 

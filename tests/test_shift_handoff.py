@@ -15,10 +15,12 @@ from datetime import date, datetime, timedelta
 
 from engine.config import Config, OVERLAP_PERCENT
 from engine.models import Batch, Machine, Masters, Operator, Process, Routing, WorkCalendar
+from engine.pipeline import RuleError
 from engine.rules import rule6_allocate
 from engine.rules.rule6_allocate import _next_shift_boundary
 from engine.operator_coverage import _shift_of, qualified_operators
 from engine.analytics import build_analytics
+from engine.worktime import WorkClock
 
 
 # --------------------------------------------------------------------------- #
@@ -165,6 +167,57 @@ def test_sample_book_is_fully_staffed_and_conflict_free(loaded):
     assert_no_operator_double_booked(sched)
     assert_within_shift(sched, masters, cfg)
     assert_fully_staffed(sched, masters, cfg, batches)
+
+
+# --------------------------------------------------------------------------- #
+# CONTAINMENT — every segment lies inside its machine's own working windows
+# --------------------------------------------------------------------------- #
+def test_every_op_segment_lies_inside_its_machine_clock_windows(loaded):
+    """Every operator shift-segment must fall ENTIRELY inside its own machine's
+    working-clock windows — no minute booked outside the machine's shifts or on an
+    off day. This directly guards the window/lookup consistency the whole handoff
+    feature depends on (the segment clock and the op-lookup clock must agree)."""
+    _, masters = loaded
+    from tests.sample_workbook import ITEM_A, ITEM_B
+    batches = [_batch(ITEM_A, "A", 50), _batch(ITEM_B, "B", 100)]
+    cfg = Config(plan_start_date=date(2025, 3, 3), apply_operator_logic=True,
+                 split_parallel=True, overlap_mode=OVERLAP_PERCENT, overlap_percent=80)
+    sched = rule6_allocate.run(list(batches), config=cfg, masters=masters)
+    clock_for, _ = rule6_allocate._clock_factory(masters, cfg)
+    checked = 0
+    for e in sched:
+        clk = clock_for(e.machine)
+        for (ss, se, op) in (e.op_segments or []):
+            span = (se - ss).total_seconds() / 60.0
+            working = clk.working_minutes_between(ss, se)
+            assert abs(working - span) < 1e-6, (
+                f"segment {ss}-{se} on {e.machine} (op {op!r}) lies partly outside the "
+                f"machine's working windows: {working:.3f} working min of {span:.3f} span")
+            checked += 1
+    assert checked > 0        # the run actually produced operator segments to check
+
+
+# --------------------------------------------------------------------------- #
+# FAIL LOUD — guard exhaustion raises, never silently under-schedules
+# --------------------------------------------------------------------------- #
+def test_lay_segments_raises_when_the_guard_is_exhausted():
+    """A run too long to lay within the segment guard (20000 shift segments) must
+    FAIL LOUD with a RuleError, not return silently with quantity left unscheduled."""
+    cal = WorkCalendar(weekly_off_weekday=6)          # near-24/7 calendar
+    clk = WorkClock(cal, [(0, 24 * 60)])              # a full-day window each working day
+    cfg = _cfg()
+    ps = datetime(2025, 3, 5, 8, 0)
+    op_lookup = lambda m, t: ["Op"]                   # always one free qualified operator
+    # 20,000,000 machine-minutes cannot be laid within 20000 shift segments, so the
+    # guard trips before ``remaining`` reaches zero.
+    try:
+        rule6_allocate._lay_segments("CNC1", clk, ps, 20_000_000, op_lookup, {},
+                                     {}, ps, cfg)
+    except RuleError as ex:
+        assert ex.rule == "rule6"
+        assert "guard exhausted" in ex.message.lower()
+    else:
+        raise AssertionError("expected RuleError on guard exhaustion, none raised")
 
 
 # --------------------------------------------------------------------------- #
