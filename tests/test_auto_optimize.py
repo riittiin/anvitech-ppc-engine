@@ -1,8 +1,13 @@
-"""Phase 1 trigger: admin actions start a contest immediately; punches never do
-(the Done button does); cloud-only; mid-run changes chain a follow-up; the
-AUTO_OPTIMIZE=0 env (internal, tests only) disables everything."""
+"""Scheduled trigger (spec 2026-07-18): the ONLY way an auto contest starts is
+POST /optimize/scheduled (the twice-weekly GitHub cron, worker-secret auth).
+No event triggers remain — admin mutations (upload, commit, uncommit, urgent,
+delete, clear, /run persist) never start a contest on their own; absences are
+covered in tests/test_absences_api.py. All of _try_start_auto's other guards
+still apply: cloud-only, one-at-a-time, and the book-fingerprint skip when
+nothing changed since the last applied plan. AUTO_OPTIMIZE=0 (internal test
+isolation only) disables everything."""
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -34,74 +39,150 @@ def _auto_env(monkeypatch):
     monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3")
 
 
-def test_admin_bump_starts_contest_immediately(monkeypatch):
+# --------------------------------------------------------------------------- #
+# POST /optimize/scheduled — the only entry point into _try_start_auto
+# --------------------------------------------------------------------------- #
+def test_scheduled_requires_worker_secret(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    c = TestClient(m.app)
+    assert c.post("/optimize/scheduled").status_code == 401
+    assert c.post("/optimize/scheduled",
+                  headers={"X-Worker-Secret": "wrong"}).status_code == 401
+
+
+def test_scheduled_starts_contest_with_secret(monkeypatch):
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
     starts = []
     monkeypatch.setattr(m, "_start_optimize",
                         lambda budget_evals, label, background=True, auto=False:
                         starts.append((label, auto)))
-    m._bump_book_changed()
+    c = TestClient(m.app)
+    r = c.post("/optimize/scheduled", headers={"X-Worker-Secret": "s3"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["started"] is True
+    assert "state" in body
     assert starts == [("auto", True)]
 
 
-def test_done_button_any_role_starts_contest(monkeypatch):
-    _auto_env(monkeypatch)
-    m = _api(); _seed_book()
-    starts = []
-    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    c = TestClient(m.app)
-    c.post("/login", data={"username": "anvitech_user",
-                           "password": "anvitech12345678"})
-    r = c.post("/optimize/done")
-    assert r.status_code == 200 and starts
-
-
-def test_mid_run_change_sets_pending_and_chains(monkeypatch):
-    _auto_env(monkeypatch)
-    m = _api(); _seed_book()
-    with m._OPTIMIZE_LOCK:
-        m._OPTIMIZE["state"] = "running"          # simulate a running contest
-    m._bump_book_changed()
-    assert m._AUTO["pending"] is True
-    with m._OPTIMIZE_LOCK:                        # let it finish
-        m._OPTIMIZE["state"] = "idle"
-    starts = []
-    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    m._drain_pending_auto()
-    assert starts and m._AUTO["pending"] is False
-
-
-def test_auto_is_cloud_only(monkeypatch):
-    _auto_env(monkeypatch)
-    m = _api(); _seed_book()
-    monkeypatch.delenv("GITHUB_DISPATCH_TOKEN")
-    starts = []
-    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    m._bump_book_changed()
-    assert starts == []
-    assert "retry" in (book_store.load_auto_note() or {}).get("text", "")
-
-
-def test_internal_env_disables_everything(monkeypatch):
-    m = _api(); _seed_book()                      # AUTO_OPTIMIZE=0 via fixture
-    starts = []
-    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    m._bump_book_changed()
-    assert starts == []
-
-
-def test_no_fire_when_signature_matches_applied(monkeypatch):
+def test_scheduled_no_op_when_signature_matches_applied(monkeypatch):
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
     sig = m._current_book_sig()
     book_store.save_plan_priority({}, {"saved_at": "t", "book_sig": sig})
     starts = []
     monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    m._bump_book_changed()
+    c = TestClient(m.app)
+    r = c.post("/optimize/scheduled", headers={"X-Worker-Secret": "s3"})
+    assert r.status_code == 200
+    assert r.json()["started"] is False
     assert starts == []
 
 
+def test_scheduled_disabled_by_internal_env(monkeypatch):
+    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3")
+    m = _api(); _seed_book()
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    c = TestClient(m.app)
+    r = c.post("/optimize/scheduled", headers={"X-Worker-Secret": "s3"})
+    assert r.status_code == 200
+    assert r.json()["started"] is False
+    assert starts == []
+
+
+def test_scheduled_is_cloud_only(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    monkeypatch.delenv("GITHUB_DISPATCH_TOKEN")
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    c = TestClient(m.app)
+    r = c.post("/optimize/scheduled", headers={"X-Worker-Secret": "s3"})
+    assert r.json()["started"] is False
+    assert starts == []
+    assert "retry" in (book_store.load_auto_note() or {}).get("text", "")
+    assert "scheduled run" in (book_store.load_auto_note() or {}).get("text", "")
+
+
+def test_scheduled_running_contest_returns_false(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["state"] = "running"          # simulate a running contest
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    c = TestClient(m.app)
+    r = c.post("/optimize/scheduled", headers={"X-Worker-Secret": "s3"})
+    assert r.status_code == 200
+    assert r.json()["started"] is False
+    assert starts == []
+
+
+# --------------------------------------------------------------------------- #
+# The done button and every deliberate admin mutation no longer trigger a
+# contest — only the scheduled endpoint does.
+# --------------------------------------------------------------------------- #
+def test_optimize_done_endpoint_is_gone(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech_user",
+                           "password": "anvitech12345678"})
+    r = c.post("/optimize/done")
+    assert r.status_code in (404, 405)
+
+
+def test_admin_mutations_do_not_start_contests(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+
+    r = c.post("/orders/commit", json={"orders": [["SO2", ITEM_B]]})
+    assert r.status_code == 200 and not starts
+
+    r = c.post("/upload", files={"file": ("sample.xlsx", build_sample_bytes(),
+               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
+    assert r.status_code == 200 and not starts
+
+    r = c.post("/orders/uncommit", json={"orders": [["SO2", ITEM_B]]})
+    assert r.status_code == 200 and not starts
+
+    r = c.post("/orders/urgent", json={"so": "SO1", "item": ITEM_A, "confirm": True})
+    assert r.status_code == 200 and not starts
+
+    r = c.post("/run", json={"config": {}, "persist": True})
+    assert r.status_code == 200 and not starts
+
+    r = c.post("/orders/delete", json={"orders": [["SO1", ITEM_A]], "password": "1930rail"})
+    assert r.status_code == 200 and not starts
+
+    r = c.post("/orders/clear", json={"password": "1930rail"})
+    assert r.status_code == 200 and not starts
+
+
+def test_run_still_surfaces_the_auto_note(monkeypatch):
+    """/run keeps reporting whatever note the last scheduled contest left —
+    it just doesn't trigger a new one."""
+    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
+    m = _api()
+    _seed_book()
+    book_store.save_auto_note({"text": "hello", "at": "t"})
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    r = c.post("/run", json={})
+    assert r.json()["auto_note"]["text"] == "hello"
+
+
+# --------------------------------------------------------------------------- #
+# End-to-end contest behavior (unchanged machinery, just entered differently)
+# --------------------------------------------------------------------------- #
 def test_auto_contest_applies_only_when_strictly_better(monkeypatch):
     _auto_env(monkeypatch)
     # "manual" dispatch never calls a real worker; force a fast fallback to
@@ -109,7 +190,7 @@ def test_auto_contest_applies_only_when_strictly_better(monkeypatch):
     monkeypatch.setenv("OPTIMIZE_CLOUD_TIMEOUT_MIN", "0.01")
     m = _api()
     _seed_book()
-    m._bump_book_changed()                              # real contest, sample book
+    m._try_start_auto()                                 # real contest, sample book
     t0 = time.time()
     while m._optimize_status()["state"] == "running" and time.time() - t0 < 60:
         time.sleep(0.05)
@@ -137,94 +218,6 @@ def test_manual_apply_also_records_book_sig(monkeypatch):
     m._start_optimize(budget_evals=15, label="deep", background=False)
     m._optimize_apply()
     assert book_store.load_plan_priority()["meta"]["book_sig"] == m._current_book_sig()
-
-
-# --------------------------------------------------------------------------- #
-# Task 5: wiring the bumps + surfacing the auto note + the clerk's Done button
-# --------------------------------------------------------------------------- #
-
-def test_mutating_endpoints_bump_and_run_returns_note(monkeypatch):
-    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
-    m = _api()
-    _seed_book()
-    bumps = []
-    monkeypatch.setattr(m, "_bump_book_changed", lambda: bumps.append(1))
-    c = TestClient(m.app)
-    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
-    c.post("/actuals", json={"so_no": "SO1", "item_code": ITEM_A,
-                             "entry_date": "2025-03-05", "qty_produced": 1,
-                             "process": "", "shift": "A"})
-    assert not bumps                                   # punches do NOT bump
-    c.post("/orders/commit", json={"orders": [["SO2", ITEM_B]]})
-    assert bumps                                       # admin action bumped
-    book_store.save_auto_note({"text": "hello", "at": "t"})
-    r = c.post("/run", json={})
-    assert r.json()["auto_note"]["text"] == "hello"
-
-
-def test_rollback_does_not_bump(monkeypatch):
-    """The /actuals/rollback punch endpoint must not bump either."""
-    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
-    m = _api()
-    _seed_book()
-    c = TestClient(m.app)
-    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
-    r = c.post("/actuals", json={"so_no": "SO1", "item_code": ITEM_A,
-                                "entry_date": "2025-03-05", "qty_produced": 1,
-                                "process": "", "shift": "A"})
-    entry_id = r.json()["actuals_ids"][0]
-    bumps = []
-    monkeypatch.setattr(m, "_bump_book_changed", lambda: bumps.append(1))
-    c.post("/actuals/rollback", json={"id": entry_id})
-    assert not bumps
-
-
-def test_all_deliberate_admin_mutations_bump(monkeypatch):
-    """upload, delete, clear, commit, uncommit, urgent, and the persist=True
-    branch of /run each call _bump_book_changed() — every other admin
-    mutation the brief lists besides the one already covered above."""
-    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
-    m = _api()
-    _seed_book()
-    bumps = []
-    monkeypatch.setattr(m, "_bump_book_changed", lambda: bumps.append(1))
-    c = TestClient(m.app)
-    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
-
-    bumps.clear()
-    c.post("/orders/urgent", json={"so": "SO1", "item": ITEM_A, "confirm": True})
-    assert bumps, "orders/urgent did not bump"
-
-    bumps.clear()
-    c.post("/orders/uncommit", json={"orders": [["SO1", ITEM_A]]})
-    assert bumps, "orders/uncommit did not bump"
-
-    bumps.clear()
-    r = c.post("/run", json={"config": {}, "persist": True})
-    assert r.status_code == 200
-    assert bumps, "/run persist=True did not bump"
-
-    bumps.clear()
-    r = c.post("/run", json={"config": {}, "persist": False})
-    assert r.status_code == 200
-    assert not bumps, "/run persist=False must NOT bump"
-
-    from tests.sample_workbook import build_sample_bytes
-    bumps.clear()
-    r = c.post("/upload", files={"file": ("sample.xlsx", build_sample_bytes(),
-               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
-    assert r.status_code == 200
-    assert bumps, "/upload did not bump"
-
-    bumps.clear()
-    r = c.post("/orders/delete", json={"orders": [["SO1", ITEM_A]], "password": "1930rail"})
-    assert r.status_code == 200
-    assert bumps, "/orders/delete did not bump"
-
-    bumps.clear()
-    r = c.post("/orders/clear", json={"password": "1930rail"})
-    assert r.status_code == 200
-    assert bumps, "/orders/clear did not bump"
 
 
 def test_optimize_status_carries_auto_field(monkeypatch):
@@ -264,3 +257,37 @@ def test_auto_apply_keeps_current_when_no_plan(monkeypatch):
     loaded_ranks = book_store.load_plan_priority()
     assert loaded_ranks is not None
     assert loaded_ranks["ranks"] == saved_ranks
+
+
+# --------------------------------------------------------------------------- #
+# IST display (server runs UTC; the notes reference a named local clock time)
+# --------------------------------------------------------------------------- #
+def test_auto_note_timestamp_is_ist(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    before = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    m._auto_note_write("a test note")
+    after = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    note = book_store.load_auto_note()
+    at = datetime.fromisoformat(note["at"])
+    assert before - timedelta(seconds=5) <= at <= after + timedelta(seconds=5)
+
+
+def test_auto_apply_result_stamp_is_ist(monkeypatch):
+    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
+    m = _api(); _seed_book()
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["result"] = {"best": None}
+        m._OPTIMIZE["auto"] = True
+    before = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%H:%M")
+    m._auto_apply_result()
+    after = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%H:%M")
+    # "no plan" branch doesn't stamp a time, so drive the "still best" branch too:
+    book_store.save_plan_priority({"k": 1}, {"saved_at": "t"})
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["result"] = {"best": {"total_late_days": 999,
+                                          "makespan_days": 999}}
+        m._OPTIMIZE["auto"] = True
+    m._auto_apply_result()
+    note = book_store.load_auto_note()
+    assert before in note["text"] or after in note["text"]

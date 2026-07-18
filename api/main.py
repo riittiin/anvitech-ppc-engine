@@ -112,7 +112,8 @@ async def gatekeeper(request: Request, call_next):
     # paths simply fall through to the normal session gate (→ 401).
     if ((method == "GET" and path.startswith("/optimize/job/"))
             or (method == "POST" and path in ("/optimize/progress",
-                                              "/optimize/result"))):
+                                              "/optimize/result",
+                                              "/optimize/scheduled"))):
         if _worker_secret_ok(request):
             request.state.user = "cloud-worker"
             request.state.role = "worker"
@@ -784,17 +785,23 @@ def _worker_secret_ok(request: Request) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Self-tuning trigger (spec 2026-07-15-self-tuning-plan, owner-revised):
-# deliberate admin actions re-optimize IMMEDIATELY; punch entry re-optimizes
-# only when the clerk presses "Done entering" (POST /optimize/done). No
-# timers. AUTO_OPTIMIZE=0 is internal test isolation only — never user-facing.
+# Scheduled trigger (spec 2026-07-18-scheduled-optimize, supersedes the
+# event-triggered 2026-07-15-self-tuning-plan Phase 1): the job order is
+# re-optimized only twice a week (Mon/Fri 11:00 IST), via the GitHub cron
+# hitting POST /optimize/scheduled. No event triggers — uploads, commits/
+# urgent/uncommit, deletes, Settings saves, and absences no longer start a
+# contest; new orders arrive Open and wait for the next scheduled run (or the
+# owner's manual Optimize button). AUTO_OPTIMIZE=0 is internal test isolation
+# only — never user-facing.
 # --------------------------------------------------------------------------- #
-_AUTO = {"pending": False}
-_AUTO_LOCK = threading.Lock()
-
-
 def _auto_enabled() -> bool:
     return os.environ.get("AUTO_OPTIMIZE", "1") != "0"
+
+
+def _ist_now():
+    """Server runs UTC; the auto notes reference a named local (IST) clock."""
+    from datetime import datetime as _dt, timedelta as _td
+    return _dt.utcnow() + _td(hours=5, minutes=30)
 
 
 def _current_book_sig() -> str:
@@ -807,9 +814,8 @@ def _current_book_sig() -> str:
 
 
 def _auto_note_write(text: str):
-    from datetime import datetime as _dt
     book_store.save_auto_note({"text": text,
-                               "at": _dt.now().isoformat(timespec="seconds")})
+                               "at": _ist_now().isoformat(timespec="seconds")})
 
 
 def _applied_book_sig():
@@ -830,17 +836,16 @@ def _applied_book_sig():
 
 
 def _try_start_auto() -> bool:
-    """The one decision point: start an auto contest now if it makes sense."""
+    """The one decision point: start an auto contest now if it makes sense.
+    Invoked only by POST /optimize/scheduled (the twice-weekly GitHub cron)."""
     if not _auto_enabled():
         return False
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["state"] == "running":
-            with _AUTO_LOCK:
-                _AUTO["pending"] = True          # chain after the current run
-            return False
+            return False                         # one contest at a time
     if _cloud_config() is None:
         _auto_note_write("Auto-optimize skipped — cloud compute unavailable; "
-                         "will retry on the next change.")
+                         "will retry on the next scheduled run.")
         return False                             # auto is cloud-only
     applied_sig = _applied_book_sig()
     try:
@@ -853,21 +858,6 @@ def _try_start_auto() -> bool:
         return True
     except HTTPException:
         return False                             # e.g. nothing to optimize
-
-
-def _bump_book_changed():
-    """Call after DELIBERATE admin mutations (upload, delete, commitment,
-    absence, Settings save). Punch saves do NOT call this — the clerk's
-    Done button does."""
-    _try_start_auto()
-
-
-def _drain_pending_auto():
-    """Called when a contest finishes: if the book changed mid-run, follow up."""
-    with _AUTO_LOCK:
-        pending, _AUTO["pending"] = _AUTO["pending"], False
-    if pending:
-        _try_start_auto()
 
 
 def _start_optimize(budget_evals: int, label: str, background: bool = True,
@@ -1037,7 +1027,6 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
             _auto_apply_result()
         except Exception:   # noqa: BLE001 — an auto note must never crash a result
             pass
-    _drain_pending_auto()
     return True
 
 
@@ -1108,7 +1097,6 @@ def _incumbent_metrics():
 def _auto_apply_result():
     """Called after an auto contest lands in state=done: apply iff strictly
     better than the incumbent; write the note either way."""
-    from datetime import datetime
     with _OPTIMIZE_LOCK:
         res = _OPTIMIZE.get("result") or {}
         best = res.get("best")
@@ -1119,15 +1107,13 @@ def _auto_apply_result():
         # `best` was scored on the book as it stood when this contest started
         # (its snapshot); `_incumbent_metrics()` below scores the incumbent
         # against TODAY's book. If production punched an actual mid-run, that's
-        # a transiently mismatched comparison — but a mutation during a run
-        # also flips `_AUTO["pending"]`, so `_drain_pending_auto()` immediately
-        # starts a follow-up contest on the new book, which re-compares
-        # correctly and self-heals.
+        # a transiently mismatched comparison — the next scheduled run
+        # re-compares against the fresh book and self-heals.
         inc = _incumbent_metrics()
     except Exception as e:  # noqa: BLE001
         _auto_note_write(f"Auto-optimize finished but could not compare: {e}")
         return
-    stamp = datetime.now().strftime("%H:%M")
+    stamp = _ist_now().strftime("%H:%M")
     if optimizer.score(best) < optimizer.score(inc):
         meta = _optimize_apply()          # persists ranks + overlap + inputs_sig + book_sig
         ov = res.get("best_overlap"); cur = res.get("current_overlap")
@@ -1218,7 +1204,6 @@ async def upload(request: Request, file: UploadFile = File(...)):
         "summary": {"items": len(masters.routings), "machines": len(masters.machines)},
         "report": _report_for_book(masters, book_lines),
     }
-    _bump_book_changed()
     return result
 
 
@@ -1242,7 +1227,6 @@ def run(request: Request, req: Optional[RunRequest] = None):
         except (ValueError, TypeError) as e:
             raise HTTPException(status_code=400, detail=f"invalid config: {e}")
         book_store.save_plan_config(json.dumps(config.to_dict()))
-        _bump_book_changed()
     elif book_store.load_plan_config():
         config = _load_plan_config()   # a saved plan exists → everyone sees it
     elif sent is not None:
@@ -1279,7 +1263,6 @@ def delete_orders(req: DeleteRequest, request: Request):
     require_password(request, req.password)
     pairs = [(o[0], o[1]) for o in req.orders if len(o) == 2]
     n = book_store.delete_orders(pairs)
-    _bump_book_changed()
     return {"deleted": n}
 
 
@@ -1290,7 +1273,6 @@ def clear_orders(req: ClearRequest, request: Request):
     require_admin(request)
     require_password(request, req.password)
     book_store.delete_all()
-    _bump_book_changed()
     return {"cleared": True}
 
 
@@ -1301,7 +1283,6 @@ def commit_orders_ep(req: CommitRequest, request: Request):
     only."""
     require_admin(request)
     _commit_orders([(o[0], o[1]) for o in req.orders if len(o) == 2])
-    _bump_book_changed()
     return {"committed": len(req.orders)}
 
 
@@ -1313,7 +1294,6 @@ def uncommit_orders_ep(req: CommitRequest, request: Request):
     for o in req.orders:
         if len(o) == 2:
             book_store.clear_commitment(o[0], o[1])
-    _bump_book_changed()
     return {"uncommitted": len(req.orders)}
 
 
@@ -1328,7 +1308,6 @@ def urgent_order_ep(req: UrgentRequest, request: Request):
     book_store.set_commitment(req.so, req.item, "urgent",
                               order.delivery_date if order else None,
                               datetime.now().isoformat(timespec="seconds"))
-    _bump_book_changed()
     return {"urgent": True}
 
 
@@ -1365,7 +1344,6 @@ def create_absence(req: AbsenceRequest, request: Request):
     saved = book_store.save_absence({"operator": req.operator,
                                      "from_date": d_from.isoformat(),
                                      "to_date": d_to.isoformat()})
-    _bump_book_changed()
     return {"absence": saved}
 
 
@@ -1375,7 +1353,6 @@ def delete_absence_ep(absence_id: str, request: Request):
     require_admin(request)
     if not book_store.delete_absence(absence_id):
         raise HTTPException(status_code=404, detail="absence not found")
-    _bump_book_changed()
     return {"deleted": True}
 
 
@@ -1416,14 +1393,6 @@ def optimize_clear_ep(request: Request):
     """Remove the applied optimization (back to the pure Rule-3 order). Admin only."""
     require_admin(request)
     return _optimize_clear()
-
-
-@app.post("/optimize/done")
-def optimize_done_ep(request: Request):
-    """The Capture-tab 'Done entering' button — ANY logged-in role. Starts the
-    self-tuning contest over today's book (no-op when nothing changed)."""
-    started = _try_start_auto()
-    return {"started": started, "state": _optimize_status()["state"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -1503,6 +1472,16 @@ def optimize_result_ep(req: WorkerResult, request: Request):
     if not stored:
         raise HTTPException(status_code=409, detail="job superseded")
     return {"ok": True}
+
+
+@app.post("/optimize/scheduled")
+def optimize_scheduled_ep(request: Request):
+    """The twice-weekly trigger (GitHub cron; worker-secret auth). All of
+    _try_start_auto's guards apply — cloud-only, one-at-a-time, and the
+    book-fingerprint skip when nothing changed since the last applied plan."""
+    _require_worker(request)
+    started = _try_start_auto()
+    return {"started": started, "state": _optimize_status()["state"]}
 
 
 @app.get("/gantt")

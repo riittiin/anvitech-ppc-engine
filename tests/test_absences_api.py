@@ -152,18 +152,23 @@ def test_orphan_absence_lists_and_reports(monkeypatch):
     assert ("ABSENT_OPERATOR_UNKNOWN", "Ghost Operator") in kinds_refs
 
 
-# --- _bump_book_changed trigger ------------------------------------------ #
-def test_post_and_delete_each_bump_book_changed(monkeypatch):
+# --- no event trigger (scheduled-optimize design, 2026-07-18) ------------ #
+def test_post_and_delete_do_not_start_a_contest(monkeypatch):
+    """Absence changes no longer start an auto contest — the twice-weekly
+    scheduled run picks them up via the book fingerprint instead."""
+    monkeypatch.setenv("AUTO_OPTIMIZE", "1")
+    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "manual")
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3")
     m = _api(); _seed_book()
     admin = _admin_client(m)
-    calls = []
-    monkeypatch.setattr(m, "_bump_book_changed", lambda: calls.append(1))
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
 
     r = admin.post("/absences", json={"operator": "Operator One",
                                       "from_date": "2025-03-10",
                                       "to_date": "2025-03-12"})
     absence_id = r.json()["absence"]["id"]
-    assert len(calls) == 1
+    assert not starts
 
     admin.delete(f"/absences/{absence_id}")
-    assert len(calls) == 2
+    assert not starts
