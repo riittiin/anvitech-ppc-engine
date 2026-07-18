@@ -3,6 +3,8 @@ on:
   schedule:
     - cron: "30 5 * * 1,5"   # Mon & Fri 11:00 IST — after the ~10:00 feedback entry
   workflow_dispatch: {}
+# Shares the compute workflow's group deliberately: if a manual contest is
+# already running, this trigger simply queues behind it (delay, not failure).
 concurrency: optimize
 jobs:
   trigger:
