@@ -915,6 +915,7 @@ function actualsFormHtml() {
   const left =
     fy("Date", `<input id="a-date" type="date" value="${today}" /> <span id="a-date-echo" class="date-echo"></span>`) +
     fy("Shift", `<input id="a-shift" value="1st shift" />`) +
+    fr("Operator <span class=auto>(required)</span>", `<select id="a-operator"><option value="">— select operator —</option></select>`) +
     fr("SO No <span class=auto>(step 1 — pick from orders)</span>", `<select id="a-so"><option value="">— select SO No —</option></select>`) +
     fr("Item Code <span class=auto>(step 2 — pick this SO's item)</span>", `<select id="a-item"><option value="">— select SO No first —</option></select>`) +
     fr("Item Name <span class=auto>(auto)</span>", `<input id="a-itemname" readonly />`) +
@@ -939,6 +940,23 @@ function actualsFormHtml() {
       <button id="optimize-done" class="primary">Done entering — update plan</button>
       <span id="optimize-done-status" class="status"></span>
     </div>`;
+}
+
+// Populate the Capture Actuals Operator dropdown from the app-owned operator
+// table (GET /operators — role-open, same list either role sees on Settings).
+async function fillOperatorDropdown() {
+  const sel = $("a-operator");
+  if (!sel) return;
+  try {
+    const res = await fetch("/operators");
+    if (!res.ok) return;
+    const data = await res.json();
+    const rows = data.operators || [];
+    const keep = sel.value;
+    sel.innerHTML = `<option value="">— select operator —</option>`
+      + rows.map((o) => `<option value="${escapeHtml(o.name)}">${escapeHtml(o.name)}</option>`).join("");
+    if (keep) sel.value = keep;
+  } catch (e) { /* dropdown stays empty; required-field check + server 400 are the backstop */ }
 }
 
 // Populate the SO No dropdown with every SO from the orders tab.
@@ -1013,6 +1031,7 @@ async function wireActualsForm() {
   ITEMS = null;                 // refetch so the SO dropdown reflects the latest orders
   await ensureItems();
   fillSoDropdown();
+  await fillOperatorDropdown();
   $("a-so").addEventListener("change", fillItemFromSO);   // step 1: pick SO No -> fill Item dropdown
   $("a-item").addEventListener("change", fillItemMeta);   // step 2: pick Item -> name + processes
   fillItemMeta();
@@ -1032,6 +1051,7 @@ async function wireActualsForm() {
       entry_date: $("a-date").value, shift: $("a-shift").value,
       so_no: $("a-so").value.trim(), item_code: $("a-item").value.trim(),
       item_name: $("a-itemname").value, process: $("a-process").value,
+      operator: $("a-operator").value.trim(),
       qty_produced: num("a-prod"), qty_rejected: num("a-rej"),
       actual_setup_min: num("a-setup"), no_power_min: num("a-nopower"),
       no_operator_min: num("a-noop"), tool_problem_min: num("a-tool"),
@@ -1039,9 +1059,9 @@ async function wireActualsForm() {
       other_work_min: num("a-other"), remarks: $("a-remarks").value,
       mark_complete: $("a-complete").checked,
     };
-    if (!body.so_no || !body.item_code) {
-      setStatus("⚠ Enter SO No and Item Code before saving.");
-      $(body.so_no ? "a-item" : "a-so").focus();
+    if (!body.operator || !body.so_no || !body.item_code) {
+      setStatus("⚠ Select Operator, SO No, and Item Code before saving.");
+      $(!body.operator ? "a-operator" : body.so_no ? "a-item" : "a-so").focus();
       return;
     }
     // Guard against re-saving the exact same entry (the #1 cause of duplicates).

@@ -44,3 +44,29 @@ def test_aggregate_by_item_sums_downtime_per_item():
     assert row["Qty Produced"] == 82 and row["Good Qty"] == 79
     assert row["No Operator"] == 50                    # 30 + 20
     assert row["Total Downtime (min)"] == 140          # (30+10) + (20+80)
+
+
+def test_operator_round_trips_through_json():
+    a = _entry(operator="Operator One")
+    d = a.to_json()
+    assert d["operator"] == "Operator One"
+    back = Actual.from_json(d)
+    assert back.operator == "Operator One"
+
+
+def test_operator_defaults_to_empty_string():
+    a = _entry()
+    assert a.operator == ""
+
+
+def test_legacy_from_json_without_operator_key_loads_as_empty_string():
+    a = _entry(operator="Operator One")
+    d = a.to_json()
+    del d["operator"]                       # simulate a pre-Task-1 saved record
+    back = Actual.from_json(d)
+    assert back.operator == ""
+
+
+def test_operator_appears_in_as_row():
+    a = _entry(operator="Operator One")
+    assert a.as_row()["Operator"] == "Operator One"

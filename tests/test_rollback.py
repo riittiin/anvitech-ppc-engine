@@ -28,7 +28,8 @@ def _post(client, **kw):
     # ITEM_A's routing ends at INSP (no DISPATCH) — its finished-goods gate. Posting
     # there means the entry actually fulfils the order, so remaining drops (and is
     # restored on rollback); intermediate-process production would not count.
-    body = {"so_no": SO1, "item_code": ITEM_A, "entry_date": "2025-03-10", "process": "INSP"}
+    body = {"so_no": SO1, "item_code": ITEM_A, "entry_date": "2025-03-10", "process": "INSP",
+            "operator": "Operator One"}
     body.update(kw)
     r = client.post("/actuals", json=body)
     assert r.status_code == 200
@@ -99,11 +100,33 @@ def test_malformed_entry_date_is_400(client):
     assert r.status_code == 400
 
 
+def test_missing_operator_is_400(client):
+    r = client.post("/actuals", json={"so_no": SO1, "item_code": ITEM_A,
+                                      "entry_date": "2025-03-10", "qty_produced": 1})
+    assert r.status_code == 400
+    assert "operator" in r.json()["detail"].lower()
+
+
+def test_blank_operator_is_400(client):
+    r = client.post("/actuals", json={"so_no": SO1, "item_code": ITEM_A,
+                                      "entry_date": "2025-03-10", "qty_produced": 1,
+                                      "operator": "   "})
+    assert r.status_code == 400
+
+
+def test_unknown_operator_is_400(client):
+    r = client.post("/actuals", json={"so_no": SO1, "item_code": ITEM_A,
+                                      "entry_date": "2025-03-10", "qty_produced": 1,
+                                      "operator": "Nobody Real"})
+    assert r.status_code == 400
+    assert "operator" in r.json()["detail"].lower()
+
+
 def test_only_latest_date_entries_are_shown_and_rollback_able(client):
-    old = {"so_no": SO1, "item_code": ITEM_A, "process": "INSP",
+    old = {"so_no": SO1, "item_code": ITEM_A, "process": "INSP", "operator": "Operator One",
            "entry_date": "2025-03-01", "qty_produced": 1}
     e_old = client.post("/actuals", json=old).json()["actuals_ids"][-1]
-    new = {"so_no": SO1, "item_code": ITEM_A, "process": "INSP",
+    new = {"so_no": SO1, "item_code": ITEM_A, "process": "INSP", "operator": "Operator One",
            "entry_date": "2025-03-02", "qty_produced": 1}
     resp = client.post("/actuals", json=new).json()
     e_new = resp["actuals_ids"][-1]

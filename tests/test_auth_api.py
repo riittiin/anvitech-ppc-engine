@@ -119,7 +119,7 @@ def test_user_can_capture_actuals_and_mark_complete():
     _upload(admin)
     user = _user()
     r = user.post("/actuals", json={
-        "so_no": SO1, "item_code": ITEM_A,
+        "so_no": SO1, "item_code": ITEM_A, "operator": "Operator One",
         "entry_date": "2025-03-10", "qty_produced": 5, "mark_complete": True,
     })
     assert r.status_code == 200 and r.json()["completed_order"] is True

@@ -434,6 +434,7 @@ class ActualRequest(BaseModel):
     shift: str = ""
     item_name: str = ""
     process: str = ""
+    operator: str = ""
     # Quantities/times can never be negative — a negative would corrupt the
     # produced/rejected math and the plan. Rejected server-side (422), not just the UI.
     qty_produced: float = Field(default=0.0, ge=0)
@@ -1719,11 +1720,18 @@ def post_actuals(req: ActualRequest):
         entry_date = date.fromisoformat(req.entry_date)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="entry_date must be YYYY-MM-DD")
+    operator = req.operator.strip()
+    if not operator:
+        raise HTTPException(status_code=400, detail="operator is required")
+    known_operators = {o.name for o in _current_masters().operators}
+    if operator not in known_operators:
+        raise HTTPException(status_code=400, detail=f"unknown operator '{operator}'")
     actual = Actual(
         so_no=req.so_no, item_code=req.item_code,
         entry_date=entry_date,
         qty_produced=req.qty_produced, qty_rejected=req.qty_rejected,
         shift=req.shift, item_name=req.item_name, process=req.process,
+        operator=operator,
         actual_setup_min=req.actual_setup_min,
         no_power_min=req.no_power_min, no_operator_min=req.no_operator_min,
         tool_problem_min=req.tool_problem_min,

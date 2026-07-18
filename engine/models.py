@@ -296,6 +296,7 @@ class Actual:
     shift: str = ""
     item_name: str = ""      # auto-prompted from the routing (display only)
     process: str = ""        # which routing process this entry reports
+    operator: str = ""       # who ran this process (required at capture time; legacy rows default "")
     id: str = ""             # stable unique id (for targeted rollback)
     # --- actual setup time (planned default lives in config.setup_time_min) -- #
     actual_setup_min: float = 0.0
@@ -339,6 +340,7 @@ class Actual:
             "Item Code": self.item_code,
             "Item Name": self.item_name,
             "Process": self.process,
+            "Operator": self.operator,
             "Qty Produced": self.qty_produced,
             "Qty Rejected": self.qty_rejected,
             "Good Qty": self.good_qty(),
@@ -364,6 +366,7 @@ class Actual:
             "shift": self.shift,
             "item_name": self.item_name,
             "process": self.process,
+            "operator": self.operator,
             "actual_setup_min": self.actual_setup_min,
             "no_power_min": self.no_power_min,
             "no_operator_min": self.no_operator_min,
@@ -387,6 +390,7 @@ class Actual:
             shift=d.get("shift", ""),
             item_name=d.get("item_name", ""),
             process=d.get("process", ""),
+            operator=d.get("operator", ""),
             # accept the old key name for forward-compat with any saved file.
             actual_setup_min=d.get("actual_setup_min", d.get("setup_time_min", 0.0)),
             no_power_min=d.get("no_power_min", 0.0),

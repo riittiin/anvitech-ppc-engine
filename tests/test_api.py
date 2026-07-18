@@ -73,7 +73,7 @@ def test_reupload_same_file_adds_nothing(client):
 def test_actual_marks_order_complete(client):
     _upload_test_workbook(client)
     r = client.post("/actuals", json={
-        "so_no": SO1, "item_code": ITEM_A,
+        "so_no": SO1, "item_code": ITEM_A, "operator": "Operator One",
         "entry_date": "2025-03-10", "qty_produced": 5, "mark_complete": True,
     })
     assert r.status_code == 200 and r.json()["completed_order"] is True
@@ -150,7 +150,7 @@ def test_recorded_downtime_does_not_affect_the_schedule(client):
 
     def punch(**extra):
         body = {"so_no": so, "item_code": item, "entry_date": "2025-03-07",
-                "process": process, "qty_produced": 1}
+                "process": process, "qty_produced": 1, "operator": "Operator One"}
         body.update(extra)
         return client.post("/actuals", json=body).json()["actuals_ids"][-1]
 
