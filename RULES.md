@@ -406,34 +406,50 @@ a regression, not an aspiration (`tests/test_replay_single_pass.py`).
 > preview) was removed. See `docs/superpowers/specs/2026-07-15-self-tuning-plan-design.md`'s
 > SUPERSEDED Phase-2 block for the full account.
 
-### Self-tuning plan — the plan re-optimizes itself *(feature, 2026-07-16)*
+### Scheduled optimize — the job order re-optimizes itself, twice a week *(feature, 2026-07-18, supersedes the event-triggered "self-tuning plan" of 2026-07-16)*
 
-Rather than requiring the admin to remember to click Optimize, the plan **watches for
-changes and re-optimizes on its own**:
+The plan still re-optimizes itself without anyone remembering to click Optimize — but
+the owner drew a hard line between two very different things:
 
-- **What counts as a change:** a fingerprint (`book_signature`) of every active order's
-  remaining qty, per-process remaining, lane/promised date, and the current operator
-  absences. Any deliberate admin action that can change this — a masters upload, an
-  order delete/clear, a commit/urgent/uncommit, an absence added/removed, or a Settings
-  save — **immediately** kicks off a fresh Optimize contest in the background.
-- **Punches never auto-trigger.** Each punch still replans instantly (the facts always
-  flow), but the entry clerk presses a **"Done entering — update & optimize plan"**
-  button (either role) when finished for the day; that is the only thing that starts an
-  optimize contest from punched actuals. A contest already running just gets queued to
-  re-check the book once it finishes, so no change is silently dropped.
-- **Cloud-only.** The background contest only runs when the free GitHub Actions cloud
-  compute is configured (see "Optimize plan" below); if it isn't, the self-tuning check
-  is skipped with a note rather than burning the free web instance for 20-40 minutes.
-  The manual Optimize button is unaffected — it still falls back to local compute.
-- **Auto-apply only if strictly better.** When the contest finishes, its best plan is
-  compared against what the users currently see (today's applied plan, or the plain
-  plan if none is applied, replanned on today's book). It is applied automatically only
-  if it is **strictly** better (never on a tie or a worse result) — including the
-  overlap % if the settings sweep (below) found a better one. Either way a one-line note
-  appears on the Orders tab: *"Plan auto-re-optimized 18:12 — 445 late-days (was 471),
-  overlap 80 → 70"* or *"Checked 18:12 — current plan still best."*
-- **No off switch.** Self-tuning is always on in the deployed app; there is no button or
-  setting to turn it off.
+- **Facts vs job order.** Every punch still replans **instantly** — quantities, dates,
+  and the Gantt always reflect what actually happened on the floor, every day. But
+  re-sequencing the batch *order* every time something changes was found to destroy
+  schedule trust (the floor was seeing a different plan hour to hour). So the JOB ORDER
+  — the thing a fresh Optimize contest can change — is only re-optimized **twice a
+  week, automatically: Monday and Friday at 11:00 IST (05:30 UTC)**. Feedback is
+  entered on the floor by ~10:00; the freshly re-optimized schedule is ready before
+  shift 2 starts. With Thursday as the weekly off, Monday and Friday sit exactly 3
+  working days apart in both directions — an even spread across the week.
+- **No event triggers.** A masters upload, an order delete/clear, a commit/urgent/
+  uncommit, an absence added/removed, and a Settings save no longer kick off a contest
+  by themselves — they just take effect, and the next scheduled run picks them up. New
+  orders arrive Open and sit there until either the next Monday/Friday run or the
+  owner's own manual Optimize click — that manual flow (arrive Open → owner presses
+  Optimize → commits) is untouched and still works exactly as before.
+- **The Done button keeps its old meaning, not the contest.** The Capture Actuals
+  "Done entering — update plan" button still means "I've finished punching today's
+  numbers" — it refreshes the plan from those punches immediately and tells the clerk
+  when the next scheduled optimization will run. It no longer starts a search of its
+  own; punches were never supposed to trigger a re-sequence, and now nothing else does
+  either except the twice-weekly schedule.
+- **Cloud-only, one at a time, and skipped when nothing changed.** The scheduled run
+  only fires a contest when the free GitHub Actions cloud compute is configured (see
+  "Optimize plan" below); if it isn't, the run is skipped with a note rather than
+  burning the free web instance for 20-40 minutes. It never overlaps a contest already
+  in progress. And if the fingerprint of today's book (order keys, remaining qty,
+  lane/promised date, absences) matches the one the currently-applied plan was computed
+  from, it skips silently — there's nothing new to re-sequence.
+- **Auto-apply only if strictly better.** Exactly as before: when the scheduled contest
+  finishes, its best plan is compared against what users currently see (today's applied
+  plan, or the plain plan if none is applied, replanned on today's book). It is applied
+  automatically only if it is **strictly** better (never on a tie or a worse result) —
+  including the overlap % if the settings sweep (below) found a better one. Either way
+  a one-line note appears on the Orders tab, timestamped in local (IST) time: *"Plan
+  auto-re-optimized 11:00 — 445 late-days (was 471), overlap 80 → 70"* or *"Checked
+  11:00 — current plan still best."*
+- **No off switch.** The twice-weekly schedule is always on in the deployed app; there
+  is no button or setting to turn it off (`AUTO_OPTIMIZE=0` exists only as an internal
+  test-isolation switch, never exposed).
 
 ### Optimize plan (sequence search) *(feature)*
 
@@ -486,8 +502,8 @@ keeps the best.
   occupy, **unranked (new) orders keep their natural Rule-3 slot** — a fresh urgent
   order is never pushed to the back. A banner flags how many orders were added since
   the last optimization ("re-optimize for the best plan"); **Remove optimization**
-  reverts to the pure Rule-3 order. Since 2026-07-16 a contest may also be started
-  automatically by the self-tuning plan (above) and auto-applied.
+  reverts to the pure Rule-3 order. A contest may also be started automatically twice a
+  week by the scheduled optimize (above) and auto-applied.
 - **Replay guarantee:** feeding the saved ranks back through the pipeline reproduces
   exactly the metrics the search reported (tested) — **for the same inputs**. The
   applied result carries a **fingerprint of the masters workbook + the plan-shaping

@@ -18,13 +18,16 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0, 512 MB).
 - **Repo:** GitHub `riittiin/anvitech-ppc-engine` (private). Push to `main` →
   Render auto-redeploys (no separate deploy step).
-- **362 tests pass, 1 skipped** (`pytest`, the skip is Mongo). FastAPI backend + vanilla
-  HTML/JS frontend, plain Python engine. Python 3 (run as `python3` locally — no
-  `python` alias). ⚠️ **`main` is currently behind:** the self-tuning plan + operator
-  absences + cloud-Optimize work below is on branch `self-tuning-plan`, complete and
-  tested, but **NOT pushed to `main`** — the live site still runs the 2026-07-15
-  deploy-day code (see "Latest session (2026-07-15/16)" below for what's staged and
-  why it hasn't shipped yet).
+- **362 tests pass, 1 skipped** (`pytest` on `main`; the skip is Mongo) — **364** on the
+  unshipped `scheduled-optimize` branch below. FastAPI backend + vanilla HTML/JS
+  frontend, plain Python engine. Python 3 (run as `python3` locally — no `python`
+  alias). The self-tuning plan + operator absences + cloud-Optimize work described in
+  "Latest session (2026-07-15/16)" below is now **merged and pushed to `main`** (it was
+  staged/unshipped when that section was first written). ⚠️ **`main` is behind again:**
+  a floor-stability pivot — automatic optimization now runs only **twice a week** via a
+  GitHub cron instead of on every change — is built and tested on branch
+  `scheduled-optimize`, **NOT pushed to `main`** (see "Latest session (2026-07-18)"
+  below for what's staged and why).
 - **Login is a two-role app-owned session** (admin / user) — see "Login & roles".
 - The engine has **8 business rules** (1–8). (Rule 8 = the Plan over the order book —
   there is no `rule8` module.) The UI now shows only **4 tabs** — **Orders**,
@@ -199,12 +202,69 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
-### Latest session (2026-07-15/16) — cloud Optimize, self-tuning plan, promise-rule pivot, absences — ⚠️ BUILT & TESTED on branch `self-tuning-plan`, **NOT pushed to `main`**
+### Latest session (2026-07-18) — scheduled optimize: floor-stability pivot — ⚠️ BUILT & TESTED on branch `scheduled-optimize`, **NOT pushed to `main`**
 
-**Status:** 362 tests pass, 1 skipped; golden untouched throughout (no regen). Branch
-`self-tuning-plan`, 23 commits, fully TDD'd via a subagent-driven SDD ledger
-(`.superpowers/sdd/progress.md`). The live site is unaffected until the owner says
-"push to main" — everything below is staged, reviewed, and ready.
+**The owner's decision:** re-sequencing the batch order every time something changes
+(a new upload, a commit, an absence, a Settings save) was destroying schedule trust on
+the floor — the plan looked different hour to hour even though nothing important had
+moved. The owner's rule: facts (punches) update the plan **every day**, but the JOB
+ORDER is only re-optimized **twice a week, automatically — Monday and Friday at 11:00
+IST (05:30 UTC)**. Feedback is entered ~10:00 on the floor; the re-optimized schedule
+is ready before shift 2. With Thursday as the weekly off, Monday and Friday land
+exactly 3 working days apart in both directions. Spec:
+`docs/superpowers/specs/2026-07-18-scheduled-optimize-design.md` (explicitly
+supersedes the event-triggered behavior of `2026-07-15-self-tuning-plan-design.md`
+Phase 1 — the auto-apply/incumbent-comparison machinery itself is unchanged, only the
+*triggers* changed).
+
+**What changed (2 code tasks, TDD'd via a subagent-driven SDD ledger,
+`.superpowers/sdd/progress.md`):**
+- **All event triggers removed.** `_bump_book_changed()`, the `_AUTO` pending/chaining
+  dict, and `_drain_pending_auto()` are gone from `api/main.py`, along with every call
+  site that used to fire one (`/upload`, `/orders/delete`, `/orders/clear`,
+  `/orders/commit`, `/orders/uncommit`, `/orders/urgent`, `/absences` POST/DELETE, a
+  `persist=True` `/run`). Those endpoints now do their own thing and stop — no contest.
+- **New endpoint `POST /optimize/scheduled`** (worker-secret auth, same gatekeeper
+  bypass as the other worker endpoints) is the *only* entry point into
+  `_try_start_auto()`, which keeps every existing guard (cloud-only, one-at-a-time, the
+  book-fingerprint skip when nothing material changed since the last applied plan).
+- **New GitHub Actions cron** — `.github/workflows/scheduled-optimize.yml`
+  (`cron: "30 5 * * 1,5"` + `workflow_dispatch` for manual testing, wake-tolerant
+  10-attempt retry loop against `/optimize/scheduled` since the free Render instance
+  may be asleep).
+- **`/optimize/done` removed; the Done button rewired.** The Capture Actuals "Done
+  entering" button is relabeled **"Done entering — update plan"** and no longer calls
+  the (now-gone) endpoint — it just refreshes the plan client-side (`runPlan(false)`)
+  and reports the next scheduled optimization day via a new pure/testable
+  `nextScheduledOptimize()` helper in `web/app.js` (next Mon/Fri at 11:00 local; today
+  counts if it's a scheduled day still before 11:00).
+- **Auto-note timestamps switched to IST** (`_ist_now()` = `utcnow() +
+  timedelta(hours=5, minutes=30)`; the server itself still runs UTC) — the schedule is
+  now a named local clock time the owner reasons about, so the notes should read in
+  that clock too. Skip-note copy updated to "will retry on the next scheduled run."
+
+**Status at time of writing:** branch `scheduled-optimize`, 2 commits
+(`80c4435` Task 1 — API endpoint in, event triggers out; `ad1d4d4` Task 2 — cron
+workflow + Done-button rewire) on top of the spec/plan commits, **NOT pushed to
+`main`**. **364 tests pass, 1 skipped** (`python3 -m pytest -q`; up from 362 on `main`
+— new/rewritten coverage in `tests/test_auto_optimize.py`); golden trace untouched, no
+regen needed (no scheduling logic changed, only *when* it's invoked).
+
+**Local E2E (controller-run, logged-in against a live local server):** a masters
+upload and an order commit each fired **zero** contests (previously either would have
+started one); `POST /optimize/scheduled` with the correct worker secret **did** start a
+contest end-to-end; `POST /optimize/done` came back **405** (the route no longer
+exists) — confirms the button-side removal matches the API-side removal.
+
+### Latest session (2026-07-15/16) — cloud Optimize, self-tuning plan, promise-rule pivot, absences — merged & pushed to `main` (was staged on branch `self-tuning-plan` when this section was first written; the event triggers it introduced are superseded by the 2026-07-18 session above)
+
+**Status:** 362 tests pass, 1 skipped; golden untouched throughout (no regen). Built on
+branch `self-tuning-plan`, 23 commits, fully TDD'd via a subagent-driven SDD ledger
+(`.superpowers/sdd/progress.md`); that branch has since **merged into `main`** (both at
+commit `dae6312`) and is presumed live via Render's auto-redeploy-on-push. The
+event-triggered auto-optimize behavior it shipped (immediate re-optimize on any
+admin mutation) is what the 2026-07-18 session above replaces with a twice-weekly
+schedule — read that section first for the current trigger behavior.
 
 **1. Cloud Optimize — the full 2,400-plan contest on free compute (shipped to `main`
 earlier the same day, 2026-07-15).** Render's free web instance is 0.1 CPU and can't
