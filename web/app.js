@@ -1184,6 +1184,51 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// ---- Operator efficiency (Settings-area block; admin-only — pure reporting,
+// never touches the plan). GET /efficiency for the on-screen preview,
+// GET /efficiency.csv for the download; both admin-only server-side. ----
+function effDefaultMonth() {
+  // Previous calendar month, "YYYY-MM" (the value a <input type="month"> wants).
+  const d = new Date();
+  d.setDate(1);          // avoid rolling into the wrong month on short months
+  d.setMonth(d.getMonth() - 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function effYearMonth() {
+  const el = $("eff-month");
+  const v = el && el.value;
+  if (!v) return null;
+  const [y, m] = v.split("-").map(Number);
+  return { year: y, month: m };
+}
+
+async function previewEfficiency() {
+  const ym = effYearMonth();
+  const el = $("eff-table");
+  if (!ym) { setStatus("Pick a month first."); return; }
+  try {
+    const res = await fetch(`/efficiency?year=${ym.year}&month=${ym.month}`);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) { setStatus("Efficiency error: " + (body.detail || res.status)); return; }
+    renderEfficiencyTable(body.rows, el);
+  } catch (e) { setStatus("Efficiency error: " + e.message); }
+}
+
+function renderEfficiencyTable(rows, el) {
+  if (!el) return;
+  if (!rows || rows.length === 0) { el.innerHTML = '<div class="empty">— no rows —</div>'; return; }
+  const columns = Object.keys(rows[0]);
+  const tableRows = rows.map((r) => columns.map((c) => (r[c] === null || r[c] === undefined ? "—" : r[c])));
+  el.innerHTML = tableHtml({ columns, rows: tableRows });
+}
+
+function downloadEfficiencyCsv() {
+  const ym = effYearMonth();
+  if (!ym) { setStatus("Pick a month first."); return; }
+  window.location.href = `/efficiency.csv?year=${ym.year}&month=${ym.month}`;
+}
+
 // ---- Operator absences (Settings-area block; list is visible to both roles,
 // add/remove controls are admin-only via CSS). GET /absences is role-open. ----
 function renderAbsenceList(absences) {
@@ -1394,6 +1439,15 @@ if (_absAdd) _absAdd.onclick = addAbsence;
 // way — the server enforces the role).
 const _opAdd = $("op-add-btn");
 if (_opAdd) _opAdd.onclick = addOperator;
+// Operator efficiency: month input defaults to last month; Preview/Download are
+// admin-only (server enforces it; the fieldset is inside the admin-only Settings
+// panel so the user role never sees it at all).
+const _effMonthEl = $("eff-month");
+if (_effMonthEl) _effMonthEl.value = effDefaultMonth();
+const _effPreviewBtn = $("eff-preview-btn");
+if (_effPreviewBtn) _effPreviewBtn.onclick = previewEfficiency;
+const _effDownloadBtn = $("eff-download-btn");
+if (_effDownloadBtn) _effDownloadBtn.onclick = downloadEfficiencyCsv;
 
 // Boot: learn the role, render the shell, then auto-load the current plan (no
 // persist) so the schedule/Gantt/rule tabs populate without a Plan click.

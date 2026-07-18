@@ -120,6 +120,17 @@
           Balance operator workload (share load fairly; same schedule)
         </label>
       </fieldset>
+      <fieldset class="settings-group">
+        <legend>Operator efficiency</legend>
+        <div class="cfg-row">
+          <label>Month
+            <input type="month" id="eff-month" />
+          </label>
+          <button id="eff-preview-btn" class="ghost-btn" type="button">Preview</button>
+          <button id="eff-download-btn" class="ghost-btn" type="button">⬇ Download CSV</button>
+        </div>
+        <div id="eff-table" class="eff-table"></div>
+      </fieldset>
     </div>
   </section>
 

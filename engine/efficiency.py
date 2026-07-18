@@ -125,6 +125,15 @@ def _absence_days_in_month(operator, absences, calendar, year, month):
 # --------------------------------------------------------------------------- #
 _UNATTRIBUTED = "Unattributed"
 
+# The column contract, in order — exposed so callers (e.g. the CSV endpoint)
+# can emit a header row even for an empty month (no rows to read keys from).
+REPORT_COLUMNS = [
+    "Operator", "Days worked", "Days absent", "Attended (min)", "Earned (min)",
+    "Efficiency %", "Pace vs standard (x)", "Good qty", "Rejected qty",
+    "Reject %", "Downtime (min)", "Setup (min)", "Jobs handled",
+    "No-standard punches",
+]
+
 
 def monthly_report(actuals, absences, masters, config, year, month):
     """One row per operator for the given calendar month (dicts, spec columns).

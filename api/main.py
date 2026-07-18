@@ -15,6 +15,7 @@ The web/ frontend is served at /.
 from __future__ import annotations
 
 import asyncio
+import csv
 import hashlib
 import hmac
 import io
@@ -44,6 +45,7 @@ from engine import optimizer
 from engine import optimize_service
 from engine.gantt import build_gantt
 from engine import book_store, orderbook
+from engine import efficiency
 from engine import operator_master
 from engine.rules import (
     rule3_tiebreak_process_time as r3,
@@ -1532,6 +1534,56 @@ def delete_operator(operator_id: str, request: Request):
     table["operators"] = keep
     book_store.save_operator_table(table)
     return {"deleted": True}
+
+
+def _validate_year_month(year: int, month: int) -> None:
+    """Shared 400 guard for both efficiency endpoints. 2000-2100 is a generous
+    sanity window (not a business rule) — just enough to reject fat-fingered
+    input without hard-coding "current year"."""
+    if not (1 <= month <= 12):
+        raise HTTPException(status_code=400, detail="month must be 1-12")
+    if not (2000 <= year <= 2100):
+        raise HTTPException(status_code=400, detail="year must be 2000-2100")
+
+
+def _efficiency_rows(year: int, month: int) -> list:
+    masters = _current_masters()
+    actuals = book_store.load_actuals()
+    absences = book_store.load_absences()
+    config = _load_plan_config()
+    return efficiency.monthly_report(actuals, absences, masters, config, year, month)
+
+
+@app.get("/efficiency")
+def efficiency_report(year: int, month: int, request: Request):
+    """Monthly operator efficiency report (admin only). Pure reporting — no
+    schedule/plan impact. See engine/efficiency.py for the formula."""
+    require_admin(request)
+    _validate_year_month(year, month)
+    return {"year": year, "month": month, "rows": _efficiency_rows(year, month)}
+
+
+@app.get("/efficiency.csv")
+def efficiency_report_csv(year: int, month: int, request: Request):
+    """Same report as a CSV download (admin only), built server-side (unlike the
+    Rule-6 schedule CSVs, which are generated client-side in app.js from the
+    on-screen table — this one has no on-screen table to scrape until Preview
+    is clicked, and admin-only auth is easier to enforce server-side)."""
+    require_admin(request)
+    _validate_year_month(year, month)
+    rows = _efficiency_rows(year, month)
+    columns = list(rows[0].keys()) if rows else list(efficiency.REPORT_COLUMNS)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(columns)
+    for row in rows:
+        writer.writerow(["-" if row[c] is None else row[c] for c in columns])
+    filename = f"operator-efficiency-{year:04d}-{month:02d}.csv"
+    return Response(
+        content="﻿" + buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/optimize")
