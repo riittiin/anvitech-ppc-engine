@@ -172,14 +172,32 @@ def _norm_header(value) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value).lower()) if value is not None else ""
 
 
-def _locate_table(rows, needed: dict):
+def _locate_table(rows, needed: dict, exact_priority: bool = False):
     """Find the header row and map each canonical key to its column index.
 
     ``needed`` maps key -> a token that must appear in the normalized header cell
     (e.g. ``{"no": "machineno"}``). Position-independent. Returns
-    ``(header_index, {key: col_index})`` or ``(None, {})`` if not all found."""
+    ``(header_index, {key: col_index})`` or ``(None, {})`` if not all found.
+
+    ``exact_priority`` (opt-in, default off ⇒ existing callers byte-identical):
+    when True, each header row is matched in TWO passes — first bind any key whose
+    normalized header cell EQUALS its token, then fill the still-unbound keys by the
+    original leftmost-substring rule. This stops a token that is a substring of a
+    neighbouring header from shadowing an exact column (e.g. "soqty" ⊂ "pendsoqty":
+    the real "SO Qty" column wins regardless of whether "Pend SO Qty" sits to its
+    left)."""
     for idx, row in enumerate(rows):
         colmap = {}
+        if exact_priority:
+            # Pass 1: exact equality wins (leftmost exact match per key).
+            for ci, cell in enumerate(row):
+                h = _norm_header(cell)
+                if not h:
+                    continue
+                for key, token in needed.items():
+                    if key not in colmap and h == token:
+                        colmap[key] = ci
+        # Substring pass (the original rule) fills whatever is still unbound.
         for ci, cell in enumerate(row):
             h = _norm_header(cell)
             if not h:
@@ -360,7 +378,7 @@ def _load_so_lines(wb, masters: Masters):
         "item_code": "salesitemcode",
         "qty": "soqty",
         "delivery": "sodeliverydate",
-    })
+    }, exact_priority=True)   # "soqty" ⊂ "pendsoqty" — exact "SO Qty" must win
     if hdr is None:
         masters.add_report(
             "MISSING_SO_COLUMNS", "Sales Order (SO) list",

@@ -158,6 +158,29 @@ def test_so_lines_survive_a_column_shift():
     assert so_lines[1].delivery_date == date(2026, 8, 12)
 
 
+def test_so_qty_not_shadowed_by_pend_so_qty_to_its_left():
+    # Token collision: "SO Qty"->"soqty" is a SUBSTRING of "Pend SO Qty"->
+    # "pendsoqty". _locate_table binds the leftmost substring match, so if
+    # Pend SO Qty sits LEFT of SO Qty the qty would silently read the pending
+    # value (999) instead of the ordered quantity (5) — a silently-wrong order
+    # qty, worse than a hard failure. exact_priority makes "soqty" win by exact
+    # match regardless of column order.
+    headers = {
+        14: "SONo", 17: "Customer Name", 28: "Sales Item Code",
+        29: "Sales Item Name", 30: "Pend SO Qty", 31: "SO Qty",
+        32: "SO Delivery Date",
+    }
+    wb = _build_so_workbook(headers, [
+        {14: "SO-1", 17: "Cust A", 28: "ITEM-1", 29: "Widget",
+         30: 999, 31: 5, 32: "10/08/2026"},
+    ])
+    masters = Masters()
+    so_lines = _load_so_lines(wb, masters)
+    assert len(so_lines) == 1
+    assert so_lines[0].qty == 5.0            # SO Qty, NOT Pend SO Qty (999)
+    assert so_lines[0].pending_qty == 999.0
+
+
 def test_so_lines_tolerate_no_remarks_column():
     # The real Test5.xlsx has NO "Remarks" column at all — it must be optional.
     wb = _build_so_workbook(SHIFTED_HEADERS, [
