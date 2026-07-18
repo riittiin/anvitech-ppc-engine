@@ -18,16 +18,16 @@ job shop. **Built, tested, deployed live, and actively iterated.**
 - **Host:** Render (free web service). **Database:** MongoDB Atlas (free M0, 512 MB).
 - **Repo:** GitHub `riittiin/anvitech-ppc-engine` (private). Push to `main` →
   Render auto-redeploys (no separate deploy step).
-- **362 tests pass, 1 skipped** (`pytest` on `main`; the skip is Mongo) — **364** on the
-  unshipped `scheduled-optimize` branch below. FastAPI backend + vanilla HTML/JS
-  frontend, plain Python engine. Python 3 (run as `python3` locally — no `python`
-  alias). The self-tuning plan + operator absences + cloud-Optimize work described in
-  "Latest session (2026-07-15/16)" below is now **merged and pushed to `main`** (it was
-  staged/unshipped when that section was first written). ⚠️ **`main` is behind again:**
-  a floor-stability pivot — automatic optimization now runs only **twice a week** via a
-  GitHub cron instead of on every change — is built and tested on branch
-  `scheduled-optimize`, **NOT pushed to `main`** (see "Latest session (2026-07-18)"
-  below for what's staged and why).
+- **481 tests pass, 1 skipped** (`pytest` on `main` as of 2026-07-19; the skip is
+  Mongo). FastAPI backend + vanilla HTML/JS frontend, plain Python engine. Python 3
+  (run as `python3` locally — no `python` alias). **Everything described in this file
+  is merged and LIVE on `main`** — the 2026-07-18 "NOT pushed" branch warnings below
+  are historical (see the staleness note at "What changed most recently"). The app
+  went into **full production at Anvitech on 2026-07-19**; the biggest same-day
+  change is the **honest per-shift operator scheduler** (see the 2026-07-19 session
+  block: operators hand off at shift boundaries or the machine pauses; makespan on
+  the real book is honestly ~79 days optimized, not the old fictional 47; the crew
+  floor is ~44 days and night-pool cross-training is the owner's business lever).
 - **Login is a two-role app-owned session** (admin / user) — see "Login & roles".
 - The engine has **8 business rules** (1–8). (Rule 8 = the Plan over the order book —
   there is no `rule8` module.) The UI now shows only **4 tabs** — **Orders**,
