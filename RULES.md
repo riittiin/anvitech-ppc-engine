@@ -556,6 +556,9 @@ the **Daily Production Entry** form. Fields captured:
 
 - *Identity (manual):* Date, Shift, SO No, Item Code. *Auto/dropdown:* Item Name
   (auto-prompted from the routing) and Process (dropdown of the item's routing).
+  **Operator** (required dropdown, 2026-07-18 — from the operator master; the
+  entry is rejected without one) — who ran this process, feeding the monthly
+  **Operator efficiency report** below.
 - *Output (manual):* Qty Produced, Qty Rejected, **at the named Process**. **Good qty
   = produced − rejected** for that step. Good at the **finished-goods gate** (the
   DISPATCH step, or the last step if the routing has no DISPATCH) is what **fulfils
@@ -601,6 +604,48 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
   1 March. It never moves earlier than the configured `plan_start_date`, and skips
   weekly-off/holiday days. With no actuals recorded, the plan starts from the configured
   date exactly as before (golden trace unchanged).
+
+### Operator efficiency report *(feature, 2026-07-18)*
+
+Every Capture Actuals entry now **names the operator** who ran it — a required
+dropdown, chosen from the app's operator master, same list Settings shows.
+A blank or unrecognised name is rejected (the entry isn't saved). This lets the
+admin pull a **monthly efficiency report per operator**, downloadable as a CSV,
+built purely from a fair formula — never biased by which shift, machine, or
+job mix an operator happened to draw:
+
+> **Efficiency % = Earned minutes ÷ Attended minutes × 100**
+> - **Earned** = the *standard* cycle time for each item/process (from the
+>   routing) × the **good** pieces punched — reject pieces earn nothing.
+> - **Attended** = the shift window the operator actually worked, minus **all**
+>   recorded downtime and setup time for that window (downtime/setup are
+>   *neutral* — they shrink the time judged, they never count for or against
+>   the operator).
+
+Fairness guarantees baked into the formula:
+
+| Situation | How it's handled |
+|---|---|
+| Rejected pieces | Earn nothing; surfaced separately as **Reject %** — never blended into efficiency |
+| Downtime (power/tooling/breakdown/etc.) and setup time | **Neutral** — subtracted from the attended window, so a stoppage that isn't the operator's fault neither helps nor hurts their score |
+| A punched item/process with **no cycle-time standard** on file | **Excluded from the formula on both sides** — it earns nothing AND its shift time isn't charged to attended either, so nobody is graded against a standard that doesn't exist. Counted separately in a **"No-standard punches"** column so it's visible, not silent |
+| Approved leave | A separate **Days absent** column, from the absence list — never mixed into the pace calculation |
+| Old entries from before this feature | Grouped into one **"Unattributed"** row (no operator name was captured back then) |
+
+**Report columns** (one row per operator, for a chosen calendar month): Operator ·
+Days worked · Days absent · Attended (min) · Earned (min) · Efficiency % · Pace
+vs standard (attended ÷ earned) · Good qty · Rejected qty · Reject % · Downtime
+(min) · Setup (min) · Jobs handled · No-standard punches.
+
+**Where to get it:** Settings → **Operator efficiency** (admin only) — pick a
+month (defaults to last month), **Preview** to see it on screen, or **Download
+CSV** for the file (`operator-efficiency-YYYY-MM.csv`). Purely a report: running
+it, previewing it, or downloading it never touches the schedule/plan.
+
+**Nothing is ever deleted.** Every punch stays in the database permanently (a
+full year of daily entries is only a few MB) — the report is simply computed
+on demand for whichever month is picked, so any past month can be pulled up
+later.
 
 ---
 

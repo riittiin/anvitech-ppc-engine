@@ -198,7 +198,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   Current-expected with a red drift flag when it slips) — neither constrains
   the scheduler or Optimize. Historical note: an earlier design (2026-07-13/14)
   had these fields drive a two-pass scheduler + a hard promise veto; that was
-  measured ~30% worse on both real books and discarded.
+  measured ~30% worse on both real books and discarded. `Actual` gains an
+  `operator` field (2026-07-18, JSON round-trip) — **required at capture**:
+  `POST /actuals` 400s on a blank operator or one not in the current operator
+  master; legacy rows predating this feature default to `""` and are grouped
+  as an "Unattributed" row by the efficiency report below.
 - `engine/loaders.py` — read the uploaded workbook (Test4 format) → typed objects +
   non-blocking report. The 3 master sheets are read **header-driven** (`_locate_table`);
   resource-name normalization (`CNC 4` ≡ `CNC4`) and provisional-machine handling live here.
@@ -452,6 +456,36 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   rollup), per-operator (busy vs shift capacity), per-process (work share, not %), and a
   headline (bottleneck / under-used ≤30% / totals). Surfaced as the **Analytics** tab
   (`trace.analytics`; CSS bars + tables in `web/`, no chart lib).
+- `engine/efficiency.py` (2026-07-18,
+  `docs/superpowers/specs/2026-07-18-operator-efficiency-report-design.md`) —
+  **pure monthly operator efficiency report**, reporting-only (never touches
+  the plan/schedule). `monthly_report(actuals, absences, masters, config,
+  year, month) -> list[dict]`, one row per operator, sorted by efficiency %
+  descending (Unattributed always last); `REPORT_COLUMNS` is the column
+  contract (also the CSV header for a month with no rows). Formula:
+  **Efficiency % = Earned ÷ Attended × 100** — Earned = Σ standard
+  `cycle_time(item, process)` × good qty punched; Attended = Σ per distinct
+  (operator, date, shift) worked window − that group's recorded downtime −
+  setup minutes, counted **once** per (operator, date, shift) even when
+  several jobs were punched that window. Fairness rules baked in: only GOOD
+  qty earns (rejects earn nothing, surface as Reject %); downtime and setup
+  are **neutral** (they shrink attended time but never earn nor penalize); a
+  punch whose item/process has no cycle-time standard is **excluded from
+  BOTH sides** — no earned minutes AND no attended contribution (neither its
+  shift window nor its downtime/setup) — and counted in "No-standard
+  punches" (nobody is judged against a standard that doesn't exist); absence
+  days are their own column from the absence table, never folded into pace;
+  legacy punches with no operator name land in an "Unattributed" row.
+  **Review-caught fairness bug (fixed same task, RED-first regression
+  pins):** the first cut excluded no-standard punches from Earned only,
+  still charging their shift window (minus their downtime/setup) to
+  Attended — a shift with several no-standard jobs deflated Attended and
+  showed a misleadingly LOW efficiency (45.5% vs the fair 90.9% on the same
+  punches once excluded both-sides). Shift windows come from `config`
+  (First/Second/manual hours), never hardcoded. **Data is never deleted**
+  (owner decision — a year of punches ≈ 5-10 MB of the 512 MB Atlas tier;
+  the report is computed on demand for any month, nothing pruned). API: `GET
+  /efficiency`/`GET /efficiency.csv` (admin) — see the `api/main.py` bullet.
 - `engine/rules/ruleN_*.py` — Rules 1–7, one pure `run(...)` each; 4/5 also expose
   the calc helpers Rule 6 imports. (Rule 7 = `rule7_capture_actuals`. There is no
   `rule8` module — Rule 8 is the unified "Plan" over the order book; see `api._plan`.)
@@ -506,7 +540,10 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (+ `/actuals/rollback`), `/items` (`so_nos` for the SO dropdown), `/gantt`,
   `/report`, `/trace/{id}`. `gatekeeper` (session + CSRF) + `security_headers`
   middleware; `require_admin`; `require_password` (re-auth on destructive deletes);
-  helper-tab augmentation. **Commitment endpoints (admin, role-gated, non-destructive,
+  helper-tab augmentation. **`POST /actuals` (2026-07-18):** requires a
+  non-empty `operator` that exists in the current operator master — 400
+  `operator is required` (blank) / `unknown operator '<name>'` (not on file);
+  otherwise unchanged, either role. **Commitment endpoints (admin, role-gated, non-destructive,
   no password re-auth):** `/orders/commit`, `/orders/urgent`, `/orders/uncommit` — set
   status + snapshot an informational `promised_date` (Committed = current expected
   completion from a fresh plan; Urgent = the SO delivery date). No trigger call (event
@@ -532,17 +569,33 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   /operators` / `PATCH /operators/{id}` / `DELETE /operators/{id}` (admin, each
   calling `_current_masters()` first for the same seed-once guarantee) — see the
   operator-master-rotation bullet above.
+  **Efficiency report (2026-07-18):** `GET /efficiency?year=&month=` (admin,
+  JSON `{year, month, rows}`) and `GET /efficiency.csv?year=&month=` (admin,
+  CSV download `operator-efficiency-YYYY-MM.csv`, BOM-prefixed, built
+  server-side — unlike the client-scraped Rule-6 CSVs, there's no on-screen
+  table to scrape until Preview is clicked) — both share `_efficiency_rows`
+  (loads actuals/absences/masters/config, calls
+  `engine.efficiency.monthly_report`) and `_validate_year_month` (400 on
+  month outside 1-12 or year outside 2000-2100). Pure reporting — no
+  plan/schedule effect.
 - `web/` — `login.html` (self-contained login page), `📋 Orders` tab (order book +
   delete, with a **password-confirm modal**, the commit/urgent/uncommit lane
   controls, and the auto-note line), the per-rule tabs (Rule 7 = Capture Actuals,
-  with an **SO No dropdown**, per-entry **↺ Rollback** button, and the **"Done
-  entering — update plan"** button for both roles — a facts-only plan refresh that
-  also reports the next scheduled optimization day; it no longer starts a contest),
-  an always-visible
+  with an **SO No dropdown**, a **required Operator dropdown** (2026-07-18, fed by
+  `GET /operators`, same list either role sees on Settings — the form blocks
+  submit and focuses the field when it's blank), per-entry **↺ Rollback** button,
+  and the **"Done entering — update plan"** button for both roles — a facts-only
+  plan refresh that also reports the next scheduled optimization day; it no
+  longer starts a contest), an always-visible
   **Operator Absences** panel (list visible to both roles; add/remove controls
   admin-only), a Settings **Operators & shifts** panel (`#operators-panel` — table
   of name/machines/shift/"Stays" pin + add-row; "Next rotation: Friday
-  DD-MM-YYYY"; admin edits, user role read-only), and a `📊 Gantt` tab; `app.js`
+  DD-MM-YYYY"; admin edits, user role read-only), a Settings **Operator
+  efficiency** block (2026-07-18, admin-only — month picker defaulting to last
+  month, "Preview" rendering the on-screen report table, "Download efficiency
+  report (CSV)"; `previewEfficiency`/`renderEfficiencyTable`/
+  `downloadEfficiencyCsv` in `app.js` call `GET /efficiency`/`GET
+  /efficiency.csv`), and a `📊 Gantt` tab; `app.js`
   renders the trace and hides admin-only controls for the user role (no per-rule
   UI code).
 

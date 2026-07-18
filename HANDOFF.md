@@ -327,6 +327,56 @@ half of the check was vacuously null. Re-proved at the engine level with the
 schedule's structure (376 → 140 entries) and reassigns 70 operators directly —
 the feature is schedule-effective, not just data-effective.
 
+### Latest session (2026-07-18, third session) — monthly operator efficiency report — ⚠️ BUILT & TESTED on branch `operator-efficiency-report`, **NOT pushed to `main`**
+
+**The owner's ask:** a fair way to evaluate each operator's performance, per
+month, that can never be argued with — not biased by which shift, machine, or
+job mix someone happened to draw. Spec:
+`docs/superpowers/specs/2026-07-18-operator-efficiency-report-design.md`.
+
+**What shipped (4 tasks, TDD'd via the subagent-driven SDD ledger,
+`.superpowers/sdd/progress.md`; built on top of `main`, which already carries
+the scheduled-optimize and operator-master-rotation branches above — none of
+which are pushed yet either):**
+- **Task 1 (`f092a01`)** — `Actual.operator` field; the Capture Actuals form
+  gets a **required** Operator dropdown fed by `GET /operators`; `POST
+  /actuals` 400s on a blank or unknown operator. Schedule-neutral (the field
+  is captured, never scheduled on). **Floor instruction needed going
+  forward: Sanjay (and anyone else punching actuals) must now pick the
+  operator from the dropdown on every Capture Actuals entry — the form won't
+  save without one.**
+- **Task 2 (`d3efd19` + `6759ae8`)** — pure `engine/efficiency.py`:
+  `monthly_report(actuals, absences, masters, config, year, month)`. Formula:
+  Efficiency % = Earned ÷ Attended × 100 (Earned = standard cycle time ×
+  good qty; Attended = worked shift window − downtime − setup, once per
+  distinct operator/date/shift).
+- **Task 3 (`025af22`)** — `GET /efficiency` + `GET /efficiency.csv` (admin),
+  Settings-area month picker + preview table + CSV download, browser-verified
+  both roles.
+- **Task 4 (this commit)** — docs (CLAUDE.md code map, RULES.md plain-language
+  section, this block).
+
+**This session's lesson (review-caught, not owner-reported): a fairness bug
+that reads as PLAUSIBLE until you build the counter-example.** The first cut
+of `engine/efficiency.py` excluded a no-standard punch from **Earned** only —
+its shift window (minus its own downtime/setup) still counted toward
+**Attended**. On a shift with several no-standard jobs mixed with standard
+ones, that inflated Attended relative to Earned and reported a misleadingly
+LOW efficiency: **45.5%** on a set of punches where the fair number (excluding
+the no-standard punch from BOTH sides) is **90.9%** — nearly a 2× swing on
+identical underlying work, entirely from where one punch's non-earning time
+landed. Caught during code review (not by the owner), fixed same task with
+RED-first regression pins (`tests/test_efficiency.py`) before Task 3 built on
+top of it. Generalizes: whenever a formula has an "exclude X" rule, check
+BOTH the numerator and denominator sides explicitly — excluding from one side
+only silently reweights everyone else's score.
+
+**Status at time of writing:** branch `operator-efficiency-report`, 6 commits
+(spec/plan + 4 code commits + the fairness fix), **NOT pushed to `main`**.
+**451 tests pass, 1 skipped** (`python3 -m pytest -q`; up from 412 on the
+`operator-master-rotation` branch above); golden trace untouched, no regen
+needed (pure reporting — no scheduling logic touched).
+
 ### Latest session (2026-07-15/16) — cloud Optimize, self-tuning plan, promise-rule pivot, absences — merged & pushed to `main` (was staged on branch `self-tuning-plan` when this section was first written; the event triggers it introduced are superseded by the 2026-07-18 session above)
 
 **Status:** 362 tests pass, 1 skipped; golden untouched throughout (no regen). Built on
