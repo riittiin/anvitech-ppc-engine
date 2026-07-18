@@ -40,6 +40,8 @@ from . import rule4_setup_time as r4
 
 
 def _plan_start(config):
+    # config.plan_start_date is never None: the API resolves "auto" (None) to
+    # today (IST) at the boundary (_resolve_config) before any rule runs.
     return datetime(
         config.plan_start_date.year,
         config.plan_start_date.month,

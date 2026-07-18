@@ -1,4 +1,6 @@
 """Gantt view-model built from the Rule 6 schedule."""
+from datetime import date
+
 from engine.config import Config
 from engine.models import PlanRun
 from engine.pipeline import run_forward
@@ -13,7 +15,8 @@ def test_empty_schedule():
 def test_gantt_from_real_run(loaded):
     so_lines, masters = loaded
     pr = PlanRun(so_lines=so_lines)
-    run_forward(pr, Config(), masters)
+    # Live default plan_start_date is None (auto today); pin the historical date.
+    run_forward(pr, Config(plan_start_date=date(2025, 3, 1)), masters)
     g = build_gantt(pr.schedule, pr.batches_prioritized, masters)
 
     # One row per consolidated batch, each carrying the SO identity columns.

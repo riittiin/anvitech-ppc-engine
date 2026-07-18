@@ -1,5 +1,7 @@
 """Config knobs. The recorded-downtime→plan gate was removed (the feedback loop is
 quantity-only), so the config no longer carries an apply_downtime_to_plan flag."""
+from datetime import date
+
 from engine.config import Config
 
 
@@ -35,3 +37,35 @@ def test_balance_operator_load_defaults_off_and_round_trips():
     cfg = Config.from_dict({"balance_operator_load": True})
     assert cfg.balance_operator_load is True
     assert Config.from_dict(cfg.to_dict()).balance_operator_load is True
+
+
+# --------------------------------------------------------------------------- #
+# Live current-date mode: plan_start_date is nullable — None = "auto: start from
+# today (IST)". The engine never sees None; the API boundary resolves it.
+# --------------------------------------------------------------------------- #
+def test_plan_start_date_defaults_to_none_auto():
+    assert Config().plan_start_date is None
+
+
+def test_none_plan_start_date_round_trips_as_json_null():
+    cfg = Config()  # plan_start_date None
+    d = cfg.to_dict()
+    assert d["plan_start_date"] is None
+    assert Config.from_dict(d).plan_start_date is None
+
+
+def test_explicit_plan_start_date_round_trips():
+    cfg = Config(plan_start_date=date(2025, 3, 1))
+    d = cfg.to_dict()
+    assert d["plan_start_date"] == "2025-03-01"
+    assert Config.from_dict(d).plan_start_date == date(2025, 3, 1)
+
+
+def test_empty_and_missing_plan_start_date_become_none():
+    assert Config.from_dict({"plan_start_date": ""}).plan_start_date is None
+    assert Config.from_dict({"plan_start_date": None}).plan_start_date is None
+    assert Config.from_dict({}).plan_start_date is None
+
+
+def test_validate_passes_with_none_plan_start_date():
+    Config().validate()  # must not raise

@@ -274,7 +274,7 @@ def _with_operator_overlay(base):
     mutated. Seeds the store the first time masters carry operators and no table
     exists yet; persists a lazy rotation advance (flips>0). Empty store + no
     workbook operators → the base is returned unchanged (nothing to overlay)."""
-    today = date.today()
+    today = _ist_today()
     table = book_store.load_operator_table()
     if table is None:
         if not base.operators:
@@ -617,7 +617,11 @@ def _plan(config: Config):
     masters = _current_masters()
     # Fingerprint of the plan-shaping inputs as REQUESTED (base config, before the
     # actuals-driven start advance) — compared against the applied optimization's.
+    # Computed on the SAVED (unresolved) config: an auto plan_start_date is None
+    # here, so a moving 'today' can never look like a settings change.
     current_inputs_sig = _inputs_signature(config)
+    # Resolve auto (None) plan start -> today (IST) so the engine never sees None.
+    config = _resolve_config(config)
     active = book_store.load_active_orders()
     completed = book_store.load_completed_orders()
     actuals = book_store.load_actuals()
@@ -752,10 +756,10 @@ def _commit_orders(pairs):
     """Snapshot each order's current expected completion (from a fresh plan) as
     its promised date, and lock it into the committed lane. Unknown (so, item)
     pairs are silently skipped — set_commitment() returns False for them."""
-    from datetime import datetime, date as _date
+    from datetime import date as _date
     result = _plan(_load_plan_config())
     exp = result.get("expected_end", {})
-    now = datetime.now().isoformat(timespec="seconds")
+    now = _ist_now().isoformat(timespec="seconds")
     for so, item in pairs:
         iso = exp.get(f"{so}\x1f{item}")
         promised = _date.fromisoformat(iso) if iso else None
@@ -868,6 +872,23 @@ def _ist_now():
     return _dt.utcnow() + _td(hours=5, minutes=30)
 
 
+def _ist_today():
+    """Today's date on the named local (IST) clock — the LIVE plan start.
+    Every date the app reasons from (plan clock, rotation, first-seen) follows
+    this, not a frozen test-era date (go-live 2026-07-19)."""
+    return _ist_now().date()
+
+
+def _resolve_config(config: Config) -> Config:
+    """Resolve an 'auto' plan start (plan_start_date is None) to today (IST) so
+    the pure engine NEVER sees None. Called at every planning entry; a config
+    that already carries an explicit date is returned unchanged. The SAVED config
+    keeps None — this resolution is per-run only, never persisted."""
+    if config.plan_start_date is None:
+        return replace(config, plan_start_date=_ist_today())
+    return config
+
+
 def _current_book_sig() -> str:
     masters = _current_masters()
     actuals = book_store.load_actuals()
@@ -954,7 +975,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
 
         config = _load_plan_config()
         masters = _current_masters()
-        base_config = config      # as saved — the basis for the inputs fingerprint
+        base_config = config      # as saved (auto -> None) — the inputs fingerprint basis
+        config = _resolve_config(config)   # None -> today (IST) for the engine/contest
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()
         absences = book_store.load_absences()
@@ -970,7 +992,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         job_id = uuid.uuid4().hex
         if cloud:
             payload = optimize_service.build_payload(
-                orders, actuals, book_store.load_masters_bytes(), base_config,
+                orders, actuals, book_store.load_masters_bytes(), config,
                 seed=_OPT_SEED, absences=absences, operator_table=operator_table)
             denom = (optimize_service.CLOUD_BUDGET_PER_CANDIDATE
                      * len(optimizer.sweep_contenders(
@@ -1162,7 +1184,7 @@ def _incumbent_metrics():
     """Score of the plan users currently see: the applied ranks (if any) replayed
     on TODAY'S book, measured over ALL active lines — the same domain the contest's
     ``best`` is scored on. Expedite off when ranks replay."""
-    config = _load_plan_config()
+    config = _resolve_config(_load_plan_config())   # None -> today (IST) for the engine
     masters = _current_masters()
     actuals = book_store.load_actuals()
     orders = book_store.load_active_orders()
@@ -1211,13 +1233,12 @@ def _auto_apply_result():
 def _optimize_apply():
     """Persist the last completed run's ranks — from then on every Plan replays
     them (admin, user, and the auto re-plan after actuals)."""
-    from datetime import datetime
     with _OPTIMIZE_LOCK:
         res = _OPTIMIZE.get("result")
         if _OPTIMIZE["state"] != "done" or not res:
             raise HTTPException(status_code=409,
                                 detail="no completed optimization to apply")
-        meta = {"saved_at": datetime.now().isoformat(timespec="seconds"),
+        meta = {"saved_at": _ist_now().isoformat(timespec="seconds"),
                 "budget": res["budget"], "seed": res["seed"],
                 "baseline": res["baseline"], "best": res["best"],
                 "covered": len(res["ranks"]),
@@ -1273,7 +1294,7 @@ async def upload(request: Request, file: UploadFile = File(...)):
     active = book_store.load_active_orders()
     completed = book_store.load_completed_orders()
     new_orders, flags = orderbook.merge_upload(
-        so_lines, active, completed, first_seen=date.today().isoformat())
+        so_lines, active, completed, first_seen=_ist_today().isoformat())
     book_store.add_orders(new_orders)
 
     book_lines = orderbook.active_so_lines(book_store.load_active_orders(),
@@ -1385,11 +1406,10 @@ def urgent_order_ep(req: UrgentRequest, request: Request):
     delivery date as the informational promise. Lanes are status labels only —
     urgent has no scheduling effect. Admin only."""
     require_admin(request)
-    from datetime import datetime
     order = book_store.load_active_orders().get((req.so, req.item))
     book_store.set_commitment(req.so, req.item, "urgent",
                               order.delivery_date if order else None,
-                              datetime.now().isoformat(timespec="seconds"))
+                              _ist_now().isoformat(timespec="seconds"))
     return {"urgent": True}
 
 
@@ -1453,7 +1473,7 @@ def get_operators():
     table = book_store.load_operator_table()
     rows = table.get("operators", []) if table else []
     return {"operators": rows,
-            "next_rotation": operator_master.next_rotation(date.today()).isoformat()}
+            "next_rotation": operator_master.next_rotation(_ist_today()).isoformat()}
 
 
 @app.post("/operators")
@@ -1477,7 +1497,7 @@ def create_operator(req: OperatorRequest, request: Request):
     _current_masters()   # seed-once + lazy rotation before we read the table
     table = book_store.load_operator_table()
     if table is None:
-        table = {"week_anchor": operator_master.last_friday(date.today()).isoformat(),
+        table = {"week_anchor": operator_master.last_friday(_ist_today()).isoformat(),
                  "operators": []}
     existing = {r.get("name", "").strip().lower() for r in table["operators"]}
     if name.lower() in existing:

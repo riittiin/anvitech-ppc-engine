@@ -53,8 +53,11 @@ class Config:
 
     # Rule 6 — where the schedule clock starts. The first process of the
     # highest-priority batch can begin no earlier than this date (08:00, first
-    # shift). Kept configurable + explicit so runs are reproducible.
-    plan_start_date: date = date(2025, 3, 1)
+    # shift). None = "auto: start from today (IST)" — the LIVE default. A fixed
+    # date is a testing/reproducibility override. The ENGINE must never see None:
+    # the API boundary resolves None -> today (api.main._resolve_config) at every
+    # planning entry before any rule reads this field.
+    plan_start_date: Optional[date] = None
 
     # Shift windows (24h clock). 1st shift 08:00-19:00, 2nd 19:00-05:00 (next day).
     first_shift_start_hour: int = 8
@@ -151,7 +154,10 @@ class Config:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d["plan_start_date"] = self.plan_start_date.isoformat()
+        # None (auto: start from today) stays None -> JSON null. The saved config
+        # keeps None so a moving 'today' is never mistaken for a settings change.
+        d["plan_start_date"] = (self.plan_start_date.isoformat()
+                                if self.plan_start_date else None)
         return d
 
     @classmethod
@@ -163,8 +169,13 @@ class Config:
         for key, value in data.items():
             if not hasattr(cfg, key):
                 continue
-            if key == "plan_start_date" and isinstance(value, str):
-                value = date.fromisoformat(value)
+            if key == "plan_start_date":
+                # None / "" / missing -> None (auto: start from today, resolved at
+                # the API boundary). A non-empty ISO string -> a fixed date.
+                if value in (None, "", "none", "null"):
+                    value = None
+                elif isinstance(value, str):
+                    value = date.fromisoformat(value)
             if key == "priority_window_days":
                 # "" / "none" / null from the UI means "no limit".
                 if value in (None, "", "none", "null"):

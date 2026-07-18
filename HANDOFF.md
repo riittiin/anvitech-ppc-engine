@@ -202,6 +202,40 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
+### Latest session (2026-07-18) — LIVE current-date mode — ⚠️ BUILT & TESTED on branch `live-current-date`, **NOT pushed to `main`**
+
+**The owner's rule for the 2026-07-19 go-live:** every date the app reasons from must
+follow the **REAL current date (Indian time)**, not a frozen test-era date. The plan
+clock, operator rotation, order first-seen, and audit stamps all now derive from
+`_ist_today()` / `_ist_now()`.
+
+**What changed:**
+- `engine/config.py`: `plan_start_date` is now **nullable — `None` = "auto: start from
+  today (IST)", and `None` is the LIVE DEFAULT**. `to_dict` keeps `None` as null;
+  `from_dict` maps `None`/`""`/missing → `None`; `validate()` accepts `None`. A fixed
+  date is a testing override.
+- `api/main.py`: new `_ist_today()` + `_resolve_config(config)` — resolves `None` →
+  today (IST) at **every planning entry** (`_plan`, `_start_optimize`,
+  `_incumbent_metrics`) so the pure engine never sees `None`. The SAVED config keeps
+  `None` (never a resolved date), and `_inputs_signature` hashes the unresolved config,
+  so a **moving "today" is never mistaken for a settings change** (scheduled-skip holds
+  across days). Full `date.today()`/`datetime.now()` sweep in `api/main.py` → IST helpers
+  (rotation overlay, merge first-seen, next-rotation, seed anchor, commit/urgent/apply
+  stamps).
+- `web/`: Settings gains a **"Start from today (recommended)"** checkbox
+  (`cfg-start-auto`, default checked) — checked sends `plan_start_date: null` and disables
+  the (display-only, today-echoing) date picker; unchecked uses the picker as before.
+- Tests: `tests/test_config.py` (nullable round-trip) + new `tests/test_live_date.py`
+  (resolve/IST-today/persist-null/signature-stability). **Golden byte-identical without
+  regen** — the golden test + the `config` conftest fixture now pin `date(2025, 3, 1)`
+  explicitly (test-side only; behavior unchanged). 466 passed, 1 skipped.
+
+**⚠️ CUTOVER STEP FOR THE CONTROLLER (do after deploy — a human/controller action, NOT
+part of this branch):** the saved live config still carries the old fixed
+`plan_start_date` (2026-07-15). After deploy, **save the auto config** (tick "Start from
+today" and Plan-with-persist) so the saved config becomes `null`, then run **one
+Optimize → Apply** to re-stamp the ranks/inputs signatures against the new (auto) config.
+
 ### Latest session (2026-07-18) — scheduled optimize: floor-stability pivot — ⚠️ BUILT & TESTED on branch `scheduled-optimize`, **NOT pushed to `main`**
 
 **The owner's decision:** re-sequencing the batch order every time something changes

@@ -41,7 +41,12 @@ def loaded(sample_bytes):
 
 @pytest.fixture
 def config():
-    return Config()
+    # The LIVE default plan_start_date is now None ("auto: start from today");
+    # the pure rules must never see None (the API resolves it). Rule tests that
+    # drive the engine directly pin the historical fixed date so their assertions
+    # (and the golden window) stay byte-identical to the pre-live-mode behaviour.
+    from datetime import date
+    return Config(plan_start_date=date(2025, 3, 1))
 
 
 @pytest.fixture(autouse=True)

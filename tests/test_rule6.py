@@ -234,7 +234,8 @@ def test_no_routing_raises_rule_error(loaded):
     bad = Batch(batch_id="BX", item_code="DOES-NOT-EXIST", item_name="x", qty=1,
                 so_delivery_date=date(2025, 3, 7), source_so_refs=["SO"])
     try:
-        rule6_allocate.run([bad], config=Config(), masters=masters)
+        rule6_allocate.run([bad], config=Config(plan_start_date=date(2025, 3, 1)),
+                           masters=masters)
         assert False, "expected RuleError"
     except RuleError as e:
         assert e.rule == "rule6"

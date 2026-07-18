@@ -49,15 +49,36 @@ function readConfig() {
     expedite_window_min: $("cfg-expedite") && $("cfg-expedite").checked ? 45 : 0,
     balance_operator_load: !!($("cfg-balance-ops") && $("cfg-balance-ops").checked),
   };
-  // Plan start date (the day scheduling begins). Sent as ISO; omitted if blank so
-  // the saved/default date is kept. Daily punches still advance the clock past it.
-  const ps = $("cfg-plan-start") && $("cfg-plan-start").value;
-  if (ps) cfgObj.plan_start_date = ps;
+  // Plan start date (the day scheduling begins). "Start from today" (auto) sends
+  // null — the server resolves it to the real current date (IST) on every plan,
+  // so a live shop never drifts to a stale date. Unchecked → send the picked ISO
+  // date (omitted if blank so the saved/default date is kept). Daily punches still
+  // advance the clock past it either way.
+  const auto = $("cfg-start-auto");
+  if (auto && auto.checked) {
+    cfgObj.plan_start_date = null;
+  } else {
+    const ps = $("cfg-plan-start") && $("cfg-plan-start").value;
+    if (ps) cfgObj.plan_start_date = ps;
+  }
   return cfgObj;
 }
 
+// Today's date as ISO (browser local) — for the disabled auto-mode display only;
+// the authoritative start date is resolved server-side in IST.
+function todayIso() {
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+}
+
 function updatePlanStartEcho() {
-  const e = $("cfg-plan-start-echo"), v = $("cfg-plan-start") && $("cfg-plan-start").value;
+  const auto = $("cfg-start-auto"), inp = $("cfg-plan-start"), e = $("cfg-plan-start-echo");
+  const isAuto = !!(auto && auto.checked);
+  if (inp) {
+    inp.disabled = isAuto;             // auto mode: the picker is display-only
+    if (isAuto) inp.value = todayIso();  // show today (server uses IST today)
+  }
+  const v = inp && inp.value;
   if (e) e.textContent = v ? "= " + isoToDdmmyyyy(v) : "";
 }
 
@@ -91,7 +112,11 @@ function applyConfig(cfg) {
   if (!cfg) return;
   const setVal = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
   const setSel = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
-  setVal("cfg-plan-start", cfg.plan_start_date);   // ISO YYYY-MM-DD from the server
+  // null plan_start_date = auto ("start from today"): tick the box, show today.
+  const _auto = $("cfg-start-auto");
+  const _isAuto = (cfg.plan_start_date === null || cfg.plan_start_date === undefined);
+  if (_auto) _auto.checked = _isAuto;
+  setVal("cfg-plan-start", _isAuto ? todayIso() : cfg.plan_start_date);  // ISO from server
   updatePlanStartEcho();
   setVal("cfg-window", cfg.consolidation_window_days);
   setVal("cfg-setup", cfg.setup_time_min);
@@ -1421,8 +1446,12 @@ if (_runBtn) _runBtn.onclick = () => runPlan(true);   // explicit admin Plan →
 const _upBtn = $("upload-btn");
 if (_upBtn) _upBtn.onclick = uploadExcel;
 // Plan-start date: keep the DD-MM-YYYY echo in sync as the admin changes it.
+// The "Start from today" checkbox disables the picker and echoes today (auto).
 const _psField = $("cfg-plan-start");
-if (_psField) { _psField.addEventListener("change", updatePlanStartEcho); updatePlanStartEcho(); }
+if (_psField) { _psField.addEventListener("change", updatePlanStartEcho); }
+const _autoField = $("cfg-start-auto");
+if (_autoField) { _autoField.addEventListener("change", updatePlanStartEcho); }
+updatePlanStartEcho();
 // Settings disclosure: reveal/hide the advanced planner knobs (hidden by default).
 const _setBtn = $("settings-toggle");
 if (_setBtn) _setBtn.onclick = () => {

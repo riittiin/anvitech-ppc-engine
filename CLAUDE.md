@@ -180,7 +180,19 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
 
 ## Map of the code
 
-- `engine/config.py` — tunable params + validation. Includes `expedite_window_min`
+- `engine/config.py` — tunable params + validation. **`plan_start_date` is nullable —
+  `None` = "auto: start from today (IST)", and `None` is now the LIVE DEFAULT** (live-mode
+  switch for the 2026-07-19 go-live). The plan clock follows the real current date without
+  anyone editing a setting; a fixed `date(...)` is a testing override (the golden test pins
+  `date(2025, 3, 1)` test-side). `to_dict` keeps `None` as JSON null; `from_dict` maps
+  `None`/`""`/missing → `None`. **The pure engine must NEVER see `None`** — the API boundary
+  resolves it to today via `api.main._resolve_config` / `_ist_today()` at every planning
+  entry (`_plan`, `_start_optimize`, `_incumbent_metrics`), and the SAVED config keeps
+  `None` so a moving "today" isn't mistaken for a settings change (`_inputs_signature`
+  hashes the unresolved config). The full `date.today()`/`datetime.now()` sweep in
+  `api/main.py` also went through `_ist_today()`/`_ist_now()` (rotation overlay, first-seen,
+  next-rotation, audit stamps) so every app-derived date is IST-current. Also includes
+  `expedite_window_min`
   (default 0 = off): Rule 6's least-slack tie-break window (Settings tick mark
   "Expedite urgent orders"); 0 is byte-identical to the legacy non-delay plan. And
   `balance_operator_load` (default off): Rule 6's schedule-neutral operator-fairness

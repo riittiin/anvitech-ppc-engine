@@ -320,6 +320,8 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
         def op_lookup(m, t):
             return []
     operator_free: dict[str, datetime] = {}   # operator name → when they next free up
+    # config.plan_start_date is never None here: the API boundary resolves an
+    # "auto" (None) start to today (IST) via _resolve_config before any rule runs.
     plan_start = datetime(
         config.plan_start_date.year,
         config.plan_start_date.month,

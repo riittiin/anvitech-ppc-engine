@@ -604,6 +604,16 @@ After actuals are entered, **re-run MRP/refresh**: regenerate the plan from
   1 March. It never moves earlier than the configured `plan_start_date`, and skips
   weekly-off/holiday days. With no actuals recorded, the plan starts from the configured
   date exactly as before (golden trace unchanged).
+- **Plan clock starts from the current date automatically** *(live mode, 2026-07-18)*:
+  `config.plan_start_date` is **nullable** — `None` means "auto: start from **today**
+  (Indian time)". The **live default is `None`**, so every plan the shop runs begins
+  from the real current date without anyone editing a setting. A **fixed date** is a
+  testing/reproducibility override (the golden trace pins `date(2025, 3, 1)`). The pure
+  engine never sees `None`: the API boundary resolves it to today (IST) via
+  `api.main._resolve_config` / `_ist_today()` before any rule runs. The **saved** config
+  keeps `None` (never a resolved date), so a moving "today" is never mistaken for a
+  settings change. Settings UI: the **"Start from today (recommended)"** checkbox
+  (`cfg-start-auto`) — checked sends `plan_start_date: null` and disables the picker.
 
 ### Operator efficiency report *(feature, 2026-07-18)*
 

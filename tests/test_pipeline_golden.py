@@ -4,6 +4,7 @@ shows as a diff. Regenerate intentionally with:  REGEN_GOLDEN=1 pytest -k golden
 """
 import json
 import os
+from datetime import date
 from pathlib import Path
 
 from engine.config import Config
@@ -16,7 +17,11 @@ SNAPSHOT_RULES = ["rule1", "rule2", "rule3", "rule6"]
 
 def _snapshot(loaded):
     so_lines, masters = loaded
-    trace = run_forward(PlanRun(so_lines=so_lines), Config(), masters)
+    # The live default plan_start_date is now None ("auto: start from today");
+    # the golden trace is pinned to the historical fixed date so it stays
+    # byte-identical without regeneration.
+    trace = run_forward(PlanRun(so_lines=so_lines),
+                        Config(plan_start_date=date(2025, 3, 1)), masters)
     return {r: trace[r]["output"] for r in SNAPSHOT_RULES}
 
 
