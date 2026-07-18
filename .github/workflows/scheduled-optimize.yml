@@ -1,0 +1,25 @@
+name: scheduled-optimize
+on:
+  schedule:
+    - cron: "30 5 * * 1,5"   # Mon & Fri 11:00 IST — after the ~10:00 feedback entry
+  workflow_dispatch: {}
+concurrency: optimize
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Wake the app and start the scheduled optimization
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          SECRET: ${{ secrets.OPTIMIZE_WORKER_SECRET }}
+        run: |
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /tmp/resp.json -w '%{http_code}' -X POST \
+              -H "X-Worker-Secret: $SECRET" --max-time 90 \
+              "$APP_URL/optimize/scheduled" || echo 000)
+            echo "attempt $i: HTTP $code $(cat /tmp/resp.json 2>/dev/null)"
+            [ "$code" = "200" ] && exit 0
+            sleep 30
+          done
+          echo "app never answered"; exit 1

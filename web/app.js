@@ -466,9 +466,26 @@ function renderTab(key) {
 }
 
 // ---- CSV download (for printing schedules) ----
-function todayStamp() {
-  const d = new Date();
+function formatDdmmyyyy(d) {
   return `${String(d.getDate()).padStart(2, "0")}-${String(d.getMonth() + 1).padStart(2, "0")}-${d.getFullYear()}`;
+}
+function todayStamp() {
+  return formatDdmmyyyy(new Date());
+}
+
+// Next scheduled cloud optimize run: Mon or Fri at 11:00 local (the GitHub cron
+// fires Mon/Fri 05:30 UTC = 11:00 IST, after the ~10:00 feedback entry window).
+// If today IS a Mon/Fri and it's still before 11:00, today counts; otherwise the
+// next Mon/Fri. `now` is optional (defaults to the real clock) so this is
+// testable-by-reading without any mocking.
+function nextScheduledOptimize(now) {
+  const base = now instanceof Date ? new Date(now.getTime()) : new Date();
+  const isSchedDay = (d) => d.getDay() === 1 || d.getDay() === 5;   // Mon=1, Fri=5
+  const at11 = (d) => { const t = new Date(d.getTime()); t.setHours(11, 0, 0, 0); return t; };
+  if (isSchedDay(base) && base < at11(base)) return formatDdmmyyyy(at11(base));
+  const next = new Date(base.getTime());
+  do { next.setDate(next.getDate() + 1); } while (!isSchedDay(next));
+  return formatDdmmyyyy(at11(next));
 }
 function tableToCsv(table) {
   const esc = (v) => {
@@ -919,7 +936,7 @@ function actualsFormHtml() {
     <label class="complete-check"><input id="a-complete" type="checkbox" /> <strong>Mark this order (this SO No + item) complete</strong> — archives just this item line; the engine never auto-completes.</label>
     <button id="a-save" class="primary">Save daily entry</button>
     <div class="optimize-done-row">
-      <button id="optimize-done" class="primary">Done entering — update &amp; optimize plan</button>
+      <button id="optimize-done" class="primary">Done entering — update plan</button>
       <span id="optimize-done-status" class="status"></span>
     </div>`;
 }
@@ -1063,25 +1080,16 @@ async function wireActualsForm() {
       setStatus("Save error: " + e.message); btn.disabled = false; btn.textContent = label;
     }
   };
-  // Clerk's "Done entering" — a manual trigger for the self-tuning re-optimize,
-  // since punch entries (unlike deliberate admin actions) don't bump on their own.
-  // Available to both roles.
+  // Clerk's "Done entering" — refreshes the plan from the day's punches right
+  // away; the sequence re-optimization itself now runs on a schedule (GitHub
+  // Actions, Mon & Fri) rather than on this click. Available to both roles.
   const doneBtn = $("optimize-done");
   if (doneBtn) {
     doneBtn.onclick = async () => {
       const st = $("optimize-done-status");
-      st.textContent = "starting…";
-      try {
-        const r = await fetch("/optimize/done", { method: "POST" });
-        const d = await r.json();
-        st.textContent = d.started
-          ? "Optimizing in the background — the plan updates itself when done."
-          : (d.state === "running"
-              ? "Already optimizing — your entries are included in the next run."
-              : "Nothing new to optimize.");
-      } catch (e) {
-        st.textContent = "Request failed: " + e.message;
-      }
+      st.textContent = "Updating plan…";
+      await runPlan(false);
+      st.textContent = `Entries saved — plan updated. Next optimization: ${nextScheduledOptimize()}.`;
     };
   }
 }
