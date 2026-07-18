@@ -346,31 +346,69 @@ def _load_routings(wb, masters: Masters):
 
 
 def _load_so_lines(wb, masters: Masters):
+    """Read the SO list header-driven (position-independent), like the 3 master
+    sheets — the owner's ERP export shifts these columns on every export, and
+    NOT uniformly, so a fixed-index reader silently reads the wrong columns
+    (e.g. delivery date lands on a text cell) and drops every row."""
     ws = _find_sheet(wb, "Sales Order (SO) list")
     if ws is None:
         masters.add_report("MISSING_SHEET", "Sales Order (SO) list", "sheet not found")
         return []
+    rows = list(ws.iter_rows(values_only=True))
+    hdr, col = _locate_table(rows, {
+        "so_no": "sono",
+        "item_code": "salesitemcode",
+        "qty": "soqty",
+        "delivery": "sodeliverydate",
+    })
+    if hdr is None:
+        masters.add_report(
+            "MISSING_SO_COLUMNS", "Sales Order (SO) list",
+            "could not find the SO number / item code / quantity / delivery date "
+            "columns by header — check the sheet headers",
+        )
+        return []
+    # Optional columns: bind if present in the same header row (first cell wins,
+    # left to right), else leave unbound so _cell reads None. Not folded into
+    # `_locate_table`'s `needed` dict — that would make them required, and the
+    # real workbook has no "Remarks" column at all.
+    header_row = rows[hdr]
+    for key, token in {
+        "item_name": "salesitemname",
+        "customer": "customername",
+        "pending_qty": "pendsoqty",
+        "remarks": "remarks",
+    }.items():
+        for ci, cell in enumerate(header_row):
+            h = _norm_header(cell)
+            if h and token in h:
+                col[key] = ci
+                break
+
     so_lines = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        item_code = _cell(row, 19)
+    for row in rows[hdr + 1:]:
+        item_code = _cell(row, col.get("item_code"))
         if item_code is None or str(item_code).strip() == "":
             continue
-        so_no = _cell(row, 5)
-        delivery = parse_date(_cell(row, 23))
+        so_no = _cell(row, col.get("so_no"))
+        delivery_raw = _cell(row, col.get("delivery"))
+        delivery = parse_date(delivery_raw)
         if delivery is None:
             masters.add_report(
-                "BAD_DELIVERY_DATE", str(so_no), f"unparseable delivery date {_cell(row, 23)!r}"
+                "BAD_DELIVERY_DATE", str(so_no), f"unparseable delivery date {delivery_raw!r}"
             )
             continue
-        item_name, customer, remarks = _cell(row, 20), _cell(row, 8), _cell(row, 24)
+        item_name = _cell(row, col.get("item_name"))
+        customer = _cell(row, col.get("customer"))
+        remarks = _cell(row, col.get("remarks"))
         so_lines.append(
             SOLine(
                 so_no=str(so_no).strip() if so_no else "",
                 item_code=str(item_code).strip(),
                 item_name=str(item_name).strip() if item_name else "",
-                qty=_num(_cell(row, 21)) or 0.0,
+                qty=_num(_cell(row, col.get("qty"))) or 0.0,
                 delivery_date=delivery,
-                pending_qty=_num(_cell(row, 27)),
+                pending_qty=_num(_cell(row, col.get("pending_qty"))),
                 customer=str(customer).strip() if customer else "",
                 remarks=str(remarks).strip() if remarks else "",
             )

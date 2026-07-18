@@ -1,7 +1,9 @@
 """Loader tests — expected counts and the known non-blocking data quirks."""
+import openpyxl
+
 from engine.loaders import (
     load_all, normalize_resource_id, parse_date, parse_resource_candidates, _num,
-    _validate,
+    _validate, _load_so_lines,
 )
 from engine.models import Masters, Routing, Process
 from datetime import date
@@ -98,6 +100,87 @@ def test_alternative_cells_register_each_machine_not_a_merged_id(loaded):
         assert bogus not in masters.machines
     assert "CNC1" in masters.machines and not masters.machines["CNC1"].provisional
     assert "CNC2" in masters.machines and not masters.machines["CNC2"].provisional
+
+
+# --------------------------------------------------------------------------- #
+# SO list: header-driven, position-independent (the owner's ERP export shifted
+# every SO column and NOT uniformly — a fixed-index reader silently reads the
+# wrong columns and drops every row as BAD_DELIVERY_DATE).
+# --------------------------------------------------------------------------- #
+def _build_so_workbook(header_by_col: dict, data_rows: list):
+    """Build a tiny workbook with just the SO sheet. ``header_by_col`` maps
+    0-based column index -> header text (row 1). ``data_rows`` is a list of
+    {0-based col: value} dicts, one per data row (from row 2)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Sales Order (SO) list"
+    for col, text in header_by_col.items():
+        ws.cell(row=1, column=col + 1, value=text)
+    for r, row in enumerate(data_rows, start=2):
+        for col, value in row.items():
+            ws.cell(row=r, column=col + 1, value=value)
+    return wb
+
+
+# Mirrors the real Test5.xlsx layout: SONo=14, Customer Name=17,
+# Sales Item Code=28, Sales Item Name=29, SO Qty=30, SO Delivery Date=32,
+# Pend SO Qty=35 (0-based) — shifted right from the old fixed indices, and
+# NOT uniformly shifted.
+SHIFTED_HEADERS = {
+    14: "SONo", 17: "Customer Name", 28: "Sales Item Code",
+    29: "Sales Item Name", 30: "SO Qty", 32: "SO Delivery Date",
+    35: "Pend SO Qty",
+}
+
+
+def test_so_lines_survive_a_column_shift():
+    # THIS is the regression: the old fixed-index reader assumed
+    # so_no=5, item_code=19, qty=21, delivery=23 — all wrong here — and would
+    # read the delivery date from a column holding text, dropping every row.
+    wb = _build_so_workbook(SHIFTED_HEADERS, [
+        {14: "SO-1", 17: "Cust A", 28: "ITEM-1", 29: "Widget", 30: 5,
+         32: "10/08/2026", 35: 5},
+        {14: "SO-2", 17: "Cust B", 28: "ITEM-2", 29: "Gadget", 30: 8,
+         32: "12/08/2026", 35: 3},
+    ])
+    masters = Masters()
+    so_lines = _load_so_lines(wb, masters)
+    assert len(so_lines) == 2
+    assert so_lines[0].so_no == "SO-1"
+    assert so_lines[0].item_code == "ITEM-1"
+    assert so_lines[0].qty == 5.0
+    assert so_lines[0].delivery_date == date(2026, 8, 10)
+    assert so_lines[0].customer == "Cust A"
+    assert so_lines[0].pending_qty == 5.0
+    assert so_lines[1].so_no == "SO-2"
+    assert so_lines[1].item_code == "ITEM-2"
+    assert so_lines[1].qty == 8.0
+    assert so_lines[1].delivery_date == date(2026, 8, 12)
+
+
+def test_so_lines_tolerate_no_remarks_column():
+    # The real Test5.xlsx has NO "Remarks" column at all — it must be optional.
+    wb = _build_so_workbook(SHIFTED_HEADERS, [
+        {14: "SO-1", 17: "Cust A", 28: "ITEM-1", 29: "Widget", 30: 5,
+         32: "10/08/2026", 35: 5},
+    ])
+    masters = Masters()
+    so_lines = _load_so_lines(wb, masters)
+    assert len(so_lines) == 1
+    assert so_lines[0].remarks == ""
+
+
+def test_so_lines_missing_required_column_reports_and_returns_empty():
+    # Omit "SO Delivery Date" entirely -> can't find the header row by name.
+    headers = {k: v for k, v in SHIFTED_HEADERS.items() if v != "SO Delivery Date"}
+    wb = _build_so_workbook(headers, [
+        {14: "SO-1", 17: "Cust A", 28: "ITEM-1", 29: "Widget", 30: 5, 35: 5},
+    ])
+    masters = Masters()
+    so_lines = _load_so_lines(wb, masters)
+    assert so_lines == []
+    kinds = [r["kind"] for r in masters.report]
+    assert "MISSING_SO_COLUMNS" in kinds
 
 
 def test_os_is_not_registered_as_a_machine():
