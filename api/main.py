@@ -44,6 +44,7 @@ from engine import optimizer
 from engine import optimize_service
 from engine.gantt import build_gantt
 from engine import book_store, orderbook
+from engine import operator_master
 from engine.rules import (
     rule3_tiebreak_process_time as r3,
     rule4_setup_time as r4,
@@ -408,6 +409,18 @@ class AbsenceRequest(BaseModel):
     operator: str
     from_date: str
     to_date: str
+
+
+class OperatorRequest(BaseModel):
+    name: str
+    machines_raw: str = ""
+    shift: str = ""
+
+
+class OperatorPatchRequest(BaseModel):
+    machines_raw: Optional[str] = None
+    shift: Optional[str] = None
+    pinned: Optional[bool] = None
 
 
 class OptimizeRequest(BaseModel):
@@ -1421,6 +1434,94 @@ def delete_absence_ep(absence_id: str, request: Request):
     require_admin(request)
     if not book_store.delete_absence(absence_id):
         raise HTTPException(status_code=404, detail="absence not found")
+    return {"deleted": True}
+
+
+_VALID_SHIFTS = {"First shift", "Second shift", ""}
+
+
+@app.get("/operators")
+def get_operators():
+    """The app-owned operator/shift table, any logged-in role. Calling
+    `_current_masters()` first ensures the one-time seed-from-workbook (if a
+    workbook exists and the table has never been seeded) and any due Friday
+    rotation are applied and persisted (as-of TODAY, for display) before the
+    rows are read back. `next_rotation` is the next Friday after today,
+    regardless of whether the table exists yet."""
+    _current_masters()
+    table = book_store.load_operator_table()
+    rows = table.get("operators", []) if table else []
+    return {"operators": rows,
+            "next_rotation": operator_master.next_rotation(date.today()).isoformat()}
+
+
+@app.post("/operators")
+def create_operator(req: OperatorRequest, request: Request):
+    """Add a new operator to the app-owned table. Admin only. `name` must be
+    non-empty and unique among existing rows (case-insensitive, stripped);
+    `shift` must be one of the 3 exact values. If the table has never been
+    created, POST creates it (`week_anchor` = the most recent Friday). No
+    optimize trigger — scheduled-only contest rules stand."""
+    require_admin(request)
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if req.shift not in _VALID_SHIFTS:
+        raise HTTPException(status_code=400,
+                            detail="shift must be 'First shift', 'Second shift', or ''")
+    table = book_store.load_operator_table()
+    if table is None:
+        table = {"week_anchor": operator_master.last_friday(date.today()).isoformat(),
+                 "operators": []}
+    existing = {r.get("name", "").strip().lower() for r in table["operators"]}
+    if name.lower() in existing:
+        raise HTTPException(status_code=400,
+                            detail=f"operator '{name}' already exists")
+    row = {"id": uuid.uuid4().hex, "name": name, "machines_raw": req.machines_raw,
+           "shift": req.shift, "pinned": False}
+    table["operators"].append(row)
+    book_store.save_operator_table(table)
+    return {"operator": row}
+
+
+@app.patch("/operators/{operator_id}")
+def update_operator(operator_id: str, req: OperatorPatchRequest, request: Request):
+    """Partially update an operator's `machines_raw`/`shift`/`pinned`. Admin
+    only. 404 if the id is unknown (including when no table exists yet);
+    `shift`, if given, is validated the same as POST."""
+    require_admin(request)
+    if req.shift is not None and req.shift not in _VALID_SHIFTS:
+        raise HTTPException(status_code=400,
+                            detail="shift must be 'First shift', 'Second shift', or ''")
+    table = book_store.load_operator_table()
+    rows = table.get("operators", []) if table else []
+    for row in rows:
+        if row.get("id") == operator_id:
+            if req.machines_raw is not None:
+                row["machines_raw"] = req.machines_raw
+            if req.shift is not None:
+                row["shift"] = req.shift
+            if req.pinned is not None:
+                row["pinned"] = req.pinned
+            book_store.save_operator_table(table)
+            return {"operator": row}
+    raise HTTPException(status_code=404, detail="operator not found")
+
+
+@app.delete("/operators/{operator_id}")
+def delete_operator(operator_id: str, request: Request):
+    """Remove an operator. Admin only. 404 if the id is unknown (including
+    when no table exists yet). Absences referencing the removed name become
+    orphans — non-blocking, covered by the existing ABSENT_OPERATOR_UNKNOWN
+    report row (same as a masters re-upload that drops an operator)."""
+    require_admin(request)
+    table = book_store.load_operator_table()
+    rows = table.get("operators", []) if table else []
+    keep = [r for r in rows if r.get("id") != operator_id]
+    if len(keep) == len(rows):
+        raise HTTPException(status_code=404, detail="operator not found")
+    table["operators"] = keep
+    book_store.save_operator_table(table)
     return {"deleted": True}
 
 
