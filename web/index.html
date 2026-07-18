@@ -72,8 +72,8 @@
       <div class="optimize-intro">
         Same machines, same people: only the order in which jobs claim the machines
         changes. All orders are sequenced together: lanes (Open / Committed / Urgent)
-        are status labels and never restrict the search. An applied optimized plan
-        <strong>supersedes the “Expedite” tick</strong> and runs with Expedite set aside.
+        are status labels and never restrict the search. Optimize also tunes the
+        overlap between steps and applies the best value it finds.
       </div>
       <div class="optimize-controls">
         <button id="optimize-start" class="primary">Start deep search</button>
@@ -157,9 +157,8 @@
           <label>Setup time (min)
             <input id="cfg-setup" type="number" value="90" min="0" />
           </label>
-          <label>Overlap % <span class="muted">(always on)</span>
-            <input id="cfg-overlap-pct" type="number" value="50" min="0" max="100" />
-          </label>
+          <p class="cfg-readonly">Overlap between steps: tuned automatically by Optimize
+            (currently <span id="cfg-overlap-info">50</span>%)</p>
         </fieldset>
         <fieldset class="settings-group">
           <legend>Priority (Rule 3)</legend>
@@ -188,10 +187,6 @@
           <label class="cfg-check">
             <input id="cfg-split-parallel" type="checkbox" checked />
             Split alternative machines in parallel
-          </label>
-          <label class="cfg-check">
-            <input id="cfg-expedite" type="checkbox" />
-            Expedite urgent orders (prioritise the most at-risk order in a near tie)
           </label>
           <label class="cfg-check">
             <input id="cfg-balance-ops" type="checkbox" />

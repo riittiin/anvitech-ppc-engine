@@ -191,6 +191,10 @@ button.danger:hover { filter: brightness(1.05); color: #fff; }
   flex-direction: row; align-items: center; gap: 8px; color: var(--ink); font-size: 13px; margin-top: 12px;
 }
 .settings-group label.cfg-check input { width: auto; }
+.settings-group .cfg-readonly {
+  margin-top: 11px; font-size: 12px; color: var(--muted); line-height: 1.4;
+}
+.settings-group .cfg-readonly span { color: var(--ink); font-weight: 700; }
 
 .cfg-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .cfg-row select, .cfg-row input[type="date"], .cfg-row input[type="text"], .cfg-row input[type="month"] {

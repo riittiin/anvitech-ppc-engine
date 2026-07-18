@@ -89,13 +89,19 @@ function readConfig() {
     consolidation_window_days: Number($("cfg-window").value),
     setup_time_min: Number($("cfg-setup").value),
     overlap_mode: "overlap",   // sequential mode retired — always overlap
-    overlap_percent: Number($("cfg-overlap-pct").value),
+    // Overlap % is owned by Optimize (the sweep contest tunes it and Apply persists
+    // the winner). There is no longer an input for it — a settings Save must PRESERVE
+    // the optimizer-chosen value, so we echo back the last-loaded config's overlap
+    // (never a form field). Fall back to 50 only before the first /run has loaded.
+    overlap_percent: (currentConfig && currentConfig.overlap_percent != null)
+      ? currentConfig.overlap_percent : 50,
     priority_metric: $("cfg-priority-metric").value,
     priority_window_days: $("cfg-priority-window").value,
     apply_operator_logic: $("cfg-operator-logic").checked,
     split_parallel: $("cfg-split-parallel").checked,
-    // Tick mark → a 45-min expedite window; unticked → 0 (legacy non-delay).
-    expedite_window_min: $("cfg-expedite") && $("cfg-expedite").checked ? 45 : 0,
+    // Expedite was removed from Settings (measured harmful, and always forced off
+    // once optimized ranks are applied): always send 0.
+    expedite_window_min: 0,
     balance_operator_load: !!($("cfg-balance-ops") && $("cfg-balance-ops").checked),
   };
   // Plan start date (the day scheduling begins). "Start from today" (auto) sends
@@ -175,7 +181,10 @@ function applyConfig(cfg, resolvedStart) {
   updatePlanStartEcho();
   setVal("cfg-window", cfg.consolidation_window_days);
   setVal("cfg-setup", cfg.setup_time_min);
-  setVal("cfg-overlap-pct", cfg.overlap_percent);
+  // Overlap % is read-only (Optimize owns it): reflect the saved value into the
+  // info line rather than an editable input.
+  const ov = $("cfg-overlap-info");
+  if (ov && cfg.overlap_percent != null) ov.textContent = cfg.overlap_percent;
   setSel("cfg-priority-metric", cfg.priority_metric);
   const pw = $("cfg-priority-window");
   if (pw) pw.value = (cfg.priority_window_days === null || cfg.priority_window_days === undefined)
@@ -184,8 +193,6 @@ function applyConfig(cfg, resolvedStart) {
   if (ol) ol.checked = !!cfg.apply_operator_logic;
   const sp = $("cfg-split-parallel");
   if (sp) sp.checked = !!cfg.split_parallel;
-  const ex = $("cfg-expedite");
-  if (ex) ex.checked = Number(cfg.expedite_window_min) > 0;
   const bo = $("cfg-balance-ops");
   if (bo) bo.checked = !!cfg.balance_operator_load;
 }
