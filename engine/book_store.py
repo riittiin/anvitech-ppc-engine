@@ -24,6 +24,7 @@ PLAN_CONFIG_KEY = "anvitech:plan_config"   # kv: json of the admin's saved Confi
 PLAN_PRIORITY_KEY = "anvitech:plan_priority"  # kv: json {ranks, meta} of the applied Optimize run
 AUTO_NOTE_KEY = "anvitech:auto_note"        # kv: json note from the self-tuning trigger (informational)
 ABSENCES_KEY = "anvitech:absences"          # kv: json list of operator absences
+OPERATORS_KEY = "anvitech:operators"        # kv: json {week_anchor, operators:[...]}
 
 _SEP = "\x1f"   # ASCII unit separator — never appears in an SO# or item code
 
@@ -245,3 +246,14 @@ def delete_absence(absence_id: str) -> bool:
         return False
     get_store().kv_set(ABSENCES_KEY, json.dumps(keep))
     return True
+
+
+# --- operator master (app-owned, seeded once from the workbook) --- #
+def load_operator_table():
+    """The app-owned operator/shift table, or ``None`` if never seeded."""
+    raw = get_store().kv_get(OPERATORS_KEY)
+    return json.loads(raw) if raw else None
+
+
+def save_operator_table(table: dict) -> None:
+    get_store().kv_set(OPERATORS_KEY, json.dumps(table))
