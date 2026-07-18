@@ -143,6 +143,39 @@
     </div>
   </section>
 
+  <section id="operators-panel" class="settings-panel">
+    <div class="settings-grid">
+      <fieldset class="settings-group operators-group">
+        <legend>Operators &amp; shifts</legend>
+        <p id="operators-header" class="muted"></p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Machines</th>
+                <th>Shift</th>
+                <th class="admin-only">Stays</th>
+                <th class="admin-only"></th>
+              </tr>
+            </thead>
+            <tbody id="operators-tbody"></tbody>
+          </table>
+        </div>
+        <div class="cfg-row admin-only">
+          <input type="text" id="op-add-name" placeholder="Name" />
+          <input type="text" id="op-add-machines" placeholder="Machines (e.g. CNC 1/CNC 2)" />
+          <select id="op-add-shift">
+            <option value="">Day (9-18)</option>
+            <option value="First shift">First shift</option>
+            <option value="Second shift">Second shift</option>
+          </select>
+          <button id="op-add-btn" class="ghost-btn" type="button">Add operator</button>
+        </div>
+      </fieldset>
+    </div>
+  </section>
+
   <nav id="tabs" class="tabs"></nav>
 
   <main id="tab-content" class="tab-content">

@@ -1225,6 +1225,117 @@ async function removeAbsence(id) {
   } catch (e) { setStatus("Remove absence error: " + e.message); }
 }
 
+// ---- Operators & shifts (Settings-area block). The list is visible to both
+// roles, but rows render two different markups per role (rather than dual-DOM
+// + CSS-hiding as the absence row's single delete button does): admins get
+// editable inputs/select/checkbox/remove; users get plain text — same
+// per-role conditional-render approach already used for the order book table
+// (`renderOrders`'s `isAdmin` branch). Simplest fit here since every cell but
+// the name needs an admin-only edit affordance, not just one trailing button. ----
+function renderOperatorsTable(operators) {
+  const tbody = $("operators-tbody");
+  if (!tbody) return;
+  const isAdmin = currentRole === "admin";
+  if (!operators || operators.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="${isAdmin ? 5 : 3}" class="empty">No operators yet.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = operators.map((o) => {
+    const id = escapeHtml(o.id);
+    if (!isAdmin) {
+      const shiftLabel = o.shift ? escapeHtml(o.shift) : "Day (9–18)";
+      return `<tr>
+        <td>${escapeHtml(o.name)}</td>
+        <td>${escapeHtml(o.machines_raw || "")}</td>
+        <td>${shiftLabel}</td>
+      </tr>`;
+    }
+    const shiftOpts = ["", "First shift", "Second shift"].map((v) =>
+      `<option value="${escapeHtml(v)}"${o.shift === v ? " selected" : ""}>${v === "" ? "Day (9–18)" : escapeHtml(v)}</option>`
+    ).join("");
+    return `<tr data-id="${id}">
+      <td>${escapeHtml(o.name)}</td>
+      <td><input type="text" class="op-machines" data-id="${id}" value="${escapeHtml(o.machines_raw || "")}" /></td>
+      <td><select class="op-shift" data-id="${id}">${shiftOpts}</select></td>
+      <td class="admin-only"><input type="checkbox" class="op-pinned" data-id="${id}" ${o.pinned ? "checked" : ""} /></td>
+      <td class="admin-only"><button type="button" class="ghost-btn op-remove" data-id="${id}">✕</button></td>
+    </tr>`;
+  }).join("");
+  if (isAdmin) {
+    tbody.querySelectorAll(".op-machines").forEach((inp) => {
+      inp.addEventListener("change", () => patchOperator(inp.dataset.id, { machines_raw: inp.value }));
+    });
+    tbody.querySelectorAll(".op-shift").forEach((sel) => {
+      sel.addEventListener("change", () => patchOperator(sel.dataset.id, { shift: sel.value }));
+    });
+    tbody.querySelectorAll(".op-pinned").forEach((chk) => {
+      chk.addEventListener("change", () => patchOperator(chk.dataset.id, { pinned: chk.checked }));
+    });
+    tbody.querySelectorAll(".op-remove").forEach((btn) => {
+      btn.onclick = () => removeOperator(btn.dataset.id);
+    });
+  }
+}
+
+async function loadOperators() {
+  try {
+    const res = await fetch("/operators");
+    if (!res.ok) return;
+    const data = await res.json();
+    const header = $("operators-header");
+    if (header) {
+      header.textContent = data.next_rotation
+        ? `Shifts rotate every Friday (effective from first shift). Next rotation: ${isoToDdmmyyyy(data.next_rotation)}.`
+        : "Shifts rotate every Friday (effective from first shift).";
+    }
+    renderOperatorsTable(data.operators || []);
+  } catch (e) { /* the panel is a convenience view — a fetch hiccup shouldn't block the page */ }
+}
+
+async function patchOperator(id, body) {
+  try {
+    const res = await fetch(`/operators/${encodeURIComponent(id)}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) { setStatus("Update operator failed: " + (await res.text())); await loadOperators(); return; }
+    setStatus("Operator updated.");
+    await loadOperators();
+    await runPlan(false);
+  } catch (e) { setStatus("Update operator error: " + e.message); }
+}
+
+async function addOperator() {
+  const name = $("op-add-name"), machines = $("op-add-machines"), shift = $("op-add-shift");
+  if (!name || !name.value.trim()) { setStatus("Enter an operator name."); return; }
+  try {
+    const res = await fetch("/operators", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: name.value.trim(),
+        machines_raw: machines ? machines.value : "",
+        shift: shift ? shift.value : "",
+      }),
+    });
+    if (!res.ok) { setStatus("Add operator failed: " + (await res.text())); return; }
+    setStatus(`Added operator ${name.value.trim()}.`);
+    name.value = ""; if (machines) machines.value = ""; if (shift) shift.value = "";
+    await loadOperators();
+    await runPlan(false);
+  } catch (e) { setStatus("Add operator error: " + e.message); }
+}
+
+async function removeOperator(id) {
+  if (!confirm("Remove this operator? Any absences recorded against them are kept but will show as unknown.")) return;
+  try {
+    const res = await fetch(`/operators/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) { setStatus("Remove operator failed: " + (await res.text())); return; }
+    setStatus("Operator removed.");
+    await loadOperators();
+    await runPlan(false);
+  } catch (e) { setStatus("Remove operator error: " + e.message); }
+}
+
 // Wire the admin controls (null-guarded — they're absent/hidden for the user role).
 const _runBtn = $("run-btn");
 if (_runBtn) _runBtn.onclick = () => runPlan(true);   // explicit admin Plan → persist
@@ -1257,6 +1368,11 @@ if (_optStop) _optStop.onclick = stopOptimize;
 // but the handler is harmless to wire either way — the server enforces the role).
 const _absAdd = $("absence-add");
 if (_absAdd) _absAdd.onclick = addAbsence;
+// Operators & shifts: add is admin-only (row wrapped in admin-only, so it's
+// CSS-hidden for the user role too; the handler is harmless to wire either
+// way — the server enforces the role).
+const _opAdd = $("op-add-btn");
+if (_opAdd) _opAdd.onclick = addOperator;
 
 // Boot: learn the role, render the shell, then auto-load the current plan (no
 // persist) so the schedule/Gantt/rule tabs populate without a Plan click.
@@ -1265,6 +1381,7 @@ if (_absAdd) _absAdd.onclick = addAbsence;
   renderTabs();
   renderTab(activeTab);
   loadAbsences();   // independent of the plan; visible to both roles (GET is role-open)
+  loadOperators();  // independent of the plan; visible to both roles (GET is role-open)
   await runPlan(false);
   // A search may still be running (or have finished) from before a page reload.
   // Re-open the panel and either resume the progress display or show the result the
