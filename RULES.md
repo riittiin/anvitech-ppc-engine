@@ -163,9 +163,15 @@ the impossible early *finish* is corrected.
 Allot each process to the **earliest-available machine from its
 preferred/suggested list** — respecting:
 - the working calendar (**Thursdays off**, holidays, operator leaves), and
-- **shift timings** (1st: 8am–7pm, 2nd: 7pm–5am). Each operator's shift is set by a
-  **Shift column** in the Operator & shift Master (First/Second) — there is no
-  swap-every-Friday rule.
+- **shift timings** (1st: 8am–7pm, 2nd: 7pm–5am). **Operators & shifts live in the
+  app, not Excel** (2026-07-18) — the admin adds, edits, removes, and sets each
+  operator's shift in **Settings**. Every **Friday**, every two-shift operator
+  automatically **swaps** shift (First ↔ Second), effective from that Friday's
+  **first shift** — "we always assume they will change." A per-operator **"stays
+  on current shift" pin** keeps individuals in place until unpinned. Day-window/
+  manual operators (blank shift, working 09:00–18:00) never rotate. The workbook's
+  "Operator & shift Master" sheet only ever **seeds** this table once, the first
+  time it's empty — a later re-upload never touches operators again.
 
 **Time basis.** A process's machine time = **cycle time × qty** (+ the 90-min setup
 for CNC/VMC steps only, Rule 4). The Process "Total time" column in the master is **never** used.
@@ -284,10 +290,12 @@ number *or* type, e.g. `CNC 1` or `Milling M/c`) includes that machine and whose
 So a machine runs the union of its operator-covered shifts: e.g. a CNC with only
 second-shift operators runs second shift only. An operation whose machine has **no
 covered shift** is **not scheduled** and is listed in a "needs operator" report
-(never fatal); operator specialties that match no machine are reported too. All of
-this is **Excel-driven** — edit the three master sheets, re-upload, and it reflects.
-Provisional machines (referenced by a routing but not yet in the master) bypass the
-coverage gate and keep a two-shift window.
+(never fatal); operator specialties that match no machine are reported too. The
+machine/calendar masters are **Excel-driven** — edit the master sheets, re-upload,
+and it reflects. **Operators and their shift are app-owned** (see above) — edit
+them in **Settings**, not Excel; a re-upload never changes an operator's shift or
+roster. Provisional machines (referenced by a routing but not yet in the master)
+bypass the coverage gate and keep a two-shift window.
 
 **Operators are one-at-a-time resources (load-balanced).** Each scheduled operation is
 assigned a specific person — the **earliest-free** qualified operator for that machine

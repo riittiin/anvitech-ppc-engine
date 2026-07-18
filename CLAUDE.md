@@ -39,6 +39,15 @@ machines following 9 business rules, then re-plans as actual production comes in
   masters live in a durable key/value store. `engine/storage.py` selects the backend:
   **MongoDB Atlas (`MONGODB_URI`) > Upstash Redis > local file (`data/store/`)**.
   This store is the only thing the app writes; uploaded workbooks are read-only.
+- **Operators are app-owned, not Excel** (`anvitech:operators`, 2026-07-18). The
+  workbook's "Operator & shift Master" sheet **seeds the table exactly once** — only
+  the first time the store table is empty and a workbook is on file — then is
+  ignored forever: a later re-upload can never touch operators (the week-2
+  stale-sheet-overwrite problem is impossible by construction). Every Friday,
+  unpinned two-shift operators swap shift automatically (effective from that
+  Friday's first shift); a per-operator pin exempts individuals; admins
+  add/edit/remove/pin operators directly in Settings. See
+  `engine/operator_master.py` and the standalone feature bullet below.
 
 ## Non-negotiable design principles
 
@@ -201,6 +210,18 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   machine's working window from Available Hrs/Day + operator shift coverage (two-shift
   vs 09:00–18:00 manual); blocked + unmatched-specialty report. Consumed by Rule 6
   when `apply_operator_logic` is on.
+- `engine/operator_master.py` — pure module owning the app's operator/shift table
+  (rotation effective **Friday shift 1**, applied **as-of the plan's start date**;
+  display uses **as-of today**; persistence is a lazy catch-up write on any store
+  touch). `seed_rows_from_masters` (one-time, workbook → app-owned rows, all
+  unpinned), `rotate_table(table, today)` (flips unpinned two-shift rows once per
+  ODD count of elapsed Fridays since `week_anchor` — an EVEN count, e.g. two missed
+  Fridays, nets to no change; blank-shift/day-window rows and pinned rows never
+  flip; idempotent same-day), `operators_as_of(table, as_of)` (the one PURE view
+  every wiring site shares — rotate + convert to `Operator` objects, nothing
+  persisted), `to_operators` (parses `machines_raw` via the same
+  `loaders.parse_resource_candidates` the Excel loader uses, so a seeded row is
+  indistinguishable from a workbook-loaded one), `last_friday`/`next_rotation`.
 - `engine/pipeline.py` — `run_rule` (snapshots in/out/config/notes), `run_forward`
   (1→2→3→6), `RuleError`, `to_table`.
 - `engine/orderbook.py` — **order-book logic (pure)**: `merge_upload` (add new /
@@ -351,6 +372,53 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   bullet above — event triggers were removed 2026-07-18). UI: an
   always-visible Settings-area panel (not nested in the admin-only toolbar, so the user
   role sees the read-only list) with add/remove controls CSS- and server-gated admin-only.
+- **Operator & shift master rotation (2026-07-18,
+  `docs/superpowers/specs/2026-07-18-operator-master-rotation-design.md`) — operators
+  moved OUT of Excel, INTO the app.** Store: `anvitech:operators` (`{week_anchor,
+  operators: [{id, name, machines_raw, shift, pinned}]}`). **Seeding is one-time**:
+  `api._with_operator_overlay` seeds from the workbook's operator sheet only when
+  the store table is empty AND a workbook is on file
+  (`operator_master.seed_rows_from_masters`); every subsequent upload is ignored for
+  operators — the sheet becomes a fossil after that. **The ONE wiring point**:
+  `api._current_masters()` calls `_with_operator_overlay(base)` on every call, which
+  replaces `base.operators` with the store's rows (via `operator_master.to_operators`)
+  — every consumer (Rule 6, `operator_coverage`, analytics, gantt, shift-wise)
+  inherits automatically, no per-consumer code. **Rotation**: every Friday, unpinned
+  two-shift ("First shift"/"Second shift") operators swap; a per-operator "stays on
+  current shift" pin exempts them; blank-shift (day-window/manual) operators never
+  rotate. `operator_master.rotate_table` is lazy and idempotent — it counts every
+  elapsed Friday since `week_anchor` and nets an ODD count to one flip (an EVEN
+  count, e.g. two missed Fridays, nets to no change — true catch-up, not a
+  double-flip). **Effectiveness rule (owner, 2026-07-18): the swap takes effect at
+  Friday SHIFT 1**, so a plan whose schedule BEGINS on/after a rotation Friday sees
+  the rotated shifts even if computed on Thursday (the off day) — `api._plan`
+  re-overlays `operator_master.operators_as_of` onto the already-fresh masters using
+  `eff_start` (the plan's effective start date, not `date.today()`);
+  `_with_operator_overlay`/`GET /operators`/the Settings panel use **as-of TODAY**
+  for display. Persistence of `week_anchor` is a **lazy catch-up write** — any
+  request that observes today ≥ an unapplied Friday persists the rotation
+  (idempotent same-day, never a double-write). Cloud payload carries the
+  ALREADY-EFFECTIVE operator rows (computed as-of the plan start when the payload
+  is built), so the worker applies them directly
+  (`optimize_service.prepare_contest(operator_table=)`) with no anchor logic
+  worker-side; local == cloud byte-identical. **`_inputs_signature` now folds in the
+  operator table's sorted row CONTENT** (name/machines/shift/pin — ids and
+  `week_anchor` excluded; the masters sha alone no longer covers operators) so a
+  rotation or an edit correctly flags an applied optimization `inputs_changed`;
+  excluding `week_anchor` specifically avoids firing on a no-op double-Friday
+  catch-up (churn regression-tested). The scheduled-optimize skip check is an OR:
+  run when EITHER `book_sig` OR the current `_inputs_signature` differs from the
+  applied meta's (a rotation alone doesn't change `book_sig`). **API**
+  (`api/main.py`): `GET /operators` (any role, `{operators, next_rotation}`,
+  triggers seed/rotation as a side effect), `POST /operators` / `PATCH
+  /operators/{id}` / `DELETE /operators/{id}` (admin; each calls
+  `_current_masters()` FIRST so a direct mutation on a fresh deploy can never
+  suppress the one-time workbook seed — a review-caught data-loss hole, closed). No
+  trigger call (event triggers stay removed per the 2026-07-18 scheduled-optimize
+  pivot). **UI**: Settings "Operators & shifts" panel (`#operators-panel` in
+  `web/index.html`) — table (name, machines, shift, "Stays" pin, remove), add-row
+  form, "Next rotation: Friday DD-MM-YYYY"; admin edits, user role read-only (the
+  pin shows as plain text, not a checkbox).
 - **Phase 2 — promise ceiling — DISCARDED (owner pivot, 2026-07-16).** A one-pool contest
   with a hard promise veto was built and measured on both real books: ~30% worse than
   the (now-removed) two-pass approach, because zero-slack promises collapse the feasible
@@ -459,6 +527,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   /absences` / `DELETE /absences/{id}` (admin) — see the `book_store.py`/optimizer
   bullets above; `_absence_orphans` feeds the `ABSENT_OPERATOR_UNKNOWN` rows
   `_report_for_book` appends.
+  **Operators:** `GET /operators` (any role, `{operators, next_rotation}` —
+  triggers seed/rotation as a side effect via `_current_masters()`), `POST
+  /operators` / `PATCH /operators/{id}` / `DELETE /operators/{id}` (admin, each
+  calling `_current_masters()` first for the same seed-once guarantee) — see the
+  operator-master-rotation bullet above.
 - `web/` — `login.html` (self-contained login page), `📋 Orders` tab (order book +
   delete, with a **password-confirm modal**, the commit/urgent/uncommit lane
   controls, and the auto-note line), the per-rule tabs (Rule 7 = Capture Actuals,
@@ -467,8 +540,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   also reports the next scheduled optimization day; it no longer starts a contest),
   an always-visible
   **Operator Absences** panel (list visible to both roles; add/remove controls
-  admin-only), and a `📊 Gantt` tab; `app.js` renders the trace and hides
-  admin-only controls for the user role (no per-rule UI code).
+  admin-only), a Settings **Operators & shifts** panel (`#operators-panel` — table
+  of name/machines/shift/"Stays" pin + add-row; "Next rotation: Friday
+  DD-MM-YYYY"; admin edits, user role read-only), and a `📊 Gantt` tab; `app.js`
+  renders the trace and hides admin-only controls for the user role (no per-rule
+  UI code).
 
 ## Resolved design decision (data-confirmed)
 

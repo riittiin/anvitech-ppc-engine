@@ -256,6 +256,77 @@ started one); `POST /optimize/scheduled` with the correct worker secret **did** 
 contest end-to-end; `POST /optimize/done` came back **405** (the route no longer
 exists) — confirms the button-side removal matches the API-side removal.
 
+### Latest session (2026-07-18, second session) — in-app Operator & Shift master + Friday rotation — ⚠️ BUILT & TESTED on branch `operator-master-rotation`, **NOT pushed to `main`**
+
+**The owner's rule:** operators & shifts stop living in Excel — the "week-2
+stale-sheet overwrite" problem (a re-upload silently reverting operator edits)
+becomes impossible by construction. Operators now live in the app's own durable
+table (`anvitech:operators`); the workbook's "Operator & shift Master" sheet only
+ever **seeds** it once. And: "we always assume they will change" — every
+**Friday**, every unpinned two-shift operator automatically swaps shift (First ↔
+Second); a per-operator **pin** keeps individuals in place. Spec:
+`docs/superpowers/specs/2026-07-18-operator-master-rotation-design.md` (amended
+mid-build: the swap is effective at **Friday shift 1**, applied **as-of the
+plan's start date**, not the wall clock — a plan computed Thursday but starting
+Friday already sees the rotated crew).
+
+**What changed (TDD'd via the subagent-driven SDD ledger,
+`.superpowers/sdd/progress.md`; 10 commits on top of `main`, which already
+carries the scheduled-optimize twice-weekly-cron pivot described above):**
+- **`engine/operator_master.py`** (Task 1, commit `8e3a772`) — pure module:
+  `seed_rows_from_masters` (one-time workbook → app-owned rows), `rotate_table`
+  (lazy, idempotent — counts every elapsed Friday since `week_anchor`; an odd
+  count flips unpinned two-shift rows once, an even count is a true no-op
+  catch-up), `operators_as_of` (the one pure as-of view every wiring site
+  shares), `to_operators` (reuses the loader's own `parse_resource_candidates`
+  so a seeded row is indistinguishable from a workbook-loaded one).
+- **Wiring** (Task 2, commits `131ee9c` + `5dba0ba`) — `api._current_masters()`
+  overlays the store table onto the workbook masters on every call
+  (`_with_operator_overlay`): seed-once when the table is empty, rotate as-of
+  TODAY for display. `api._plan` re-overlays as-of the plan's `eff_start`
+  (Friday-shift-1 rule) so the schedule, Gantt, and Analytics agree. The cloud
+  payload carries the already-effective operator rows so the worker needs no
+  anchor logic; local == cloud byte-identical. `_inputs_signature` now folds in
+  the operator table's sorted row content (name/machines/shift/pin) — a
+  rotation or edit correctly flags an applied optimization `inputs_changed`;
+  `week_anchor` itself is excluded (a no-op double-Friday catch-up must not look
+  like a change — regression-tested). The scheduled-optimize skip check became
+  an OR (`book_sig` OR `inputs_sig` differs) so a rotation alone still triggers
+  the twice-weekly re-optimize.
+- **`/operators` endpoints** (Task 3, commits `b67de8b` + `5c60d9a`) — `GET`
+  (any role), `POST`/`PATCH /{id}`/`DELETE /{id}` (admin). **Review caught a
+  data-loss hole and it was closed the same task:** a direct mutation hitting a
+  never-yet-seeded store (e.g. the very first admin action after a fresh
+  deploy, before any `GET` or plan had run) would create/edit a bare table and
+  **permanently suppress** the one-time migration of the real workbook
+  operators. Fix: every mutating endpoint calls `_current_masters()` first
+  (same seed-once guarantee as `GET`, call-order independent) — closed with a
+  genuine regression test.
+- **Settings UI** (Task 4, commits `55f3d26` + `423da16`) — `#operators-panel`
+  in `web/index.html`: table (name, machines, shift, "Stays" pin, remove),
+  add-row form, "Next rotation: Friday DD-MM-YYYY". Browser-verified both
+  roles; a review fix corrected the pin display for the user role to plain
+  text (was an odd disabled-checkbox render).
+
+**Status at time of writing:** branch `operator-master-rotation`, 10 commits
+(spec/plan + 7 code commits across 4 tasks + 2 fix-ups), **NOT pushed**. **412
+tests pass, 1 skipped** (`python3 -m pytest -q`; up from 364 on `main`); golden
+trace untouched, no regen (seeding from the sample workbook reproduces
+byte-identical schedules).
+
+**Task 5 migration rehearsal (controller, real `Test5.xlsx`, ahead of this docs
+task):** seeded 19 operators from the workbook ✓; the server's overlaid plan ==
+a pure-Excel-loaded plan, byte-identical (383 rows) ✓; re-uploading the
+workbook left the operator table untouched ✓; a 2-Friday catch-up netted to no
+change with pins honored ✓; a 1-Friday flip swapped every unpinned operator's
+shift while pins stayed put ✓. **Caveat surfaced and resolved:** the
+rehearsal store's default config had `apply_operator_logic=False` (operators
+decorative — Rule 6 doesn't consult shift/coverage at all), so the plan-diff
+half of the check was vacuously null. Re-proved at the engine level with the
+**live** setting (`apply_operator_logic=True`): the Friday swap changes the
+schedule's structure (376 → 140 entries) and reassigns 70 operators directly —
+the feature is schedule-effective, not just data-effective.
+
 ### Latest session (2026-07-15/16) — cloud Optimize, self-tuning plan, promise-rule pivot, absences — merged & pushed to `main` (was staged on branch `self-tuning-plan` when this section was first written; the event triggers it introduced are superseded by the 2026-07-18 session above)
 
 **Status:** 362 tests pass, 1 skipped; golden untouched throughout (no regen). Built on
