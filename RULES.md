@@ -176,6 +176,18 @@ preferred/suggested list** — respecting:
 **Time basis.** A process's machine time = **cycle time × qty** (+ the 90-min setup
 for CNC/VMC steps only, Rule 4). The Process "Total time" column in the master is **never** used.
 
+**Operator staffing is per shift (2026-07-19).** An operation must have a **qualified
+operator on every shift it runs in**. When a job crosses the 19:00 (or 05:00) shift
+boundary, a fresh qualified operator on the new shift **takes over** (a handoff:
+same machine, different person, chosen free-and-least-loaded). If **no** qualified
+operator on the new shift is free, the **machine pauses** and the job resumes when
+one frees up. A person is never billed outside their own shift and never runs two
+machines at once. This replaced the earlier model that kept the starting operator
+on the job across shift boundaries — that model quietly assumed ~900 hours of night
+machining with nobody on the floor (the old "unstaffed" warning) and showed
+completion dates the crew could not actually achieve. Plans are now honest: every
+scheduled minute is staffed, and the schedule's dates reflect the real crew.
+
 **Non-delay scheduling (keep machines running).** The engine schedules at the
 *operation* level, not batch-by-batch: at every step it considers the next ready
 operation of **every** batch and starts the one that can begin earliest on its
@@ -201,7 +213,11 @@ non-delay tie-break (byte-identical plans). A small window (≈45 min) pulls the
 worst-stuck urgent orders forward by days while never pushing a comfortably on-time
 order late — it only redistributes machine/operator time *among orders competing at
 nearly the same moment*. It is a tie-break refinement, not a reordering: no machine
-ever waits for a not-yet-ready op.
+ever waits for a not-yet-ready op. *(2026-07-19: the Settings tick mark for this was
+removed — measured consistently harmful under per-shift staffing, and it is forced
+off whenever an optimized plan is applied. The config field remains, default 0.
+The overlap % control left Settings the same day: the Optimize contest auto-tunes
+it and Apply persists the winner, so users no longer set it by hand.)*
 
 **Alternative ("preferred") machines.** A process's *Suggested M/c* cell may list
 **alternatives separated by `/`** (e.g. `CNC3/CNC6` = run on either CNC3 or CNC6).

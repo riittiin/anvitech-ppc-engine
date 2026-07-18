@@ -85,16 +85,20 @@ function onHashChange() {
 }
 
 function readConfig() {
+  // GUARD — Overlap % is owned by Optimize (the sweep contest tunes it and Apply
+  // persists the winner). There is no form field for it; its ONLY source is
+  // currentConfig, populated by the first /run response. Until then there is NO
+  // complete config to send — return null so no caller (present or future) can
+  // POST a config that would silently reset the tuned overlap to a default.
+  // There is deliberately no fallback value here.
+  if (!currentConfig || currentConfig.overlap_percent == null) return null;
   const cfgObj = {
     consolidation_window_days: Number($("cfg-window").value),
     setup_time_min: Number($("cfg-setup").value),
     overlap_mode: "overlap",   // sequential mode retired — always overlap
-    // Overlap % is owned by Optimize (the sweep contest tunes it and Apply persists
-    // the winner). There is no longer an input for it — a settings Save must PRESERVE
-    // the optimizer-chosen value, so we echo back the last-loaded config's overlap
-    // (never a form field). Fall back to 50 only before the first /run has loaded.
-    overlap_percent: (currentConfig && currentConfig.overlap_percent != null)
-      ? currentConfig.overlap_percent : 50,
+    // A settings Save must PRESERVE the optimizer-chosen overlap: echo back the
+    // last-loaded config's value (never a form field, never a hardcoded default).
+    overlap_percent: currentConfig.overlap_percent,
     priority_metric: $("cfg-priority-metric").value,
     priority_window_days: $("cfg-priority-window").value,
     apply_operator_logic: $("cfg-operator-logic").checked,
@@ -201,11 +205,23 @@ function applyConfig(cfg, resolvedStart) {
 // persist=true only on the admin's explicit Plan click (saves the config so every
 // login sees the same plan). Auto-load and the user role pass persist=false.
 async function runPlan(persist = false) {
+  // readConfig() is null until boot's first /run has populated currentConfig
+  // (the only source of the optimizer-tuned overlap). A save in that window
+  // would persist an incomplete config — block it; the admin just retries.
+  const cfg = readConfig();
+  if (persist && cfg === null) {
+    setStatus("Plan is still loading, try again in a moment.");
+    return;
+  }
   setStatus("Planning…");
   try {
+    // With no complete config yet (pre-boot refresh), send none: the server
+    // plans with its saved config (or defaults) and nothing is persisted.
+    const body = { persist: !!persist };
+    if (cfg !== null) body.config = cfg;
     const res = await fetch("/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config: readConfig(), persist: !!persist }),
+      body: JSON.stringify(body),
     });
     if (res.status === 401) { window.location = "/login"; return; }
     if (!res.ok) { setStatus("Error: " + (await res.text())); return; }

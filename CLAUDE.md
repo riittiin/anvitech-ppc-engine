@@ -193,15 +193,29 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `api/main.py` also went through `_ist_today()`/`_ist_now()` (rotation overlay, first-seen,
   next-rotation, audit stamps) so every app-derived date is IST-current. Also includes
   `expedite_window_min`
-  (default 0 = off): Rule 6's least-slack tie-break window (Settings tick mark
-  "Expedite urgent orders"); 0 is byte-identical to the legacy non-delay plan. And
-  `balance_operator_load` (default off): Rule 6's schedule-neutral operator-fairness
+  (default 0 = off): Rule 6's least-slack tie-break window; 0 is byte-identical to the
+  legacy non-delay plan. **Its Settings tick mark was REMOVED 2026-07-19** (measured
+  consistently harmful under per-shift staffing; forced off when ranks are applied) —
+  the config field stays, UI always sends 0. **The overlap % input left Settings the
+  same day** (owner rule: users never touch knobs the optimizer owns — the sweep
+  contest tunes overlap and Apply persists the winner; the UI shows it read-only and
+  `readConfig()` echoes the STORED `currentConfig.overlap_percent` on save, refusing
+  to save before the first /run response populates it — never a form/fallback value).
+  And `balance_operator_load` (default off): Rule 6's schedule-neutral operator-fairness
   post-process (Settings tick mark "Balance operator workload") — reassigns *who* runs
   each op without moving any time, so makespan/lateness are unchanged. A repair pass
   guarantees it never double-books a person (2026-07-15 live fix; see
-  `tests/test_operator_invariants.py`). Related invariant: the shift-wise view /
-  Analytics never bill a busy person — overload segments become `rule6_allocate.UNSTAFFED`
-  and roll up as `headline.unstaffed_hrs`, so **no operator can ever show >100%**.
+  `tests/test_operator_invariants.py`). **Per-shift staffing (2026-07-19,
+  `operator-shift-handoff`): Rule 6 books a qualified operator for EVERY shift segment
+  of an op** — handoff at the 19:00/05:00 boundary to a free least-loaded qualified
+  operator on the new shift, or the machine PAUSES until one frees (see the rule6
+  bullet + RULES.md). `UNSTAFFED`/`headline.unstaffed_hrs` still exist for the legacy
+  display path but a schedule produced with operator logic ON now yields 0 unstaffed
+  hours by construction (invariant-tested in `tests/test_shift_handoff.py`; guard
+  exhaustion in `_lay_segments` raises RuleError — fail loud, never under-schedule).
+  Honest-plan impact on the real book (2026-07-19): makespan 47→79d, late-days
+  1413→2533 unoptimized; deep optimize recovers to 79d/1607 (owner-approved cutover);
+  crew floor ~44d (night pools: VMC1-3 have 2 night-qualified operators, CNC3/6 have 2).
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
   `Order` and `SOLine` carry `commitment` (open|committed|urgent), `promised_date`,
   and `committed_at`. **Informational only** (owner pivot 2026-07-16 — see the

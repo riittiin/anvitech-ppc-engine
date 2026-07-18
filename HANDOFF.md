@@ -202,7 +202,77 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 
 ## What changed most recently (read these, newest first)
 
-### Latest session (2026-07-18) — LIVE current-date mode — ⚠️ BUILT & TESTED on branch `live-current-date`, **NOT pushed to `main`**
+> **Staleness note (2026-07-19):** every "NOT pushed" warning on the 2026-07-18
+> blocks below is obsolete — all of those branches (`live-current-date`,
+> `scheduled-optimize`, `operator-master-rotation`, `operator-efficiency-report`)
+> **shipped to `main` and are live**, as is the full 2026-07-19 session block
+> directly below. The app went into full production at Anvitech on 2026-07-19.
+
+### Latest session (2026-07-19) — HONEST SCHEDULER (per-shift operator staffing) + SO header-driven loader + missing-routings display + optimizer research + knob removal — ✅ ALL SHIPPED & LIVE
+
+The most consequential day since go-live. Read this block fully before touching
+Rule 6, the loaders, or the Settings UI.
+
+1. **SO list reader is header-driven** (`so-header-driven`, commits ff022ba+e88127d).
+   The owner's new ERP export shifted every SO column (+9 non-uniform); the old
+   fixed-index reader read "RV" as a delivery date and dropped ALL 86 rows. Now
+   `_load_so_lines` locates columns by header NAME via `_locate_table(...,
+   exact_priority=True)` — a new two-pass matcher (exact normalized equality first,
+   substring fallback) added because "soqty" is a substring of "pendsoqty" and
+   leftmost-substring silently read the PENDING qty when columns reorder
+   (review-caught, regression-pinned). Remarks column is optional (the real file
+   has none). Required tokens: sono/salesitemcode/soqty/sodeliverydate; failure →
+   non-blocking `MISSING_SO_COLUMNS` report. Cross-validated field-by-field vs both
+   Test5 (86 rows) and Test6 (72 rows): zero mismatches, zero header ambiguity.
+2. **Upload shows the file's own missing routings** (`show-missing-routings`,
+   b210eb2). `load_all` drops no-routing lines before the book, so the book-scoped
+   report (the 2026-07-15 anti-ghost fix, UNTOUCHED) never saw them — the admin
+   couldn't learn WHICH item codes to add. `/upload` now returns
+   `_report_after_upload(masters)` (the loader's own report + absence orphans) and
+   the UI shows an always-visible warn line ("Missing routings. Add these item
+   codes...") in `#report-noroute`, fed ONLY from the upload response (the
+   post-upload auto-replan would otherwise wipe it), cleared on a clean upload.
+   Current real file: 10 item codes lack routings (owner notified; `DEC-PURCHASE-PA`
+   is probably a purchase line, not a routing gap).
+3. **THE HONEST SCHEDULER** (`operator-shift-handoff`, 1237ff4 + hardening). The
+   old model booked ONE operator for a whole op from the START shift's crew, so
+   77 ops crossing 19:00 kept a first-shift person "working" at night — ~909
+   unmanned machine-hours and a 47-day makespan that manning could not deliver
+   (the owner discovered this via the "916 hrs unstaffed" warning chip; earlier
+   sessions' framing of that chip as display-only was WRONG — empirical headcount
+   test settled it: 19 ops→47d vs 3 ops→182d, so operators DO bind). Rule 6 now
+   books a qualified operator for EVERY shift segment (`_lay_segments`): handoff at
+   the boundary to a free least-loaded qualified operator on the new shift, else
+   the machine PAUSES. 5 invariants as tests (`tests/test_shift_handoff.py`): no
+   double-booking, nobody outside their shift, unstaffed==0, plentiful-crew
+   byte-identity, determinism. Golden untouched (operator logic OFF there). Guard
+   exhaustion raises RuleError (fail loud, never under-schedule — owner demand
+   after this scare: no silent gaps EVER). Review verdict: the makespan growth is
+   honest capacity, not artifact; handoff-before-pause confirmed by probe.
+   **Numbers on the real book (71 orders, start 2026-07-19):** dishonest 47d/1413
+   late-days → honest unoptimized **79d/2533** → honest + deep optimize
+   **79d/1607/59 late orders** (replay-verified; the shipped cutover) → makespan-
+   weighted research probe 71.5d/2208 (rejected trade) → **crew floor ~44d**
+   (VMC1/2/3 share TWO night-qualified operators: Mahesh+Saif; CNC3/CNC6 share
+   TWO: Sidhu+Khansab — cross-training the night pools is worth ~35 calendar days
+   and is a BUSINESS lever, told to the owner).
+4. **Settings knobs removed** (owner rule: users never touch what the optimizer
+   owns): the overlap % input is now a read-only "tuned automatically by Optimize
+   (currently NN%)" line — `readConfig()` sends the STORED
+   `currentConfig.overlap_percent`, refuses to save before the first /run
+   populates it (review-caught race: an early Save would clobber a tuned overlap
+   with a hardcoded 50), and the "Expedite urgent orders" tick is GONE (measured
+   consistently harmful under per-shift staffing: makespan 79→86-92 in the grid;
+   forced off under ranks anyway). Config fields remain engine-side.
+5. **Research context for the next optimizer conversation:** settings grid (24
+   combos) shows overlap 60 marginally best, expedite always harmful, split ON
+   good; sequence search converges by ~1,500 evals (0.2 s/plan on the honest
+   scheduler — memoization survives); MAKESPAN_WEIGHT sweeps: 10 (shipped) →
+   79d/1607, 30 → 79.6/1654, 100 → 71.5/2208. The stale pre-handoff auto-note
+   ("Checked 10:56 — current plan still best (564 late-days)", em dash and all)
+   dates from 18-07's smaller book; the next scheduled run (Mon 20-07 11:00 IST)
+   overwrites it dash-free. The owner exploded over BOTH the em dash and the
+   unexplained numbers — keep the status strip scrupulously current-book-true.
 
 **The owner's rule for the 2026-07-19 go-live:** every date the app reasons from must
 follow the **REAL current date (Indian time)**, not a frozen test-era date. The plan
