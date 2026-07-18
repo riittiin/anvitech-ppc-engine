@@ -5,18 +5,22 @@ The formula (owner-approved, see
 
     Efficiency % = Earned ÷ Attended × 100
       Earned minutes  = Σ standard cycle_time(item, process) × good qty punched
-      Attended minutes = Σ per worked (operator, day, shift) window:
+      Attended minutes = Σ per worked (operator, day, shift) window HAVING at
+                         least one standard punch:
                          that shift's window minutes
-                         − ALL recorded downtime minutes on that group
-                         − recorded setup minutes on that group   (floored at 0)
+                         − the standard punches' recorded downtime minutes
+                         − their recorded setup minutes        (floored at 0)
 
 Fairness rules baked in:
   * Downtime and setup are NEUTRAL — they shrink attended time, never earn nor
     penalize (an idle-through-no-fault operator is not judged for it).
   * Only GOOD quantity earns; rejects earn nothing and surface as a reject %.
-  * A punch whose item/process has no cycle-time standard is EXCLUDED from both
-    sides (earned and attended-context) and counted in "No-standard punches" —
-    nobody is judged against a standard that doesn't exist.
+  * A punch whose item/process has no cycle-time standard is EXCLUDED from
+    BOTH sides — it earns nothing AND contributes nothing to attended (neither
+    its shift window nor its downtime/setup); a wholly-no-standard shift adds
+    zero attended minutes. Such punches are counted in "No-standard punches"
+    (and still roll into the informational qty/downtime/setup totals) — nobody
+    is judged against a standard that doesn't exist.
   * Absence days come from the absence table as their own column — never folded
     into pace.
   * Legacy punches with no operator name fall into an "Unattributed" row.
@@ -122,10 +126,6 @@ def _absence_days_in_month(operator, absences, calendar, year, month):
 _UNATTRIBUTED = "Unattributed"
 
 
-def _round(x, ndigits):
-    return round(x, ndigits) if x is not None else None
-
-
 def monthly_report(actuals, absences, masters, config, year, month):
     """One row per operator for the given calendar month (dicts, spec columns).
 
@@ -155,9 +155,15 @@ def monthly_report(actuals, absences, masters, config, year, month):
         op_actuals = [a for a in month_actuals if (a.operator or _UNATTRIBUTED) == op]
 
         # --- attended: one window per distinct (date, normalized shift) --- #
-        # Accumulate each group's summed downtime + setup, then subtract once.
+        # "Excluded from BOTH sides": only punches WITH a standard build attended.
+        # A (date, shift) group's window exists iff it has >= 1 standard punch,
+        # and only the standard punches' downtime + setup deduct from it — a
+        # wholly-no-standard shift contributes nothing to attended (its punches
+        # still count in the flag column and the informational qty totals).
         groups = {}   # (date, shift_key) -> [window_min, deducted_min]
         for a in op_actuals:
+            if _cycle_for(masters, a.item_code, a.process) is None:
+                continue                                  # no standard — excluded
             key = (a.entry_date, _norm_shift(a.shift))
             if key not in groups:
                 groups[key] = [_shift_window_min(key[1], config), 0.0]

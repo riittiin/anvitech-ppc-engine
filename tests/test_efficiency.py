@@ -211,6 +211,40 @@ def test_no_standard_punch_excluded_and_flagged():
     assert r["Good qty"] == 10 + 99 + 99
 
 
+def test_wholly_no_standard_day_contributes_nothing_to_attended():
+    """Reviewer's exact walk: Aug-4 First standard (60x10, window 660) + Aug-5
+    First wholly-no-standard punch => attended stays 660 (the Aug-5 window is
+    excluded from BOTH sides), efficiency 600/660 = 90.9, flag = 1."""
+    masters = _masters([_routing("A", [("TURNING", 10.0)])])
+    actuals = [
+        _actual(entry_date=date(2025, 8, 4), qty_produced=60),                  # standard
+        _actual(entry_date=date(2025, 8, 5), process="GHOST", qty_produced=5),  # no standard
+    ]
+    rows = monthly_report(actuals, [], masters, CFG, 2025, 8)
+    r = _row(rows, "Ravi")
+    assert r["Attended (min)"] == 660.0
+    assert r["Earned (min)"] == 600.0
+    assert r["Efficiency %"] == 90.9
+    assert r["No-standard punches"] == 1
+
+
+def test_no_standard_punch_downtime_does_not_deduct_from_shared_window():
+    """Mixed same day/shift: only the STANDARD punch's downtime/setup deduct
+    from the shared window — a no-standard punch's downtime is excluded along
+    with the punch itself."""
+    masters = _masters([_routing("A", [("TURNING", 10.0)])])
+    actuals = [
+        _actual(qty_produced=60, actual_setup_min=15),               # standard
+        _actual(process="GHOST", qty_produced=5, no_power_min=30),   # no standard, downtime 30
+    ]
+    rows = monthly_report(actuals, [], masters, CFG, 2025, 8)
+    r = _row(rows, "Ravi")
+    # window 660 - the standard punch's own setup 15 only; the ghost's 30 ignored.
+    assert r["Attended (min)"] == 660.0 - 15
+    assert r["Earned (min)"] == 600.0
+    assert r["No-standard punches"] == 1
+
+
 # --------------------------------------------------------------------------- #
 # Process name matches by NORMALIZED comparison
 # --------------------------------------------------------------------------- #
