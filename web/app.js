@@ -28,12 +28,61 @@ let autoNote = null;          // /run's auto_note: scheduled optimization's late
 let optimizePollTimer = null; // /optimize/status polling handle
 let ITEMS = null;
 let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour detail)
-let activeTab = "orders";
 let currentRole = "user";   // set from /me; default to the least-privileged role
+let currentConfig = null;   // /run's config (both roles) — feeds the status strip's plan basis
+let nextRotation = null;    // /operators next_rotation (admin only) — status strip segment
+
+// ---- View router ----
+// Six destinations, one visible at a time. Each maps to an existing render call
+// (the old per-rule tab machinery, absorbed into a fixed nav). `mountFor` returns
+// the per-view content div so the unchanged render functions write to the right spot.
+const VIEWS = ["orders", "schedule", "gantt", "entry", "analytics", "settings"];
+let activeView = "orders";
 
 const $ = (id) => document.getElementById(id);
 const setStatus = (m) => { $("status").textContent = m; };
 const setDatasetStatus = (m) => { $("dataset-status").innerHTML = m; };
+
+function mountFor(key) {
+  if (key === "orders") return $("orders-mount");
+  if (key === "gantt") return $("gantt-mount");
+  if (key === "analytics") return $("analytics-mount");
+  if (key === "rule6" || key === "schedule") return $("schedule-mount");
+  if (key === "rule7" || key === "entry") return $("entry-mount");
+  return $("tab-content");
+}
+
+// Render the content for a view using the existing render functions.
+function renderView(v) {
+  if (v === "orders") renderOrders();
+  else if (v === "schedule") renderTab("rule6");
+  else if (v === "gantt") renderGantt();
+  else if (v === "entry") renderTab("rule7");
+  else if (v === "analytics") renderAnalytics();
+  // "settings" is static markup (cards wired once at boot) — nothing to render.
+}
+
+function showView(v, push) {
+  if (!VIEWS.includes(v)) v = "orders";
+  if (v === "settings" && currentRole !== "admin") v = "orders";   // never land users on admin-only
+  activeView = v;
+  try { localStorage.setItem("anvitech-view", v); } catch (e) { /* private mode */ }
+  document.querySelectorAll(".view").forEach((s) => s.classList.toggle("active", s.id === "view-" + v));
+  document.querySelectorAll(".nav-item").forEach((n) => n.classList.toggle("active", n.dataset.view === v));
+  renderView(v);
+  if (push && location.hash.replace(/^#/, "") !== v) location.hash = v;
+}
+
+function lastView() {
+  let v;
+  try { v = localStorage.getItem("anvitech-view"); } catch (e) { v = null; }
+  return VIEWS.includes(v) ? v : "orders";
+}
+
+function onHashChange() {
+  const h = location.hash.replace(/^#/, "");
+  showView(VIEWS.includes(h) ? h : lastView());
+}
 
 function readConfig() {
   const cfgObj = {
@@ -160,12 +209,14 @@ async function runPlan(persist = false) {
     currentExpected = data.expected_end || null;
     optimizeMeta = data.optimize_meta || null;
     autoNote = data.auto_note || null;
+    currentConfig = data.config || null;
+    if (data.resolved_plan_start) lastResolvedStart = data.resolved_plan_start;
     if (currentRole === "admin" && data.config) applyConfig(data.config, data.resolved_plan_start);
     renderReport(data.report);
     renderOptimizeBanner();
     renderAutoNote();
-    renderTabs();
-    renderTab(activeTab);
+    renderStatusStrip();
+    renderView(activeView);
     setStatus("Plan " + data.run_id + " complete.");
   } catch (e) { setStatus("Request failed: " + e.message); }
 }
@@ -189,7 +240,7 @@ async function uploadExcel() {
     if (d.masters_updated) msg += " · masters updated";
     setDatasetStatus(msg);
     await runPlan();           // refresh the book + schedule
-    activeTab = "orders"; renderTabs(); renderTab("orders");
+    showView("orders", true);
   } catch (e) { setDatasetStatus("Upload error: " + e.message); }
 }
 
@@ -240,6 +291,82 @@ function renderAutoNote() {
   const n = autoNote;
   if (n && n.text) { el.classList.remove("hidden"); el.textContent = n.text; }
   else { el.classList.add("hidden"); el.textContent = ""; }
+}
+
+// ---- Status strip (both roles) ----
+// One calm line, entirely from data already fetched: order/late counts, the plan
+// basis, next scheduled optimization, next shift rotation (admin only), the latest
+// auto-note (collapsible), and a colored warning chip for staleness / unstaffed hrs.
+function countLateOrders() {
+  if (!currentOrders || !currentOrders.rows || !currentExpected) return 0;
+  const cols = currentOrders.columns;
+  const soI = cols.indexOf("SO No"), itI = cols.indexOf("Item Code");
+  const ddI = cols.indexOf("SO Delivery Date"), stI = cols.indexOf("Status");
+  if (soI < 0 || ddI < 0) return 0;
+  let late = 0;
+  currentOrders.rows.forEach((r) => {
+    if (stI >= 0 && String(r[stI]) === "Complete") return;   // archived — not "late"
+    const key = String(r[soI]) + "\x1f" + String(itI >= 0 ? r[itI] : "");
+    const exp = isoToDate(currentExpected[key]);
+    const due = ddmmyyyyToDate(r[ddI]);
+    if (exp && due && exp > due) late++;
+  });
+  return late;
+}
+
+function renderStatusStrip() {
+  const el = $("status-strip");
+  if (!el) return;
+  const nOrders = currentOrders && currentOrders.rows ? currentOrders.rows.length : 0;
+  const nLate = countLateOrders();
+
+  const segs = [];
+  segs.push(`<span class="ss-seg"><span class="ss-dot"></span>${nOrders} order${nOrders === 1 ? "" : "s"}</span>`);
+  segs.push(`<span class="ss-seg${nLate ? " ss-late" : ""}">${nLate} late</span>`);
+
+  // Plan basis: null start date = "follows today" (server-resolved); else a fixed date.
+  const isAuto = currentConfig ? (currentConfig.plan_start_date === null || currentConfig.plan_start_date === undefined) : true;
+  const startDisp = isoToDdmmyyyy(lastResolvedStart || todayIso());
+  segs.push(isAuto
+    ? `<span class="ss-seg">Plan follows today (${escapeHtml(startDisp)})</span>`
+    : `<span class="ss-seg">Plan starts ${escapeHtml(isoToDdmmyyyy(currentConfig.plan_start_date))}</span>`);
+
+  segs.push(`<span class="ss-seg">Next optimization: ${escapeHtml(nextScheduledOptimize())}</span>`);
+  if (currentRole === "admin" && nextRotation) {
+    segs.push(`<span class="ss-seg">Next rotation: ${escapeHtml(isoToDdmmyyyy(nextRotation))}</span>`);
+  }
+
+  // Latest auto-note — collapsible.
+  if (autoNote && autoNote.text) {
+    segs.push(`<button type="button" class="ss-note" id="ss-note-toggle">▸ note</button>`
+      + `<span class="ss-note-text hidden" id="ss-note-text">${escapeHtml(autoNote.text)}</span>`);
+  }
+
+  // Warning chip: staleness and/or unstaffed hours (both from the /run response).
+  const warns = [];
+  if (optimizeMeta && optimizeMeta.inputs_changed) {
+    warns.push("Settings or masters changed since the applied optimization — its numbers will differ; run Optimize again.");
+  }
+  const unstaffed = currentTrace && currentTrace.analytics && currentTrace.analytics.headline
+    ? currentTrace.analytics.headline.unstaffed_hrs : 0;
+  if (unstaffed && unstaffed > 0) {
+    warns.push(`${Math.round(unstaffed)} hrs of scheduled work fall in shifts with no free qualified operator — those shifts need more crew.`);
+  }
+  let chip = "";
+  if (warns.length) {
+    chip = `<button type="button" class="ss-chip" id="ss-chip">⚠ ${warns.length} warning${warns.length === 1 ? "" : "s"}</button>`
+      + `<div class="ss-chip-detail hidden" id="ss-chip-detail"><ul>${warns.map((w) => `<li>${escapeHtml(w)}</li>`).join("")}</ul></div>`;
+  }
+
+  el.innerHTML = `<div class="ss-line">${segs.join("")}${chip}</div>`;
+
+  const nt = $("ss-note-toggle");
+  if (nt) nt.onclick = () => {
+    const t = $("ss-note-text");
+    if (t) { const open = t.classList.toggle("hidden") === false; nt.textContent = (open ? "▾ " : "▸ ") + "note"; }
+  };
+  const cb = $("ss-chip");
+  if (cb) cb.onclick = () => { const d = $("ss-chip-detail"); if (d) d.classList.toggle("hidden"); };
 }
 
 function optimizeProgressLine(st) {
@@ -399,47 +526,16 @@ function renderReport(report) {
   toggle.onclick = () => { const open = !detail.classList.toggle("hidden"); toggle.classList.toggle("open", open); };
 }
 
-// ---- Tabs ----
-function renderTabs() {
-  const nav = $("tabs"); nav.innerHTML = "";
-  // Orders tab first — the order book is the home view.
-  const ot = document.createElement("div");
-  ot.className = "tab tab-orders" + (activeTab === "orders" ? " active" : "");
-  ot.textContent = "Orders";
-  ot.onclick = () => { activeTab = "orders"; renderTabs(); renderTab("orders"); };
-  nav.appendChild(ot);
-
-  VISIBLE_TABS.forEach((key) => {
-    const entry = (currentTrace && currentTrace[key]) || {};
-    const meta = RULES[key];
-    const el = document.createElement("div");
-    el.className = "tab" + (key === activeTab ? " active" : "")
-      + (entry.error ? " error" : "") + (entry.reached === false ? " not-reached" : "");
-    el.textContent = meta.title + (entry.error ? " ⚠" : "");   // no rule-number prefix
-    el.onclick = () => { activeTab = key; renderTabs(); renderTab(key); };
-    nav.appendChild(el);
-  });
-
-  const g = document.createElement("div");
-  g.className = "tab tab-gantt" + (activeTab === "gantt" ? " active" : "");
-  g.textContent = "Gantt";
-  g.onclick = () => { activeTab = "gantt"; renderTabs(); renderTab("gantt"); };
-  nav.appendChild(g);
-
-  const an = document.createElement("div");
-  an.className = "tab tab-gantt" + (activeTab === "analytics" ? " active" : "");
-  an.textContent = "Analytics";
-  an.onclick = () => { activeTab = "analytics"; renderTabs(); renderTab("analytics"); };
-  nav.appendChild(an);
-}
-
+// ---- Per-view content (rule6 = Schedule, rule7 = Daily Entry) ----
+// The fixed nav (renderView/showView) drives which view is visible; this renders
+// the dynamic content for the rule-backed views into their per-view mount.
 function renderTab(key) {
   if (key === "orders") { renderOrders(); return; }
   if (key === "gantt") { renderGantt(); return; }
   if (key === "analytics") { renderAnalytics(); return; }
   const entry = currentTrace ? currentTrace[key] : null;
   const meta = RULES[key];
-  const root = $("tab-content");
+  const root = mountFor(key);
   if (!entry) { root.innerHTML = '<p class="placeholder">Click <strong>Plan</strong> to run the rules.</p>'; return; }
 
   let html = `<div class="rule-header"><h2>Rule ${meta.n} — ${meta.title}</h2></div>`;
@@ -539,31 +635,37 @@ function downloadCsv(filename, table) {
 
 // ---- Orders dashboard ----
 async function renderOrders() {
-  const root = $("tab-content");
+  const root = mountFor("orders");
   if (!currentOrders) {
     try { currentOrders = (await (await fetch("/orders")).json()).orders; } catch (e) { currentOrders = null; }
   }
   const isAdmin = currentRole === "admin";
-  let html = '<div class="rule-header"><h2>Order book</h2></div>';
+  let html = "";
   if (!currentOrders || !currentOrders.rows.length) {
     html += isAdmin
-      ? '<p class="placeholder">No orders yet. Upload your Excel above to add them, then click <strong>Plan</strong>.</p>'
+      ? '<p class="placeholder">No orders yet — upload your Excel to begin.</p>'
       : '<p class="placeholder">No orders yet.</p>';
     root.innerHTML = html; return;
   }
-  // Delete + commitment controls are admin-only (server enforces this too).
+  // Commitment controls are admin-only (server enforces this too). Danger actions
+  // (delete) live in a separate strip at the bottom, visually set apart.
   if (isAdmin) {
     html += '<div class="ord-toolbar">'
       + '<button id="ord-commit-sel">Commit selected</button> '
       + '<button id="ord-urgent-sel">Mark Urgent</button> '
-      + '<button id="ord-uncommit-sel">Uncommit selected</button> '
-      + '<button id="ord-del-sel">Delete selected</button> '
-      + '<button id="ord-del-all" class="danger">Delete ALL data</button>'
-      + '<span class="muted"> · deletes permanently from the database (and their actuals)</span></div>';
+      + '<button id="ord-uncommit-sel">Uncommit selected</button>'
+      + '</div>';
   }
   html += orderTableHtml(currentOrders, isAdmin);
   html += '<p class="g-note">Pending = not started · Running = production logged · Complete = marked complete on a Rule 7 entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty. '
     + 'Lane: status labels only (no scheduling effect) — <strong>open</strong> = newly arrived · <strong>committed</strong> = released, promised date snapshotted · <strong>urgent</strong> = flagged, promised = delivery date. The plan sequences all orders together by delivery date.</p>';
+  if (isAdmin) {
+    html += '<div class="danger-strip">'
+      + '<span class="danger-label">Danger zone</span>'
+      + '<button id="ord-del-sel">Delete selected</button> '
+      + '<button id="ord-del-all" class="danger">Delete ALL data</button>'
+      + '<span class="muted"> · deletes permanently from the database (and their actuals)</span></div>';
+  }
   root.innerHTML = html;
   if (isAdmin) { wireOrdersDelete(); wireOrdersCommit(); }
 }
@@ -757,12 +859,11 @@ function wireOrdersCommit() {
 
 // ---- Gantt ----
 function renderGantt() {
-  const root = $("tab-content");
-  if (!currentGantt) { root.innerHTML = '<p class="placeholder">Click <strong>Plan</strong> to build the Gantt.</p>'; return; }
+  const root = mountFor("gantt");
+  if (!currentGantt) { root.innerHTML = '<p class="placeholder">No schedule yet — add orders on the Orders view to build the Gantt.</p>'; return; }
   const g = currentGantt;
   if (!g.rows || !g.rows.length) {
-    root.innerHTML = '<div class="rule-header"><h2>Production Planning — Gantt</h2></div>'
-      + '<p class="placeholder">No schedule to chart. Upload orders and click Plan.</p>';
+    root.innerHTML = '<p class="placeholder">No schedule to chart — add orders on the Orders view.</p>';
     return;
   }
   const DAYW = ganttDayWidth, axisW = g.num_days * DAYW;
@@ -807,7 +908,6 @@ function renderGantt() {
 
   const legend = Object.entries(g.machine_colors).map(([m, c]) => `<span class="g-leg"><span class="g-chip" style="background:${c}"></span>${escapeHtml(m)}</span>`).join("");
   root.innerHTML = `
-    <div class="rule-header"><h2>Production Planning — Gantt</h2></div>
     <div class="g-toolbar">Zoom (day width) <button id="g-zoom-out">−</button> <button id="g-zoom-in">+</button>
       <span class="muted">· one column per day; shaded = non-working day</span></div>
     <div class="g-scroll"><table class="g-table"><thead>
@@ -825,11 +925,10 @@ function renderGantt() {
 
 // ---- Analytics ----
 function renderAnalytics() {
-  const root = $("tab-content");
+  const root = mountFor("analytics");
   const a = currentTrace && currentTrace.analytics;
   if (!a || !a.machines || !a.machines.length) {
-    root.innerHTML = '<div class="a-head"><h2>Analytics</h2></div>'
-      + '<p class="placeholder">Click <strong>Plan</strong> to build analytics — utilization &amp; bottlenecks across every machine, operator, and process.</p>';
+    root.innerHTML = '<p class="placeholder">No analytics yet — add orders on the Orders view to see utilization &amp; bottlenecks.</p>';
     return;
   }
   const h = a.headline || {};
@@ -905,7 +1004,6 @@ function renderAnalytics() {
 
   root.innerHTML = `
     <div class="a-head">
-      <h2>Analytics</h2>
       <span class="a-window">${a.window ? "Current plan · " + escapeHtml(a.window.start + " → " + a.window.end) : ""}</span>
     </div>
     ${kpis}
@@ -1133,12 +1231,12 @@ async function wireActualsForm() {
       setStatus("✓ Saved — re-planning from the new actuals…");
       await runPlan(false);                    // refreshes currentTrace/gantt/orders/report
       if (d.completed_order) {
-        // The order was archived — show the result on the Orders tab.
+        // The order was archived — show the result on the Orders view.
         setStatus(`✓ Saved & re-planned. Order ${body.so_no} marked complete and archived.`);
-        activeTab = "orders"; renderTabs(); renderTab("orders");
+        showView("orders", true);
       } else {
         setStatus(`✓ Saved & re-planned — schedule, Gantt and Orders updated from the new actuals.`);
-        activeTab = "rule7"; renderTabs(); renderTab("rule7");   // fresh blank form + updated output
+        renderTab("rule7");   // fresh blank form + updated output (stays on Daily Entry)
       }
     } catch (e) {
       setStatus("Save error: " + e.message); btn.disabled = false; btn.textContent = label;
@@ -1392,6 +1490,7 @@ async function loadOperators() {
     const res = await fetch("/operators");
     if (!res.ok) return;
     const data = await res.json();
+    nextRotation = data.next_rotation || null;   // status-strip "Next rotation" segment
     const header = $("operators-header");
     if (header) {
       header.textContent = data.next_rotation
@@ -1399,6 +1498,7 @@ async function loadOperators() {
         : "Shifts rotate every Friday (effective from first shift).";
     }
     renderOperatorsTable(data.operators || []);
+    renderStatusStrip();
   } catch (e) { /* the panel is a convenience view — a fetch hiccup shouldn't block the page */ }
 }
 
@@ -1458,22 +1558,8 @@ if (_psField) { _psField.addEventListener("change", updatePlanStartEcho); }
 const _autoField = $("cfg-start-auto");
 if (_autoField) { _autoField.addEventListener("change", updatePlanStartEcho); }
 updatePlanStartEcho();
-// Settings disclosure: reveal/hide the advanced planner knobs (hidden by default).
-const _setBtn = $("settings-toggle");
-if (_setBtn) _setBtn.onclick = () => {
-  const panel = $("settings-panel");
-  const open = panel.classList.toggle("hidden") === false;
-  _setBtn.classList.toggle("open", open);
-  _setBtn.setAttribute("aria-expanded", String(open));
-};
-// Optimize disclosure + start button (admin-only controls; null-guarded).
-const _optBtn = $("optimize-toggle");
-if (_optBtn) _optBtn.onclick = () => {
-  const panel = $("optimize-panel");
-  const open = panel.classList.toggle("hidden") === false;
-  _optBtn.classList.toggle("open", open);
-  _optBtn.setAttribute("aria-expanded", String(open));
-};
+// Settings & Optimize are now their own nav destinations (Settings view / Schedule
+// view) — no disclosure toggles. Optimize Start/Stop wire directly.
 const _optStart = $("optimize-start");
 if (_optStart) _optStart.onclick = startOptimize;
 const _optStop = $("optimize-stop");
@@ -1497,26 +1583,29 @@ if (_effPreviewBtn) _effPreviewBtn.onclick = previewEfficiency;
 const _effDownloadBtn = $("eff-download-btn");
 if (_effDownloadBtn) _effDownloadBtn.onclick = downloadEfficiencyCsv;
 
-// Boot: learn the role, render the shell, then auto-load the current plan (no
-// persist) so the schedule/Gantt/rule tabs populate without a Plan click.
+// Boot: learn the role, restore the last view, then auto-load the current plan (no
+// persist) so the schedule/Gantt/views populate without a Plan click.
 (async function boot() {
   await initSession();
-  renderTabs();
-  renderTab(activeTab);
-  loadAbsences();   // independent of the plan; visible to both roles (GET is role-open)
-  loadOperators();  // independent of the plan; visible to both roles (GET is role-open)
+  window.addEventListener("hashchange", onHashChange);
+  document.querySelectorAll(".nav-item").forEach((n) => {
+    n.addEventListener("click", (e) => { e.preventDefault(); showView(n.dataset.view, true); });
+  });
+  // Land on the hash's view, else the last view visited (defaults to Orders).
+  const initial = VIEWS.includes(location.hash.replace(/^#/, "")) ? location.hash.replace(/^#/, "") : lastView();
+  showView(initial, true);
+  if (currentRole === "admin") {
+    loadAbsences();   // Settings cards (admin-only): operator/absence masters
+    loadOperators();
+  }
   await runPlan(false);
   // A search may still be running (or have finished) from before a page reload.
-  // Re-open the panel and either resume the progress display or show the result the
-  // admin never got to see — so a refresh mid-run never loses the work.
+  // Resume the progress display so a refresh mid-run never loses the work — the
+  // Optimize card lives on the Schedule view and updates in place.
   if (currentRole === "admin") {
     try {
       const st = await (await fetch("/optimize/status")).json();
-      if (st.state === "running" || (st.state === "done" && st.best)) {
-        const panel = $("optimize-panel");
-        if (panel) panel.classList.remove("hidden");
-        pollOptimizeStatus();
-      }
+      if (st.state === "running" || (st.state === "done" && st.best)) pollOptimizeStatus();
     } catch (e) { /* status is cosmetic at boot */ }
   }
 })();

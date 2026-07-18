@@ -15,187 +15,259 @@
         <span class="brand-sub">Production Planning &amp; Control</span>
       </span>
     </div>
+    <nav id="nav" class="nav" aria-label="Main">
+      <a class="nav-item" data-view="orders" href="#orders">Orders</a>
+      <a class="nav-item" data-view="schedule" href="#schedule">Schedule</a>
+      <a class="nav-item" data-view="gantt" href="#gantt">Gantt</a>
+      <a class="nav-item" data-view="entry" href="#entry">Daily Entry</a>
+      <a class="nav-item" data-view="analytics" href="#analytics">Analytics</a>
+      <a class="nav-item admin-only" data-view="settings" href="#settings">Settings</a>
+    </nav>
     <div class="session-bar">
       <span id="status" class="status"></span>
       <span id="session-info"></span>
     </div>
   </header>
 
-  <section class="toolbar admin-only">
-    <div class="toolbar-group">
-      <label class="file-field">
-        <input id="xlsx-file" type="file" accept=".xlsx" />
-      </label>
-      <button id="upload-btn">Upload &amp; merge</button>
-      <span id="dataset-status" class="status">No orders yet — upload your Excel to add them to the order book.</span>
+  <!-- One calm line: what the system is doing right now (both roles). -->
+  <div id="status-strip" class="status-strip" aria-live="polite"></div>
+
+  <!-- ===================== ORDERS ===================== -->
+  <section class="view" id="view-orders">
+    <div class="card admin-only" id="upload-card">
+      <div class="card-head">
+        <h2>Add orders</h2>
+        <p class="explainer">Upload your sales-order Excel — new order lines merge into the order book below.</p>
+      </div>
+      <div class="cfg-row">
+        <label class="file-field">
+          <input id="xlsx-file" type="file" accept=".xlsx" />
+        </label>
+        <button id="upload-btn" class="primary">Upload &amp; merge</button>
+        <span id="dataset-status" class="status">No orders yet — upload your Excel to add them to the order book.</span>
+      </div>
+      <section id="report-panel" class="report hidden">
+        <button id="report-toggle" class="report-summary"></button>
+        <div id="report-detail" class="hidden"></div>
+      </section>
     </div>
-    <div class="toolbar-group toolbar-actions">
-      <button id="settings-toggle" class="ghost-btn" type="button" aria-expanded="false">Settings</button>
-      <button id="optimize-toggle" class="ghost-btn" type="button" aria-expanded="false">Optimize</button>
-      <button id="run-btn" class="primary big">Plan</button>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Order book</h2>
+        <p class="explainer">Every active order and its status. The plan schedules each by its remaining quantity.</p>
+      </div>
+      <div id="orders-mount"></div>
     </div>
   </section>
 
-  <section id="optimize-panel" class="settings-panel admin-only hidden">
-    <div class="optimize-intro">
-      <strong>Optimize plan</strong> — tries many different job sequences on the current
-      order book and keeps the best plan found (smaller delivery gaps first, fewer total
-      days second). Same machines, same people — only the order in which jobs claim the
-      machines changes. All orders are sequenced together — lanes (Open / Committed /
-      Urgent) are status labels and never restrict the search. Optimizing finds the
-      best job order globally, so it <strong>supersedes the “Expedite” tick</strong> (which
-      only nudges order locally) — an applied optimized plan runs with Expedite set aside.
+  <!-- ===================== SCHEDULE ===================== -->
+  <section class="view" id="view-schedule">
+    <section id="optimize-panel" class="card admin-only">
+      <div class="card-head">
+        <h2>Optimize plan</h2>
+        <p class="explainer">Tries many job sequences on the current order book and keeps the best plan found (smaller delivery gaps first, fewer total days second).</p>
+      </div>
+      <div class="optimize-intro">
+        Same machines, same people — only the order in which jobs claim the machines
+        changes. All orders are sequenced together — lanes (Open / Committed / Urgent)
+        are status labels and never restrict the search. An applied optimized plan
+        <strong>supersedes the “Expedite” tick</strong> and runs with Expedite set aside.
+      </div>
+      <div class="optimize-controls">
+        <button id="optimize-start" class="primary">Start deep search</button>
+        <button id="optimize-stop" class="ghost-btn hidden">Stop &amp; keep best</button>
+        <span id="optimize-progress" class="status"></span>
+      </div>
+      <div class="optimize-note muted">
+        The full contest is ~2,400 plans in the cloud (~10 min) or ~1,000 on this
+        server. You can leave this open — watch “best so far” improve and press
+        <strong>Stop &amp; keep best</strong> whenever you’re happy.
+      </div>
+      <div id="optimize-result" class="optimize-result hidden"></div>
+    </section>
+
+    <section id="optimize-banner" class="optimize-banner hidden"></section>
+    <div id="auto-note" class="auto-note muted hidden"></div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>Machine schedule</h2>
+        <p class="explainer">The final allocation of every operation to a machine. Download it to print for the floor.</p>
+      </div>
+      <div id="schedule-mount"></div>
     </div>
-    <div class="optimize-controls">
-      <span class="cfg-check">Deep search — the full contest (~2,400 plans in the cloud,
-        ~10 min; ~1,000 plans on this server if the cloud is unavailable)</span>
-      <button id="optimize-start" class="primary">Start</button>
-      <button id="optimize-stop" class="ghost-btn hidden">Stop &amp; keep best</button>
-      <span id="optimize-progress" class="status"></span>
-    </div>
-    <div class="optimize-note muted">
-      You can leave this tab open and it keeps going. Every Overlap % contender gets the
-      same full search and the best plan wins — your current setting is searched first.
-      Watch “best so far” improve and press <strong>Stop &amp; keep best</strong> whenever
-      you’re happy.
-    </div>
-    <div id="optimize-result" class="optimize-result hidden"></div>
   </section>
 
-  <section id="optimize-banner" class="optimize-banner hidden"></section>
-  <div id="auto-note" class="auto-note muted hidden"></div>
+  <!-- ===================== GANTT ===================== -->
+  <section class="view" id="view-gantt">
+    <div class="card">
+      <div class="card-head">
+        <h2>Gantt</h2>
+        <p class="explainer">Each order's operations placed on the days they run, coloured by machine.</p>
+      </div>
+      <div id="gantt-mount"></div>
+    </div>
+  </section>
 
-  <section id="settings-panel" class="settings-panel admin-only hidden">
-    <div class="settings-grid">
-      <fieldset class="settings-group">
-        <legend>Scheduling</legend>
-        <label class="cfg-check">
-          <input id="cfg-start-auto" type="checkbox" checked />
-          Start from today (recommended)
-        </label>
-        <label>Plan start date
-          <input id="cfg-plan-start" type="date" value="2025-03-01" />
-          <span id="cfg-plan-start-echo" class="date-echo"></span>
-        </label>
-        <label>Consolidation window (days)
-          <input id="cfg-window" type="number" value="10" min="0" />
-        </label>
-        <label>Setup time (min)
-          <input id="cfg-setup" type="number" value="90" min="0" />
-        </label>
-        <label>Overlap % <span class="muted">(always on)</span>
-          <input id="cfg-overlap-pct" type="number" value="50" min="0" max="100" />
-        </label>
-      </fieldset>
-      <fieldset class="settings-group">
-        <legend>Priority (Rule 3)</legend>
-        <label>Metric
-          <select id="cfg-priority-metric">
-            <option value="slack">Least slack</option>
-            <option value="critical_ratio">Critical ratio</option>
-            <option value="process_time">Process time (legacy)</option>
-          </select>
-        </label>
-        <label>Window
-          <select id="cfg-priority-window">
-            <option value="">No limit</option>
-            <option value="3">Within 3 days</option>
-            <option value="10">Within 10 days</option>
-            <option value="0">Exact date only</option>
-          </select>
-        </label>
-      </fieldset>
-      <fieldset class="settings-group">
-        <legend>Options</legend>
-        <label class="cfg-check">
-          <input id="cfg-operator-logic" type="checkbox" checked />
-          Apply operator &amp; shift logic
-        </label>
-        <label class="cfg-check">
-          <input id="cfg-split-parallel" type="checkbox" checked />
-          Split alternative machines in parallel
-        </label>
-        <label class="cfg-check">
-          <input id="cfg-expedite" type="checkbox" />
-          Expedite urgent orders (prioritise the most at-risk order in a near tie)
-        </label>
-        <label class="cfg-check">
-          <input id="cfg-balance-ops" type="checkbox" />
-          Balance operator workload (share load fairly; same schedule)
-        </label>
-      </fieldset>
-      <fieldset class="settings-group">
-        <legend>Operator efficiency</legend>
-        <div class="cfg-row">
-          <label>Month
-            <input type="month" id="eff-month" />
+  <!-- ===================== DAILY ENTRY ===================== -->
+  <section class="view" id="view-entry">
+    <div class="card">
+      <div class="card-head">
+        <h2>Daily entry</h2>
+        <p class="explainer">Log what the floor produced. Pick the order, the process, the operator and shift, then Save.</p>
+      </div>
+      <div id="entry-mount"></div>
+    </div>
+  </section>
+
+  <!-- ===================== ANALYTICS ===================== -->
+  <section class="view" id="view-analytics">
+    <div class="card">
+      <div class="card-head">
+        <h2>Analytics</h2>
+        <p class="explainer">Utilization and bottlenecks across every machine, operator and process in the current plan.</p>
+      </div>
+      <div id="analytics-mount"></div>
+    </div>
+  </section>
+
+  <!-- ===================== SETTINGS (admin) ===================== -->
+  <section class="view" id="view-settings">
+    <div class="card admin-only">
+      <div class="card-head">
+        <h2>Plan settings</h2>
+        <p class="explainer">Controls how the schedule is built. Change a value, then Save &amp; re-plan.</p>
+      </div>
+      <div class="settings-grid">
+        <fieldset class="settings-group">
+          <legend>Scheduling</legend>
+          <label class="cfg-check">
+            <input id="cfg-start-auto" type="checkbox" checked />
+            Start from today (recommended)
           </label>
-          <button id="eff-preview-btn" class="ghost-btn" type="button">Preview</button>
-          <button id="eff-download-btn" class="ghost-btn" type="button">⬇ Download CSV</button>
-        </div>
-        <div id="eff-table" class="eff-table"></div>
-      </fieldset>
+          <label>Plan start date
+            <input id="cfg-plan-start" type="date" value="2025-03-01" />
+            <span id="cfg-plan-start-echo" class="date-echo"></span>
+          </label>
+          <label>Consolidation window (days)
+            <input id="cfg-window" type="number" value="10" min="0" />
+          </label>
+          <label>Setup time (min)
+            <input id="cfg-setup" type="number" value="90" min="0" />
+          </label>
+          <label>Overlap % <span class="muted">(always on)</span>
+            <input id="cfg-overlap-pct" type="number" value="50" min="0" max="100" />
+          </label>
+        </fieldset>
+        <fieldset class="settings-group">
+          <legend>Priority (Rule 3)</legend>
+          <label>Metric
+            <select id="cfg-priority-metric">
+              <option value="slack">Least slack</option>
+              <option value="critical_ratio">Critical ratio</option>
+              <option value="process_time">Process time (legacy)</option>
+            </select>
+          </label>
+          <label>Window
+            <select id="cfg-priority-window">
+              <option value="">No limit</option>
+              <option value="3">Within 3 days</option>
+              <option value="10">Within 10 days</option>
+              <option value="0">Exact date only</option>
+            </select>
+          </label>
+        </fieldset>
+        <fieldset class="settings-group">
+          <legend>Options</legend>
+          <label class="cfg-check">
+            <input id="cfg-operator-logic" type="checkbox" checked />
+            Apply operator &amp; shift logic
+          </label>
+          <label class="cfg-check">
+            <input id="cfg-split-parallel" type="checkbox" checked />
+            Split alternative machines in parallel
+          </label>
+          <label class="cfg-check">
+            <input id="cfg-expedite" type="checkbox" />
+            Expedite urgent orders (prioritise the most at-risk order in a near tie)
+          </label>
+          <label class="cfg-check">
+            <input id="cfg-balance-ops" type="checkbox" />
+            Balance operator workload (share load fairly; same schedule)
+          </label>
+        </fieldset>
+      </div>
+      <div class="card-actions">
+        <button id="run-btn" class="primary">Save &amp; re-plan</button>
+      </div>
+    </div>
+
+    <div class="card admin-only">
+      <div class="card-head">
+        <h2>Operators &amp; shifts</h2>
+        <p class="explainer">Who runs which machines and on which shift. Shifts rotate every Friday.</p>
+      </div>
+      <p id="operators-header" class="muted"></p>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Machines</th>
+              <th>Shift</th>
+              <th>Stays</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="operators-tbody"></tbody>
+        </table>
+      </div>
+      <div class="cfg-row">
+        <input type="text" id="op-add-name" placeholder="Name" />
+        <input type="text" id="op-add-machines" placeholder="Machines (e.g. CNC 1/CNC 2)" />
+        <select id="op-add-shift">
+          <option value="">Day (9-18)</option>
+          <option value="First shift">First shift</option>
+          <option value="Second shift">Second shift</option>
+        </select>
+        <button id="op-add-btn" class="ghost-btn" type="button">Add operator</button>
+      </div>
+    </div>
+
+    <div class="card admin-only">
+      <div class="card-head">
+        <h2>Absences</h2>
+        <p class="explainer">Mark an operator away for a date range — the plan skips them while absent.</p>
+      </div>
+      <div class="cfg-row">
+        <select id="absence-operator"></select>
+        <input type="date" id="absence-from" />
+        <input type="date" id="absence-to" />
+        <button id="absence-add" class="ghost-btn" type="button">Mark absent</button>
+      </div>
+      <ul id="absence-list" class="absence-list"></ul>
+    </div>
+
+    <div class="card admin-only">
+      <div class="card-head">
+        <h2>Efficiency report</h2>
+        <p class="explainer">Per-operator output vs standard for a month (pure reporting — never changes the plan).</p>
+      </div>
+      <div class="cfg-row">
+        <label class="inline-field">Month
+          <input type="month" id="eff-month" />
+        </label>
+        <button id="eff-preview-btn" class="ghost-btn" type="button">Preview</button>
+        <button id="eff-download-btn" class="ghost-btn" type="button">⬇ Download CSV</button>
+      </div>
+      <div id="eff-table" class="eff-table"></div>
     </div>
   </section>
 
-  <section id="report-panel" class="report hidden">
-    <button id="report-toggle" class="report-summary"></button>
-    <div id="report-detail" class="hidden"></div>
-  </section>
-
-  <section id="absence-panel" class="settings-panel">
-    <div class="settings-grid">
-      <fieldset class="settings-group">
-        <legend>Operator absences</legend>
-        <div class="cfg-row admin-only">
-          <select id="absence-operator"></select>
-          <input type="date" id="absence-from" />
-          <input type="date" id="absence-to" />
-          <button id="absence-add" class="ghost-btn" type="button">Mark absent</button>
-        </div>
-        <ul id="absence-list" class="absence-list"></ul>
-      </fieldset>
-    </div>
-  </section>
-
-  <section id="operators-panel" class="settings-panel">
-    <div class="settings-grid">
-      <fieldset class="settings-group">
-        <legend>Operators &amp; shifts</legend>
-        <p id="operators-header" class="muted"></p>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Machines</th>
-                <th>Shift</th>
-                <th>Stays</th>
-                <th class="admin-only"></th>
-              </tr>
-            </thead>
-            <tbody id="operators-tbody"></tbody>
-          </table>
-        </div>
-        <div class="cfg-row admin-only">
-          <input type="text" id="op-add-name" placeholder="Name" />
-          <input type="text" id="op-add-machines" placeholder="Machines (e.g. CNC 1/CNC 2)" />
-          <select id="op-add-shift">
-            <option value="">Day (9-18)</option>
-            <option value="First shift">First shift</option>
-            <option value="Second shift">Second shift</option>
-          </select>
-          <button id="op-add-btn" class="ghost-btn" type="button">Add operator</button>
-        </div>
-      </fieldset>
-    </div>
-  </section>
-
-  <nav id="tabs" class="tabs"></nav>
-
-  <main id="tab-content" class="tab-content">
-    <p class="placeholder">Upload your Excel, then click <strong>Plan</strong>.</p>
-  </main>
+  <!-- Legacy single mount kept as a harmless fallback target for any render call
+       whose view isn't found (router always supplies a real mount). -->
+  <main id="tab-content" hidden></main>
 
   <script src="app.js"></script>
 </body>
