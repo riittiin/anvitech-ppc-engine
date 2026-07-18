@@ -175,11 +175,11 @@ def merge_upload(so_lines, active_orders: dict, completed_orders: dict, first_se
             changed = (ex.ordered_qty != so.qty or ex.delivery_date != so.delivery_date)
             flags.append({
                 **base,
-                "reason": "changed — original kept (revisions deferred)" if changed
-                          else "duplicate — already in the book",
+                "reason": "changed: original kept (revisions deferred)" if changed
+                          else "duplicate: already in the book",
             })
         elif key in completed_orders:
-            flags.append({**base, "reason": "already completed — not re-added"})
+            flags.append({**base, "reason": "already completed: not re-added"})
         else:
             seen_in_upload.add(key)
             new_orders.append(Order(

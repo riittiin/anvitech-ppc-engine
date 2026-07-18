@@ -64,6 +64,6 @@ def run(new_entries, config=None, notes=None, masters=None, **kw):
             f"(good {a.good_qty():g}) for {a.item_code} (SO {a.so_no}) on "
             f"{fmt_date(a.entry_date)}; setup {a.actual_setup_min:g} min, "
             f"downtime {a.total_downtime_min():g} min"
-            + (" — MARKED COMPLETE" if a.mark_complete else "")
+            + (": MARKED COMPLETE" if a.mark_complete else "")
         )
     return book_store.load_actuals()

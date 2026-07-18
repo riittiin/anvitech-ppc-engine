@@ -36,7 +36,7 @@ def test_overlap_view_shows_machining_handoff_overlapped():
     h1 = rows[0]  # CNC -> DEBURRING: machining step, overlaps
     assert h1["Overlap applied"].startswith("yes")
     # sequential would wait the full 190; overlap waits 50% of the 100 cutting = 50.
-    assert h1["Next allowed after — this run (min)"] == 50
+    assert h1["Next allowed after: this run (min)"] == 50
     assert h1["Pulled earlier (min)"] == 140
 
 

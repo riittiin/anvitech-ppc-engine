@@ -134,7 +134,7 @@ def run(batches, config=None, notes=None, masters=None, **kw):
                 f"{b.item_code} (due {fmt_date(b.so_delivery_date)}, slack "
                 f"{round(slack_b)} min) prioritized ahead of earlier-due "
                 f"{beaten.item_code} (due {fmt_date(beaten.so_delivery_date)}, slack "
-                f"{round(slack_e)} min) — higher lateness risk."
+                f"{round(slack_e)} min): higher lateness risk."
             )
 
     return ordered

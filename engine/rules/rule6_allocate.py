@@ -338,7 +338,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
         if routing is None:
             raise RuleError(
                 "rule6", batch.item_code,
-                "batch has no routing — should have been skipped at load (NO_ROUTING)",
+                "batch has no routing: should have been skipped at load (NO_ROUTING)",
             )
         if batch.qty is None or batch.qty < 0:
             raise RuleError("rule6", batch.batch_id, f"invalid batch qty {batch.qty}")
@@ -370,7 +370,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
                     pass  # an uncovered machine has no window to delay
         if seeded:
             notes.append(
-                "Seeded machine-unavailable time — " + ", ".join(sorted(seeded)) + "."
+                "Seeded machine-unavailable time: " + ", ".join(sorted(seeded)) + "."
             )
 
     offmachine: list = []    # (item_code, seq, name) of off-machine milestones (OS/DISPATCH)
@@ -403,10 +403,10 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
                         batch_id=s["batch"].batch_id, item_code=s["batch"].item_code,
                         process_seq=p.seq, process_name=p.name, machine="OS / Outsourced",
                         qty=q, occupancy_min=cyc, start=start, end=end,
-                        notes=(f"outsourced (OS) — reserves {cyc:g} min of vendor "
+                        notes=(f"outsourced (OS): reserves {cyc:g} min of vendor "
                                f"turnaround (continuous, no in-house machine/operator)"
                                if cyc > 0 else
-                               "outsourced (OS) — no turnaround time set yet; shown "
+                               "outsourced (OS): no turnaround time set yet; shown "
                                "as a milestone"),
                         so_refs=list(s["batch"].source_so_refs), operator="",
                     ))
@@ -432,7 +432,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
                         process_seq=p.seq, process_name=p.name, machine=_offmachine_lane(p),
                         qty=_qty_for(s["batch"], p), occupancy_min=0.0,
                         start=at, end=at,   # milestone: zero duration
-                        notes="off-machine step (OS / outsourcing / dispatch) — no in-house "
+                        notes="off-machine step (OS / outsourcing / dispatch): no in-house "
                               "machine or time; shown as a milestone",
                         so_refs=list(s["batch"].source_so_refs), operator="",
                     ))
@@ -585,7 +585,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     if offmachine:
         names = sorted({nm for _, _, nm in offmachine})
         notes.append(
-            f"Included {len(offmachine)} off-machine step(s) as milestones — OS / "
+            f"Included {len(offmachine)} off-machine step(s) as milestones: OS / "
             f"outsourcing / dispatch (no in-house machine or time), shown on the Gantt "
             f"but consuming no machine/operator time (e.g. {', '.join(names[:5])})."
         )
@@ -593,13 +593,13 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
         names = sorted({nm for _, _, nm in done_steps})
         notes.append(
             f"Skipped {len(done_steps)} step(s) already fully produced on the floor "
-            f"(per-process remaining 0) — work continues from there (e.g. "
+            f"(per-process remaining 0); work continues from there (e.g. "
             f"{', '.join(names[:5])})."
         )
     if needs_machine:
         names = sorted({r["Process"] for r in needs_machine})
         notes.append(
-            f"⚠ {len(needs_machine)} step(s) have a cycle time but NO machine assigned — "
+            f"⚠ {len(needs_machine)} step(s) have a cycle time but NO machine assigned: "
             f"NOT scheduled (their batch is held). Fix the Machine column in the process "
             f"master (e.g. {', '.join(names[:5])})."
         )
@@ -607,7 +607,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
         names = sorted({nm for _, _, nm, _ in os_reserved})
         notes.append(
             f"Reserved {len(os_reserved)} outsourced (OS) step(s) as continuous "
-            f"turnaround blocks — no in-house machine or operator; the next process "
+            f"turnaround blocks (no in-house machine or operator); the next process "
             f"waits for each to return (e.g. {', '.join(names[:5])})."
         )
 
@@ -628,13 +628,13 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
         )
         if blocked_ops:
             notes.append(
-                f"{len(blocked_ops)} operation(s) NOT scheduled — no qualified operator "
+                f"{len(blocked_ops)} operation(s) NOT scheduled: no qualified operator "
                 f"on a valid shift for the machine (see the 'needs operator' table)."
             )
         if cov_report and cov_report.get("unmatched_specialties"):
             notes.append(
                 f"{len(cov_report['unmatched_specialties'])} operator specialty entr(ies) "
-                f"match no machine — check naming (see the table)."
+                f"match no machine: check naming (see the table)."
             )
 
     if getattr(config, "balance_operator_load", False):
@@ -642,7 +642,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
         if moved:
             notes.append(
                 f"Operator load balancing ON: reassigned {moved} operation(s) to the "
-                f"least-loaded qualified operator (same shift, already free) — spreads "
+                f"least-loaded qualified operator (same shift, already free); spreads "
                 f"work evenly across interchangeable people; start/end times unchanged."
             )
 

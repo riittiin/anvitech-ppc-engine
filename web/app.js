@@ -246,7 +246,7 @@ async function uploadExcel() {
 
 // ---- Optimize (admin: search for a better job sequence; banner for everyone) ----
 function fmtMetrics(m) {
-  if (!m) return "—";
+  if (!m) return "-";
   return `${m.makespan_days} days · ${m.late_orders}/${m.orders} late · ${m.total_late_days} late-days`;
 }
 
@@ -263,12 +263,12 @@ function renderOptimizeBanner() {
   b.classList.remove("hidden");
   let h = `Optimized plan active (saved ${escapeHtml(isoToDisplayDateTime(optimizeMeta.saved_at))})`;
   if (optimizeMeta.uncovered > 0) {
-    h += ` · <span class="pill-pending">${optimizeMeta.uncovered} order(s) added since — ` +
+    h += ` · <span class="pill-pending">${optimizeMeta.uncovered} order(s) added since: ` +
          `run Optimize again for the best plan</span>`;
   }
   if (optimizeMeta.inputs_changed) {
     h += ` · <span class="pill-pending">Settings or masters have changed since this ` +
-         `optimization was computed — its numbers will differ; run Optimize again</span>`;
+         `optimization was computed. Its numbers will differ; run Optimize again</span>`;
   }
   if (currentRole === "admin") {
     h += ` <button id="optimize-clear-btn" class="ghost-btn small">Remove optimization</button>`;
@@ -345,12 +345,12 @@ function renderStatusStrip() {
   // Warning chip: staleness and/or unstaffed hours (both from the /run response).
   const warns = [];
   if (optimizeMeta && optimizeMeta.inputs_changed) {
-    warns.push("Settings or masters changed since the applied optimization — its numbers will differ; run Optimize again.");
+    warns.push("Settings or masters changed since the applied optimization. Its numbers will differ; run Optimize again.");
   }
   const unstaffed = currentTrace && currentTrace.analytics && currentTrace.analytics.headline
     ? currentTrace.analytics.headline.unstaffed_hrs : 0;
   if (unstaffed && unstaffed > 0) {
-    warns.push(`${Math.round(unstaffed)} hrs of scheduled work fall in shifts with no free qualified operator — those shifts need more crew.`);
+    warns.push(`${Math.round(unstaffed)} hrs of scheduled work fall in shifts with no free qualified operator. Those shifts need more crew.`);
   }
   let chip = "";
   if (warns.length) {
@@ -372,7 +372,7 @@ function renderStatusStrip() {
 function optimizeProgressLine(st) {
   const where = st.mode === "cloud" ? " in the cloud" : "";
   const tried = `tried ${st.evals} of ${st.budget_evals} plans${where}`;
-  const best = st.best ? ` — best so far: ${fmtMetrics(st.best)}` : "";
+  const best = st.best ? `, best so far: ${fmtMetrics(st.best)}` : "";
   return tried + best;
 }
 
@@ -404,7 +404,7 @@ async function pollOptimizeStatus() {
   const prog = $("optimize-progress");
   if (st.state === "running") {
     _showRunningControls(true);
-    const tail = st.stopping ? " — stopping…" : "…";
+    const tail = st.stopping ? ", stopping…" : "…";
     if (prog) prog.textContent = optimizeProgressLine(st) + tail;
     _schedulePoll(3000);
     return;
@@ -417,7 +417,7 @@ async function pollOptimizeStatus() {
   }
   if (st.state === "done") {
     const how = st.cancelled ? "stopped early" : "done";
-    if (prog) prog.textContent = `${how} — ${st.evals} plans tried in ${st.elapsed_s}s`;
+    if (prog) prog.textContent = `${how}: ${st.evals} plans tried in ${st.elapsed_s}s`;
     renderOptimizeResult(st);
   }
 }
@@ -429,30 +429,30 @@ function renderOptimizeResult(st) {
     // An auto-triggered contest already applied itself (or found nothing better) —
     // never show a stale Apply/Discard panel for a decision that's already made.
     box.classList.remove("hidden");
-    box.innerHTML = "<p>Auto-optimize finished — the plan updated itself if a better one was found.</p>";
+    box.innerHTML = "<p>Auto-optimize finished. The plan updated itself if a better one was found.</p>";
     runPlan(false);
     return;
   }
   box.classList.remove("hidden");
   const rows = [
-    ["Total days to finish", st.baseline ? st.baseline.makespan_days : "—",
-     st.best ? st.best.makespan_days : "—"],
-    ["Late orders", st.baseline ? `${st.baseline.late_orders} / ${st.baseline.orders}` : "—",
-     st.best ? `${st.best.late_orders} / ${st.best.orders}` : "—"],
-    ["Total late-days (sum of delivery gaps)", st.baseline ? st.baseline.total_late_days : "—",
-     st.best ? st.best.total_late_days : "—"],
-    ["Worst order lateness (days)", st.baseline ? st.baseline.max_late_days : "—",
-     st.best ? st.best.max_late_days : "—"],
+    ["Total days to finish", st.baseline ? st.baseline.makespan_days : "-",
+     st.best ? st.best.makespan_days : "-"],
+    ["Late orders", st.baseline ? `${st.baseline.late_orders} / ${st.baseline.orders}` : "-",
+     st.best ? `${st.best.late_orders} / ${st.best.orders}` : "-"],
+    ["Total late-days (sum of delivery gaps)", st.baseline ? st.baseline.total_late_days : "-",
+     st.best ? st.best.total_late_days : "-"],
+    ["Worst order lateness (days)", st.baseline ? st.baseline.max_late_days : "-",
+     st.best ? st.best.max_late_days : "-"],
   ];
-  const stoppedNote = st.cancelled ? " (stopped early — this is the best of the plans tried so far)" : "";
+  const stoppedNote = st.cancelled ? " (stopped early: this is the best of the plans tried so far)" : "";
   let h = st.improved
     ? `<p><strong>A better plan was found${stoppedNote}.</strong> Apply it to use this order in every plan from now on.</p>`
-    : `<p><strong>No improvement found</strong> — the current plan already matches the best sequence tried.</p>`;
+    : `<p><strong>No improvement found.</strong> The current plan already matches the best sequence tried.</p>`;
   // Settings sweep: Optimize also tried the overlap % values.
   if (st.best_overlap != null && st.current_overlap != null) {
     h += st.best_overlap !== st.current_overlap
       ? `<p>Best setting found: <strong>Overlap ${st.best_overlap}%</strong> (currently ${st.current_overlap}%). Applying this plan also sets Overlap to ${st.best_overlap}% in Settings.</p>`
-      : `<p>Your Overlap setting (${st.current_overlap}%) was also tested against ${escapeHtml("50–100%")} — it is already the best.</p>`;
+      : `<p>Your Overlap setting (${st.current_overlap}%) was also tested against ${escapeHtml("50-100%")}. It is already the best.</p>`;
   }
   h += '<div class="table-wrap"><table><thead><tr><th></th><th>Standard plan</th><th>Optimized</th></tr></thead><tbody>';
   rows.forEach((r) => {
@@ -468,7 +468,7 @@ function renderOptimizeResult(st) {
     const res = await fetch("/optimize/apply", { method: "POST" });
     if (!res.ok) { setStatus("Apply failed: " + (await res.text())); return; }
     box.classList.add("hidden"); box.innerHTML = "";
-    setStatus("Optimized order applied — replanning…");
+    setStatus("Optimized order applied. Replanning…");
     await runPlan(false);
   };
   $("optimize-discard-btn").onclick = () => { box.classList.add("hidden"); box.innerHTML = ""; };
@@ -520,7 +520,7 @@ function renderReport(report) {
   const counts = {};
   report.rows.forEach((r) => { counts[r[0]] = (counts[r[0]] || 0) + 1; });
   const parts = Object.entries(counts).map(([k, v]) => `${v} ${REPORT_LABELS[k] || k}`).join(", ");
-  toggle.innerHTML = `⚠ ${parts} (data gaps) — click to view <span class="chev">▸</span>`;
+  toggle.innerHTML = `⚠ ${parts} (data gaps): click to view <span class="chev">▸</span>`;
   detail.innerHTML = tableHtml(report, true);
   detail.classList.add("hidden"); toggle.classList.remove("open");
   toggle.onclick = () => { const open = !detail.classList.toggle("hidden"); toggle.classList.toggle("open", open); };
@@ -538,13 +538,13 @@ function renderTab(key) {
   const root = mountFor(key);
   if (!entry) { root.innerHTML = '<p class="placeholder">Click <strong>Plan</strong> to run the rules.</p>'; return; }
 
-  let html = `<div class="rule-header"><h2>Rule ${meta.n} — ${meta.title}</h2></div>`;
+  let html = `<div class="rule-header"><h2>Rule ${meta.n}: ${meta.title}</h2></div>`;
   if (entry.reached === false) {
-    html += '<div class="not-reached-box">Not reached — a previous rule stopped the chain.</div>';
+    html += '<div class="not-reached-box">Not reached: a previous rule stopped the chain.</div>';
     root.innerHTML = html; return;
   }
   if (entry.error) {
-    html += `<div class="error-box"><strong>Rule error</strong> — record `
+    html += `<div class="error-box"><strong>Rule error</strong> in record `
       + `<code>${escapeHtml(String(entry.error.record_id))}</code>: ${escapeHtml(entry.error.message)}</div>`;
   }
   if (key === "rule7") html += actualsFormHtml();
@@ -555,7 +555,7 @@ function renderTab(key) {
       + '<button id="dl-schedule" class="primary">⬇ Download schedule (CSV)</button>'
       + '<button id="dl-machine">⬇ Download machine-wise view</button>'
       + '<button id="dl-shiftwise">⬇ Download shift-wise schedule</button>'
-      + '<span class="muted"> — opens in Excel; print it for the floor</span></div>';
+      + '<span class="muted"> (opens in Excel; print it for the floor)</span></div>';
   }
 
   html += '<div class="io">';
@@ -643,7 +643,7 @@ async function renderOrders() {
   let html = "";
   if (!currentOrders || !currentOrders.rows.length) {
     html += isAdmin
-      ? '<p class="placeholder">No orders yet — upload your Excel to begin.</p>'
+      ? '<p class="placeholder">No orders yet. Upload your Excel to begin.</p>'
       : '<p class="placeholder">No orders yet.</p>';
     root.innerHTML = html; return;
   }
@@ -658,7 +658,7 @@ async function renderOrders() {
   }
   html += orderTableHtml(currentOrders, isAdmin);
   html += '<p class="g-note">Pending = not started · Running = production logged · Complete = marked complete on a Rule 7 entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty. '
-    + 'Lane: status labels only (no scheduling effect) — <strong>open</strong> = newly arrived · <strong>committed</strong> = released, promised date snapshotted · <strong>urgent</strong> = flagged, promised = delivery date. The plan sequences all orders together by delivery date.</p>';
+    + 'Lane: status labels only (no scheduling effect): <strong>open</strong> = newly arrived · <strong>committed</strong> = released, promised date snapshotted · <strong>urgent</strong> = flagged, promised = delivery date. The plan sequences all orders together by delivery date.</p>';
   if (isAdmin) {
     html += '<div class="danger-strip">'
       + '<span class="danger-label">Danger zone</span>'
@@ -755,7 +755,7 @@ function deleteWithPassword(message, doFetch) {
       ok.disabled = true; err.textContent = "Checking…";
       try {
         const res = await doFetch(pw);
-        if (res.status === 403) { err.textContent = "Password incorrect — try again."; ok.disabled = false; input.select(); return; }
+        if (res.status === 403) { err.textContent = "Password incorrect. Try again."; ok.disabled = false; input.select(); return; }
         if (!res.ok) { err.textContent = "Failed: " + (await res.text()); ok.disabled = false; return; }
         done(true);
       } catch (e) { err.textContent = "Error: " + e.message; ok.disabled = false; }
@@ -860,10 +860,10 @@ function wireOrdersCommit() {
 // ---- Gantt ----
 function renderGantt() {
   const root = mountFor("gantt");
-  if (!currentGantt) { root.innerHTML = '<p class="placeholder">No schedule yet — add orders on the Orders view to build the Gantt.</p>'; return; }
+  if (!currentGantt) { root.innerHTML = '<p class="placeholder">No schedule yet. Add orders on the Orders view to build the Gantt.</p>'; return; }
   const g = currentGantt;
   if (!g.rows || !g.rows.length) {
-    root.innerHTML = '<p class="placeholder">No schedule to chart — add orders on the Orders view.</p>';
+    root.innerHTML = '<p class="placeholder">No schedule to chart. Add orders on the Orders view.</p>';
     return;
   }
   const DAYW = ganttDayWidth, axisW = g.num_days * DAYW;
@@ -928,11 +928,11 @@ function renderAnalytics() {
   const root = mountFor("analytics");
   const a = currentTrace && currentTrace.analytics;
   if (!a || !a.machines || !a.machines.length) {
-    root.innerHTML = '<p class="placeholder">No analytics yet — add orders on the Orders view to see utilization &amp; bottlenecks.</p>';
+    root.innerHTML = '<p class="placeholder">No analytics yet. Add orders on the Orders view to see utilization &amp; bottlenecks.</p>';
     return;
   }
   const h = a.headline || {};
-  const pct = (v) => v == null ? "—" : v + "%";
+  const pct = (v) => v == null ? "-" : v + "%";
   const cls = (s) => s === "bottleneck" ? "hot" : s === "under-used" ? "cold" : s === "process" ? "proc" : "ok";
 
   // one utilization row: status dot · name (+ muted sub) · track/fill bar · value
@@ -953,7 +953,7 @@ function renderAnalytics() {
     const cols = Object.keys(rows[0]).filter((c) => c !== "Status");
     const th = cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
     const tr = rows.map((r) => "<tr>" + cols.map((c) =>
-      `<td>${escapeHtml(String(r[c] == null ? "—" : r[c]))}</td>`).join("") + "</tr>").join("");
+      `<td>${escapeHtml(String(r[c] == null ? "-" : r[c]))}</td>`).join("") + "</tr>").join("");
     return `<details class="a-more"><summary>Show numbers</summary>
       <div class="table-wrap"><table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table></div></details>`;
   };
@@ -964,7 +964,7 @@ function renderAnalytics() {
   const kpis = `<div class="a-kpis">
     <div class="a-kpi hot">
       <span class="a-kpi-lab">Bottleneck</span>
-      <span class="a-kpi-val">${b ? escapeHtml(b.Machine) : "—"}</span>
+      <span class="a-kpi-val">${b ? escapeHtml(b.Machine) : "-"}</span>
       <span class="a-kpi-sub">${b ? pct(b["Utilization %"]) + " used · your tightest resource" : "no machines"}</span>
     </div>
     <div class="a-kpi">
@@ -998,7 +998,7 @@ function renderAnalytics() {
   // Honest capacity gap: shift segments no qualified operator was free to man
   // (never billed to a person, so nobody can show over 100%).
   const unstaffedNote = (h.unstaffed_hrs || 0) > 0
-    ? `<p class="a-empty">⚠ <strong>${Math.round(h.unstaffed_hrs)} hrs</strong> of scheduled machine time fall in shifts where every qualified operator is already busy on another machine — that work needs more crew on those shifts.</p>`
+    ? `<p class="a-empty">⚠ <strong>${Math.round(h.unstaffed_hrs)} hrs</strong> of scheduled machine time fall in shifts where every qualified operator is already busy on another machine. That work needs more crew on those shifts.</p>`
     : "";
   const procBars = a.processes.map((p) => row(p.Process, p.Machines, p["Share %"], "process")).join("");
 
@@ -1027,7 +1027,7 @@ function renderAnalytics() {
         ${table(a.processes)}
       </section>
     </div>
-    <p class="a-foot"><strong>How to read this.</strong> Utilization = busy time ÷ that resource's <em>own</em> available time in the plan window (Thursdays &amp; holidays excluded), so a single-shift manual station and a two-shift CNC are judged fairly — 60% means the same for both. A <span class="au-t hot">bottleneck</span> is your constraint to relieve; <span class="au-t cold">under-used</span> resources have slack to take on more. Process share = each operation's cut of total machine-hours. Operator capacity assumes the standard shift length.</p>`;
+    <p class="a-foot"><strong>How to read this.</strong> Utilization = busy time ÷ that resource's <em>own</em> available time in the plan window (Thursdays &amp; holidays excluded), so a single-shift manual station and a two-shift CNC are judged fairly: 60% means the same for both. A <span class="au-t hot">bottleneck</span> is your constraint to relieve; <span class="au-t cold">under-used</span> resources have slack to take on more. Process share = each operation's cut of total machine-hours. Operator capacity assumes the standard shift length.</p>`;
 }
 
 // ---- Rule 8 daily entry form ----
@@ -1044,9 +1044,9 @@ function actualsFormHtml() {
   const left =
     fy("Date", `<input id="a-date" type="date" value="${today}" /> <span id="a-date-echo" class="date-echo"></span>`) +
     fy("Shift", `<select id="a-shift"><option value="1st shift">1st shift</option><option value="2nd shift">2nd shift</option></select>`) +
-    fr("Operator <span class=auto>(required)</span>", `<select id="a-operator"><option value="">— select operator —</option></select>`) +
-    fr("SO No <span class=auto>(step 1 — pick from orders)</span>", `<select id="a-so"><option value="">— select SO No —</option></select>`) +
-    fr("Item Code <span class=auto>(step 2 — pick this SO's item)</span>", `<select id="a-item"><option value="">— select SO No first —</option></select>`) +
+    fr("Operator <span class=auto>(required)</span>", `<select id="a-operator"><option value="">Select operator</option></select>`) +
+    fr("SO No <span class=auto>(step 1: pick from orders)</span>", `<select id="a-so"><option value="">Select SO No</option></select>`) +
+    fr("Item Code <span class=auto>(step 2: pick this SO's item)</span>", `<select id="a-item"><option value="">Select SO No first</option></select>`) +
     fr("Item Name <span class=auto>(auto)</span>", `<input id="a-itemname" readonly />`) +
     fr("Process <span class=auto>(dropdown)</span>", `<select id="a-process"></select>`);
   const right =
@@ -1063,10 +1063,10 @@ function actualsFormHtml() {
   return `
     <div class="entry-legend"><span class="lg lg-y">Manual entry</span><span class="lg lg-r">Auto-prompt / dropdown</span></div>
     <div class="entry-grid"><div class="entry-col">${left}</div><div class="entry-col">${right}</div></div>
-    <label class="complete-check"><input id="a-complete" type="checkbox" /> <strong>Mark this order (this SO No + item) complete</strong> — archives just this item line; the engine never auto-completes.</label>
+    <label class="complete-check"><input id="a-complete" type="checkbox" /> <strong>Mark this order (this SO No + item) complete</strong>: archives just this item line; the engine never auto-completes.</label>
     <button id="a-save" class="primary">Save daily entry</button>
     <div class="optimize-done-row">
-      <button id="optimize-done" class="primary">Done entering — update plan</button>
+      <button id="optimize-done" class="primary">Done entering: update plan</button>
       <span id="optimize-done-status" class="status"></span>
     </div>`;
 }
@@ -1082,7 +1082,7 @@ async function fillOperatorDropdown() {
     const data = await res.json();
     const rows = data.operators || [];
     const keep = sel.value;
-    sel.innerHTML = `<option value="">— select operator —</option>`
+    sel.innerHTML = `<option value="">Select operator</option>`
       + rows.map((o) => `<option value="${escapeHtml(o.name)}">${escapeHtml(o.name)}</option>`).join("");
     if (keep) sel.value = keep;
   } catch (e) { /* dropdown stays empty; required-field check + server 400 are the backstop */ }
@@ -1108,7 +1108,7 @@ function fillSoDropdown() {
   // order (and a stray punch on one would wrongly advance the plan clock).
   const list = (ITEMS && ITEMS.open_so_nos) ? ITEMS.open_so_nos
              : (ITEMS && ITEMS.so_nos) ? ITEMS.so_nos : [];
-  sel.innerHTML = `<option value="">— select SO No —</option>`
+  sel.innerHTML = `<option value="">Select SO No</option>`
     + list.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("");
 }
 
@@ -1121,11 +1121,11 @@ function fillItemFromSO() {
   const lines = map[so] || [];
   const sel = $("a-item");
   if (!lines.length) {
-    sel.innerHTML = `<option value="">— select SO No first —</option>`;
+    sel.innerHTML = `<option value="">Select SO No first</option>`;
   } else {
-    const head = lines.length > 1 ? `<option value="">— select item —</option>` : "";
+    const head = lines.length > 1 ? `<option value="">Select item</option>` : "";
     sel.innerHTML = head + lines.map((l) =>
-      `<option value="${escapeHtml(l.item_code)}">${escapeHtml(l.item_code)}${l.item_name ? " — " + escapeHtml(l.item_name) : ""}</option>`
+      `<option value="${escapeHtml(l.item_code)}">${escapeHtml(l.item_code)}${l.item_name ? " - " + escapeHtml(l.item_name) : ""}</option>`
     ).join("");
     if (lines.length === 1) sel.value = lines[0].item_code;   // only one → pick it
   }
@@ -1136,7 +1136,7 @@ function fillItemMeta() {
   const code = $("a-item").value.trim();
   if (!code) {
     $("a-itemname").value = "";
-    $("a-process").innerHTML = `<option value="">—</option>`;
+    $("a-process").innerHTML = `<option value="">-</option>`;
     return;
   }
   const meta = ITEMS && ITEMS.items ? ITEMS.items[code] : null;
@@ -1145,7 +1145,7 @@ function fillItemMeta() {
     $("a-process").innerHTML = meta.processes.map((p) => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("");
   } else {
     $("a-itemname").value = "(unknown item code)";
-    $("a-process").innerHTML = `<option value="">—</option>`;
+    $("a-process").innerHTML = `<option value="">-</option>`;
   }
 }
 
@@ -1208,7 +1208,7 @@ async function wireActualsForm() {
     }
     // Guard against re-saving the exact same entry (the #1 cause of duplicates).
     if (actualIsDuplicate(body) && !confirm(
-        `An identical entry is already saved (SO ${body.so_no}, ${body.process || "—"}, `
+        `An identical entry is already saved (SO ${body.so_no}, ${body.process || "-"}, `
         + `${body.qty_produced} produced on ${body.entry_date}). Save another?`)) {
       return;
     }
@@ -1228,14 +1228,14 @@ async function wireActualsForm() {
       // Close the feedback loop on the punch: immediately re-plan so the schedule,
       // machine allotment, Gantt and Orders all reflect what the floor just reported
       // (per-process quantity produced/rejected). This is what makes the plan dynamic.
-      setStatus("✓ Saved — re-planning from the new actuals…");
+      setStatus("✓ Saved. Re-planning from the new actuals…");
       await runPlan(false);                    // refreshes currentTrace/gantt/orders/report
       if (d.completed_order) {
         // The order was archived — show the result on the Orders view.
         setStatus(`✓ Saved & re-planned. Order ${body.so_no} marked complete and archived.`);
         showView("orders", true);
       } else {
-        setStatus(`✓ Saved & re-planned — schedule, Gantt and Orders updated from the new actuals.`);
+        setStatus(`✓ Saved & re-planned. Schedule, Gantt and Orders updated from the new actuals.`);
         renderTab("rule7");   // fresh blank form + updated output (stays on Daily Entry)
       }
     } catch (e) {
@@ -1251,14 +1251,14 @@ async function wireActualsForm() {
       const st = $("optimize-done-status");
       st.textContent = "Updating plan…";
       await runPlan(false);
-      st.textContent = `Entries saved — plan updated. Next optimization: ${nextScheduledOptimize()}.`;
+      st.textContent = `Entries saved. Plan updated. Next optimization: ${nextScheduledOptimize()}.`;
     };
   }
 }
 
 // Capture-actuals table with a per-row Rollback button (uses the parallel ids).
 function actualsOutputHtml(table, ids) {
-  if (!table || !table.columns || !table.columns.length) return '<div class="empty">— no entries —</div>';
+  if (!table || !table.columns || !table.columns.length) return '<div class="empty">No entries</div>';
   // Rollback is the FIRST column so it's always visible (the table is wide).
   let h = '<div class="table-wrap"><table><thead><tr><th>Rollback</th>';
   table.columns.forEach((c) => (h += `<th>${escapeHtml(c)}</th>`));
@@ -1293,7 +1293,7 @@ function wireRollback() {
           currentTrace.rule7.output = d.actuals;
           currentTrace.rule7.actuals_ids = d.actuals_ids;
           currentTrace.rule7.tables = [{
-            title: "Per item code — output & downtime rollup (minutes summed across entries)",
+            title: "Per item code: output & downtime rollup (minutes summed across entries)",
             table: d.by_item,
           }];
         }
@@ -1306,7 +1306,7 @@ function wireRollback() {
 }
 
 function tableHtml(table, withClasses) {
-  if (!table || !table.columns || table.columns.length === 0) return '<div class="empty">— no rows —</div>';
+  if (!table || !table.columns || table.columns.length === 0) return '<div class="empty">No rows</div>';
   let h = '<div class="table-wrap"><table><thead><tr>';
   table.columns.forEach((c) => (h += `<th>${escapeHtml(c)}</th>`));
   h += "</tr></thead><tbody>";
@@ -1359,9 +1359,9 @@ async function previewEfficiency() {
 
 function renderEfficiencyTable(rows, el) {
   if (!el) return;
-  if (!rows || rows.length === 0) { el.innerHTML = '<div class="empty">— no rows —</div>'; return; }
+  if (!rows || rows.length === 0) { el.innerHTML = '<div class="empty">No rows</div>'; return; }
   const columns = Object.keys(rows[0]);
-  const tableRows = rows.map((r) => columns.map((c) => (r[c] === null || r[c] === undefined ? "—" : r[c])));
+  const tableRows = rows.map((r) => columns.map((c) => (r[c] === null || r[c] === undefined ? "-" : r[c])));
   el.innerHTML = tableHtml({ columns, rows: tableRows });
 }
 
@@ -1382,7 +1382,7 @@ function renderAbsenceList(absences) {
   }
   ul.innerHTML = absences.map((a) => `
     <li>
-      <span>${escapeHtml(a.operator)} — ${isoToDdmmyyyy(a.from_date)} to ${isoToDdmmyyyy(a.to_date)}</span>
+      <span>${escapeHtml(a.operator)}: ${isoToDdmmyyyy(a.from_date)} to ${isoToDdmmyyyy(a.to_date)}</span>
       <button type="button" class="ghost-btn absence-remove admin-only" data-id="${escapeHtml(a.id)}">✕</button>
     </li>`).join("");
   ul.querySelectorAll(".absence-remove").forEach((btn) => {
@@ -1455,7 +1455,7 @@ function renderOperatorsTable(operators) {
         <td>${escapeHtml(o.name)}</td>
         <td>${escapeHtml(o.machines_raw || "")}</td>
         <td>${shiftLabel}</td>
-        <td>${o.pinned ? "Yes" : "—"}</td>
+        <td>${o.pinned ? "Yes" : "-"}</td>
       </tr>`;
     }
     const shiftOpts = ["", "First shift", "Second shift"].map((v) =>

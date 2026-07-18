@@ -392,7 +392,7 @@ def _register_provisional(masters: Masters, raw_label: str):
     masters.machines[canonical] = Machine(
         machine_no=canonical,
         display_name=str(raw_label).strip(),
-        machine_type="(provisional — fill in Machine master)",
+        machine_type="(provisional: fill in Machine master)",
         hr_rate=None,
         provisional=True,
     )
@@ -400,7 +400,7 @@ def _register_provisional(masters: Masters, raw_label: str):
         "PENDING_MASTER_DATA",
         canonical,
         f"resource '{raw_label}' used by a routing but not in Machine master; "
-        f"registered as provisional — add it to the Excel master to complete it",
+        f"registered as provisional: add it to the Excel master to complete it",
     )
 
 

@@ -185,7 +185,7 @@ def prepare_contest(orders: dict, actuals, masters, config: Config,
 
     target = so_lines
     if not target:
-        raise ValueError("nothing to optimize — no active orders with work remaining")
+        raise ValueError("nothing to optimize: no active orders with work remaining")
 
     # The batch sequence only has leverage when Expedite is off (see the
     # 2026-07-13 Expedite↔Optimize fix) — search in the pure non-delay model.

@@ -37,14 +37,14 @@
     <div class="card admin-only" id="upload-card">
       <div class="card-head">
         <h2>Add orders</h2>
-        <p class="explainer">Upload your sales-order Excel — new order lines merge into the order book below.</p>
+        <p class="explainer">Upload your sales-order Excel: new order lines merge into the order book below.</p>
       </div>
       <div class="cfg-row">
         <label class="file-field">
           <input id="xlsx-file" type="file" accept=".xlsx" />
         </label>
         <button id="upload-btn" class="primary">Upload &amp; merge</button>
-        <span id="dataset-status" class="status">No orders yet — upload your Excel to add them to the order book.</span>
+        <span id="dataset-status" class="status">No orders yet. Upload your Excel to add them to the order book.</span>
       </div>
       <section id="report-panel" class="report hidden">
         <button id="report-toggle" class="report-summary"></button>
@@ -69,8 +69,8 @@
         <p class="explainer">Tries many job sequences on the current order book and keeps the best plan found (smaller delivery gaps first, fewer total days second).</p>
       </div>
       <div class="optimize-intro">
-        Same machines, same people — only the order in which jobs claim the machines
-        changes. All orders are sequenced together — lanes (Open / Committed / Urgent)
+        Same machines, same people: only the order in which jobs claim the machines
+        changes. All orders are sequenced together: lanes (Open / Committed / Urgent)
         are status labels and never restrict the search. An applied optimized plan
         <strong>supersedes the “Expedite” tick</strong> and runs with Expedite set aside.
       </div>
@@ -81,7 +81,7 @@
       </div>
       <div class="optimize-note muted">
         The full contest is ~2,400 plans in the cloud (~10 min) or ~1,000 on this
-        server. You can leave this open — watch “best so far” improve and press
+        server. You can leave this open: watch “best so far” improve and press
         <strong>Stop &amp; keep best</strong> whenever you’re happy.
       </div>
       <div id="optimize-result" class="optimize-result hidden"></div>
@@ -238,7 +238,7 @@
     <div class="card admin-only">
       <div class="card-head">
         <h2>Absences</h2>
-        <p class="explainer">Mark an operator away for a date range — the plan skips them while absent.</p>
+        <p class="explainer">Mark an operator away for a date range: the plan skips them while absent.</p>
       </div>
       <div class="cfg-row">
         <select id="absence-operator"></select>
@@ -252,7 +252,7 @@
     <div class="card admin-only">
       <div class="card-head">
         <h2>Efficiency report</h2>
-        <p class="explainer">Per-operator output vs standard for a month (pure reporting — never changes the plan).</p>
+        <p class="explainer">Per-operator output vs standard for a month (pure reporting: never changes the plan).</p>
       </div>
       <div class="cfg-row">
         <label class="inline-field">Month

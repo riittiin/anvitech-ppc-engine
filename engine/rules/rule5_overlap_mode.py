@@ -65,11 +65,11 @@ def build_overlap_view(schedule, config):
             applied = elapsed_before_next(prev.occupancy_min, cutting, config)
             pulled = seq_gap - applied
             if not overlap_on:
-                label = "no — sequential mode"
+                label = "no, sequential mode"
             elif cutting > 0:
-                label = f"yes — {pct}% of cutting"
+                label = f"yes, {pct}% of cutting"
             else:
-                label = "no — finishing step (no cutting)"
+                label = "no, finishing step (no cutting)"
             rows.append({
                 "Batch": prev.batch_id,
                 "Item Code": prev.item_code,
@@ -77,8 +77,8 @@ def build_overlap_view(schedule, config):
                 "To process": f"{nxt.process_seq}. {nxt.process_name}",
                 "Cutting (min)": round(cutting, 1),
                 "Setup (min)": setup,
-                "Next allowed after — sequential (min)": round(seq_gap, 1),
-                "Next allowed after — this run (min)": round(applied, 1),
+                "Next allowed after: sequential (min)": round(seq_gap, 1),
+                "Next allowed after: this run (min)": round(applied, 1),
                 "Pulled earlier (min)": round(pulled, 1),
                 "Overlap applied": label,
             })

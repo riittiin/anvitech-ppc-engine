@@ -369,7 +369,7 @@ def _report_for_book(masters, so_lines, absences=None):
     for name in _absence_orphans(masters, absences=absences):
         rows.append({"kind": "ABSENT_OPERATOR_UNKNOWN", "ref": name,
                      "message": f"absence entry for an operator not in the "
-                                f"current masters — ignored"})
+                                f"current masters: ignored"})
     return to_table([
         {"Kind": r["kind"], "Reference": r["ref"], "Message": r["message"]}
         for r in rows
@@ -464,7 +464,7 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
     if "rule3" in trace and trace["rule3"].get("reached", True) and plan_run.batches_prioritized:
         breakdown = r3.build_priority_breakdown(plan_run.batches_prioritized, config, masters)
         trace["rule3"]["tables"] = [
-            {"title": "Priority breakdown — slack/critical-ratio per batch (lower slack = more urgent)",
+            {"title": "Priority breakdown: slack/critical-ratio per batch (lower slack = more urgent)",
              "table": to_table(breakdown)},
         ]
 
@@ -472,7 +472,7 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
         timeline, summary = r6.build_machine_view(
             plan_run.schedule, masters, config, plan_run.batches_prioritized)
         trace["rule6"]["tables"] = [
-            {"title": "Machine timeline — per-machine queue (Idle before = working minutes the machine waited)",
+            {"title": "Machine timeline: per-machine queue (Idle before = working minutes the machine waited)",
              "table": to_table(timeline)},
             {"title": "Machine utilization", "table": to_table(summary)},
         ]
@@ -501,7 +501,7 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
             def _cov_label(mid):
                 iv = windows.get(mid)
                 if iv is None:
-                    return "—"
+                    return "-"
                 if not iv:
                     return "⚠ needs operator"
                 parts = []
@@ -511,19 +511,19 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
                     parts.append("2nd shift")
                 if manual in iv:
                     parts.append(f"manual {config.manual_start_hour:02d}:00–{config.manual_end_hour:02d}:00")
-                return " + ".join(parts) or "—"
+                return " + ".join(parts) or "-"
 
             cov_rows = [{"Machine": m.display_name,
                          "Available Hrs/Day": m.available_hrs_per_day,
                          "Runs": _cov_label(mid) + (" (provisional)" if m.provisional else "")}
                         for mid, m in sorted(masters.machines.items())]
             trace["rule6"]["tables"].append({
-                "title": "Operator coverage — when each machine can run (from Available "
+                "title": "Operator coverage: when each machine can run (from Available "
                          "Hrs/Day + which shifts have a qualified operator)",
                 "table": to_table(cov_rows)})
             if cov.get("unmatched_specialties"):
                 trace["rule6"]["tables"].append({
-                    "title": "Operator specialties that match no machine — check the "
+                    "title": "Operator specialties that match no machine: check the "
                              "spelling/name in Excel",
                     "table": to_table([{"Operator": u["operator"], "Specialty": u["specialty"]}
                                        for u in cov["unmatched_specialties"]])})
@@ -556,13 +556,13 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
         + (f" ({pct}% of cutting time)" if config.overlap_mode == OVERLAP_PERCENT else ""),
         f"{len(overlap_rows)} operation handoff(s) in this plan; {n_overlapped} overlapped, "
         f"pulling later operations {total_pulled:g} working-minutes earlier in total vs sequential.",
-        "Overlap % applies to the cutting time only — the 90-min setup is excluded "
+        "Overlap % applies to the cutting time only: the 90-min setup is excluded "
         "(the next machine is set up in parallel). A step with no cutting time "
         "(deburring, inspection, washing, packing) does not overlap; its successor "
         "waits for it to fully complete.",
     ]
     if not overlap_rows:
-        rule5_notes.append("No scheduled operations yet — upload orders and click Plan.")
+        rule5_notes.append("No scheduled operations yet. Upload orders and click Plan.")
     trace["rule5"] = {
         "input": to_table([{
             "Overlap mode": config.overlap_mode,
@@ -584,14 +584,14 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
     visible = orderbook.actuals_on_latest_date(actuals)
     latest = orderbook.latest_actual_date(actuals)
     progress = orderbook.process_progress_rows(book_store.load_active_orders(), actuals, masters)
-    tables = [{"title": "Per item code — output & downtime rollup (minutes summed across ALL entries)",
+    tables = [{"title": "Per item code: output & downtime rollup (minutes summed across ALL entries)",
                "table": to_table(r7.aggregate_by_item(actuals))}]
     if progress:
         tables.insert(0, {
-            "title": "Per-process progress — pieces cleared at each step (the floor's reality; "
+            "title": "Per-process progress: pieces cleared at each step (the floor's reality; "
                      "drives the next Plan's per-process schedule)",
             "table": to_table(progress)})
-    list_note = (f"Showing the {fmt_date(latest)} entries (the latest day) — only these can be "
+    list_note = (f"Showing the {fmt_date(latest)} entries (the latest day): only these can be "
                  f"rolled back; earlier days are locked and kept in the rollup below."
                  if latest else "No entries yet.")
     trace["rule7"] = {
@@ -696,7 +696,7 @@ def _plan(config: Config):
         return {"SO No": o.so_no, "Item Code": o.item_code, "Remaining Qty": remaining,
                 "SO Delivery Date": fmt_date(o.delivery_date),
                 "Status": status_by_order[o.key],
-                "In this plan": "scheduled" if remaining > 0 else "no — fully produced, mark complete"}
+                "In this plan": "scheduled" if remaining > 0 else "no, fully produced, mark complete"}
 
     # Sort by the real date (not the DD-MM-YYYY display string).
     r8_rows = [_r8_row(o) for o in sorted(active.values(),
@@ -713,7 +713,7 @@ def _plan(config: Config):
             "(ordered − finished good at the DISPATCH/last-step gate). Production "
             "still mid-routing (WIP) does not reduce it. Completed orders are excluded.",
             "An order fully produced but not yet marked complete shows Remaining 0 "
-            "and 'In this plan = no' — it isn't scheduled until you tick 'mark "
+            "and 'In this plan = no': it isn't scheduled until you tick 'mark "
             "complete' on a Rule 7 entry to archive it.",
         ],
         "error": None, "reached": True,
@@ -945,7 +945,7 @@ def _try_start_auto() -> bool:
         if _OPTIMIZE["state"] == "running":
             return False                         # one contest at a time
     if _cloud_config() is None:
-        _auto_note_write("Auto-optimize skipped — cloud compute unavailable; "
+        _auto_note_write("Auto-optimize skipped: cloud compute unavailable; "
                          "will retry on the next scheduled run.")
         return False                             # auto is cloud-only
     # Skip only when NOTHING material changed since the last applied plan — and
@@ -1088,7 +1088,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                         if was_cancelled:
                             # Cancelled and the cloud never answered → just stop.
                             _OPTIMIZE.update(state="failed", cancel=False,
-                                             error="stopped — the cloud run did not "
+                                             error="stopped: the cloud run did not "
                                                    "answer before the timeout")
                             return
                         _OPTIMIZE["mode"] = "local"
@@ -1216,7 +1216,7 @@ def _auto_apply_result():
         res = _OPTIMIZE.get("result") or {}
         best = res.get("best")
     if not best:
-        _auto_note_write("Auto-optimize found no plan — kept the current plan.")
+        _auto_note_write("Auto-optimize found no plan. Kept the current plan.")
         return
     try:
         # `best` was scored on the book as it stood when this contest started
@@ -1233,11 +1233,11 @@ def _auto_apply_result():
         meta = _optimize_apply()          # persists ranks + overlap + inputs_sig + book_sig
         ov = res.get("best_overlap"); cur = res.get("current_overlap")
         ov_txt = f", overlap {cur} → {ov}" if ov != cur else ""
-        _auto_note_write(f"Plan auto-re-optimized {stamp} — "
+        _auto_note_write(f"Plan auto-re-optimized {stamp}: "
                          f"{best['total_late_days']} late-days "
                          f"(was {inc['total_late_days']}){ov_txt}.")
     else:
-        _auto_note_write(f"Checked {stamp} — current plan still best "
+        _auto_note_write(f"Checked {stamp}: current plan still best "
                          f"({inc['total_late_days']} late-days).")
 
 
