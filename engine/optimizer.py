@@ -150,10 +150,13 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
             cancelled[0] = True
         return cancelled[0]
 
+    from .pipeline import scheduler_for
+    _sched_run = scheduler_for(config)
+
     def evaluate(seq) -> dict:
         nonlocal evals
-        sched = rule6_allocate.run(list(seq), config=config, masters=masters,
-                                   reserved=reserved)
+        sched = _sched_run(list(seq), config=config, masters=masters,
+                           reserved=reserved)
         evals += 1
         m = plan_metrics(sched, so_lines, config.plan_start_date)
         if on_progress:

@@ -258,3 +258,38 @@ def test_deterministic(loaded):
            [(e.machine, e.start, e.end, e.qty, e.op_segments) for e in c]
     assert_machine_exclusive(a)
     assert_causality(a, pri, masters)
+
+
+# --------------------------------------------------------------------------- #
+# Dispatch: config.scheduler selects the engine through the WHOLE pipeline
+# --------------------------------------------------------------------------- #
+def test_run_forward_dispatches_by_config(loaded):
+    from engine.models import PlanRun
+    from engine.pipeline import run_forward
+    so_lines, masters = loaded
+    flow_cfg = _cfg(flow_chunks=4)
+    classic_cfg = Config(plan_start_date=WED, apply_operator_logic=True)
+    tr_flow = run_forward(PlanRun(so_lines=list(so_lines)), flow_cfg, masters)
+    tr_classic = run_forward(PlanRun(so_lines=list(so_lines)), classic_cfg, masters)
+    assert any("flow scheduler" in n for n in tr_flow["rule6"]["notes"])
+    assert not any("flow scheduler" in n for n in tr_classic["rule6"]["notes"])
+    # both scheduled the same demand, differently
+    assert tr_flow["rule6"]["error"] is None and tr_classic["rule6"]["error"] is None
+
+
+def test_optimizer_searches_with_the_flow_engine(loaded):
+    from engine import optimizer
+    so_lines, masters = loaded
+    cfg = _cfg(flow_chunks=4)
+    res = optimizer.optimize(so_lines, cfg, masters, budget_evals=5, seed=1)
+    # the baseline metrics must equal a direct flow plan of the rule-3 order —
+    # proof the search evaluates through the flow engine, not classic rule 6
+    from engine.rules import rule1_consolidate, rule2_sort_by_date, \
+        rule3_tiebreak_process_time
+    from engine.optimizer import plan_metrics
+    b = rule1_consolidate.run(list(so_lines), config=cfg, masters=masters)
+    b = rule2_sort_by_date.run(b, config=cfg, masters=masters)
+    pri = rule3_tiebreak_process_time.run(b, config=cfg, masters=masters)
+    direct = plan_metrics(flow_scheduler.run(list(pri), config=cfg, masters=masters),
+                          so_lines, cfg.plan_start_date)
+    assert res.baseline == direct

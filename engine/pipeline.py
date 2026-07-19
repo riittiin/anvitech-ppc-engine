@@ -132,6 +132,19 @@ def batch_rank(batch, priority_rank: dict):
     return min(ranks) if ranks else None
 
 
+def scheduler_for(config):
+    """The allocation engine for this plan: ``config.scheduler`` selects the
+    classic Rule 6 non-delay scheduler (default — historical plans and the
+    golden trace byte-identical) or the piece-flow scheduler
+    (``engine/flow_scheduler.py``, 2026-07-19 spec). ONE dispatch point shared
+    by run_forward and the optimizer, so search and replay always use the same
+    engine as the plan."""
+    if getattr(config, "scheduler", "classic") == "flow":
+        from . import flow_scheduler
+        return flow_scheduler.run
+    return rule6_allocate.run
+
+
 def apply_priority_rank(batches: list, priority_rank: dict | None) -> tuple[list, int]:
     """Replay a saved optimized sequence over Rule 3's output.
 
@@ -214,7 +227,7 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
                 f"unranked (new) batches keep their Rule-3 position."
             )
         plan_run.schedule = run_rule(
-            trace, "rule6", rule6_allocate.run, plan_run.batches_prioritized,
+            trace, "rule6", scheduler_for(config), plan_run.batches_prioritized,
             config=config, masters=masters, machine_lost_min=machine_lost_min,
             reserved=reserved,
         )
