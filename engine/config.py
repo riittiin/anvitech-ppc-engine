@@ -59,6 +59,16 @@ class Config:
     # planning entry before any rule reads this field.
     plan_start_date: Optional[date] = None
 
+    # Which allocation engine plans the book (2026-07-19 flow-scheduler spec):
+    #   "classic" = the original Rule 6 non-delay scheduler (engine default —
+    #               keeps the golden trace and every historical plan identical)
+    #   "flow"    = the piece-flow scheduler (engine/flow_scheduler.py): chunked
+    #               WIP flow, no resource-holding, setup per re-engagement.
+    # Not a Settings knob (the owner's no-knobs rule) — the LIVE saved config
+    # carries "flow" after cutover; flow_chunks is tuned by the Optimize contest.
+    scheduler: str = "classic"
+    flow_chunks: int = 4
+
     # Shift windows (24h clock). 1st shift 08:00-19:00, 2nd 19:00-05:00 (next day).
     first_shift_start_hour: int = 8
     second_shift_end_hour: int = 5  # on the following calendar day
@@ -141,6 +151,10 @@ class Config:
             errs.append("two_shift_threshold_hours must be >= 0")
         if not isinstance(self.apply_operator_logic, bool):
             errs.append("apply_operator_logic must be true or false")
+        if self.scheduler not in ("classic", "flow"):
+            errs.append("scheduler must be 'classic' or 'flow'")
+        if not (1 <= int(self.flow_chunks) <= 50):
+            errs.append("flow_chunks must be within 1..50")
         if not isinstance(self.split_parallel, bool):
             errs.append("split_parallel must be true or false")
         if not isinstance(self.balance_operator_load, bool):
