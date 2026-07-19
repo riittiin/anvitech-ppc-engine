@@ -208,6 +208,39 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 > **shipped to `main` and are live**, as is the full 2026-07-19 session block
 > directly below. The app went into full production at Anvitech on 2026-07-19.
 
+### Latest session (2026-07-19, third session) — FLOW SCHEDULER productized + LIVE — pushed to `main` + cutover on the owner's explicit instruction ("do whatever you have to do, it must work live")
+
+**The owner rejected 72 days** and mandated a from-scratch rebuild keeping only
+the three basics (machine+operator every working minute, operators in their own
+shift, process order respected). Research (`scheduler-v2` memory) produced a
+piece-flow scheduler measuring 43.7 d / 1169 late-days on the live 71-order book
+(vs classic 70.8 d applied). This session PRODUCTIZED it and took it live.
+
+**What shipped (branch `flow-scheduler-productization`, spec
+`docs/superpowers/specs/2026-07-19-flow-scheduler-design.md`):**
+- `engine/flow_scheduler.py` — the piece-flow engine, same `run()` contract as
+  `rule6_allocate.run`. NO resource-holding (a starved machine releases instead
+  of pacing), chunked piece-flow (`config.flow_chunks`, contest-tuned), setup
+  per machine re-engagement, scarce-first crewing, `process_qty` feedback,
+  `reserved=` absences, RuleError guards. Byte-exact vs the research build.
+- `pipeline.scheduler_for(config)` — one dispatch point (`config.scheduler`
+  classic|flow) shared by `run_forward` and the optimizer. Default **classic**
+  (golden + every historical plan byte-identical).
+- Knob-aware Optimize contest: flow mode tunes `flow_chunks` (3,4,6 local /
+  2,3,4,6 cloud — flow evals ~5x slower than classic), classic tunes overlap.
+  Apply persists into the right config field; result panel/auto-note labeled.
+- `FLOW_FINGERPRINT` in `_inputs_signature` (a flow-semantics change flags the
+  applied plan stale).
+- Review (inline medium) caught + fixed a real bug: flow-mode cloud payload was
+  built with the OVERLAP candidates, so the worker would set flow_chunks=60..95
+  (validate caps at 50) and error the whole cloud contest — now passes
+  `cloud_candidates(config)`; regression test added.
+- 499 tests pass, 1 skipped; golden untouched.
+
+**Cutover done live (see the bottom of this block for verified numbers):** saved
+the live config with `scheduler:"flow"`, ran Optimize (cloud chunk contest),
+Applied the winner. Classic Rule 6 stays in the codebase (golden + fallback).
+
 ### Latest session (2026-07-19, second session) — CREW-SMART SCHEDULER (scarce-first operator pick) + objective rebalance — pushed to `main` on the owner's explicit instruction
 
 **The owner rejected the 79-84 d honest plan** ("machines at 30-40% is bullshit") and
