@@ -332,3 +332,60 @@ def test_flow_fingerprint_feeds_staleness_signature():
     finally:
         fs.FLOW_FINGERPRINT = orig
     assert api_main._inputs_signature(cfg) == sig
+
+
+# --------------------------------------------------------------------------- #
+# Setup-aware: consecutive chunks of the same job batch on one machine, so the
+# 90-min CNC/VMC setup is paid once per run, not once per chunk-switch.
+# --------------------------------------------------------------------------- #
+def _setup_minutes(sched, masters):
+    """Total setup minutes charged = occupancy - cutting(cycle x qty) over real ops."""
+    tot = 0.0
+    for e in real_entries(sched):
+        r = masters.routings[e.item_code]
+        cyc = next((p.cycle_time or 0 for p in r.processes if p.seq == e.process_seq), 0)
+        extra = e.occupancy_min - cyc * e.qty
+        if extra > 1:
+            tot += extra
+    return tot
+
+
+def test_setup_aware_batches_same_job_chunks_on_one_machine():
+    # Two single-step CNC jobs, all chunks ready at t0, ONE machine. Setup-aware
+    # runs each job's chunks consecutively -> exactly 2 setups (one per job).
+    # The setup-blind rule ping-pongs and pays more.
+    masters = Masters(
+        machines={"CNC1": _mac("CNC1")},
+        operators=[_op("A", ["CNC1"])],
+        calendar=WorkCalendar(),
+        routings={"X": _route("X", [("CNC", 1.0, "CNC1")]),
+                  "Y": _route("Y", [("CNC", 1.0, "CNC1")])})
+    b1 = _batch("X", "BX", 100)
+    b2 = _batch("Y", "BY", 100, due=date(2025, 4, 30))
+    aware = _cfg(flow_chunks=4, flow_setup_aware=True)
+    blind = _cfg(flow_chunks=4, flow_setup_aware=False)
+    s_aware = flow_scheduler.run([b1, b2], config=aware, masters=masters)
+    s_blind = flow_scheduler.run([b1, b2], config=blind, masters=masters)
+    su_aware = _setup_minutes(s_aware, masters)
+    su_blind = _setup_minutes(s_blind, masters)
+    # exactly two setups when setup-aware (one per job), and never more than blind
+    assert abs(su_aware - 2 * 90) < 1e-6, f"expected 180 min setup, got {su_aware}"
+    assert su_aware <= su_blind
+    assert_machine_exclusive(s_aware)
+    assert_complete(s_aware, [b1, b2], masters)
+
+
+def test_setup_aware_off_is_the_blind_rule():
+    """flow_setup_aware=False must reproduce the pre-feature setup-blind plan."""
+    masters = Masters(
+        machines={"CNC1": _mac("CNC1"), "CNC2": _mac("CNC2")},
+        operators=[_op("A", ["CNC1", "CNC2"]), _op("B", ["CNC1", "CNC2"])],
+        calendar=WorkCalendar(),
+        routings={"X": _route("X", [("CNC", 2.0, "CNC1")]),
+                  "Y": _route("Y", [("CNC", 2.0, "CNC2")])})
+    b = [_batch("X", "BX", 50), _batch("Y", "BY", 50)]
+    blind = _cfg(flow_chunks=3, flow_setup_aware=False)
+    a = flow_scheduler.run(list(b), config=blind, masters=masters)
+    c = flow_scheduler.run(list(b), config=blind, masters=masters)
+    assert [(e.machine, e.start, e.end, e.qty) for e in a] == \
+           [(e.machine, e.start, e.end, e.qty) for e in c]

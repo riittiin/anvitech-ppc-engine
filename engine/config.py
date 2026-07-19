@@ -68,6 +68,12 @@ class Config:
     # carries "flow" after cutover; flow_chunks is tuned by the Optimize contest.
     scheduler: str = "classic"
     flow_chunks: int = 4
+    # Flow scheduler only (2026-07-19): rank a candidate that needs a fresh 90-min
+    # CNC/VMC setup as if it started 90 min later, so a machine keeps running the
+    # SAME job's consecutive chunks (one setup) instead of ping-ponging between
+    # jobs (a setup each time). Attacks the ~9% of machine time lost to re-setups
+    # that chunking inflates. Off = the setup-blind earliest-start rule.
+    flow_setup_aware: bool = True
 
     # Shift windows (24h clock). 1st shift 08:00-19:00, 2nd 19:00-05:00 (next day).
     first_shift_start_hour: int = 8

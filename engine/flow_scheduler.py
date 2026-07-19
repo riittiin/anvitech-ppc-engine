@@ -83,7 +83,7 @@ def _next_block_start(reservations, s, e):
 
 # Version token for the FLOW scheduler's semantics, folded into
 # api._inputs_signature next to rule6's (bump on any behaviour change here).
-FLOW_FINGERPRINT = "flow-v1"
+FLOW_FINGERPRINT = "flow-v2-setup-aware"
 
 
 class _Flow:
@@ -97,6 +97,7 @@ class _Flow:
                                    dtime(getattr(config, "first_shift_start_hour", 8), 0))
         self.n_chunks = max(1, int(getattr(config, "flow_chunks", 4) or 4))
         self.setup_min = float(config.setup_time_min)
+        self.setup_aware = bool(getattr(config, "flow_setup_aware", True))
         self.op_logic = bool(getattr(config, "apply_operator_logic", False))
 
         self.mac_hours = {}
@@ -315,6 +316,7 @@ class _Flow:
                 from .pipeline import RuleError
                 raise RuleError("rule6", "-", "main scheduling loop guard exhausted")
             best = None
+            best_key = None      # effective-start comparison key (setup-aware)
             for j in jobs:
                 qty = j["b"].qty
                 for si, st in enumerate(j["steps"]):
@@ -330,7 +332,9 @@ class _Flow:
                                 break
                         if t is None:
                             continue
-                        if best is None or (t, j["prio"], si) < (best[0], best[1], best[2]):
+                        key = (t, 0, j["prio"], si)   # OS never needs a setup
+                        if best_key is None or key < best_key:
+                            best_key = key
                             best = (t, j["prio"], si, j, st, None, 0.0)
                         continue
                     if st["sched_qty"] >= st["rem"] - 1e-6:
@@ -348,13 +352,28 @@ class _Flow:
                     if t is None:
                         continue
                     run_qty = min(avail, remaining, j["chunk"])
+                    op_key = (j["b"].batch_id, st["p"].seq)
                     for mid in st["cands"]:
                         est = max(t, self.machine_free.get(mid, self.t0))
                         try:
                             est, _we = self._mac_next_window(mid, est)
                         except Exception:
                             continue
-                        if best is None or (est, j["prio"], si) < (best[0], best[1], best[2]):
+                        # Setup-aware TIE-BREAK: keep earliest-start (makespan) as
+                        # the primary key, but when two candidates could start at the
+                        # SAME instant, prefer the one that does NOT need a fresh
+                        # CNC/VMC setup (machine already running this op's chunks).
+                        # Chunk boundaries create many exact ties on a just-freed
+                        # machine, so this batches a job's consecutive chunks and
+                        # cuts re-setups without ever delaying an earlier start.
+                        # Off -> byte-identical to the setup-blind earliest-start rule.
+                        needs_setup = int(
+                            self.setup_aware
+                            and r6._is_setup_machine(mid, self.masters)
+                            and self.machine_last_op.get(mid) != op_key)
+                        key = (est, needs_setup, j["prio"], si)
+                        if best_key is None or key < best_key:
+                            best_key = key
                             best = (est, j["prio"], si, j, st, mid, run_qty)
             if best is None:
                 break
