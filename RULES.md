@@ -313,9 +313,17 @@ them in **Settings**, not Excel; a re-upload never changes an operator's shift o
 roster. Provisional machines (referenced by a routing but not yet in the master)
 bypass the coverage gate and keep a two-shift window.
 
-**Operators are one-at-a-time resources (load-balanced).** Each scheduled operation is
-assigned a specific person — the **earliest-free** qualified operator for that machine
-and shift — and that person is then busy until the op ends. So work **spreads across the
+**Operators are one-at-a-time resources (load-balanced, scarce-first).** Each
+scheduled operation is assigned a specific person. Among the qualified operators
+who are **free** at that moment, the scheduler spends the **least-flexible person
+first** — the one qualified on the fewest machines — so flexible people (who can
+run VMCs *and* CNCs) stay available for the machines only they can run. Without
+this, a flexible operator could get grabbed for work a specialist could do, and
+the machine only the flexible person can run would sit paused waiting for them
+(measured on the real book, 2026-07-19: this one rule cut the plan from 78.5 to
+73.7 days with the identical job order). Ties (same flexibility) go to whoever
+freed up earliest, then sheet order — deterministic. That person is then busy
+until the op (or their shift segment of it) ends. So work **spreads across the
 whole crew** instead of always landing on the first-listed name: with four interchangeable
 helpers (HP1–HP4) the load divides four ways, and an operation **waits for a free person**
 when all qualified operators are busy, capping concurrency at the real headcount (e.g. at

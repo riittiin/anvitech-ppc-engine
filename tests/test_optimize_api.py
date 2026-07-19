@@ -40,8 +40,11 @@ def test_optimize_then_apply_persists_ranks():
     assert st["state"] == "done"
     # The advertised budget is the current setting's full-depth floor; the
     # overlap probes + challenger are bounded extras on top (sweep contract).
+    # The contest lineup depends on the CURRENT overlap (an off-list setting
+    # joins as an extra contender), so mirror the API and pass it.
     from engine import optimizer
-    assert st["evals"] <= optimizer.sweep_total_evals(15)
+    from engine.config import OVERLAP_PERCENT
+    assert st["evals"] <= optimizer.sweep_total_evals(15, current_overlap=OVERLAP_PERCENT)
     assert st["baseline"] and st["best"]
 
     meta = m._optimize_apply()

@@ -216,6 +216,20 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   Honest-plan impact on the real book (2026-07-19): makespan 47→79d, late-days
   1413→2533 unoptimized; deep optimize recovers to 79d/1607 (owner-approved cutover);
   crew floor ~44d (night pools: VMC1-3 have 2 night-qualified operators, CNC3/6 have 2).
+  **Scarce-first operator pick (2026-07-19 evening, `crew-smart-scheduling`):** among
+  FREE qualified operators, `_lay_segments` books the least-flexible person first
+  (`op_rank` = machines-qualified count from the operator master; ties earliest-free
+  then sheet order) — flexible people stay available for the machines only they can
+  run. Measured on the live 71-order book: makespan 78.5 → 73.7 d on the identical
+  sequence; all shift-handoff invariants hold (`tests/test_scarce_operator_pick.py`).
+  Same research: the crew's SHAPE (not hours) costs ~35 d vs a machines-only world
+  (43.8 d); certified LP capacity floor 37.2 calendar days (operators binding, not
+  machines). Dead ends measured — do not retry: dispatch-window pick policies
+  (slack/remwork/due/prio × 60-1440 min, all worse) and CP-SAT-as-sequence-oracle
+  (idealized 44-45 d, greedy replay loses it all). `OVERLAP_CANDIDATES` is now
+  (70, 80, 85, 88) and `CLOUD_OVERLAP_CANDIDATES` (60, 70, 80, 85, 88, 95) — 85/88
+  dominate under this scheduler; best plan settings: overlap 88 + consolidation
+  window 1 day (UI-settable) + split/metric unchanged.
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
   `Order` and `SOLine` carry `commitment` (open|committed|urgent), `promised_date`,
   and `committed_at`. **Informational only** (owner pivot 2026-07-16 — see the

@@ -247,7 +247,10 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
 # late-days on Test5@15-07, and on Test6@11-07 it picks 713 late-d/39.7 d
 # where full depth picks 717/36.8 — equal-or-near outcomes at 42% compute.
 # --------------------------------------------------------------------------- #
-OVERLAP_CANDIDATES = (50, 60, 70, 80)
+# 2026-07-19 (crew-smart scheduler): re-measured on the live 71-order book --
+# 85/88 dominate (makespan 73.5-73.7 d vs 77.4 at 80, 79+ at 50/60); 50/60
+# lost every contest and were dropped, 90/92 measurably worse than 85/88.
+OVERLAP_CANDIDATES = (70, 80, 85, 88)
 
 
 def sweep_contenders(current_overlap=None, candidates=OVERLAP_CANDIDATES):

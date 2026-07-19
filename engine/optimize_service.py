@@ -28,7 +28,9 @@ from engine.models import Actual, Masters, Order
 # current overlap is one of the six. Only the cloud (GitHub Actions, 2 vCPU)
 # can afford it; Render's 0.1-CPU instance runs the trimmed local fallback
 # (optimizer.OVERLAP_CANDIDATES at 1,000 plans total).
-CLOUD_OVERLAP_CANDIDATES = (50, 60, 70, 80, 90, 100)
+# 2026-07-19: 50/90/100 dropped (lost every measured contest under the
+# crew-smart scheduler); 85/88/95 added (the new winners' region).
+CLOUD_OVERLAP_CANDIDATES = (60, 70, 80, 85, 88, 95)
 CLOUD_BUDGET_PER_CANDIDATE = 400
 
 
