@@ -28,7 +28,6 @@ from datetime import date, datetime, time as dtime, timedelta
 
 from .models import ScheduleEntry
 from .loaders import normalize_process_name, normalize_resource_id
-from .orderbook import is_dispatch
 from .rules import rule6_allocate as r6
 
 
@@ -400,7 +399,7 @@ class _Flow:
                 if st["kind"] != "milestone":
                     continue
                 p = st["p"]
-                lane = r6._offmachine_lane(p) if hasattr(r6, "_offmachine_lane") else "Off-machine"
+                lane = r6._offmachine_lane(p)
                 self.entries.append(ScheduleEntry(
                     batch_id=b.batch_id, item_code=b.item_code,
                     process_seq=p.seq, process_name=p.name,

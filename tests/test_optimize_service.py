@@ -159,3 +159,26 @@ def test_book_signature_tracks_material_changes():
     assert svc.book_signature(lines) == s0                   # restored ⇒ same sig
     assert svc.book_signature(lines, absences=[{"operator": "X",
         "from_date": "2025-03-02", "to_date": "2025-03-03"}]) != s0
+
+
+def test_flow_mode_cloud_contest_uses_chunk_candidates():
+    """Flow mode must send the CHUNK candidates in the payload — not the default
+    overlap %. Sending overlap values (60..95) would make the worker replace
+    flow_chunks with numbers the config rejects (validate caps at 50), erroring
+    the whole cloud contest. Regression for the api build_payload candidates fix.
+    """
+    orders, actuals, raw, masters, cfg = _book()
+    cfg = replace(cfg, scheduler="flow", flow_chunks=4)
+    cands = svc.cloud_candidates(cfg)
+    assert cands == svc.CLOUD_FLOW_CHUNK_CANDIDATES        # chunk list, not overlaps
+    assert all(1 <= c <= 50 for c in cands)                # all valid flow_chunks
+    payload = svc.build_payload(orders, actuals, raw, cfg, seed=42,
+                                candidates=cands, budget_per_candidate=6)
+    payload = json.loads(json.dumps(payload))
+    res = svc.run_contest(payload, processes=1)            # must NOT raise
+    assert res["knob"] == "flow_chunks"
+    assert res["best"] is not None
+    # the winning value is a real chunk count, and every contender was valid
+    allowed = set(cands) | {cfg.flow_chunks}
+    assert res["winner_overlap"] in allowed
+    assert {row["overlap"] for row in res["rows"]} <= allowed

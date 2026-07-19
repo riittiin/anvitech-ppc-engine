@@ -1032,14 +1032,19 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         cloud = _cloud_config()
         job_id = uuid.uuid4().hex
         if cloud:
+            # The contest lineup must match the scheduler MODE: chunk counts under
+            # flow, overlap % under classic. Passing the wrong list would make the
+            # worker replace flow_chunks with 60..95 (invalid — validate caps at 50)
+            # and the whole cloud contest would error out, never running in flow mode.
+            _cands = optimize_service.cloud_candidates(setup.search_config)
             payload = optimize_service.build_payload(
                 orders, actuals, book_store.load_masters_bytes(), config,
-                seed=_OPT_SEED, absences=absences, operator_table=operator_table)
+                seed=_OPT_SEED, candidates=_cands, absences=absences,
+                operator_table=operator_table)
             _knob, _ = optimizer.knob_for(setup.search_config)
             denom = (optimize_service.CLOUD_BUDGET_PER_CANDIDATE
                      * len(optimizer.sweep_contenders(
-                         getattr(setup.search_config, _knob),
-                         optimize_service.cloud_candidates(setup.search_config))))
+                         getattr(setup.search_config, _knob), _cands)))
         else:
             payload = None
             _knob, _kcands = optimizer.knob_for(setup.search_config)
