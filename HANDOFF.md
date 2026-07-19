@@ -208,10 +208,29 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 > **shipped to `main` and are live**, as is the full 2026-07-19 session block
 > directly below. The app went into full production at Anvitech on 2026-07-19.
 
-### Latest session (2026-07-19) — HONEST SCHEDULER (per-shift operator staffing) + SO header-driven loader + missing-routings display + optimizer research + knob removal — ✅ ALL SHIPPED & LIVE
+### Latest session (2026-07-19) — HONEST SCHEDULER (per-shift operator staffing) + SO header-driven loader + missing-routings display + optimizer research + knob removal — ✅ ALL SHIPPED & LIVE (deploy-verified logged-in; live backend confirmed serving 0.0 unstaffed hrs on the 71-order book)
 
 The most consequential day since go-live. Read this block fully before touching
 Rule 6, the loaders, or the Settings UI.
+
+**Deploy postscript (2026-07-19 morning; two mistakes not to repeat):** the
+overnight deploy "failure" never happened — e97473c went live at 02:10, but the
+verification watcher polled `/app.js` WITHOUT a session and the gatekeeper serves a
+23-byte stub logged-out, so the check could never match; hours were lost and an
+empty retrigger commit (7991f65, harmless) pushed before the Render events page
+settled it. **LESSON (now written twice): verify deploys LOGGED-IN — `/app.js` is
+login-gated** (the 2026-07-15 deploy-day memory already said so). Second: a fix
+subagent's `git add -A` swept the controller's in-progress docs edits into commit
+72afa74 (content verified correct; same lesson as 2026-07-16). **Cutover state at
+handoff:** a fresh cloud Deep search (2,400 plans) was dispatched on the live book
+and was mid-run as the session ended — when it finishes the admin must press
+**Apply** on the Schedule page (manual contests never auto-apply); if nobody does,
+the Mon/Fri 11:00 IST scheduled run re-optimizes and auto-applies
+(strictly-better-or-nothing) anyway. The stale auto-note (em dash, "564
+late-days", from the 18-07 54-order book) self-corrects at the next scheduled run.
+Pre-Apply the live plan replays the OLD applied ranks on the honest scheduler
+(~84 d observed); once an optimization is applied expect the ~79 d / ~1,600
+late-days class.
 
 1. **SO list reader is header-driven** (`so-header-driven`, commits ff022ba+e88127d).
    The owner's new ERP export shifted every SO column (+9 non-uniform); the old
