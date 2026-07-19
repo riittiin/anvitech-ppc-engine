@@ -32,7 +32,8 @@ from engine.models import Actual, Masters, Order
 # crew-smart scheduler); 85/88/95 added (the new winners' region).
 CLOUD_OVERLAP_CANDIDATES = (60, 70, 80, 85, 88, 95)
 # Flow-mode cloud contest: chunk counts (see optimizer.FLOW_CHUNK_CANDIDATES).
-CLOUD_FLOW_CHUNK_CANDIDATES = (1, 2, 3, 4, 6, 8)
+CLOUD_FLOW_CHUNK_CANDIDATES = (2, 3, 4, 6)   # flow evals ~5x slower: 4 x 400
+#   evals / 2 vCPU ~= 15 min, inside OPTIMIZE_CLOUD_TIMEOUT_MIN's default 20.
 
 
 def cloud_candidates(config) -> tuple:

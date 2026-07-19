@@ -230,6 +230,22 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (70, 80, 85, 88) and `CLOUD_OVERLAP_CANDIDATES` (60, 70, 80, 85, 88, 95) — 85/88
   dominate under this scheduler; best plan settings: overlap 88 + consolidation
   window 1 day (UI-settable) + split/metric unchanged.
+- `engine/flow_scheduler.py` — **the flow scheduler (2026-07-19,
+  `docs/superpowers/specs/2026-07-19-flow-scheduler-design.md`)**: the productized
+  from-scratch rebuild (owner mandate: only the three basics are rules). Same
+  contract as `rule6_allocate.run`; `pipeline.scheduler_for(config)` dispatches by
+  `config.scheduler` ("classic" engine default = golden untouched; "flow" = the
+  LIVE mode after cutover). Chunked piece-flow (`config.flow_chunks`, contest-
+  tuned), no resource-holding, setup per re-engagement, scarce-first crewing,
+  process_qty feedback (punched pieces = initial WIP downstream), reserved=
+  absences, `FLOW_FINGERPRINT` in `_inputs_signature`. The optimizer evaluates
+  through the same dispatcher; in flow mode the sweep contest tunes
+  `flow_chunks` over `FLOW_CHUNK_CANDIDATES` (3,4,6; cloud 2,3,4,6 — flow evals
+  are ~5× slower than classic, budget accordingly) and Apply persists the
+  winning chunk count (wire field names keep "overlap"; `knob` says which).
+  Real-book numbers: classic optimized 70.8d/1460 → flow ~44d/~1170 searched;
+  crew capacity floor 37.2d. Tests: `tests/test_flow_scheduler.py` (crafted
+  piece-flow/no-holding/feedback/absence/setup cases + independent validators).
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
   `Order` and `SOLine` carry `commitment` (open|committed|urgent), `promised_date`,
   and `committed_at`. **Informational only** (owner pivot 2026-07-16 — see the

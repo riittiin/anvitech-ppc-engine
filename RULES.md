@@ -159,6 +159,41 @@ the impossible early *finish* is corrected.
 
 ## PHASE 4 — Allocate processes to machines *(the actual schedule)*
 
+### 🔻 Rule 6 — Allocate to machines *(Pipeline stage — TWO engines, config-selected)*
+
+**The flow scheduler (2026-07-19, LIVE mode after cutover)** — chosen by
+`scheduler: "flow"` in the saved plan config. Built from the three basics only:
+machine + qualified operator on every working minute; operators strictly within
+their own shift; process order respected piece-wise. What it does differently:
+
+- **No resource-holding.** A machine and its operator are occupied ONLY while
+  cutting pieces that already exist at that step. A step starved of parts
+  RELEASES the machine for other jobs and resumes when more parts arrive. (The
+  classic engine seized resources at op start and held them to the paced end —
+  measured cost on the real book: ~20 days.)
+- **Chunked piece-flow.** A batch moves between steps in `qty / flow_chunks`
+  transfer chunks (contest-tuned, 4 typical): the next operation starts once
+  the first chunk has cleared its predecessor, and chunks of one step may run
+  concurrently on alternative machines. No piece ever runs at step k+1 before
+  it physically exists at step k (validator-enforced).
+- **Setup per re-engagement.** The 90-min CNC/VMC setup is charged every time
+  the machine takes up an op it wasn't just running; consecutive chunks of the
+  same op pay once. More honest than one-per-step — a plan pays for every
+  job-switch its packing causes.
+- **Scarce-first crewing** (same rule as classic): among free qualified
+  operators, spend the least-flexible person first.
+- The Optimize contest tunes `flow_chunks` (the overlap % has no meaning
+  without pacing); OS/DISPATCH/off-machine semantics unchanged; operator
+  absences (`reserved=`) and the punched-quantity feedback loop (per-process
+  remaining = initial WIP downstream) fully honored.
+
+Measured on the live 71-order book (2026-07-19): classic optimized 70.8 d /
+1460 late-days → flow unoptimized 49.6 d / 1431 → flow + search ~44 d / ~1170.
+The certified crew capacity floor is 37.2 calendar days.
+
+**The classic engine below** (`scheduler: "classic"`, the engine default) is
+unchanged and remains the byte-identical historical behaviour.
+
 ### 🔻 Rule 6 — Assign each process to the earliest-available preferred machine  *(Pipeline stage)*
 Allot each process to the **earliest-available machine from its
 preferred/suggested list** — respecting:
