@@ -1017,6 +1017,11 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         config = _load_plan_config()
         masters = _current_masters()
         base_config = config      # as saved (auto -> None) — the inputs fingerprint basis
+        # Flow evals are ~15s each on the free instance — a full local search would
+        # run for hours. Cap the LOCAL-path budget hard for flow (the cloud path
+        # sizes itself via cloud_candidates); classic keeps its full budget.
+        if getattr(base_config, "scheduler", "classic") == "flow":
+            budget_evals = min(budget_evals, optimizer.FLOW_LOCAL_BUDGET)
         config = _resolve_config(config)   # None -> today (IST) for the engine/contest
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()

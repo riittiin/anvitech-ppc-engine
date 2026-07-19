@@ -32,8 +32,11 @@ from engine.models import Actual, Masters, Order
 # crew-smart scheduler); 85/88/95 added (the new winners' region).
 CLOUD_OVERLAP_CANDIDATES = (60, 70, 80, 85, 88, 95)
 # Flow-mode cloud contest: chunk counts (see optimizer.FLOW_CHUNK_CANDIDATES).
-CLOUD_FLOW_CHUNK_CANDIDATES = (2, 3, 4, 6)   # flow evals ~5x slower: 4 x 400
-#   evals / 2 vCPU ~= 15 min, inside OPTIMIZE_CLOUD_TIMEOUT_MIN's default 20.
+# Two candidates only: on 2 vCPU they run in ONE parallel round (~13 min wall
+# for 400 evals each), fitting OPTIMIZE_CLOUD_TIMEOUT_MIN's default 20. Four
+# candidates needed a second round and timed out (live 2026-07-19), falling back
+# to the hours-long local path. Chunk 4 wins at depth, 6 is the close runner-up.
+CLOUD_FLOW_CHUNK_CANDIDATES = (4, 6)
 
 
 def cloud_candidates(config) -> tuple:

@@ -264,10 +264,18 @@ OVERLAP_CANDIDATES = (70, 80, 85, 88)
 # meaning without Rule 6's pacing, so the settings sweep tunes the chunk count
 # instead — how many transfer chunks a batch flows between steps in. Measured
 # on the live book: 4 best (49.6 d), 6 close, 1 = no pipelining (56.6 d).
-# 1 and 2 chunks lost every measured contest (54-56 d vs the 50 d class) and a
-# flow plan evaluates ~5x slower than classic — keep the list to the real
-# contenders so the local fallback stays usable on the free instance.
-FLOW_CHUNK_CANDIDATES = (3, 4, 6)
+# Flow evals are ~1.5s each (5x classic), so a contest must be SHORT enough to
+# fit the cloud's 20-min window on 2 vCPU: 2 candidates run in ONE parallel round
+# (~13 min wall for 400 evals each), 3+ candidates need a second round and time
+# out. Chunk 4 is the reliable winner (43.7 d at depth), 6 the close runner-up;
+# 1/2/3 lost every measured contest. So the lineup is exactly (4, 6).
+FLOW_CHUNK_CANDIDATES = (4, 6)
+
+# Local-fallback budget when flow times out of the cloud: on Render's 0.1 CPU a
+# flow eval is ~15s, so a full 1000-eval search would run for HOURS. Cap it hard
+# — a short search still yields the ~50 d / far-fewer-late-days class, a big win
+# over classic, without hanging the free instance.
+FLOW_LOCAL_BUDGET = 100
 
 
 def knob_for(config):
