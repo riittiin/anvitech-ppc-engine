@@ -260,6 +260,21 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
 # lost every contest and were dropped, 90/92 measurably worse than 85/88.
 OVERLAP_CANDIDATES = (70, 80, 85, 88)
 
+# Flow-mode contest (2026-07-19 flow-scheduler spec): the overlap % has no
+# meaning without Rule 6's pacing, so the settings sweep tunes the chunk count
+# instead — how many transfer chunks a batch flows between steps in. Measured
+# on the live book: 4 best (49.6 d), 6 close, 1 = no pipelining (56.6 d).
+FLOW_CHUNK_CANDIDATES = (1, 2, 3, 4, 6)
+
+
+def knob_for(config):
+    """The ONE setting the sweep contest tunes for this scheduler mode:
+    ('flow_chunks', FLOW_CHUNK_CANDIDATES) under the flow scheduler,
+    ('overlap_percent', OVERLAP_CANDIDATES) under classic Rule 6."""
+    if getattr(config, "scheduler", "classic") == "flow":
+        return "flow_chunks", FLOW_CHUNK_CANDIDATES
+    return "overlap_percent", OVERLAP_CANDIDATES
+
 
 def sweep_contenders(current_overlap=None, candidates=OVERLAP_CANDIDATES):
     """The contest lineup: the current setting first (Stop-safety + tie
@@ -279,10 +294,14 @@ def sweep_total_evals(budget_evals, current_overlap=None,
 
 @dataclass
 class SweepResult:
-    """Winner of the (sequence, overlap) search. ``result`` is the winning
-    candidate's OptimizeResult (its ranks are the persistable artifact)."""
+    """Winner of the (sequence, knob) search. ``result`` is the winning
+    candidate's OptimizeResult (its ranks are the persistable artifact).
+    ``overlap_percent`` carries the winning KNOB VALUE — the overlap % under
+    classic Rule 6, the chunk count under the flow scheduler (``knob`` says
+    which; the field keeps its historical name for wire compatibility)."""
 
-    overlap_percent: int = 0            # the winning overlap
+    overlap_percent: int = 0            # the winning knob value (see docstring)
+    knob: str = "overlap_percent"       # which config field the value belongs to
     result: OptimizeResult = field(default_factory=OptimizeResult)
     table: list = field(default_factory=list)   # per-candidate probe outcomes
     evals: int = 0
@@ -308,7 +327,10 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
     from dataclasses import replace
     from engine.optimize_service import merge_reservations
 
-    cur = config.overlap_percent
+    knob, default_cands = knob_for(config)
+    if candidates is OVERLAP_CANDIDATES:
+        candidates = default_cands       # caller took the default: follow the mode
+    cur = getattr(config, knob)
     lineup = sweep_contenders(cur, candidates)
     others = lineup[1:]
     each = budget_evals // len(lineup)
@@ -330,7 +352,7 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
         if budget <= 0 or cancelled or (should_cancel and should_cancel()):
             cancelled = cancelled or bool(should_cancel and should_cancel())
             return None
-        cfg = replace(config, overlap_percent=ov)
+        cfg = replace(config, **{knob: ov})
         reserved = merge_reservations(None, base_reserved) or None
         res = optimize(so_lines, cfg, masters, reserved=reserved,
                        budget_evals=budget, seed=seed,
@@ -361,9 +383,9 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
             best_ov, best_res, best_score = ov, r, r_score
 
     if best_score is None:      # every contender vetoed/cancelled/infeasible
-        return SweepResult(overlap_percent=cur,
+        return SweepResult(overlap_percent=cur, knob=knob,
                            result=OptimizeResult(evals=spent, cancelled=cancelled,
                                                  best=None),
                            table=table, evals=spent, cancelled=cancelled)
-    return SweepResult(overlap_percent=best_ov, result=best_res, table=table,
-                       evals=spent, cancelled=cancelled)
+    return SweepResult(overlap_percent=best_ov, knob=knob, result=best_res,
+                       table=table, evals=spent, cancelled=cancelled)

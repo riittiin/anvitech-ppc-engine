@@ -313,6 +313,8 @@ def _inputs_signature(config: Config) -> str:
     # and let the scheduled contest re-run — otherwise the ranks replay under
     # new semantics behind a green banner (review-caught deploy hole).
     d["scheduler_fingerprint"] = r6.SCHEDULER_FINGERPRINT
+    from engine import flow_scheduler as _flow
+    d["flow_fingerprint"] = _flow.FLOW_FINGERPRINT
     # Operators live in the store now, so the masters sha no longer covers them.
     # Fold ONLY the table's sorted row CONTENT (name/machines/shift/pin) into
     # the blob so a rotation or an operator edit correctly flags the applied
@@ -1033,14 +1035,16 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             payload = optimize_service.build_payload(
                 orders, actuals, book_store.load_masters_bytes(), config,
                 seed=_OPT_SEED, absences=absences, operator_table=operator_table)
+            _knob, _ = optimizer.knob_for(setup.search_config)
             denom = (optimize_service.CLOUD_BUDGET_PER_CANDIDATE
                      * len(optimizer.sweep_contenders(
-                         setup.search_config.overlap_percent,
-                         optimize_service.CLOUD_OVERLAP_CANDIDATES)))
+                         getattr(setup.search_config, _knob),
+                         optimize_service.cloud_candidates(setup.search_config))))
         else:
             payload = None
-            denom = optimizer.sweep_total_evals(budget_evals,
-                                                setup.search_config.overlap_percent)
+            _knob, _kcands = optimizer.knob_for(setup.search_config)
+            denom = optimizer.sweep_total_evals(
+                budget_evals, getattr(setup.search_config, _knob), _kcands)
 
         _OPTIMIZE.update(state="running", label=label, budget_evals=denom,
                          evals=0, baseline=None, best=None, error=None, result=None,
@@ -1095,8 +1099,9 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                                   and _OPTIMIZE["job_id"] == job_id)
                     if still_mine:
                         _OPTIMIZE["mode"] = "local"
+                        _k, _kc = optimizer.knob_for(setup.search_config)
                         _OPTIMIZE["budget_evals"] = optimizer.sweep_total_evals(
-                            budget_evals, setup.search_config.overlap_percent)
+                            budget_evals, getattr(setup.search_config, _k), _kc)
                 if still_mine:
                     local_job()
                 return
@@ -1120,8 +1125,9 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                                                    "answer before the timeout")
                             return
                         _OPTIMIZE["mode"] = "local"
+                        _k, _kc = optimizer.knob_for(setup.search_config)
                         _OPTIMIZE["budget_evals"] = optimizer.sweep_total_evals(
-                            budget_evals, setup.search_config.overlap_percent)
+                            budget_evals, getattr(setup.search_config, _k), _kc)
                         _OPTIMIZE["evals"] = 0
                 if timed_out:
                     local_job()          # cloud never answered → compute here
@@ -1147,8 +1153,9 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
     # Fingerprint against the WINNING settings: Apply persists the winning
     # overlap into the saved plan config, so the staleness check must
     # compare future plans against exactly that config.
+    _knob, _ = optimizer.knob_for(base_config)
     inputs_sig = _inputs_signature(replace(base_config,
-                                           overlap_percent=winner_overlap))
+                                           **{_knob: winner_overlap}))
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["job_id"] != job_id:
             return False
@@ -1162,7 +1169,8 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                     "budget": label, "seed": _OPT_SEED,
                     "inputs_sig": inputs_sig,
                     "best_overlap": winner_overlap,
-                    "current_overlap": base_config.overlap_percent,
+                    "current_overlap": getattr(base_config, _knob),
+                    "knob": _knob,
                     "sweep_table": table})
     if _OPTIMIZE.get("auto"):
         try:
@@ -1185,6 +1193,9 @@ def _optimize_status():
                 "improved": res.get("improved"), "cancelled": res.get("cancelled", False),
                 "best_overlap": res.get("best_overlap"),
                 "current_overlap": res.get("current_overlap"),
+                # which config field the value tunes: overlap_percent (classic)
+                # or flow_chunks (flow) — the UI labels the result with this
+                "knob": res.get("knob"),
                 "mode": _OPTIMIZE.get("mode", "local"),
                 # Whether the current/last run was auto-triggered (self-tuning) rather
                 # than a manual admin Start click — the UI uses this to suppress a
@@ -1260,7 +1271,8 @@ def _auto_apply_result():
     if optimizer.score(best) < optimizer.score(inc):
         meta = _optimize_apply()          # persists ranks + overlap + inputs_sig + book_sig
         ov = res.get("best_overlap"); cur = res.get("current_overlap")
-        ov_txt = f", overlap {cur} → {ov}" if ov != cur else ""
+        word = "chunks" if res.get("knob") == "flow_chunks" else "overlap"
+        ov_txt = f", {word} {cur} → {ov}" if ov != cur else ""
         _auto_note_write(f"Plan auto-re-optimized {stamp}: "
                          f"{best['total_late_days']} late-days "
                          f"(was {inc['total_late_days']}){ov_txt}.")
@@ -1291,9 +1303,10 @@ def _optimize_apply():
         best_ov = res.get("best_overlap")
         if best_ov is not None:
             cfg = _load_plan_config()
-            if cfg.overlap_percent != best_ov:
+            knob = res.get("knob") or optimizer.knob_for(cfg)[0]
+            if getattr(cfg, knob) != best_ov:
                 book_store.save_plan_config(json.dumps(
-                    replace(cfg, overlap_percent=best_ov).to_dict()))
+                    replace(cfg, **{knob: best_ov}).to_dict()))
         # Clear the in-memory job so a later page refresh doesn't re-show the
         # "Apply" panel for a plan that's already applied.
         _OPTIMIZE.update(state="idle", result=None, best=None, baseline=None)

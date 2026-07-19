@@ -82,6 +82,11 @@ def _next_block_start(reservations, s, e):
     return best
 
 
+# Version token for the FLOW scheduler's semantics, folded into
+# api._inputs_signature next to rule6's (bump on any behaviour change here).
+FLOW_FINGERPRINT = "flow-v1"
+
+
 class _Flow:
     def __init__(self, batches, config, masters, reserved=None):
         self.batches = batches

@@ -476,11 +476,15 @@ function renderOptimizeResult(st) {
   let h = st.improved
     ? `<p><strong>A better plan was found${stoppedNote}.</strong> Apply it to use this order in every plan from now on.</p>`
     : `<p><strong>No improvement found.</strong> The current plan already matches the best sequence tried.</p>`;
-  // Settings sweep: Optimize also tried the overlap % values.
+  // Settings sweep: Optimize also tuned the mode's setting (overlap % under the
+  // classic scheduler, transfer chunks under the flow scheduler).
   if (st.best_overlap != null && st.current_overlap != null) {
+    const isChunks = st.knob === "flow_chunks";
+    const name = isChunks ? "Batch flow (chunks)" : "Overlap";
+    const unit = isChunks ? "" : "%";
     h += st.best_overlap !== st.current_overlap
-      ? `<p>Best setting found: <strong>Overlap ${st.best_overlap}%</strong> (currently ${st.current_overlap}%). Applying this plan also sets Overlap to ${st.best_overlap}% in Settings.</p>`
-      : `<p>Your Overlap setting (${st.current_overlap}%) was also tested against ${escapeHtml("50-100%")}. It is already the best.</p>`;
+      ? `<p>Best setting found: <strong>${name} ${st.best_overlap}${unit}</strong> (currently ${st.current_overlap}${unit}). Applying this plan also updates it automatically.</p>`
+      : `<p>Your ${name} setting (${st.current_overlap}${unit}) was also tested against the alternatives. It is already the best.</p>`;
   }
   h += '<div class="table-wrap"><table><thead><tr><th></th><th>Standard plan</th><th>Optimized</th></tr></thead><tbody>';
   rows.forEach((r) => {

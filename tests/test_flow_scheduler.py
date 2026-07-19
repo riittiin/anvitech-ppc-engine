@@ -293,3 +293,42 @@ def test_optimizer_searches_with_the_flow_engine(loaded):
     direct = plan_metrics(flow_scheduler.run(list(pri), config=cfg, masters=masters),
                           so_lines, cfg.plan_start_date)
     assert res.baseline == direct
+
+
+# --------------------------------------------------------------------------- #
+# Contest: in flow mode the sweep tunes CHUNKS, not overlap
+# --------------------------------------------------------------------------- #
+def test_sweep_contest_tunes_chunks_in_flow_mode(loaded):
+    from engine import optimizer
+    so_lines, masters = loaded
+    cfg = _cfg(flow_chunks=4)
+    sw = optimizer.sweep_optimize(so_lines, cfg, masters, budget_evals=12, seed=1)
+    assert sw.knob == "flow_chunks"
+    tried = {row["overlap"] for row in sw.table}   # wire key stays "overlap"
+    allowed = set(optimizer.FLOW_CHUNK_CANDIDATES) | {cfg.flow_chunks}
+    assert tried and tried <= allowed, (tried, allowed)
+    assert sw.overlap_percent in allowed           # the winning chunk count
+
+
+def test_sweep_contest_still_tunes_overlap_in_classic_mode(loaded):
+    from engine import optimizer
+    so_lines, masters = loaded
+    cfg = Config(plan_start_date=WED, apply_operator_logic=True)
+    sw = optimizer.sweep_optimize(so_lines, cfg, masters, budget_evals=10, seed=1)
+    assert sw.knob == "overlap_percent"
+    tried = {row["overlap"] for row in sw.table}
+    assert tried <= set(optimizer.OVERLAP_CANDIDATES) | {cfg.overlap_percent}
+
+
+def test_flow_fingerprint_feeds_staleness_signature():
+    from api import main as api_main
+    from engine import flow_scheduler as fs
+    cfg = Config()
+    sig = api_main._inputs_signature(cfg)
+    orig = fs.FLOW_FINGERPRINT
+    try:
+        fs.FLOW_FINGERPRINT = orig + "-next"
+        assert api_main._inputs_signature(cfg) != sig
+    finally:
+        fs.FLOW_FINGERPRINT = orig
+    assert api_main._inputs_signature(cfg) == sig

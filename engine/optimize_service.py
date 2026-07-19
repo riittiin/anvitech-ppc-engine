@@ -31,6 +31,15 @@ from engine.models import Actual, Masters, Order
 # 2026-07-19: 50/90/100 dropped (lost every measured contest under the
 # crew-smart scheduler); 85/88/95 added (the new winners' region).
 CLOUD_OVERLAP_CANDIDATES = (60, 70, 80, 85, 88, 95)
+# Flow-mode cloud contest: chunk counts (see optimizer.FLOW_CHUNK_CANDIDATES).
+CLOUD_FLOW_CHUNK_CANDIDATES = (1, 2, 3, 4, 6, 8)
+
+
+def cloud_candidates(config) -> tuple:
+    """The cloud contest lineup for this config's scheduler mode."""
+    if getattr(config, "scheduler", "classic") == "flow":
+        return CLOUD_FLOW_CHUNK_CANDIDATES
+    return CLOUD_OVERLAP_CANDIDATES
 CLOUD_BUDGET_PER_CANDIDATE = 400
 
 
@@ -226,7 +235,8 @@ def run_candidate(payload: dict, overlap: int, *, on_progress=None,
     orders, actuals, masters, config, absences, operator_table = parse_payload(payload)
     setup = prepare_contest(orders, actuals, masters, config, absences=absences,
                             operator_table=operator_table)
-    cfg = replace(setup.search_config, overlap_percent=int(overlap))
+    knob, _cands = optimizer.knob_for(setup.search_config)
+    cfg = replace(setup.search_config, **{knob: int(overlap)})
     res = optimizer.optimize(setup.target, cfg, setup.masters,
                              reserved=setup.absence_reserved,
                              budget_evals=int(payload["budget_per_candidate"]),
@@ -268,8 +278,9 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
     ``processes == 1`` runs them sequentially in-process. Returns
     {winner_overlap, rows, best, ranks, evals, cancelled}."""
     config = Config.from_dict(payload["config"])
-    contenders = optimizer.sweep_contenders(config.overlap_percent,
-                                            payload["candidates"])
+    knob, _default_cands = optimizer.knob_for(config)
+    cur_value = getattr(config, knob)
+    contenders = optimizer.sweep_contenders(cur_value, payload["candidates"])
     rows, done_evals, cancelled = [], 0, False
 
     if processes <= 1:
@@ -310,13 +321,13 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
 
     if on_progress:
         on_progress(done_evals, None)
-    winner = pick_winner(config.overlap_percent, rows)
+    winner = pick_winner(cur_value, rows)
     table = [{k: r[k] for k in ("overlap", "eligible", "best", "evals")
               if k in r} for r in rows]
     if winner is None:
-        return {"winner_overlap": config.overlap_percent, "rows": table,
+        return {"winner_overlap": cur_value, "rows": table, "knob": knob,
                 "best": None, "ranks": {}, "evals": done_evals,
                 "cancelled": cancelled}
-    return {"winner_overlap": winner["overlap"], "rows": table,
+    return {"winner_overlap": winner["overlap"], "rows": table, "knob": knob,
             "best": winner["best"], "ranks": winner.get("ranks", {}),
             "evals": done_evals, "cancelled": cancelled}
