@@ -30,9 +30,14 @@ from .rules import rule1_consolidate, rule2_sort_by_date, rule3_tiebreak_process
     rule6_allocate
 
 # Score = total_late_days + MAKESPAN_WEIGHT x makespan_days. Both owner goals in one
-# number, delivery gaps dominant (a day of one order's lateness trades 1:10 against
-# a day of everyone-finishes-earlier makespan).
-MAKESPAN_WEIGHT = 10.0
+# number. 2026-07-19 (owner: minimize BOTH late days and completion days, after
+# rejecting the 79-84 d plans): weight raised 10 -> 40, measured on the live
+# 71-order book under the crew-smart scheduler — at 10 the search lands
+# 78.4 d / 1327 late-days; at 40 it lands 72.7 d / 1528, which beats the
+# previous live optimum (83.6 d / 1531) on BOTH axes; at 80 it trades real
+# lateness for speed (69.7 d / 1701+). 40 is the dominance point, not a taste
+# choice — re-measure before moving it.
+MAKESPAN_WEIGHT = 40.0
 
 # Local-search shape. Multi-start iterated local search: each restart hill-climbs a
 # fresh random permutation until it has gone this many evaluations with no improvement,
