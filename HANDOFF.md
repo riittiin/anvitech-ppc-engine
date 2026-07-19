@@ -208,6 +208,47 @@ middleware in `api/main.py` + `web/login.html`. Spec:
 > **shipped to `main` and are live**, as is the full 2026-07-19 session block
 > directly below. The app went into full production at Anvitech on 2026-07-19.
 
+### Latest session (2026-07-19, second session) — CREW-SMART SCHEDULER (scarce-first operator pick) + objective rebalance — pushed to `main` on the owner's explicit instruction
+
+**The owner rejected the 79-84 d honest plan** ("machines at 30-40% is bullshit") and
+mandated open-ended optimization research (any rule may change except: job needs
+machine + operator, operators keep shifts, follow the masters). Findings, all on the
+exact live book (71 orders / 19 operators / start 19-07, harness rebuilt from live
+/orders + /operators + Test5.xlsx):
+
+- **Floors:** hardest order alone 22.6 d; machines-only world 43.8 d (greedy ≈ CP
+  there); certified LP capacity floor WITH crew **37.2 calendar days** (operators
+  binding, not machines). The ~35 lost days were crew COORDINATION (operators ~50%
+  busy, machines idle in both shifts equally), not capacity.
+- **THE fix — scarce-first crewing** (`_lay_segments` + `_operator_flexibility`):
+  among FREE qualified operators book the least-flexible first (rank = how many of
+  the master's machines their list resolves to, id-OR-type matching). 78.5 → 73.7 d
+  on the identical sequence. Plus overlap candidates (70,80,85,88) local /
+  (60,70,80,85,88,95) cloud, and **MAKESPAN_WEIGHT 10 → 40** (the measured
+  both-axes dominance point). Recommended plan class: **72.7 d / 1528 late-days —
+  beats the previous live optimum (83.6 / 1531) on BOTH axes**; W=80 reaches 69.7 d
+  at +170 late-days if the owner ever wants max speed.
+- **Deploy safety:** `rule6_allocate.SCHEDULER_FINGERPRINT` is folded into
+  `_inputs_signature`, so this deploy automatically flags the applied optimization
+  stale (banner) and un-skips the scheduled contest. Bump it on ANY allocation-
+  semantics change.
+- **Review saga (multi-agent, 3 real bugs fixed):** type-qualified operators would
+  have ranked scarcest (inverted; fixed + regression), the deploy-staleness hole
+  (fixed via the fingerprint), a test asserting against the overlap-MODE string
+  (fixed). **One review fix was REJECTED BY MEASUREMENT:** making the split
+  estimator's operator pick scarce-first "for consistency" — 73.66 → 80.56 d WORSE;
+  the estimate stays earliest-free with an inline do-not-refix comment. Lesson:
+  measure every plausible-sounding scheduler change, including reviewers'.
+- **Generalization (owner asked explicitly):** nothing is book-specific — searched
+  head-to-head on Test6 (scarce 63.7/1370 vs legacy 63.8/1535) and new_so_list
+  (59.6/1139 vs 59.7/1024, a wash); every future upload gets its own contest.
+- **Dead ends (measured, do not retry):** dispatch-window pick policies (all
+  worse), CP-SAT as sequence oracle (idealized 44-45 d, greedy replay loses it),
+  more search depth on the legacy scheduler (caps ~80 d).
+- 486 tests pass, 1 skipped; golden untouched. Cutover after deploy: Settings →
+  consolidation window 10 → 1 + Save, then Optimize → Apply (or the Mon/Fri 11:00
+  IST auto-run). Business lever unchanged: night cross-training on VMC1-3 + CNC3/6.
+
 ### Latest session (2026-07-19) — HONEST SCHEDULER (per-shift operator staffing) + SO header-driven loader + missing-routings display + optimizer research + knob removal — ✅ ALL SHIPPED & LIVE (deploy-verified logged-in; live backend confirmed serving 0.0 unstaffed hrs on the 71-order book)
 
 The most consequential day since go-live. Read this block fully before touching
