@@ -26,10 +26,19 @@ from datetime import datetime, timedelta, time as dtime
 
 from ..models import ScheduleEntry
 from ..worktime import WorkClock, NoWorkingWindow
-from ..loaders import parse_resource_candidates, normalize_process_name
+from ..loaders import (parse_resource_candidates, normalize_process_name,
+                       normalize_resource_id)
 from ..orderbook import is_dispatch
 from . import rule4_setup_time as r4
 from . import rule5_overlap_mode as r5
+
+# Version token for the SCHEDULER'S OWN semantics, folded into the applied-
+# optimization staleness fingerprint (api._inputs_signature): saved ranks were
+# scored under a specific allocation policy, and a code change to that policy
+# (e.g. the scarce-first operator pick) legitimately changes what replaying
+# them produces — the UI must flag it and the scheduled contest must re-run,
+# exactly like a masters/settings change. Bump on any behaviour change here.
+SCHEDULER_FINGERPRINT = "scarce-first-v1"
 
 # Sentinel operator name for a shift segment NO qualified person is free to man
 # (the plan runs more machines in that shift than the crew can staff). Surfaced in
@@ -82,6 +91,28 @@ def _clock_factory(masters, config):
         return cache[mid]
 
     return clock_for, cov_report
+
+
+def _operator_flexibility(masters):
+    """``{operator name -> how many of the master's machines they can run}`` —
+    the scarce-first rank. A qualification entry matches a machine by its id OR
+    its (normalized) type, mirroring ``operator_coverage.qualified_operators``,
+    so an operator listed by TYPE (one token covering every machine of that
+    type) correctly ranks as flexible, not scarce (review-caught: the raw
+    list-length rank inverted scarce-first on type-qualified books). Entries
+    matching NO master machine (e.g. only provisional machines) fall back to
+    the raw list length so they still rank deterministically."""
+    machines = getattr(masters, "machines", {}) or {}
+    keys_by_machine = {}
+    for mid, mac in machines.items():
+        keys_by_machine[mid] = {mid,
+                                normalize_resource_id(getattr(mac, "machine_type", "") or "")}
+    ranks = {}
+    for op in getattr(masters, "operators", None) or []:
+        quals = set(getattr(op, "machines", []) or [])
+        n = sum(1 for keys in keys_by_machine.values() if quals & keys)
+        ranks[op.name] = n or len(quals)
+    return ranks
 
 
 def _resolve_candidates(proc, config=None):
@@ -337,7 +368,10 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
       common target finish time T, starting from when IT becomes free.
 
     **Operators are one-at-a-time resources.** A candidate machine's free time also
-    waits for its **earliest-free qualified operator** (``op_lookup`` + ``operator_free``);
+    waits for its earliest-free qualified operator (``op_lookup`` + ``operator_free``)
+    — an ESTIMATE used only to choose/size candidates; the actual booking
+    (``_lay_segments``) picks scarce-first via ``op_rank``, and keeping this
+    estimate earliest-free is deliberate and measured (see the inline comment);
     split siblings get **distinct** operators (a person can't run two machines at once),
     so work spreads across the crew and concurrency is capped by headcount. With
     operator logic off (or a provisional machine with no listed crew) there's no
@@ -362,6 +396,15 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
             avail = [o for o in names if o not in reserved]
             if not avail:
                 continue                # every qualified operator already taken by a sibling
+            # DELIBERATELY earliest-free (NOT the scarce-first key _lay_segments
+            # books with): this pick only ESTIMATES a candidate machine's start
+            # for choosing/sizing candidates. Making it scarce-first sounds more
+            # consistent but was measured strictly worse on the real book
+            # (makespan 73.66 -> 80.56 d, late-days 2265 -> 2881, 2026-07-19):
+            # the optimistic estimate orders candidate machines better, and the
+            # rare split-sibling mis-drop it allows costs far less than the
+            # machine choices the scarce estimate distorts. Do not "fix" this
+            # to match _lay_segments without re-measuring.
             op = min(avail, key=lambda o: operator_free.get(o, plan_start))
             reserved.add(op)
             f = clk.advance(max(mf, operator_free.get(op, plan_start)), 0)
@@ -475,10 +518,9 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     else:
         def op_lookup(m, t):
             return []
-    # Scarce-first rank: how many machines each operator is qualified for (their
-    # parsed Preferred-Machines list). Fewest = spent first; see _lay_segments.
-    op_rank = {op.name: len(getattr(op, "machines", []) or [])
-               for op in (getattr(masters, "operators", None) or [])} if masters else {}
+    # Scarce-first rank: how many of the master's machines each operator can
+    # actually run. Fewest = spent first; see _lay_segments / _operator_flexibility.
+    op_rank = _operator_flexibility(masters) if masters else {}
     operator_free: dict[str, datetime] = {}   # operator name → when they next free up
     # config.plan_start_date is never None here: the API boundary resolves an
     # "auto" (None) start to today (IST) via _resolve_config before any rule runs.

@@ -110,3 +110,42 @@ def test_deterministic():
     b = rule6_allocate.run(_batches(), config=cfg, masters=masters)
     assert [(e.machine, e.start, e.end, e.op_segments) for e in a] == \
            [(e.machine, e.start, e.end, e.op_segments) for e in b]
+
+
+def test_flexibility_rank_counts_type_qualified_machines():
+    """An operator qualified by machine TYPE (one token covering every machine
+    of that type) is the FLEXIBLE one — the raw list-length rank inverted this
+    (review-caught): rank must count the master's machines the entry resolves
+    to, mirroring operator_coverage's id-OR-type matching."""
+    masters = _masters()
+    # 3 CNCs; "Typed" lists ONE token = the normalized machine type, so they can
+    # run all three; "Solo" lists exactly one machine id.
+    masters.machines["CNC3"] = _cnc("CNC3")
+    masters.operators = [
+        Operator(name="Typed", preferred_machines_raw="CNC lathe",
+                 machines=["CNCLATHE"], shift="First shift"),
+        Operator(name="Solo", preferred_machines_raw="CNC1",
+                 machines=["CNC1"], shift="First shift"),
+    ]
+    ranks = rule6_allocate._operator_flexibility(masters)
+    assert ranks["Typed"] == 3, ranks
+    assert ranks["Solo"] == 1, ranks
+
+
+def test_scheduler_fingerprint_feeds_the_staleness_signature():
+    """A scheduler-semantics change (SCHEDULER_FINGERPRINT bump) must flip the
+    applied-optimization staleness signature, so a deploy that changes HOW the
+    scheduler books people flags the applied plan stale instead of replaying
+    old ranks behind a green banner (review-caught deploy hole)."""
+    import importlib
+    from api import main as api_main
+    from engine.config import Config as Cfg
+    cfg = Cfg()
+    sig_now = api_main._inputs_signature(cfg)
+    orig = rule6_allocate.SCHEDULER_FINGERPRINT
+    try:
+        rule6_allocate.SCHEDULER_FINGERPRINT = orig + "-next"
+        assert api_main._inputs_signature(cfg) != sig_now
+    finally:
+        rule6_allocate.SCHEDULER_FINGERPRINT = orig
+    assert api_main._inputs_signature(cfg) == sig_now

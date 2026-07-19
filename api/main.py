@@ -307,6 +307,12 @@ def _inputs_signature(config: Config) -> str:
     d = config.to_dict()
     d.pop("balance_operator_load", None)
     d["expedite_window_min"] = 0
+    # The scheduler's own semantics version: saved ranks were scored under a
+    # specific allocation policy, so a deploy that changes it (e.g. the
+    # scarce-first operator pick, 2026-07-19) must flag the applied plan stale
+    # and let the scheduled contest re-run — otherwise the ranks replay under
+    # new semantics behind a green banner (review-caught deploy hole).
+    d["scheduler_fingerprint"] = r6.SCHEDULER_FINGERPRINT
     # Operators live in the store now, so the masters sha no longer covers them.
     # Fold ONLY the table's sorted row CONTENT (name/machines/shift/pin) into
     # the blob so a rotation or an operator edit correctly flags the applied
