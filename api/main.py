@@ -861,7 +861,13 @@ def _cloud_config():
     return {"token": token, "secret": secret,
             "repo": os.environ.get("GITHUB_REPO", "riittiin/anvitech-ppc-engine"),
             "workflow": os.environ.get("OPTIMIZE_WORKFLOW", "optimize.yml"),
-            "timeout_min": float(os.environ.get("OPTIMIZE_CLOUD_TIMEOUT_MIN", "20"))}
+            # 40, not 20: flow-scheduler evals are ~5x slower than classic, so the
+            # GitHub Actions runner needs ~25 min for a full flow contest. At 20 the
+            # cloud (fast, 2 vCPU) got cut off ~79% done and fell back to Render's
+            # 0.1-CPU local compute (live 2026-07-19). 40 lets GitHub always finish
+            # first, so the slow local path is never hit. GitHub cost stays $0 (free
+            # minutes, spending cap 0); a run is ~25 min, far under the 2000/month.
+            "timeout_min": float(os.environ.get("OPTIMIZE_CLOUD_TIMEOUT_MIN", "40"))}
 
 
 def _dispatch_workflow(cloud, job_id) -> bool:
