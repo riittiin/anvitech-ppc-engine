@@ -45,8 +45,13 @@ def config():
     # the pure rules must never see None (the API resolves it). Rule tests that
     # drive the engine directly pin the historical fixed date so their assertions
     # (and the golden window) stay byte-identical to the pre-live-mode behaviour.
+    #
+    # scheduler="classic": the new operator-stable engine is now the app default, but the
+    # pure-engine rule/golden/optimizer tests were written against the classic engine (and
+    # its byte-identical golden trace). They keep validating that KEPT engine explicitly;
+    # the new engine has its own suite on a fully-staffed fixture (tests/test_new_engine.py).
     from datetime import date
-    return Config(plan_start_date=date(2025, 3, 1))
+    return Config(plan_start_date=date(2025, 3, 1), scheduler="classic")
 
 
 @pytest.fixture(autouse=True)
