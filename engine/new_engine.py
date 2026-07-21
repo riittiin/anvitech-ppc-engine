@@ -27,7 +27,6 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 
 from engine import book_store
-from engine.config import OVERLAP_PERCENT
 from engine.models import ScheduleEntry
 
 from ppc_engine.config import PlanConfig
@@ -75,9 +74,10 @@ def _plan_config(config) -> PlanConfig:
     plan start). Consolidation is 0 — the old Rule 1 already consolidated the batches."""
     start = getattr(config, "plan_start_date", None) or date.today()
     h = int(getattr(config, "first_shift_start_hour", 8))
-    overlap = 0.0
-    if getattr(config, "overlap_mode", None) == OVERLAP_PERCENT:
-        overlap = float(getattr(config, "overlap_percent", 0)) / 100.0
+    # The new engine's overlap is always a fraction (0.0 = sequential). Read it straight
+    # from overlap_percent, IGNORING the old 'overlap_mode' switch (the new engine has no
+    # such mode) — otherwise a tuned or saved overlap silently has no effect. Clamp 0..0.95.
+    overlap = min(0.95, max(0.0, float(getattr(config, "overlap_percent", 0)) / 100.0))
     return PlanConfig(
         plan_start=datetime(start.year, start.month, start.day, h, 0),
         week_anchor=_friday_on_or_before(start),
@@ -194,43 +194,70 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     return _entries_from_schedule(sched, batch_by_key)
 
 
+# Overlaps the sweep contest tries (0.0 = sequential .. 0.90). The best-scoring one is
+# applied, so "Start deep search" auto-tunes the overlap AND the sequence together.
+_OVERLAP_CANDIDATES = (0.0, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9)
+
+
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None, base_reserved=None, **kw):
-    """Optimize the batch order with the NEW engine's search + objective (total tardiness
-    with a fairness guard, RULES.md Rule 3), returning the old ``SweepResult`` shape so the
-    existing optimize job / apply / rank-replay machinery is unchanged.
+    """The full contest for the NEW engine: search the job SEQUENCE **and** sweep the
+    OVERLAP, keeping the best (sequence, overlap) by the owner's objective (total tardiness
+    + fairness). Returns the old ``SweepResult`` shape, so the existing optimize job / apply
+    / rank-replay machinery is unchanged and the winning overlap is applied to the plan.
 
-    The old app's optimizer scored plans by makespan+lateness; the new engine scores by the
-    owner's objective. We run the new search, translate the winning order back into the old
-    rank map (``ranks_for``), and — so the app's before/after panel stays apples-to-apples —
-    report the winner's metrics in the OLD ``plan_metrics`` space (makespan + late days).
+    Two phases (cheap enough for the free instance):
+      1. Search the sequence at the overlap sweet-spot (0.7) — many plans, keep the best.
+      2. Sweep every overlap on that winning sequence and pick the score-minimising one
+         (the "auto-overlap" tuner). Overlap is the biggest makespan lever, so this is where
+         most of the improvement comes from.
+    Before/after is reported in the OLD ``plan_metrics`` space so the app's panel matches.
     """
+    from dataclasses import replace
+
     from engine.optimizer import OptimizeResult, SweepResult, plan_metrics, ranks_for
     from engine.rules import rule1_consolidate
 
+    from ppc_engine.objective import compute_metrics, score
     from ppc_engine.optimize import optimize as new_optimize
+    from ppc_engine.scheduler import decode
 
     new_masters = _new_masters()
-    cfg = _plan_config(config)
-    overlap_pct = int(round(cfg.overlap * 100))
+    base = _plan_config(config)
     plan_start = getattr(config, "plan_start_date", None) or date.today()
 
     batches = rule1_consolidate.run(so_lines, config)
     if not batches:
-        return SweepResult(overlap_percent=overlap_pct, knob="overlap",
+        return SweepResult(overlap_percent=int(round(base.overlap * 100)), knob="overlap",
                            result=OptimizeResult(evals=0, best=None),
                            table=[], evals=0, cancelled=False)
 
     orders, batch_by_key = _orders_from_batches(batches, new_masters)
-    progress = (lambda evals, best: on_progress(evals, best)) if on_progress else None
-    res = new_optimize(orders, new_masters, cfg, budget=int(budget_evals),
-                       seed=int(seed), on_progress=progress)
 
-    best_seq = [batch_by_key[k] for k in res.best_sequence if k in batch_by_key]
-    ranks = ranks_for(best_seq)
-    # Winner metrics in the old space: decode the winning order and measure it the old way.
-    winner_metrics = plan_metrics(run(best_seq, config, masters), so_lines, plan_start)
+    # Phase 1 — search the sequence at the overlap sweet-spot.
+    search_cfg = replace(base, overlap=0.7)
+    progress = (lambda evals, best: on_progress(evals, best)) if on_progress else None
+    res = new_optimize(orders, new_masters, search_cfg, budget=int(budget_evals),
+                       seed=int(seed), on_progress=progress)
+    best_keys = list(res.best_sequence)
+
+    # Phase 2 — auto-tune the overlap on the winning sequence (score-minimising).
+    best_overlap, best_score = 0.7, None
+    for ov in _OVERLAP_CANDIDATES:
+        cfg_ov = replace(base, overlap=ov)
+        sc = score(compute_metrics(decode(orders, best_keys, new_masters, cfg_ov),
+                                   orders, cfg_ov.plan_start), cfg_ov)
+        if best_score is None or sc < best_score:
+            best_score, best_overlap = sc, ov
+
+    best_batches = [batch_by_key[k] for k in best_keys if k in batch_by_key]
+    ranks = ranks_for(best_batches)
+    # Winner metrics in the old space: decode the winning (sequence, overlap) the old way.
+    won_cfg = replace(base, overlap=best_overlap)
+    winner_entries = _entries_from_schedule(decode(orders, best_keys, new_masters, won_cfg),
+                                            batch_by_key)
+    winner_metrics = plan_metrics(winner_entries, so_lines, plan_start)
     result = OptimizeResult(ranks=ranks, best=winner_metrics, evals=res.evaluations,
                             improved=True, cancelled=False)
-    return SweepResult(overlap_percent=overlap_pct, knob="overlap",
+    return SweepResult(overlap_percent=int(round(best_overlap * 100)), knob="overlap",
                        result=result, table=[], evals=res.evaluations, cancelled=False)
