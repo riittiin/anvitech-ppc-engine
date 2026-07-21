@@ -112,6 +112,11 @@ def _orders_from_batches(batches, masters):
     routing, so a partially-produced order re-plans each step at its own remaining."""
     orders, batch_by_key = [], {}
     for b in batches:
+        # An item with no routing is not schedulable — skip it (it still shows in the order
+        # book / validation report). The classic engine tolerated this; the new engine must
+        # too, or one unrouted order would crash the whole plan (KeyError on the routing).
+        if b.item_code not in masters.routings:
+            continue
         key = (b.batch_id, b.item_code)
         process_remaining = None
         if getattr(b, "process_qty", None):
@@ -201,7 +206,11 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
         return []
     new_masters = _new_masters()
     orders, batch_by_key = _orders_from_batches(batches, new_masters)
-    sequence = [(b.batch_id, b.item_code) for b in batches]
+    if not orders:
+        return []
+    # Sequence from the ROUTED orders only (unrouted batches were skipped above), preserving
+    # the incoming priority order.
+    sequence = [o.key for o in orders]
     sched = decode(orders, sequence, new_masters, _plan_config(config))
     return _entries_from_schedule(sched, batch_by_key)
 
@@ -268,11 +277,14 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
 
     best_batches = [batch_by_key[k] for k in tr.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
-    won_cfg = replace(base, overlap=tr.best_overlap)
+    # Report metrics at the APPLIED (integer-%) overlap, not the continuous best, so the
+    # before/after panel matches the plan the app actually re-plans (no overstated gain).
+    overlap_pct = int(round(tr.best_overlap * 100))
+    won_cfg = replace(base, overlap=overlap_pct / 100.0)
     winner_metrics = plan_metrics(
         _entries_from_schedule(decode(orders, tr.best_sequence, new_masters, won_cfg), batch_by_key),
         so_lines, plan_start)
-    return ranks, int(round(tr.best_overlap * 100)), winner_metrics, tr.evaluations
+    return ranks, overlap_pct, winner_metrics, tr.evaluations
 
 
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,

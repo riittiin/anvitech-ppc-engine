@@ -149,3 +149,17 @@ def test_old_ui_builds_from_new_engine(old_book, new_masters):
 
     a = analytics.build_analytics(pr.schedule, masters, _CONF, pr.batches, [])
     assert a["machines"] and a["headline"]
+
+
+def test_unrouted_order_is_skipped_not_crashing(old_book, new_masters):
+    """Regression: an order whose item has no routing must be SKIPPED (it still shows in the
+    book/report), never crash the plan. The classic engine tolerated this; the new engine
+    once raised KeyError, which would have blanked the whole schedule."""
+    from engine.models import SOLine
+    so_lines, masters = old_book
+    bad = SOLine(so_no="X9", item_code="NO_SUCH_ITEM", item_name="?", qty=5,
+                 delivery_date=date(2025, 5, 1))
+    pr = PlanRun(so_lines=list(so_lines) + [bad])
+    pipeline.run_forward(pr, _CONF, masters)  # must not raise
+    assert "NO_SUCH_ITEM" not in {e.item_code for e in pr.schedule}
+    assert pr.schedule  # the routed orders still schedule
