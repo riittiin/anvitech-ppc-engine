@@ -139,7 +139,13 @@ def scheduler_for(config):
     (``engine/flow_scheduler.py``, 2026-07-19 spec). ONE dispatch point shared
     by run_forward and the optimizer, so search and replay always use the same
     engine as the plan."""
-    if getattr(config, "scheduler", "classic") == "flow":
+    sched = getattr(config, "scheduler", "classic")
+    if sched == "new":
+        # The new operator-stable engine (engine/new_engine.py), run behind this seam so
+        # the whole UI keeps consuming the same ScheduleEntry list.
+        from . import new_engine
+        return new_engine.run
+    if sched == "flow":
         from . import flow_scheduler
         return flow_scheduler.run
     return rule6_allocate.run

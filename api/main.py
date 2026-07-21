@@ -1028,6 +1028,11 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         # sizes itself via cloud_candidates); classic keeps its full budget.
         if getattr(base_config, "scheduler", "classic") == "flow":
             budget_evals = min(budget_evals, optimizer.FLOW_LOCAL_BUDGET)
+        # The new engine runs its own search in-process (its cloud worker is not wired yet);
+        # cap the budget so a click finishes on the free tier (the Stop button also applies).
+        new_engine_run = getattr(base_config, "scheduler", "classic") == "new"
+        if new_engine_run:
+            budget_evals = min(budget_evals, 200)
         config = _resolve_config(config)   # None -> today (IST) for the engine/contest
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()
@@ -1040,7 +1045,9 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        cloud = _cloud_config()
+        # Force the local path for the new engine (its GitHub-Actions worker isn't wired
+        # for the new optimizer yet — a documented follow-up).
+        cloud = None if new_engine_run else _cloud_config()
         job_id = uuid.uuid4().hex
         if cloud:
             # The contest lineup must match the scheduler MODE: chunk counts under

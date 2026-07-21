@@ -322,7 +322,25 @@ class SweepResult:
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None,
                    candidates=OVERLAP_CANDIDATES, base_reserved=None) -> SweepResult:
-    """Search batch sequence AND overlap %. ``budget_evals`` is the TOTAL
+    """Search batch sequence AND overlap %. ``budget_evals`` is the TOTAL"""
+    # The new engine owns its own search + objective; delegate there when it is the
+    # selected scheduler (see engine/new_engine.py). The old sweep below runs only for the
+    # retired classic/flow engines.
+    if getattr(config, "scheduler", "classic") == "new":
+        from engine import new_engine
+        return new_engine.sweep_optimize(
+            so_lines, config, masters, budget_evals=budget_evals, seed=seed,
+            on_progress=on_progress, should_cancel=should_cancel, base_reserved=base_reserved)
+    return _sweep_optimize_classic(
+        so_lines, config, masters, budget_evals=budget_evals, seed=seed,
+        on_progress=on_progress, should_cancel=should_cancel,
+        candidates=candidates, base_reserved=base_reserved)
+
+
+def _sweep_optimize_classic(so_lines, config, masters, *, budget_evals=150, seed=42,
+                            on_progress=None, should_cancel=None,
+                            candidates=OVERLAP_CANDIDATES, base_reserved=None) -> SweepResult:
+    """The original classic/flow overlap-sweep search (see history). ``budget_evals`` is the TOTAL
     budget for the whole contest; it is split EQUALLY across the contenders
     (the current setting + ``candidates``), ``budget_evals // n`` plans each.
 

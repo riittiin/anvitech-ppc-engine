@@ -1,0 +1,358 @@
+"""The decoder — turn an order sequence into a concrete, constraint-legal schedule.
+
+``decode(orders, sequence, masters, config) -> Schedule``
+
+This is the single scheduler (LESSONS.md: one scheduler only) and a pure function of
+its inputs (deterministic — same inputs, same schedule). The optimizer will call it
+thousands of times over different sequences; this file never knows about the
+objective (that lives in engine/objective).
+
+Decode policy (v1, operation-level, non-delay):
+  Repeatedly, look at every unfinished order's *next* operation, compute the earliest
+  time it could feasibly start, and schedule the one that can start earliest — with
+  the order *sequence* breaking ties (so the sequence, the optimizer's lever, decides
+  who wins a contended machine). Each operation is laid across real working windows
+  (shifts, off-days, leave), staffed by a stable per-shift operator.
+
+See ARCHITECTURE.md "Scheduler v1 scope" for what is intentionally deferred
+(piece-flow chunking, operation overlap, coarse idle-operator reassignment) — those
+are later, measured layers, not hidden flags.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+
+from ppc_engine.config import PlanConfig
+from ppc_engine.domain.masters import Masters
+from ppc_engine.domain.order import Order
+from ppc_engine.domain.resources import Machine
+from ppc_engine.domain.routing import Operation, OperationKind
+from ppc_engine.scheduler.duration import operation_duration_min
+from ppc_engine.scheduler.schedule import Schedule, Segment
+from ppc_engine.scheduler.staffing import StaffingBoard, build_machine_pools
+from ppc_engine.worktime import iter_windows
+
+# Tiny tolerance so floating-point minute arithmetic doesn't loop forever.
+_EPS_MIN = 1e-9
+
+# In-house op kinds — the only ones that can overlap (OS/dispatch stay sequential).
+_INHOUSE = (OperationKind.MACHINING, OperationKind.MANUAL, OperationKind.INSPECTION)
+
+
+def decode(
+    orders: list[Order],
+    sequence: list[tuple[str, str]],
+    masters: Masters,
+    config: PlanConfig,
+    dispatch: str = "gt",
+) -> Schedule:
+    """Schedule ``orders`` following the priority ``sequence``.
+
+    Args:
+        orders:   The order lines to schedule.
+        sequence: Order keys (so_no, item_code) in priority order — the decision the
+                  optimizer controls. Every key must be an order with a known routing.
+        masters:  The shop (machines, operators, routings, calendar).
+        config:   Plan start, shifts, setup, etc.
+        dispatch: How to resolve which ready op runs next:
+                  - "gt" (default): Giffler-Thompson — find the op with the earliest
+                    *completion*, take its machine as the critical resource, then among
+                    the ops contending for that machine (that could start before that
+                    completion) let the order **sequence** decide. Generates *active*
+                    schedules (the class containing the tardiness optimum) and makes the
+                    sequence a real lever.
+                  - "nondelay": legacy — schedule whichever op can *start* earliest,
+                    sequence only breaks exact ties. Kept for A/B measurement.
+
+    Returns:
+        A Schedule with all segments and each order's completion datetime.
+    """
+    # Consolidation (transparent): if a window is set, merge same-item nearby-due orders
+    # into batches, schedule the batches, then map each batch's completion back onto its
+    # original orders — so the caller still sees per-original-order completions.
+    if getattr(config, "consolidation_window", 0) and config.consolidation_window > 0:
+        return _decode_consolidated(orders, sequence, masters, config, dispatch)
+
+    order_by_key = {o.key: o for o in orders}
+    priority = {key: i for i, key in enumerate(sequence)}
+
+    # Per-order progress: which operation is next, and when it can start (= end of the
+    # order's previous operation; starts at plan_start).
+    ops_of: dict[tuple[str, str], tuple[Operation, ...]] = {}
+    idx_of: dict[tuple[str, str], int] = {}
+    ready_of: dict[tuple[str, str], datetime] = {}
+    # prev_end tracks the true completion of the order's last-scheduled op, used to
+    # PACE the next op (an op can never finish before its predecessor). With overlap,
+    # ready_of (when the next op may start) is earlier than prev_end.
+    prev_end_of: dict[tuple[str, str], datetime] = {}
+    for key in sequence:
+        order = order_by_key[key]
+        ops_of[key] = masters.routings[order.item_code].operations
+        idx_of[key] = 0
+        ready_of[key] = config.plan_start
+        prev_end_of[key] = config.plan_start
+
+    machine_free: dict[str, datetime] = {mid: config.plan_start for mid in masters.machines}
+    staffing = StaffingBoard(build_machine_pools(masters))
+    segments: list[Segment] = []
+    completion: dict[tuple[str, str], datetime] = {}
+
+    # Orders that still have operations left to schedule.
+    remaining = [key for key in sequence if idx_of[key] < len(ops_of[key])]
+
+    guard = 0
+    guard_max = sum(len(ops_of[k]) for k in sequence) + 1
+    while remaining:
+        guard += 1
+        if guard > guard_max:  # every loop schedules exactly one op — this can't be hit
+            raise RuntimeError("scheduler made no progress (internal error)")
+
+        # Evaluate the next op of every remaining order (board read read-only — each
+        # placement carries the staffing assignments it would make, committed below
+        # only for the chosen op).
+        placements = {
+            key: _place_operation(
+                ops_of[key][idx_of[key]], order_by_key[key], ready_of[key],
+                machine_free, staffing, masters, config,
+            )
+            for key in remaining
+        }
+
+        if dispatch == "nondelay":
+            # Legacy: schedule whichever op can START earliest; sequence breaks ties.
+            key = min(remaining, key=lambda k: (placements[k]["start"], priority[k], k))
+        else:
+            # Giffler-Thompson: the critical op is the one finishing earliest; its
+            # machine m* is the contested resource. Among ops that want m* and could
+            # start before that completion, the order sequence picks the winner. Ops
+            # with no machine (OS/dispatch) never contend — schedule them directly.
+            crit = min(remaining, key=lambda k: (placements[k]["end"], priority[k], k))
+            m_star = placements[crit]["machine_id"]
+            if m_star is None:
+                key = crit
+            else:
+                c_star = placements[crit]["end"]
+                conflict = [
+                    k for k in remaining
+                    if placements[k]["machine_id"] == m_star and placements[k]["start"] < c_star
+                ]
+                key = min(conflict, key=lambda k: (priority[k], k)) if conflict else crit
+
+        placement = placements[key]
+        # Commit the winning placement onto the real state. The machine frees after its
+        # actual cutting (placement["end"]) — pacing affects only the ORDER's downstream.
+        for machine_id, day, shift, name in placement["assignments"]:
+            staffing.commit(machine_id, day, shift, name)
+        if placement["machine_id"] is not None:
+            machine_free[placement["machine_id"]] = placement["end"]
+        for seg in placement["segments"]:
+            if seg.operator is not None:  # track load for the "balanced" operator pick
+                staffing.add_load(seg.operator, (seg.end - seg.start).total_seconds() / 60.0)
+        segments.extend(placement["segments"])
+
+        just = ops_of[key][idx_of[key]]                       # the op just scheduled
+        paced_end = max(placement["end"], prev_end_of[key])   # never finish before predecessor
+        prev_end_of[key] = paced_end
+        idx_of[key] += 1
+
+        if idx_of[key] >= len(ops_of[key]):
+            # Order finished — completion is the paced end of its last op (dispatch).
+            completion[key] = paced_end
+            remaining.remove(key)
+        else:
+            nxt = ops_of[key][idx_of[key]]
+            # Overlap: the next op may start once THIS op is `overlap` through cutting,
+            # but only between two in-house ops (OS/dispatch stay fully sequential).
+            o = order_by_key[key]
+            just_qty = (o.process_remaining.get(just.seq, o.qty)
+                        if o.process_remaining is not None else o.qty)
+            if config.overlap > 0 and just.kind in _INHOUSE and nxt.kind in _INHOUSE and just_qty > 0:
+                setup = config.setup_min if just.kind == OperationKind.MACHINING else 0.0
+                cutting = just_qty * just.cycle_min
+                release = placement["start"] + timedelta(
+                    minutes=setup + (1.0 - config.overlap) * cutting
+                )
+                # Can't release later than the op actually finished, nor earlier than
+                # the op's own start.
+                ready_of[key] = min(release, paced_end)
+            else:
+                ready_of[key] = paced_end
+
+    return Schedule(tuple(segments), completion)
+
+
+def _decode_consolidated(
+    orders: list[Order],
+    sequence: list[tuple[str, str]],
+    masters: Masters,
+    config: PlanConfig,
+    dispatch: str,
+) -> Schedule:
+    """Decode with order consolidation: schedule merged batches, then expand each
+    batch's completion onto the original orders it covers."""
+    from dataclasses import replace
+
+    from ppc_engine.consolidation import consolidate
+
+    batches, expand = consolidate(orders, config.consolidation_window)
+    orig_to_batch = {mk: bkey for bkey, members in expand.items() for mk in members}
+
+    # Batch sequence = the batches in the order their members first appear in `sequence`.
+    seen: set = set()
+    batch_seq: list = []
+    for key in sequence:
+        bkey = orig_to_batch[key]
+        if bkey not in seen:
+            seen.add(bkey)
+            batch_seq.append(bkey)
+
+    # Schedule the batches with consolidation OFF (avoid infinite recursion).
+    sub = decode(batches, batch_seq, masters, replace(config, consolidation_window=0.0), dispatch)
+
+    # A batch's completion is every covered order's completion.
+    completion: dict[tuple[str, str], datetime] = {}
+    for bkey, members in expand.items():
+        end = sub.completion.get(bkey)
+        if end is not None:
+            for mk in members:
+                completion[mk] = end
+    return Schedule(sub.segments, completion)
+
+
+def _place_operation(
+    op: Operation,
+    order: Order,
+    ready: datetime,
+    machine_free: dict[str, datetime],
+    staffing: StaffingBoard,
+    masters: Masters,
+    config: PlanConfig,
+) -> dict:
+    """Work out where/when ``op`` would run if scheduled next for ``order``.
+
+    Returns a placement dict: start, end, list[Segment], list of new staffing
+    assignments to commit, and the machine_id used (None for OS/dispatch). Reads
+    ``machine_free`` and the (already-cloned) ``staffing`` but does not mutate real
+    state — the caller commits the chosen placement.
+    """
+    # Per-operation quantity: on a re-plan, each op runs its OWN remaining (from
+    # order.process_remaining); on a fresh plan, the full order qty.
+    op_qty = order.qty
+    if order.process_remaining is not None:
+        op_qty = order.process_remaining.get(op.seq, order.qty)
+
+    if op.kind == OperationKind.DISPATCH:
+        # Zero-duration milestone: the order is done at ``ready``.
+        seg = Segment(order.key, op.seq, op.name, op.kind, None, None, ready, ready, 0)
+        return {"start": ready, "end": ready, "segments": [seg], "assignments": [], "machine_id": None}
+
+    dur = operation_duration_min(op, op_qty, config)
+
+    if op.kind == OperationKind.OUTSOURCED:
+        # A fixed off-site lead time (or a zero-time milestone if already done).
+        end = ready + timedelta(minutes=dur)
+        seg = Segment(order.key, op.seq, op.name, op.kind, None, None, ready, end, int(op_qty))
+        return {"start": ready, "end": end, "segments": [seg], "assignments": [], "machine_id": None}
+
+    if dur <= 0:
+        # This operation is already finished (re-plan) → a zero-time milestone, no
+        # machine/operator, no phantom setup. Successors start right after it.
+        seg = Segment(order.key, op.seq, op.name, op.kind, None, None, ready, ready, 0)
+        return {"start": ready, "end": ready, "segments": [seg], "assignments": [], "machine_id": None}
+
+    # In-house operation: try each allowed machine, keep the one that finishes soonest
+    # (ties → the machine's preference order). "Soonest finish" naturally prefers a
+    # free machine over a busy one.
+    best = None
+    for opt_idx, mid in enumerate(op.machine_options):
+        machine = masters.machines.get(mid)
+        if machine is None:
+            continue  # unknown machine id (provisional handling comes with the loader)
+        earliest = max(ready, machine_free.get(mid, config.plan_start))
+        laid = _lay_on_machine(machine, earliest, dur, order, op, int(op_qty), staffing, masters, config)
+        if laid is None:
+            continue
+        cand = (laid["end"], opt_idx)
+        if best is None or cand < (best["end"], best["opt_idx"]):
+            best = {**laid, "opt_idx": opt_idx, "machine_id": mid}
+
+    if best is None:
+        # Fail loud (LESSONS.md / RULES.md) rather than silently drop an operation.
+        raise RuntimeError(
+            f"cannot schedule op '{op.name}' (seq {op.seq}) of order {order.key}: "
+            f"no runnable machine among {op.machine_options}"
+        )
+    return {
+        "start": best["start"],
+        "end": best["end"],
+        "segments": best["segments"],
+        "assignments": best["assignments"],
+        "machine_id": best["machine_id"],
+    }
+
+
+def _lay_on_machine(
+    machine: Machine,
+    earliest: datetime,
+    dur_min: float,
+    order: Order,
+    op: Operation,
+    op_qty: int,
+    staffing: StaffingBoard,
+    masters: Masters,
+    config: PlanConfig,
+) -> dict | None:
+    """Lay ``dur_min`` minutes of work for ``op`` onto ``machine`` from ``earliest``.
+
+    Walks the machine's working windows, splitting the work into per-window segments,
+    and staffs each shift with a stable operator (reusing the shift's operator if one
+    is already on the machine, otherwise assigning a free qualified one). If no
+    operator is available for a shift, that shift is skipped (the machine idles) and
+    work continues in the next staffable window.
+
+    ``staffing`` is a working clone that may be mutated here. Returns the placement
+    (start, end, segments, assignments) or None if the work can't be completed within
+    the lookahead horizon.
+    """
+    cursor = earliest
+    remaining = dur_min
+    segments: list[Segment] = []
+    assignments: list[tuple] = []
+    first_start: datetime | None = None
+
+    for win in iter_windows(machine, earliest, masters.calendar, config):
+        if remaining <= _EPS_MIN:
+            break
+
+        # Who mans this machine this shift? Reuse the shift's operator if already set;
+        # otherwise assign a free qualified one (scarce-first). No operator → the
+        # machine can't run this shift, so idle through it.
+        name = staffing.operator_for(machine.id, win.shift_date, win.shift)
+        if name is None:
+            name = staffing.candidate_operator(machine, win.shift_date, win.shift, masters, config)
+            if name is None:
+                cursor = win.end
+                continue
+            # Record (don't commit) — the decoder commits only the chosen placement.
+            # Within one operation each (machine, date, shift) is unique, so we never
+            # re-query this key, and reading the committed board stays correct.
+            assignments.append((machine.id, win.shift_date, win.shift, name))
+
+        seg_start = max(cursor, win.start)
+        avail = (win.end - seg_start).total_seconds() / 60.0
+        if avail <= 0:
+            cursor = win.end
+            continue
+
+        take = min(avail, remaining)
+        seg_end = seg_start + timedelta(minutes=take)
+        segments.append(Segment(order.key, op.seq, op.name, op.kind, machine.id, name, seg_start, seg_end, op_qty))
+        if first_start is None:
+            first_start = seg_start
+        remaining -= take
+        cursor = seg_end
+
+    if remaining > _EPS_MIN or first_start is None:
+        return None  # unschedulable within the lookahead horizon
+    return {"start": first_start, "end": segments[-1].end, "segments": segments, "assignments": assignments}

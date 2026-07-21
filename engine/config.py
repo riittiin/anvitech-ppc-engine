@@ -66,7 +66,7 @@ class Config:
     #               WIP flow, no resource-holding, setup per re-engagement.
     # Not a Settings knob (the owner's no-knobs rule) — the LIVE saved config
     # carries "flow" after cutover; flow_chunks is tuned by the Optimize contest.
-    scheduler: str = "classic"
+    scheduler: str = "new"
     flow_chunks: int = 4
     # Flow scheduler only (2026-07-19): rank a candidate that needs a fresh 90-min
     # CNC/VMC setup as if it started 90 min later, so a machine keeps running the
@@ -157,8 +157,8 @@ class Config:
             errs.append("two_shift_threshold_hours must be >= 0")
         if not isinstance(self.apply_operator_logic, bool):
             errs.append("apply_operator_logic must be true or false")
-        if self.scheduler not in ("classic", "flow"):
-            errs.append("scheduler must be 'classic' or 'flow'")
+        if self.scheduler not in ("classic", "flow", "new"):
+            errs.append("scheduler must be 'classic', 'flow', or 'new'")
         if not (1 <= int(self.flow_chunks) <= 50):
             errs.append("flow_chunks must be within 1..50")
         if not isinstance(self.split_parallel, bool):
@@ -203,4 +203,8 @@ class Config:
                 else:
                     value = int(value)
             setattr(cfg, key, value)
+        # The new operator-stable engine is now THE scheduler; migrate any config saved
+        # under the retired classic/flow engines so existing deployments switch over.
+        if cfg.scheduler in ("classic", "flow"):
+            cfg.scheduler = "new"
         return cfg
