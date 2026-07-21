@@ -1,5 +1,36 @@
 # CLAUDE.md — Anvitech PPC Engine
 
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-07-22)
+>
+> This app now runs a **NEW operator-stable scheduling engine**, swapped in behind the old
+> scheduler seam. **Everything below this banner describes the PRE-SWAP classic/flow engine and
+> is historical** — when it conflicts with the code, trust the code + this banner.
+>
+> - **New engine = `ppc_engine/`** (a vendored package; its imports were rewritten `engine.` →
+>   `ppc_engine.`). Adapter = **`engine/new_engine.py`**: it runs ppc_engine behind
+>   `engine/pipeline.py:scheduler_for` and maps its output back to the old `ScheduleEntry` list, so
+>   the entire UI is unchanged. It exists to enforce **RULES.md Rule 1 — one operator per machine
+>   per shift, NO hour-by-hour hopping** (the old classic/flow engines broke this). `ppc_engine/`,
+>   `new_engine.py`, and the `"new"` branches are **intentional, not errors or stray copies.**
+> - **Production runs `scheduler="new"`** via the env var **`DEFAULT_SCHEDULER=new`** (see
+>   `api/main.py:_load_plan_config`). The code default in `engine/config.py` is `"classic"` **on
+>   purpose**: the ~500 existing tests validate the KEPT classic engine; the new engine has its own
+>   tests in **`tests/test_new_engine.py`** (+ `tests/new_sample_workbook.py`). **Classic/flow are
+>   retired but kept so those tests stay green — do not delete them.**
+> - **"Start deep search"** auto-tunes **overlap % + job sequence** for the new engine: a PARALLEL
+>   fine-grid overlap contest on GitHub Actions (`optimize_service.run_contest` +
+>   `CLOUD_NEW_OVERLAP_CANDIDATES`), with a local golden-section fallback (`new_engine.tune` /
+>   `sweep_optimize`). `optimizer.optimize` / `sweep_optimize` **delegate to `new_engine`** for
+>   `scheduler=="new"`. Progress is per-plan (`ppc_engine` `on_eval`).
+> - **Recent audit fixes (keep — regression tests exist):** unrouted orders are skipped not crashed;
+>   operator absences are honoured (`new_engine._with_absences`); the optimizer's before/after is
+>   reported at the applied overlap.
+> - **Deploy:** repo `riittiin/anvitech-ppc-engine` (branch `main`) → Render service `anvitech-ppc`
+>   (https://anvitech-ppc.onrender.com). Env: `DEFAULT_SCHEDULER=new`, `GITHUB_DISPATCH_TOKEN`,
+>   `OPTIMIZE_WORKER_SECRET`, `MONGODB_URI`, `APP_USERNAME`/`APP_PASSWORD`. **Render auto-deploy is
+>   OFF** — deploy via the dashboard: **Manual Deploy → Deploy latest commit**. Tests: `pytest`
+>   (508 passing).
+
 Guidance for any Claude session working in this repository. Read this first.
 **Taking over a fresh?** Start with [`HANDOFF.md`](HANDOFF.md) — current deployed
 state, live URL, what's done vs deferred, and operational gotchas.
