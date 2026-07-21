@@ -399,6 +399,11 @@ function renderStatusStrip() {
 
 function optimizeProgressLine(st) {
   const where = st.mode === "cloud" ? " in the cloud" : "";
+  // Before the first plan lands (cloud runner still spinning up ~1-2 min), say so plainly
+  // rather than showing a frozen "tried 0".
+  if (st.mode === "cloud" && (!st.evals || st.evals === 0)) {
+    return "starting on GitHub Actions (spinning up the runner, ~1-2 min)…";
+  }
   const tried = `tried ${st.evals} of ${st.budget_evals} plans${where}`;
   let best = "";
   if (st.best && st.best.makespan_days !== undefined) best = `, best so far: ${fmtMetrics(st.best)}`;

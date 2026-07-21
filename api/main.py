@@ -1073,18 +1073,14 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             # worker replace flow_chunks with 60..95 (invalid — validate caps at 50)
             # and the whole cloud contest would error out, never running in flow mode.
             _cands = optimize_service.cloud_candidates(setup.search_config)
+            _bpc = optimize_service.cloud_budget(setup.search_config)
             payload = optimize_service.build_payload(
                 orders, actuals, book_store.load_masters_bytes(), config,
-                seed=_OPT_SEED, candidates=_cands, absences=absences,
-                operator_table=operator_table)
+                seed=_OPT_SEED, candidates=_cands, budget_per_candidate=_bpc,
+                absences=absences, operator_table=operator_table)
             _knob, _ = optimizer.knob_for(setup.search_config)
-            if new_engine_run:
-                # golden-section runs ~13 probes at NEW_CLOUD_BUDGET_PER_EVAL plans each.
-                denom = 13 * optimize_service.NEW_CLOUD_BUDGET_PER_EVAL
-            else:
-                denom = (optimize_service.CLOUD_BUDGET_PER_CANDIDATE
-                         * len(optimizer.sweep_contenders(
-                             getattr(setup.search_config, _knob), _cands)))
+            denom = _bpc * len(optimizer.sweep_contenders(
+                getattr(setup.search_config, _knob), _cands))
         else:
             payload = None
             _knob, _kcands = optimizer.knob_for(setup.search_config)

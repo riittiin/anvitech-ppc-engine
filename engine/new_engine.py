@@ -225,8 +225,9 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     if not batches:
         return OptimizeResult()
     orders, batch_by_key = _orders_from_batches(batches, nm)
-    prog = (lambda evals, _b: on_progress(evals, {})) if on_progress else None
-    res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_progress=prog)
+    # Report EVERY plan (on_eval), not just improvements, so the live counter climbs steadily.
+    prog = (lambda evals, _sc: on_progress(evals, None)) if on_progress else None
+    res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_eval=prog)
     best_batches = [batch_by_key[k] for k in res.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
     winner_metrics = plan_metrics(run(best_batches, config, masters), so_lines, plan_start)

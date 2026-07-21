@@ -29,7 +29,7 @@ APP_URL = os.environ["APP_URL"].rstrip("/")
 SECRET = os.environ["OPTIMIZE_WORKER_SECRET"]
 JOB_ID = os.environ["JOB_ID"]
 
-PROGRESS_EVERY_S = 10.0
+PROGRESS_EVERY_S = 5.0
 
 
 def _call(method, path, body=None, *, tries=5, timeout=120):

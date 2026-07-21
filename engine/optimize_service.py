@@ -31,6 +31,10 @@ from engine.models import Actual, Masters, Order
 # 2026-07-19: 50/90/100 dropped (lost every measured contest under the
 # crew-smart scheduler); 85/88/95 added (the new winners' region).
 CLOUD_OVERLAP_CANDIDATES = (60, 70, 80, 85, 88, 95)
+# New engine: a FINE overlap grid (2–4% steps, dense around the sweet spot) so the parallel
+# contest finds a near-continuous optimum (0.78/0.80/0.82…), not just coarse grid points —
+# while still fanning out across the runner's cores (fast, unlike a sequential tuner).
+CLOUD_NEW_OVERLAP_CANDIDATES = (60, 65, 70, 74, 78, 80, 82, 84, 86, 88, 90, 93)
 # Flow-mode cloud contest: chunk counts (see optimizer.FLOW_CHUNK_CANDIDATES).
 # Two candidates only: on 2 vCPU they run in ONE parallel round (~13 min wall
 # for 400 evals each), fitting OPTIMIZE_CLOUD_TIMEOUT_MIN's default 20. Four
@@ -41,10 +45,25 @@ CLOUD_FLOW_CHUNK_CANDIDATES = (4, 6)
 
 def cloud_candidates(config) -> tuple:
     """The cloud contest lineup for this config's scheduler mode."""
-    if getattr(config, "scheduler", "classic") == "flow":
+    sched = getattr(config, "scheduler", "classic")
+    if sched == "flow":
         return CLOUD_FLOW_CHUNK_CANDIDATES
+    if sched == "new":
+        return CLOUD_NEW_OVERLAP_CANDIDATES
     return CLOUD_OVERLAP_CANDIDATES
+
+
 CLOUD_BUDGET_PER_CANDIDATE = 400
+# The new engine's decode is heavier, so its fine grid gets a smaller per-candidate budget
+# (12 candidates × 150 ≈ 1,800 plans, ~15 min across 2 cores).
+CLOUD_NEW_BUDGET_PER_CANDIDATE = 150
+
+
+def cloud_budget(config) -> int:
+    """Plans per candidate for the cloud contest, per scheduler mode."""
+    return (CLOUD_NEW_BUDGET_PER_CANDIDATE
+            if getattr(config, "scheduler", "classic") == "new"
+            else CLOUD_BUDGET_PER_CANDIDATE)
 
 
 def absence_reservations(absences):
@@ -281,33 +300,6 @@ def _pool_run(args):
                          should_cancel=(lambda: bool(stop.value)) if stop else None)
 
 
-# Plans per golden-section probe for the new engine's cloud run (~13 probes → ~1,500 plans,
-# ~20 min sequential on a GitHub 2-vCPU runner — within the cloud timeout).
-NEW_CLOUD_BUDGET_PER_EVAL = 120
-
-
-def _run_contest_new(payload: dict, *, on_progress=None, should_cancel=None) -> dict:
-    """The new engine's contest: continuous golden-section overlap tune + sequence search.
-    Same result shape as ``run_contest``. Progress is per-plan with the best score so far."""
-    from engine import new_engine
-
-    orders, actuals, masters, config, absences, operator_table = parse_payload(payload)
-    raw = payload.get("masters_xlsx_b64")
-    new_engine.set_masters_bytes(base64.b64decode(raw) if raw else None)
-    setup = prepare_contest(orders, actuals, masters, config, absences=absences,
-                            operator_table=operator_table)
-
-    def step(plans, best_score):
-        if on_progress:
-            on_progress(plans, best_score)
-
-    ranks, winner_overlap, best_metrics, evals = new_engine.tune(
-        setup.target, setup.search_config, setup.masters,
-        budget_per_eval=NEW_CLOUD_BUDGET_PER_EVAL, seed=int(payload["seed"]), on_step=step)
-    return {"winner_overlap": winner_overlap, "ranks": ranks, "best": best_metrics,
-            "rows": [], "evals": evals, "cancelled": bool(should_cancel and should_cancel())}
-
-
 def run_contest(payload: dict, *, processes=1, on_progress=None,
                 should_cancel=None, poll_seconds=5.0) -> dict:
     """The full fair contest from a payload. ``processes > 1`` fans the
@@ -315,10 +307,6 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
     ``processes == 1`` runs them sequentially in-process. Returns
     {winner_overlap, rows, best, ranks, evals, cancelled}."""
     config = Config.from_dict(payload["config"])
-    # The new engine uses the CONTINUOUS golden-section overlap tuner (finds 0.78/0.82/0.913,
-    # not grid points), run as one job — not the discrete parallel sweep.
-    if getattr(config, "scheduler", "classic") == "new":
-        return _run_contest_new(payload, on_progress=on_progress, should_cancel=should_cancel)
     knob, _default_cands = optimizer.knob_for(config)
     cur_value = getattr(config, knob)
     contenders = optimizer.sweep_contenders(cur_value, payload["candidates"])
