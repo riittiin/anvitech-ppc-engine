@@ -810,16 +810,28 @@ def _commit_orders(pairs):
 def _load_plan_config() -> Config:
     """The admin's last-saved plan config, or defaults. Never raises: a missing,
     unparseable, or invalid stored value falls back to ``Config()`` so a read
-    endpoint can't be 500'd by a bad stored config."""
+    endpoint can't be 500'd by a bad stored config.
+
+    Engine selection: the code default is ``classic`` (the kept engine the test suite
+    validates). Production runs the new operator-stable engine by setting the env var
+    ``DEFAULT_SCHEDULER=new`` — applied only when the admin hasn't explicitly saved a
+    scheduler choice, so an explicit Settings choice always wins and tests (no env) stay
+    on classic."""
     raw = book_store.load_plan_config()
-    if not raw:
-        return Config()
+    saved = {}
+    if raw:
+        try:
+            saved = json.loads(raw)
+        except Exception:
+            saved = {}
     try:
-        cfg = Config.from_dict(json.loads(raw))
+        cfg = Config.from_dict(saved)
         cfg.validate()
-        return cfg
     except Exception:
-        return Config()
+        cfg = Config()
+    if "scheduler" not in (saved or {}):
+        cfg.scheduler = os.environ.get("DEFAULT_SCHEDULER", cfg.scheduler)
+    return cfg
 
 
 # --------------------------------------------------------------------------- #

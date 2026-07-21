@@ -25,3 +25,8 @@ services:
         sync: false
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
+      # Run the new operator-stable engine in production. The code default is 'classic'
+      # (kept for the test suite that validates that engine); this makes the deployed app
+      # use the new engine unless an admin explicitly picks another in Settings.
+      - key: DEFAULT_SCHEDULER
+        value: new
