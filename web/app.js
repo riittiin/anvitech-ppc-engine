@@ -970,7 +970,21 @@ function renderGantt() {
     <p class="g-note">Each process sits on its own line, coloured by machine, placed on the day(s) it runs, with its start → end date shown. Hover a bar for machine · operator · time · qty. Status = Pending/Running per order.</p>`;
   $("g-zoom-in").onclick = () => { ganttDayWidth = Math.min(ganttDayWidth + 40, 560); renderGantt(); };
   $("g-zoom-out").onclick = () => { ganttDayWidth = Math.max(ganttDayWidth - 40, 80); renderGantt(); };
+  fitGantt();
 }
+
+// Size the Gantt scroll area to fill from its top down to near the window's bottom, so its
+// HORIZONTAL scrollbar is always pinned to the bottom of the screen — visible no matter how
+// far down you scroll the rows (instead of dropping below the fold on a tall chart).
+function fitGantt() {
+  const gs = document.querySelector("#view-gantt .g-scroll");
+  if (!gs) return;
+  const top = gs.getBoundingClientRect().top;   // distance from the window top to the chart
+  gs.style.maxHeight = Math.max(320, window.innerHeight - top - 24) + "px";
+}
+window.addEventListener("resize", () => {
+  if (document.getElementById("view-gantt")?.classList.contains("active")) fitGantt();
+});
 
 // ---- Analytics ----
 function renderAnalytics() {

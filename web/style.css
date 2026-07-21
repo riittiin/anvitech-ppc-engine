@@ -347,7 +347,10 @@ td.slip { color: var(--danger); background: rgba(248,81,73,.12); font-weight: 60
 #view-gantt { max-width: none; }
 .g-toolbar { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
 .g-toolbar button { padding: 2px 10px; margin-left: 4px; font-size: 14px; line-height: 1; }
-.g-scroll { overflow: auto; max-height: calc(100vh - 150px); min-height: 460px;
+/* max-height is refined precisely by fitGantt() in app.js so the horizontal scrollbar sits
+   at the window bottom; this calc is the pre-JS fallback. min-height matches fitGantt()'s
+   floor so a short window can't force the chart taller than the space (hiding the scrollbar). */
+.g-scroll { overflow: auto; max-height: calc(100vh - 150px); min-height: 320px;
   border: 1px solid var(--line); border-radius: var(--radius); }
 .g-table { border-collapse: collapse; }
 .g-table th, .g-table td {
