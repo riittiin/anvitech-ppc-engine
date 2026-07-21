@@ -829,8 +829,13 @@ def _load_plan_config() -> Config:
         cfg.validate()
     except Exception:
         cfg = Config()
-    if "scheduler" not in (saved or {}):
-        cfg.scheduler = os.environ.get("DEFAULT_SCHEDULER", cfg.scheduler)
+    # DEFAULT_SCHEDULER is the DEPLOY-level engine selector and is AUTHORITATIVE: it
+    # overrides any scheduler stored in the saved config, so switching the deployed engine
+    # never requires clearing an old MongoDB config (which pins the retired flow/classic).
+    # Normalised for stray whitespace/case. Unset (e.g. in tests) -> the saved/Config value.
+    env_sched = (os.environ.get("DEFAULT_SCHEDULER") or "").strip().lower()
+    if env_sched in ("new", "classic", "flow"):
+        cfg.scheduler = env_sched
     return cfg
 
 
