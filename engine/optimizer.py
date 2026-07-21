@@ -131,6 +131,13 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
     search stops early and returns the best plan found so far. Exceptions from Rule 6 are
     not caught: a book that cannot plan at all should fail loud exactly like Plan does.
     """
+    # The new engine runs its own sequence search + objective; delegate there (so the cloud
+    # contest, which calls this per overlap candidate, becomes the new engine's contest).
+    if getattr(config, "scheduler", "classic") == "new":
+        from engine import new_engine
+        return new_engine.optimize_sequence(
+            so_lines, config, masters, reserved=reserved, budget_evals=budget_evals,
+            seed=seed, on_progress=on_progress, should_cancel=should_cancel)
     config.validate()
 
     batches = rule1_consolidate.run(list(so_lines), config=config, masters=masters)

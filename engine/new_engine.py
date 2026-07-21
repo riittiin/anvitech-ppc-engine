@@ -51,11 +51,23 @@ def _norm(name) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(name or "").upper())
 
 
+# Workbook bytes injected out-of-band (the cloud optimize worker has no store — it carries
+# the workbook in its payload). When set, it wins over book_store; the web app leaves it None.
+_OVERRIDE_BYTES = None
+
+
+def set_masters_bytes(raw: bytes | None) -> None:
+    """Feed the new engine the masters workbook directly (used by the cloud worker, which
+    runs from a payload rather than the store). Pass None to clear and fall back to the store."""
+    global _OVERRIDE_BYTES
+    _OVERRIDE_BYTES = raw
+
+
 def _new_masters():
-    """Load the new-engine Masters from the stored workbook, cached by content hash."""
-    raw = book_store.load_masters_bytes()
+    """Load the new-engine Masters from the injected bytes or the stored workbook, cached."""
+    raw = _OVERRIDE_BYTES if _OVERRIDE_BYTES is not None else book_store.load_masters_bytes()
     if not raw:
-        raise RuntimeError("new_engine.run: no masters workbook stored")
+        raise RuntimeError("new_engine: no masters workbook available (store empty and none injected)")
     h = hashlib.sha256(raw).hexdigest()
     cached = _MASTERS_CACHE.get(h)
     if cached is None:
@@ -194,7 +206,35 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     return _entries_from_schedule(sched, batch_by_key)
 
 
-# Overlaps the sweep contest tries (0.0 = sequential .. 0.90). The best-scoring one is
+def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=150,
+                      seed=42, on_progress=None, should_cancel=None):
+    """Sequence-only search for the NEW engine at the config's overlap. The cloud contest
+    sweeps overlaps EXTERNALLY (one candidate per overlap) and calls this per candidate, so
+    across candidates it becomes the full overlap × sequence contest — just distributed and
+    at scale on GitHub Actions. Returns the old OptimizeResult so the contest/apply machinery
+    is unchanged."""
+    from engine.optimizer import OptimizeResult, plan_metrics, ranks_for
+    from engine.rules import rule1_consolidate
+
+    from ppc_engine.optimize import optimize as new_optimize
+
+    nm = _new_masters()
+    cfg = _plan_config(config)
+    plan_start = getattr(config, "plan_start_date", None) or date.today()
+    batches = rule1_consolidate.run(so_lines, config)
+    if not batches:
+        return OptimizeResult()
+    orders, batch_by_key = _orders_from_batches(batches, nm)
+    prog = (lambda evals, _b: on_progress(evals, {})) if on_progress else None
+    res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_progress=prog)
+    best_batches = [batch_by_key[k] for k in res.best_sequence if k in batch_by_key]
+    ranks = ranks_for(best_batches)
+    winner_metrics = plan_metrics(run(best_batches, config, masters), so_lines, plan_start)
+    return OptimizeResult(ranks=ranks, best=winner_metrics, evals=res.evaluations,
+                          improved=True, cancelled=False)
+
+
+# Overlaps the LOCAL sweep tries (0.0 = sequential .. 0.90). The best-scoring one is
 # applied, so "Start deep search" auto-tunes the overlap AND the sequence together.
 _OVERLAP_CANDIDATES = (0.0, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9)
 

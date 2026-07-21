@@ -1062,9 +1062,10 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-        # Force the local path for the new engine (its GitHub-Actions worker isn't wired
-        # for the new optimizer yet — a documented follow-up).
-        cloud = None if new_engine_run else _cloud_config()
+        # The new engine now runs its contest on GitHub Actions too (the worker seeds its
+        # masters from the payload workbook). If the cloud run fails/times out, the watchdog
+        # falls back to the in-process sweep (budget-capped above) — so the button always works.
+        cloud = _cloud_config()
         job_id = uuid.uuid4().hex
         if cloud:
             # The contest lineup must match the scheduler MODE: chunk counts under

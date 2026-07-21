@@ -237,6 +237,12 @@ def run_candidate(payload: dict, overlap: int, *, on_progress=None,
     absences (physical unavailability). Returns a sweep-table row (+ ranks for
     the winner)."""
     orders, actuals, masters, config, absences, operator_table = parse_payload(payload)
+    # The new engine loads its masters from the workbook; the cloud worker has no store, so
+    # feed it the payload's workbook bytes directly (harmless for classic/flow).
+    if getattr(config, "scheduler", "classic") == "new":
+        from engine import new_engine
+        _raw = payload.get("masters_xlsx_b64")
+        new_engine.set_masters_bytes(base64.b64decode(_raw) if _raw else None)
     setup = prepare_contest(orders, actuals, masters, config, absences=absences,
                             operator_table=operator_table)
     knob, _cands = optimizer.knob_for(setup.search_config)
