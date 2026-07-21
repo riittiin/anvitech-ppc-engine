@@ -163,3 +163,18 @@ def test_unrouted_order_is_skipped_not_crashing(old_book, new_masters):
     pipeline.run_forward(pr, _CONF, masters)  # must not raise
     assert "NO_SUCH_ITEM" not in {e.item_code for e in pr.schedule}
     assert pr.schedule  # the routed orders still schedule
+
+
+def test_operator_absence_is_honoured(old_book, new_masters):
+    """The app's operator-absence feature must apply under the new engine: an absent
+    operator is never assigned (regression — it was silently ignored)."""
+    from engine import optimize_service
+    so_lines, masters = old_book
+    if not masters.operators:
+        pytest.skip("no operators in sample")
+    op = masters.operators[0].name
+    reserved = optimize_service.absence_reservations(
+        [{"operator": op, "from_date": "2025-03-01", "to_date": "2025-12-31"}])
+    pr = PlanRun(so_lines=so_lines)
+    pipeline.run_forward(pr, _CONF, masters, reserved=reserved)
+    assert all(e.operator != op for e in pr.schedule)

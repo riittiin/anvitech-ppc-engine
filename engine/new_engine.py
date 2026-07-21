@@ -81,6 +81,33 @@ def _friday_on_or_before(d: date) -> date:
     return d - timedelta(days=(d.weekday() - 4) % 7)
 
 
+def _with_absences(masters, reserved):
+    """Return a per-plan copy of the new-engine Masters with the app's operator absences
+    folded into the calendar's per-operator leave, so an absent operator is never assigned.
+    ``reserved`` is the old ``{operator -> [(start_dt, end_dt), ...]}`` from
+    optimize_service.absence_reservations. Cached masters are never mutated."""
+    from dataclasses import replace as _replace
+    if not reserved:
+        return masters
+    extra: dict[str, set] = {}
+    for op, intervals in reserved.items():
+        days: set = set()
+        for start, end in intervals:
+            d = start.date()
+            while d < end.date():
+                days.add(d)
+                d += timedelta(days=1)
+        if days:
+            extra[op] = days
+    if not extra:
+        return masters
+    cal = masters.calendar
+    merged = dict(getattr(cal, "leaves", {}) or {})
+    for op, days in extra.items():
+        merged[op] = frozenset(merged.get(op, frozenset()) | days)
+    return _replace(masters, calendar=_replace(cal, leaves=merged))
+
+
 def _plan_config(config) -> PlanConfig:
     """Translate the old Config into a new PlanConfig (shift hours, setup, overlap,
     plan start). Consolidation is 0 — the old Rule 1 already consolidated the batches."""
@@ -204,7 +231,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     """
     if not batches:
         return []
-    new_masters = _new_masters()
+    new_masters = _with_absences(_new_masters(), reserved)
     orders, batch_by_key = _orders_from_batches(batches, new_masters)
     if not orders:
         return []
@@ -227,7 +254,7 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
 
     from ppc_engine.optimize import optimize as new_optimize
 
-    nm = _new_masters()
+    nm = _with_absences(_new_masters(), reserved)
     cfg = _plan_config(config)
     plan_start = getattr(config, "plan_start_date", None) or date.today()
     batches = rule1_consolidate.run(so_lines, config)
@@ -244,7 +271,7 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
                           improved=True, cancelled=False)
 
 
-def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=None):
+def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=None, reserved=None):
     """The CONTINUOUS overlap optimizer + sequence search (the 'atom optimizer').
 
     Golden-section search over the overlap value: it treats "best plan score achievable at
@@ -263,7 +290,7 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     from ppc_engine.optimize import tune_overlap
     from ppc_engine.scheduler import decode
 
-    new_masters = _new_masters()
+    new_masters = _with_absences(_new_masters(), reserved)
     base = _plan_config(config)
     plan_start = getattr(config, "plan_start_date", None) or date.today()
 
@@ -304,7 +331,8 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
     # Split the (capped) budget across ~12 golden-section probes.
     per = max(15, int(budget_evals) // 10)
     ranks, overlap_pct, metrics, plans = tune(so_lines, config, masters,
-                                              budget_per_eval=per, seed=seed, on_step=_step)
+                                              budget_per_eval=per, seed=seed, on_step=_step,
+                                              reserved=base_reserved)
     state["best"] = metrics or {}
     if not ranks:
         return SweepResult(overlap_percent=overlap_pct, knob="overlap",
