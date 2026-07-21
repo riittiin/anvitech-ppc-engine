@@ -400,7 +400,9 @@ function renderStatusStrip() {
 function optimizeProgressLine(st) {
   const where = st.mode === "cloud" ? " in the cloud" : "";
   const tried = `tried ${st.evals} of ${st.budget_evals} plans${where}`;
-  const best = st.best ? `, best so far: ${fmtMetrics(st.best)}` : "";
+  let best = "";
+  if (st.best && st.best.makespan_days !== undefined) best = `, best so far: ${fmtMetrics(st.best)}`;
+  else if (st.best && typeof st.best.score === "number") best = `, best score so far: ${st.best.score}`;
   return tried + best;
 }
 

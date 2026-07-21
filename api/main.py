@@ -1078,9 +1078,13 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                 seed=_OPT_SEED, candidates=_cands, absences=absences,
                 operator_table=operator_table)
             _knob, _ = optimizer.knob_for(setup.search_config)
-            denom = (optimize_service.CLOUD_BUDGET_PER_CANDIDATE
-                     * len(optimizer.sweep_contenders(
-                         getattr(setup.search_config, _knob), _cands)))
+            if new_engine_run:
+                # golden-section runs ~13 probes at NEW_CLOUD_BUDGET_PER_EVAL plans each.
+                denom = 13 * optimize_service.NEW_CLOUD_BUDGET_PER_EVAL
+            else:
+                denom = (optimize_service.CLOUD_BUDGET_PER_CANDIDATE
+                         * len(optimizer.sweep_contenders(
+                             getattr(setup.search_config, _knob), _cands)))
         else:
             payload = None
             _knob, _kcands = optimizer.knob_for(setup.search_config)

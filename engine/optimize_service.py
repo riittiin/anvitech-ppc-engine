@@ -281,6 +281,33 @@ def _pool_run(args):
                          should_cancel=(lambda: bool(stop.value)) if stop else None)
 
 
+# Plans per golden-section probe for the new engine's cloud run (~13 probes → ~1,500 plans,
+# ~20 min sequential on a GitHub 2-vCPU runner — within the cloud timeout).
+NEW_CLOUD_BUDGET_PER_EVAL = 120
+
+
+def _run_contest_new(payload: dict, *, on_progress=None, should_cancel=None) -> dict:
+    """The new engine's contest: continuous golden-section overlap tune + sequence search.
+    Same result shape as ``run_contest``. Progress is per-plan with the best score so far."""
+    from engine import new_engine
+
+    orders, actuals, masters, config, absences, operator_table = parse_payload(payload)
+    raw = payload.get("masters_xlsx_b64")
+    new_engine.set_masters_bytes(base64.b64decode(raw) if raw else None)
+    setup = prepare_contest(orders, actuals, masters, config, absences=absences,
+                            operator_table=operator_table)
+
+    def step(plans, best_score):
+        if on_progress:
+            on_progress(plans, best_score)
+
+    ranks, winner_overlap, best_metrics, evals = new_engine.tune(
+        setup.target, setup.search_config, setup.masters,
+        budget_per_eval=NEW_CLOUD_BUDGET_PER_EVAL, seed=int(payload["seed"]), on_step=step)
+    return {"winner_overlap": winner_overlap, "ranks": ranks, "best": best_metrics,
+            "rows": [], "evals": evals, "cancelled": bool(should_cancel and should_cancel())}
+
+
 def run_contest(payload: dict, *, processes=1, on_progress=None,
                 should_cancel=None, poll_seconds=5.0) -> dict:
     """The full fair contest from a payload. ``processes > 1`` fans the
@@ -288,6 +315,10 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
     ``processes == 1`` runs them sequentially in-process. Returns
     {winner_overlap, rows, best, ranks, evals, cancelled}."""
     config = Config.from_dict(payload["config"])
+    # The new engine uses the CONTINUOUS golden-section overlap tuner (finds 0.78/0.82/0.913,
+    # not grid points), run as one job — not the discrete parallel sweep.
+    if getattr(config, "scheduler", "classic") == "new":
+        return _run_contest_new(payload, on_progress=on_progress, should_cancel=should_cancel)
     knob, _default_cands = optimizer.knob_for(config)
     cur_value = getattr(config, knob)
     contenders = optimizer.sweep_contenders(cur_value, payload["candidates"])

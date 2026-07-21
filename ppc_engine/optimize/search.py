@@ -54,12 +54,16 @@ class OptimizeResult:
 class _Evaluator:
     """Decodes + scores a sequence, caching by sequence so identical ones are free."""
 
-    def __init__(self, orders: list[Order], masters: Masters, config: PlanConfig) -> None:
+    def __init__(self, orders: list[Order], masters: Masters, config: PlanConfig,
+                 on_eval=None) -> None:
         self._orders = orders
         self._masters = masters
         self._config = config
         self._cache: dict[tuple, tuple[float, PlanMetrics]] = {}
         self.evals = 0  # number of real (non-cached) decodes performed
+        # Fired after EVERY real decode with (evals_so_far, score) — used for a live
+        # progress tracker (unlike on_progress, which only fires on an improvement).
+        self._on_eval = on_eval
 
     def evaluate(self, sequence: Sequence) -> tuple[float, PlanMetrics]:
         key = tuple(sequence)
@@ -71,6 +75,8 @@ class _Evaluator:
         metrics = compute_metrics(sched, self._orders, self._config.plan_start)
         result = (score(metrics, self._config), metrics)
         self._cache[key] = result
+        if self._on_eval:
+            self._on_eval(self.evals, result[0])
         return result
 
 
@@ -138,6 +144,7 @@ def optimize(
     budget: int = 300,
     seed: int = 0,
     on_progress=None,
+    on_eval=None,
 ) -> OptimizeResult:
     """Search for the order sequence that minimises the objective.
 
@@ -153,7 +160,7 @@ def optimize(
         An OptimizeResult with the best sequence found and how it compares to the best
         dispatch-rule baseline.
     """
-    ev = _Evaluator(orders, masters, config)
+    ev = _Evaluator(orders, masters, config, on_eval=on_eval)
     rng = random.Random(seed)
 
     # Seed with the dispatch rules; the best of them is our starting incumbent.

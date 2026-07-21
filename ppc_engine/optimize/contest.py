@@ -175,6 +175,7 @@ def tune_overlap(
     tol: float = 0.02,
     coarse: int = 5,
     on_eval: Callable[[float, float], None] | None = None,
+    on_step: Callable[[int, float], None] | None = None,
 ) -> TuneResult:
     """Smart 1-D optimizer for the overlap value — homes in on the true optimum.
 
@@ -197,6 +198,7 @@ def tune_overlap(
     cache: dict[float, OptimizeResult] = {}
     trace: list[tuple[float, float]] = []
     total_evals = 0
+    best_ever = [float("inf")]  # best score across ALL probes so far (for the live tracker)
 
     def f(x: float) -> float:
         nonlocal total_evals
@@ -205,7 +207,16 @@ def tune_overlap(
             return cache[x].best_score
         best: OptimizeResult | None = None
         for sd in seeds:
-            res = optimize(orders, masters, replace(config, overlap=x), budget=budget_per_eval, seed=sd)
+            offset = total_evals  # cumulative plans before this probe
+
+            def _step(evals_in_probe, sc, _off=offset):
+                if sc < best_ever[0]:
+                    best_ever[0] = sc
+                if on_step:
+                    on_step(_off + evals_in_probe, best_ever[0])
+
+            res = optimize(orders, masters, replace(config, overlap=x),
+                           budget=budget_per_eval, seed=sd, on_eval=_step)
             total_evals += res.evaluations
             if best is None or res.best_score < best.best_score:
                 best = res

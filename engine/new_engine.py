@@ -234,32 +234,23 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
                           improved=True, cancelled=False)
 
 
-# Overlaps the LOCAL sweep tries (0.0 = sequential .. 0.90). The best-scoring one is
-# applied, so "Start deep search" auto-tunes the overlap AND the sequence together.
-_OVERLAP_CANDIDATES = (0.0, 0.5, 0.6, 0.7, 0.8, 0.85, 0.9)
+def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=None):
+    """The CONTINUOUS overlap optimizer + sequence search (the 'atom optimizer').
 
+    Golden-section search over the overlap value: it treats "best plan score achievable at
+    overlap x" as a function of x and homes in on its true minimum — a CONTINUOUS value like
+    0.78 / 0.82 / 0.913, not a fixed grid point. Each probe runs the full sequence search
+    (comparing many plans), so it optimizes the overlap AND the job order together.
 
-def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
-                   on_progress=None, should_cancel=None, base_reserved=None, **kw):
-    """The full contest for the NEW engine: search the job SEQUENCE **and** sweep the
-    OVERLAP, keeping the best (sequence, overlap) by the owner's objective (total tardiness
-    + fairness). Returns the old ``SweepResult`` shape, so the existing optimize job / apply
-    / rank-replay machinery is unchanged and the winning overlap is applied to the plan.
-
-    Two phases (cheap enough for the free instance):
-      1. Search the sequence at the overlap sweet-spot (0.7) — many plans, keep the best.
-      2. Sweep every overlap on that winning sequence and pick the score-minimising one
-         (the "auto-overlap" tuner). Overlap is the biggest makespan lever, so this is where
-         most of the improvement comes from.
-    Before/after is reported in the OLD ``plan_metrics`` space so the app's panel matches.
+    ``on_step(cumulative_plans, best_score_so_far)`` is fired after every plan for a live
+    tracker. Returns ``(ranks, best_overlap_percent, winner_metrics_old_space, plans)``.
     """
     from dataclasses import replace
 
-    from engine.optimizer import OptimizeResult, SweepResult, plan_metrics, ranks_for
+    from engine.optimizer import plan_metrics, ranks_for
     from engine.rules import rule1_consolidate
 
-    from ppc_engine.objective import compute_metrics, score
-    from ppc_engine.optimize import optimize as new_optimize
+    from ppc_engine.optimize import tune_overlap
     from ppc_engine.scheduler import decode
 
     new_masters = _new_masters()
@@ -268,36 +259,43 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
 
     batches = rule1_consolidate.run(so_lines, config)
     if not batches:
-        return SweepResult(overlap_percent=int(round(base.overlap * 100)), knob="overlap",
-                           result=OptimizeResult(evals=0, best=None),
-                           table=[], evals=0, cancelled=False)
-
+        return {}, int(round(base.overlap * 100)), {}, 0
     orders, batch_by_key = _orders_from_batches(batches, new_masters)
 
-    # Phase 1 — search the sequence at the overlap sweet-spot.
-    search_cfg = replace(base, overlap=0.7)
-    progress = (lambda evals, best: on_progress(evals, best)) if on_progress else None
-    res = new_optimize(orders, new_masters, search_cfg, budget=int(budget_evals),
-                       seed=int(seed), on_progress=progress)
-    best_keys = list(res.best_sequence)
+    tr = tune_overlap(orders, new_masters, base, lo=0.5, hi=0.95, seeds=(int(seed),),
+                      budget_per_eval=int(budget_per_eval), tol=0.01, coarse=5, on_step=on_step)
 
-    # Phase 2 — auto-tune the overlap on the winning sequence (score-minimising).
-    best_overlap, best_score = 0.7, None
-    for ov in _OVERLAP_CANDIDATES:
-        cfg_ov = replace(base, overlap=ov)
-        sc = score(compute_metrics(decode(orders, best_keys, new_masters, cfg_ov),
-                                   orders, cfg_ov.plan_start), cfg_ov)
-        if best_score is None or sc < best_score:
-            best_score, best_overlap = sc, ov
-
-    best_batches = [batch_by_key[k] for k in best_keys if k in batch_by_key]
+    best_batches = [batch_by_key[k] for k in tr.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
-    # Winner metrics in the old space: decode the winning (sequence, overlap) the old way.
-    won_cfg = replace(base, overlap=best_overlap)
-    winner_entries = _entries_from_schedule(decode(orders, best_keys, new_masters, won_cfg),
-                                            batch_by_key)
-    winner_metrics = plan_metrics(winner_entries, so_lines, plan_start)
-    result = OptimizeResult(ranks=ranks, best=winner_metrics, evals=res.evaluations,
-                            improved=True, cancelled=False)
-    return SweepResult(overlap_percent=int(round(best_overlap * 100)), knob="overlap",
-                       result=result, table=[], evals=res.evaluations, cancelled=False)
+    won_cfg = replace(base, overlap=tr.best_overlap)
+    winner_metrics = plan_metrics(
+        _entries_from_schedule(decode(orders, tr.best_sequence, new_masters, won_cfg), batch_by_key),
+        so_lines, plan_start)
+    return ranks, int(round(tr.best_overlap * 100)), winner_metrics, tr.evaluations
+
+
+def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
+                   on_progress=None, should_cancel=None, base_reserved=None, **kw):
+    """Local (in-process) fallback for 'Start deep search': the same continuous golden-section
+    tune as the cloud, at a smaller budget so it finishes on the free instance. Returns the old
+    ``SweepResult`` shape so the optimize/apply/replay machinery is unchanged. ``on_progress``
+    is fed EVERY plan (with the best-so-far metrics) so the app's counter tracks real work."""
+    from engine.optimizer import OptimizeResult, SweepResult
+
+    state = {"best": {}}
+
+    def _step(plans, best_score):
+        if on_progress:
+            on_progress(plans, state["best"])
+
+    # Split the (capped) budget across ~12 golden-section probes.
+    per = max(15, int(budget_evals) // 10)
+    ranks, overlap_pct, metrics, plans = tune(so_lines, config, masters,
+                                              budget_per_eval=per, seed=seed, on_step=_step)
+    state["best"] = metrics or {}
+    if not ranks:
+        return SweepResult(overlap_percent=overlap_pct, knob="overlap",
+                           result=OptimizeResult(evals=0, best=None), table=[], evals=0, cancelled=False)
+    result = OptimizeResult(ranks=ranks, best=metrics, evals=plans, improved=True, cancelled=False)
+    return SweepResult(overlap_percent=overlap_pct, knob="overlap",
+                       result=result, table=[], evals=plans, cancelled=False)

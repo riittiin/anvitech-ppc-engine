@@ -65,28 +65,35 @@ def main() -> int:
           f"{payload['budget_per_candidate']} plans, {n_procs} processes",
           flush=True)
 
-    state = {"evals": 0, "cancel": bool(job.get("cancel")), "done": False}
+    state = {"evals": 0, "best": None, "cancel": bool(job.get("cancel")), "done": False}
 
     def poster():
-        """Progress heartbeat; the response carries the admin's Stop click."""
+        """Progress heartbeat (plans tried + best score so far); the response carries the
+        admin's Stop click."""
         while not state["done"]:
             time.sleep(PROGRESS_EVERY_S)
             if state["done"]:
                 return
             try:
-                r = _call("POST", "/optimize/progress",
-                          {"job_id": JOB_ID, "evals": state["evals"]}, tries=2,
-                          timeout=30)
+                body = {"job_id": JOB_ID, "evals": state["evals"]}
+                b = state["best"]
+                if b is not None:
+                    body["best"] = {"score": round(b)} if isinstance(b, (int, float)) else b
+                r = _call("POST", "/optimize/progress", body, tries=2, timeout=30)
                 if r.get("cancel"):
                     state["cancel"] = True
             except Exception as e:  # noqa: BLE001 — a missed beat is fine
                 print(f"worker: progress post failed (non-fatal): {e}", flush=True)
 
+    def _on_prog(evals, best):
+        state["evals"] = evals
+        if best is not None:
+            state["best"] = best
+
     threading.Thread(target=poster, daemon=True).start()
     try:
         out = optimize_service.run_contest(
-            payload, processes=n_procs,
-            on_progress=lambda evals, _best: state.__setitem__("evals", evals),
+            payload, processes=n_procs, on_progress=_on_prog,
             should_cancel=lambda: state["cancel"])
         state["done"] = True
         _call("POST", "/optimize/result", {
