@@ -342,9 +342,12 @@ td.slip { color: var(--danger); background: rgba(248,81,73,.12); font-weight: 60
 .auto-note strong { color: var(--accent); }
 
 /* ---------------- Gantt ---------------- */
+/* The Gantt is a wide, dense chart — give it the full window width (the 1280px page cap
+   squeezes it) and much more height so far fewer scrolls are needed to read a plan. */
+#view-gantt { max-width: none; }
 .g-toolbar { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
 .g-toolbar button { padding: 2px 10px; margin-left: 4px; font-size: 14px; line-height: 1; }
-.g-scroll { overflow: auto; max-height: calc(100vh - 320px); min-height: 320px;
+.g-scroll { overflow: auto; max-height: calc(100vh - 150px); min-height: 460px;
   border: 1px solid var(--line); border-radius: var(--radius); }
 .g-table { border-collapse: collapse; }
 .g-table th, .g-table td {
