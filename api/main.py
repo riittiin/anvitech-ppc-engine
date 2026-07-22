@@ -737,17 +737,31 @@ def _plan(config: Config):
     # Status keyed by each order's (SO#, item) pair — an SO# alone isn't unique.
     status_by_order = {o.key: orderbook.derive_status(o, started) for o in active.values()}
 
+    # Keys that ACTUALLY landed on the schedule (so the "In this plan" column tells the
+    # truth): an order with work remaining that is absent from the schedule was held out
+    # — no routing, or an in-house step with no machine that has a qualified operator —
+    # so it must NOT be labelled "scheduled".
+    scheduled_keys = {(r, e.item_code) for e in plan_run.schedule
+                      for r in (e.so_refs or [])}
+
     def _r8_row(o):
         remaining = max(o.ordered_qty - finished.get(o.key, 0.0), 0.0)
+        if remaining <= 0:
+            in_plan = "no, fully produced, mark complete"
+        elif o.key in scheduled_keys:
+            in_plan = "scheduled"
+        else:
+            in_plan = ("not scheduled — a step has no routing or no machine with a "
+                       "qualified operator; it will schedule once the master is completed")
         return {"SO No": o.so_no, "Item Code": o.item_code, "Remaining Qty": remaining,
                 "SO Delivery Date": fmt_date(o.delivery_date),
                 "Status": status_by_order[o.key],
-                "In this plan": "scheduled" if remaining > 0 else "no, fully produced, mark complete"}
+                "In this plan": in_plan}
 
     # Sort by the real date (not the DD-MM-YYYY display string).
     r8_rows = [_r8_row(o) for o in sorted(active.values(),
                                           key=lambda o: (o.delivery_date, o.so_no, o.item_code))]
-    scheduled = sum(1 for r in r8_rows if r["Remaining Qty"] > 0)
+    scheduled = sum(1 for r in r8_rows if r["In this plan"] == "scheduled")
     trace["rule8"] = {
         "input": to_table([{"Active orders": len(active),
                             "Scheduled (work remaining)": scheduled,
@@ -761,6 +775,10 @@ def _plan(config: Config):
             "An order fully produced but not yet marked complete shows Remaining 0 "
             "and 'In this plan = no': it isn't scheduled until you tick 'mark "
             "complete' on a Rule 7 entry to archive it.",
+            "An order with work remaining but 'In this plan = not scheduled' was held "
+            "out because a process step has no routing or no machine with a qualified "
+            "operator. Complete the master (add the routing / assign an operator) and it "
+            "schedules automatically on the next plan — it is never lost or completed.",
         ],
         "error": None, "reached": True,
     }

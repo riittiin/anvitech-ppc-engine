@@ -61,6 +61,11 @@ def test_upload_merges_then_plans(client):
     assert r.status_code == 200
     assert len(r.json()["orders"]["rows"]) == 3
     assert len(r.json()["trace"]["rule1"]["output"]["rows"]) >= 1
+    # The Plan tab labels a schedulable order "scheduled" (honesty: the label reflects
+    # actual schedule membership, so a held-out order is never mislabelled — see _plan).
+    out = r.json()["trace"]["rule8"]["output"]
+    plan_i = out["columns"].index("In this plan")
+    assert all(row[plan_i] == "scheduled" for row in out["rows"])
 
 
 def test_reupload_same_file_adds_nothing(client):
