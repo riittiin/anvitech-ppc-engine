@@ -983,10 +983,6 @@ def _applied_plan_meta():
     return data.get("meta") or {}
 
 
-def _applied_book_sig():
-    return (_applied_plan_meta() or {}).get("book_sig")
-
-
 def _try_start_auto() -> bool:
     """Start an auto-applying re-optimization if it makes sense. Invoked by
     POST /optimize/done (the 'Done entering — update plan' button). Returns True
@@ -1004,14 +1000,22 @@ def _try_start_auto() -> bool:
     # Skip only when NOTHING material changed since the last applied plan —
     # "material" includes the inputs fingerprint (masters + settings + operator
     # rotation/edits), not just the book. A legacy applied meta without an
-    # inputs_sig doesn't force a run on the missing field alone.
-    meta = _applied_plan_meta() or {}
+    # inputs_sig doesn't force a run on the missing field alone. Also skip when
+    # a contest already SEARCHED this exact book+inputs and found nothing worth
+    # applying (or nothing has ever been applied) — otherwise a redundant Done
+    # click re-runs the full contest every time.
     try:
-        book_same = (meta.get("book_sig") == _current_book_sig())
+        cur_book = _current_book_sig()
+        cur_inputs = _inputs_signature(_load_plan_config())
+        meta = _applied_plan_meta() or {}
         applied_inputs = meta.get("inputs_sig")
-        inputs_same = (applied_inputs is None
-                       or applied_inputs == _inputs_signature(_load_plan_config()))
-        if book_same and inputs_same:
+        applied_match = (meta.get("book_sig") == cur_book
+                         and (applied_inputs is None
+                              or applied_inputs == cur_inputs))
+        last = book_store.load_last_searched() or {}
+        searched_match = (last.get("book_sig") == cur_book
+                         and last.get("inputs_sig") == cur_inputs)
+        if applied_match or searched_match:
             _auto_note_write("No new feedback since the last optimization — "
                              "plan unchanged.")
             return False                         # nothing material changed
@@ -1087,12 +1091,19 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             denom = optimizer.sweep_total_evals(
                 budget_evals, getattr(setup.search_config, _knob), _kcands)
 
+        # Snapshot the book/inputs fingerprints AT START — a punch that lands
+        # mid-run must still force a re-run on the next Done click, even though
+        # this contest is already in flight against the pre-punch book.
+        searched_book_sig = _current_book_sig()
+        searched_inputs_sig = _inputs_signature(base_config)
         _OPTIMIZE.update(state="running", label=label, budget_evals=denom,
                          evals=0, baseline=None, best=None, error=None, result=None,
                          elapsed_s=0.0, started_mono=time.monotonic(), cancel=False,
                          mode=("cloud" if cloud else "local"), job_id=job_id,
                          cloud_payload=payload, cloud_failed=False,
-                         base_config=base_config, auto=bool(auto))
+                         base_config=base_config, auto=bool(auto),
+                         searched_book_sig=searched_book_sig,
+                         searched_inputs_sig=searched_inputs_sig)
 
     def local_job():
         try:
@@ -1213,6 +1224,12 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                     "current_overlap": getattr(base_config, _knob),
                     "knob": _knob,
                     "sweep_table": table})
+        # Record a "last searched" marker for EVERY completed contest — not
+        # just an applied one — so a redundant Done click (no improvement
+        # found, or nothing was ever applied) can still be skipped without
+        # re-running the search.
+        book_store.save_last_searched({"book_sig": _OPTIMIZE.get("searched_book_sig"),
+                                       "inputs_sig": _OPTIMIZE.get("searched_inputs_sig")})
     if _OPTIMIZE.get("auto"):
         try:
             _auto_apply_result()

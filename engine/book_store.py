@@ -23,6 +23,7 @@ MASTERS_KEY = "anvitech:masters"           # kv: base64 of the latest workbook
 PLAN_CONFIG_KEY = "anvitech:plan_config"   # kv: json of the admin's saved Config
 PLAN_PRIORITY_KEY = "anvitech:plan_priority"  # kv: json {ranks, meta} of the applied Optimize run
 AUTO_NOTE_KEY = "anvitech:auto_note"        # kv: json note from the self-tuning trigger (informational)
+LAST_SEARCHED_KEY = "anvitech:last_searched"  # kv: json {book_sig, inputs_sig} of the last completed contest
 ABSENCES_KEY = "anvitech:absences"          # kv: json list of operator absences
 OPERATORS_KEY = "anvitech:operators"        # kv: json {week_anchor, operators:[...]}
 
@@ -222,6 +223,16 @@ def save_auto_note(note: dict) -> None:
 
 def load_auto_note():
     raw = get_store().kv_get(AUTO_NOTE_KEY)
+    return json.loads(raw) if raw else None
+
+
+# --- last-searched marker (informational, non-blocking) --- #
+def save_last_searched(sig: dict) -> None:
+    get_store().kv_set(LAST_SEARCHED_KEY, json.dumps(sig))
+
+
+def load_last_searched():
+    raw = get_store().kv_get(LAST_SEARCHED_KEY)
     return json.loads(raw) if raw else None
 
 

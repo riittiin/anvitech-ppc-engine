@@ -524,6 +524,7 @@ async function doneOptimize() {
   if (doneBtn) doneBtn.disabled = true;
   if (st) st.textContent = "Starting optimization…";
   let started = false;
+  let state = null;
   try {
     const res = await fetch("/optimize/done", { method: "POST" });
     if (!res.ok) {
@@ -531,9 +532,18 @@ async function doneOptimize() {
       if (doneBtn) doneBtn.disabled = false;
       return;
     }
-    started = (await res.json()).started;
+    const body = await res.json();
+    started = body.started;
+    state = body.state;
   } catch (e) {
     if (st) st.textContent = "Could not start optimization: " + e.message;
+    if (doneBtn) doneBtn.disabled = false;
+    return;
+  }
+  if (!started && state === "running") {
+    // A contest is already in flight (e.g. another click/tab) — attach to it
+    // instead of reporting a no-op "nothing to re-optimize".
+    await pollDoneOptimize(st);
     if (doneBtn) doneBtn.disabled = false;
     return;
   }

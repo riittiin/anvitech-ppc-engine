@@ -97,6 +97,27 @@ def test_done_skips_and_notes_when_nothing_changed(monkeypatch):
     assert "plan unchanged" in (book_store.load_auto_note() or {}).get("text", "")
 
 
+def test_done_skips_when_last_searched_matches_even_without_applied_plan(monkeypatch):
+    """No applied plan_priority at all, but a prior contest already SEARCHED
+    this exact book+inputs (e.g. it found nothing worth applying) — a
+    redundant Done click must still be skipped, not re-run the full contest."""
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    cfg = m._load_plan_config()
+    book_store.save_last_searched({"book_sig": m._current_book_sig(),
+                                   "inputs_sig": m._inputs_signature(cfg)})
+    assert book_store.load_plan_priority() is None
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    r = c.post("/optimize/done")
+    assert r.status_code == 200
+    assert r.json()["started"] is False
+    assert starts == []
+    assert "plan unchanged" in (book_store.load_auto_note() or {}).get("text", "")
+
+
 def test_done_disabled_by_internal_env(monkeypatch):
     monkeypatch.setenv("AUTO_OPTIMIZE", "0")
     m = _api(); _seed_book()
