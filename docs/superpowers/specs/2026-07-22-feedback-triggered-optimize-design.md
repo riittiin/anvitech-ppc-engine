@@ -30,8 +30,11 @@ the admin and the user/operator role, unchanged) becomes the trigger. On click:
 1. Start a full optimization contest on the current book — which already includes
    the feedback just punched (the contest loads current actuals).
 2. Show **live progress** next to the button (`#optimize-done-status`): plans tried
-   / budget and best-so-far, refreshed by polling `GET /optimize/status`, with a
-   **Stop** button. Stop keeps the best plan found so far (existing cancel path).
+   / budget and best-so-far, refreshed by polling `GET /optimize/status`. **Pure
+   block-and-wait — no Stop button** (owner decision, 2026-07-22): once Done is
+   clicked the run goes to completion. (Admins retain the pre-existing Settings
+   optimize-panel Stop, which operates on the same shared contest; the feedback
+   flow itself adds no cancel control.)
 3. On completion, the winner is **auto-applied iff strictly better** than the plan
    currently applied (`_auto_apply_result` — unchanged), and the client calls
    `runPlan(false)` once so the Gantt, schedule, Rule-6 allocation, and analytics
@@ -47,9 +50,11 @@ cloud→local fallback, progress polling, and strictly-better auto-apply already
 ### UX caveat (accepted by the owner)
 
 Each run is ~8–10 min on GitHub's free cloud, so every feedback session ends with an
-8–10 min wait before the schedule flips. The live progress bar + Stop button make
-this a visible, interruptible wait rather than a frozen spinner. Stop is the escape
-hatch (keeps best-so-far).
+8–10 min wait before the schedule flips. The live progress bar makes this a visible
+wait rather than a frozen spinner. Per the owner's block-and-wait decision there is
+no Stop control in the feedback flow — the run always completes. (To reduce
+*unnecessary* waits, `_try_start_auto` skips starting a contest at all when nothing
+material changed since the last one it ran — see Server changes.)
 
 ## Server changes
 
@@ -58,11 +63,17 @@ hatch (keeps best-so-far).
 - **Auth:** any logged-in role (no `require_admin`) — same access as the feedback
   form itself. The operators entering feedback must be able to trigger it. CSRF is
   handled by the existing `gatekeeper` middleware for unsafe methods.
-- **Fingerprint skip:** if the current book+inputs signature matches the last
-  applied optimization's saved signature (Done clicked twice with no new feedback
-  between), return a "no new feedback — plan unchanged" note **without running** a
-  contest. Reuses `_current_book_sig()` / `_applied_plan_meta()` / the
-  `_inputs_signature` OR-check from `_try_start_auto`.
+- **Fingerprint skip:** if the current book+inputs signature matches **either** the
+  last applied optimization's saved signature **or** the last *searched* signature
+  (Done clicked twice with no new feedback between), return a "no new feedback — plan
+  unchanged" note **without running** a contest. The last-searched marker
+  (`anvitech:last_searched`, `book_store.save_last_searched`/`load_last_searched`) is
+  written by `_finalize_optimize` after **every** completed contest — captured from
+  the book snapshot taken at contest *start*, so a punch mid-run still forces a
+  re-run. This is what makes a redundant click skip even when the last contest found
+  **no improvement** (nothing gets applied in that case, so the applied-plan
+  signature alone would miss it — final-review finding, fixed 2026-07-22). Reuses
+  `_current_book_sig()` / `_applied_plan_meta()` / `_inputs_signature`.
 - **Start:** otherwise start `_start_optimize(_OPT_BUDGETS["deep"], "auto",
   background=True, auto=True)`. `auto=True` gives auto-apply on completion via
   `_finalize_optimize` → `_auto_apply_result`. `_start_optimize` already handles
