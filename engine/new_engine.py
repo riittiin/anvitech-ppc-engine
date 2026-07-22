@@ -27,6 +27,7 @@ from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 
 from engine import book_store
+from engine.loaders import normalize_process_name
 from engine.models import ScheduleEntry
 
 from ppc_engine.config import PlanConfig
@@ -45,10 +46,13 @@ _MASTERS_CACHE: dict = {}
 
 
 def _norm(name) -> str:
-    """Old build's process-name normaliser (engine/orderbook.py): strip everything but
-    A-Z0-9, uppercase. Used to line up a batch's `process_qty` keys with the new
-    engine's operation names for per-process 'continue from reality' re-planning."""
-    return re.sub(r"[^A-Z0-9]", "", str(name or "").upper())
+    """Canonical process-name key. MUST be the EXACT same normaliser the order book
+    uses to key a batch's ``process_qty`` (``engine.loaders.normalize_process_name``:
+    collapse whitespace + uppercase, but KEEP word breaks — 'cnc  first side' ->
+    'CNC FIRST SIDE'). A different rule (e.g. stripping spaces) silently drops every
+    multi-word step from ``process_remaining``, so re-plans after production would
+    ignore finished progress on those steps and re-schedule them at full qty."""
+    return normalize_process_name(name)
 
 
 # Workbook bytes injected out-of-band (the cloud optimize worker has no store — it carries

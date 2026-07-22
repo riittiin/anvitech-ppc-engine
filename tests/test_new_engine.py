@@ -22,7 +22,7 @@ import pytest
 from engine import analytics, book_store, gantt, loaders, pipeline
 from engine.config import Config
 from engine.models import Batch, PlanRun
-from engine.new_engine import _norm, _orders_from_batches, _plan_config, run, sweep_optimize
+from engine.new_engine import _orders_from_batches, _plan_config, run, sweep_optimize
 from engine.rules import rule1_consolidate
 
 from ppc_engine.domain.routing import OperationKind
@@ -107,15 +107,22 @@ def test_optimized_order_is_also_clean(old_book, new_masters):
 
 
 def test_per_process_feedback_finishes_step_as_milestone(new_masters):
+    # process_qty is keyed by the ORDER BOOK's normaliser (loaders.normalize_process_name),
+    # NOT new_engine._norm — build it that way so this test exercises the REAL production
+    # path and would catch a normaliser mismatch that silently drops multi-word steps.
     item = next(c for c, r in new_masters.routings.items()
                 if sum(1 for o in r.operations if o.kind == OperationKind.MACHINING) >= 2)
     ops = new_masters.routings[item].operations
     done = next(o for o in ops if o.kind == OperationKind.MACHINING)
-    pq = {_norm(o.name): (0 if o.seq == done.seq else 100) for o in ops}
+    assert " " in done.name, "regression needs a multi-word step name (e.g. 'CNC FIRST SIDE')"
+    pq = {loaders.normalize_process_name(o.name): (0 if o.seq == done.seq else 100) for o in ops}
     b = Batch(batch_id="T1", item_code=item, item_name="x", qty=100,
               so_delivery_date=date(2025, 4, 1), source_so_refs=["SO_T1"], process_qty=pq)
 
     orders, _ = _orders_from_batches([b], new_masters)
+    # EVERY step must be present — a normaliser mismatch would drop the multi-word ones,
+    # and the finished step must read 0 remaining (not silently fall back to full qty).
+    assert set(orders[0].process_remaining) == {o.seq for o in ops}
     assert orders[0].process_remaining[done.seq] == 0
 
     entries = {e.process_seq: e for e in run([b], _CONF, None)}
