@@ -134,6 +134,26 @@ def _plan_config(config) -> PlanConfig:
     )
 
 
+def _op_has_no_runnable_machine(op, op_qty, masters) -> bool:
+    """True iff this operation would reach the scheduler's in-house branch with NO
+    runnable machine. The decoder raises 'no runnable machine' (a RuntimeError that
+    would 500 the WHOLE plan) for an in-house op — one that is NOT a DISPATCH/OUTSOURCED
+    milestone and still has remaining work (``dur > 0``) — when none of its machine
+    options both EXISTS in the master AND has a qualified operator. That happens with
+    incomplete master data (e.g. a provisional machine referenced by a routing but not
+    yet given operators). Mirrors the scheduler's own branch order in
+    ppc_engine/scheduler/flow_scheduler.py:_place_operation."""
+    if op.kind in (OperationKind.DISPATCH, OperationKind.OUTSOURCED):
+        return False                     # milestone / off-site: no machine needed
+    if op_qty <= 0:
+        return False                     # already finished -> zero-time milestone
+    qualified = set()
+    for o in masters.operators:
+        qualified |= set(getattr(o, "qualified_machines", ()) or ())
+    return not any(mid in masters.machines and mid in qualified
+                   for mid in op.machine_options)
+
+
 def _orders_from_batches(batches, masters):
     """Old Batch[] -> new Order[], plus an order-key -> batch index for mapping back.
 
@@ -149,15 +169,28 @@ def _orders_from_batches(batches, masters):
         if b.item_code not in masters.routings:
             continue
         key = (b.batch_id, b.item_code)
+        routing = masters.routings[b.item_code]
         process_remaining = None
         if getattr(b, "process_qty", None):
-            routing = masters.routings.get(b.item_code)
-            if routing:
-                process_remaining = {
-                    op.seq: int(round(b.process_qty[_norm(op.name)]))
-                    for op in routing.operations
-                    if _norm(op.name) in b.process_qty
-                }
+            process_remaining = {
+                op.seq: int(round(b.process_qty[_norm(op.name)]))
+                for op in routing.operations
+                if _norm(op.name) in b.process_qty
+            }
+
+        # Forgiving-master rule (CLAUDE.md: never stop the pipeline for incomplete
+        # master data): if any still-to-run in-house step has no machine that both
+        # exists AND has a qualified operator, the decoder would raise and 500 the
+        # entire plan. Skip THIS order (it still shows in the order book / report),
+        # exactly as an unrouted order is skipped, so every other order still plans.
+        def _op_qty(op):
+            if process_remaining is not None:
+                return process_remaining.get(op.seq, int(round(b.qty)))
+            return int(round(b.qty))
+        if any(_op_has_no_runnable_machine(op, _op_qty(op), masters)
+               for op in routing.operations):
+            continue
+
         orders.append(Order(
             so_no=b.batch_id, item_code=b.item_code, item_name=b.item_name,
             qty=int(round(b.qty)), due_date=b.so_delivery_date,

@@ -106,6 +106,22 @@ def test_optimized_order_is_also_clean(old_book, new_masters):
     _assert_clean(decode(orders, res.best_sequence, new_masters, _plan_config(_CONF)).segments)
 
 
+def test_unstaffed_op_is_skipped_not_crashed(new_masters):
+    """A routing whose in-house step has NO machine with a qualified operator (e.g.
+    incomplete master data / a provisional machine without operators) must NOT 500 the
+    whole plan — the decoder would raise 'no runnable machine'. The order is skipped
+    (like an unrouted order), so every other order still plans."""
+    from dataclasses import replace
+    item = next(iter(new_masters.routings))
+    b = Batch(batch_id="B1", item_code=item, item_name="x", qty=10,
+              so_delivery_date=date(2025, 4, 1), source_so_refs=["S"])
+    kept, _ = _orders_from_batches([b], new_masters)   # fully staffed -> scheduled
+    assert len(kept) == 1
+    no_ops = replace(new_masters, operators=[])         # no qualified operator anywhere
+    dropped, _ = _orders_from_batches([b], no_ops)      # skipped, not crashed
+    assert dropped == []
+
+
 def test_per_process_feedback_finishes_step_as_milestone(new_masters):
     # process_qty is keyed by the ORDER BOOK's normaliser (loaders.normalize_process_name),
     # NOT new_engine._norm — build it that way so this test exercises the REAL production
