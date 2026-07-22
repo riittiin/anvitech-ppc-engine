@@ -408,10 +408,10 @@ moved. The owner's rule: facts (punches) update the plan **every day**, but the 
 ORDER is only re-optimized **twice a week, automatically — Monday and Friday at 11:00
 IST (05:30 UTC)**. Feedback is entered ~10:00 on the floor; the re-optimized schedule
 is ready before shift 2. With Thursday as the weekly off, Monday and Friday land
-exactly 3 working days apart in both directions. Spec:
-`docs/superpowers/specs/2026-07-18-scheduled-optimize-design.md` (explicitly
-supersedes the event-triggered behavior of `2026-07-15-self-tuning-plan-design.md`
-Phase 1 — the auto-apply/incumbent-comparison machinery itself is unchanged, only the
+exactly 3 working days apart in both directions. (Design spec since pruned as
+superseded; it explicitly superseded the event-triggered behavior of the
+self-tuning-plan Phase 1 — the auto-apply/incumbent-comparison machinery itself is
+unchanged, only the
 *triggers* changed).
 
 **What changed (2 code tasks, TDD'd via a subagent-driven SDD ledger,
@@ -624,8 +624,8 @@ alongside the sequence search) went through three contracts in one day:
      Render's. `sweep_optimize`'s 1,000-plan v3 shape is kept as the **local fallback**
      when cloud is unavailable.
 
-**3. Self-tuning plan — the plan re-optimizes itself (this branch, Phase 1 of
-`docs/superpowers/specs/2026-07-15-self-tuning-plan-design.md`).** The owner's ask:
+**3. Self-tuning plan — the plan re-optimizes itself (this branch, Phase 1 of the
+self-tuning-plan design; spec since pruned as superseded).** The owner's ask:
 "when production changes reality, the plan should re-optimize without anyone
 remembering to click." Built as: a book fingerprint
 (`optimize_service.book_signature` — order keys, remaining qty + per-process
@@ -693,8 +693,8 @@ roles via Chrome MCP.
 `engine/optimize_service.py`, and `api/main.py` have the exact function/endpoint names;
 `RULES.md`'s "Order commitment (lanes)", "Self-tuning plan", "Operator absences" and
 "Optimize plan" sections have the business-rule version. The design history lives in
-`docs/superpowers/specs/2026-07-15-self-tuning-plan-design.md` (see its SUPERSEDED
-Phase-2 block) and `docs/superpowers/specs/2026-07-15-optimize-settings-sweep-design.md`.
+the self-tuning-plan design (spec since pruned as superseded) and
+`docs/superpowers/specs/2026-07-15-optimize-settings-sweep-design.md`.
 
 ### Latest session (2026-07-15) — deploy-day fixes, settings sweep, full-app audit — ✅ ALL SHIPPED & LIVE
 

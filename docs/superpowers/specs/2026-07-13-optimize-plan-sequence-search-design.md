@@ -3,7 +3,7 @@
 **Date:** 2026-07-13
 **Status:** Approved & built (2026-07-13)
 **Related:** [`RULES.md`](../../../RULES.md) (Rules 3, 6, 8),
-[order-commitment design](2026-07-13-order-commitment-promise-protection-design.md),
+the order-commitment design (spec since pruned as superseded),
 memory `sequence-optimizer-findings`
 
 ---
