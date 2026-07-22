@@ -45,6 +45,7 @@ from engine import optimizer
 from engine import optimize_service
 from engine.gantt import build_gantt
 from engine import book_store, orderbook
+from engine import storage
 from engine import efficiency
 from engine import operator_master
 from engine.rules import (
@@ -147,6 +148,22 @@ async def security_headers(request: Request, call_next):
     if _is_https(request):
         response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     return response
+
+
+@app.middleware("http")
+async def request_store_cache(request: Request, call_next):
+    """Give each request a per-request store read cache: every durable-store KEY is
+    read from the backend at most once per request (a write to a key drops its
+    cached reads, so read-after-write stays correct). This removes the redundant
+    round-trips a single request makes — the operator table alone was read 4× per
+    plan — which is the dominant latency on the MongoDB/Upstash backends. Purely a
+    performance layer: the data returned is identical. The cache lives only for the
+    request; outside a request the raw backend is used (see engine.storage)."""
+    token = storage.begin_request_cache()
+    try:
+        return await call_next(request)
+    finally:
+        storage.end_request_cache(token)
 
 
 def require_admin(request: Request):

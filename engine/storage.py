@@ -18,6 +18,7 @@ Local override: STORE_DIR (defaults to ./data/store).
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import re
@@ -202,6 +203,84 @@ class MongoStore:
 
 _STORE_CACHE: dict = {}
 
+# Per-request read cache. Set to a fresh dict by the API middleware at the start of
+# each HTTP request and reset at the end (see api.main). While it is active,
+# get_store() returns a _RequestCachedStore wrapper so each store KEY is read from
+# the backend at most once per request — eliminating the redundant round-trips a
+# single request makes (e.g. the operator table read 4× per plan). A write to a key
+# drops its cached reads, so read-after-write within the same request still sees
+# fresh data. Outside a request (tests, the engine, background optimize threads) the
+# ContextVar is None and the raw backend is used, so behaviour is unchanged there.
+_REQUEST_CACHE: contextvars.ContextVar = contextvars.ContextVar(
+    "store_request_cache", default=None)
+
+
+def begin_request_cache():
+    """Start a per-request read cache; returns a token to pass to end_request_cache."""
+    return _REQUEST_CACHE.set({})
+
+
+def end_request_cache(token) -> None:
+    """End the per-request read cache opened by begin_request_cache()."""
+    _REQUEST_CACHE.reset(token)
+
+
+class _RequestCachedStore:
+    """Wraps a backend store with a per-request read cache (the dict from
+    ``_REQUEST_CACHE``). Reads are memoized by key; a write to a key drops its
+    cached reads so read-after-write within the same request stays correct.
+    Hash/list reads return fresh copies every call (as the backends do), so a
+    caller mutating a returned dict/list never corrupts the cache."""
+
+    def __init__(self, backend, cache: dict):
+        self._b = backend
+        self._c = cache
+
+    # --- reads: memoize per key --- #
+    def kv_get(self, key) -> Optional[str]:
+        ck = ("kv", key)
+        if ck not in self._c:
+            self._c[ck] = self._b.kv_get(key)
+        return self._c[ck]                       # str | None — immutable, safe to share
+
+    def hgetall(self, key) -> dict:
+        ck = ("h", key)
+        if ck not in self._c:
+            self._c[ck] = self._b.hgetall(key)
+        return dict(self._c[ck])                 # copy: callers may mutate
+
+    def list_all(self, key) -> list:
+        ck = ("l", key)
+        if ck not in self._c:
+            self._c[ck] = self._b.list_all(key)
+        return list(self._c[ck])                 # copy: callers may mutate
+
+    # --- writes: invalidate the key's cached reads, then delegate --- #
+    def kv_set(self, key, value: str) -> None:
+        self._c.pop(("kv", key), None)
+        self._b.kv_set(key, value)
+
+    def hset(self, key, field, value: str) -> None:
+        self._c.pop(("h", key), None)
+        self._b.hset(key, field, value)
+
+    def hdel(self, key, field) -> None:
+        self._c.pop(("h", key), None)
+        self._b.hdel(key, field)
+
+    def list_append(self, key, value: str) -> None:
+        self._c.pop(("l", key), None)
+        self._b.list_append(key, value)
+
+    def list_set(self, key, values) -> None:
+        self._c.pop(("l", key), None)
+        self._b.list_set(key, values)
+
+    def delete_key(self, key) -> None:
+        for op in ("kv", "h", "l"):
+            self._c.pop((op, key), None)
+        self._b.delete_key(key)
+
 
 def get_store():
     """Pick the backend: MongoDB Atlas > Upstash Redis > local file.
@@ -212,6 +291,11 @@ def get_store():
     (as this used to) re-ran SRV DNS resolution + TLS handshake + auth on every
     request — the dominant source of latency. Keyed by env so tests that swap
     ``STORE_DIR`` / backends still get an isolated store.
+
+    When a per-request read cache is active (``_REQUEST_CACHE`` set by the API
+    middleware), the backend is wrapped so each key is read at most once per
+    request. The wrapper is a thin per-call object sharing the request's cache
+    dict, so repeated get_store() calls within a request all hit the same cache.
     """
     mongo_uri = os.environ.get("MONGODB_URI")
     url = os.environ.get("UPSTASH_REDIS_REST_URL")
@@ -229,4 +313,8 @@ def get_store():
         else:
             store = LocalStore(base)
         _STORE_CACHE[key] = store
+
+    req_cache = _REQUEST_CACHE.get()
+    if req_cache is not None:
+        return _RequestCachedStore(store, req_cache)
     return store
