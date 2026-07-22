@@ -403,16 +403,25 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   failure / worker error / `OPTIMIZE_CLOUD_TIMEOUT_MIN` (20) exceeded → compute
   locally (1,000-total split), so the button always works; env unset → pure local.
   `GITHUB_DISPATCH_TOKEN=manual` skips the GitHub call (run the worker by hand).
-- **Feedback-triggered optimize (2026-07-22,
+- **Feedback-triggered optimize, THURSDAY-gated (2026-07-22,
   `docs/superpowers/specs/2026-07-22-feedback-triggered-optimize-design.md`,
-  supersedes the twice-weekly cron below) — the job order re-optimizes when
-  feedback is entered.** The **"Done entering — update plan"** button (both roles)
-  hits **`POST /optimize/done`** → `_try_start_auto()`, which starts an
-  auto-applying contest unless a run is already going or nothing changed since the
-  last applied plan (book + inputs fingerprint; writes a "plan unchanged" note).
-  It is **NOT cloud-only** (local fallback), so the button always acts. The
-  frontend blocks on live progress (`/optimize/status`) then `runPlan(false)`s to
-  the auto-applied winner. **Removed:** the Mon/Fri GitHub cron
+  supersedes the twice-weekly cron below) — the job order re-optimizes once a week,
+  on Thursday; the plan reflects new facts every day.** The **"Done entering —
+  update plan"** button (both roles) hits **`POST /optimize/done`**, which
+  **first checks `_is_optimize_day()`** (today, IST, is Thursday —
+  `_ist_today().weekday() == _OPTIMIZE_WEEKDAY`, `= 3`). **Non-Thursday:** it returns
+  `{started:False, reason:"not_optimize_day"}` and the client just `runPlan(false)`s
+  (facts refresh, NO contest). **Thursday** (the weekly off day — the owner punches
+  Wednesday's feedback then, so the new schedule is ready for Friday): it calls
+  `_try_start_auto()`, which starts an auto-applying contest unless a run is already
+  going or nothing changed since the last one it RAN (applied **or** last-searched
+  book+inputs fingerprint — `anvitech:last_searched`, written by `_finalize_optimize`
+  from the contest-start snapshot; writes a "plan unchanged" note). It is **NOT
+  cloud-only** (local fallback). The frontend blocks on live progress
+  (`/optimize/status`, **no Stop button** — owner's block-and-wait decision; admins
+  keep the Settings-panel Stop) then `runPlan(false)`s to the auto-applied winner.
+  The **admin manual "Start deep search"** (`POST /optimize`) is **NOT** weekday-gated
+  — runs any day. **Removed:** the Mon/Fri GitHub cron
   (`.github/workflows/scheduled-optimize.yml`), `POST /optimize/scheduled`, and
   `nextScheduledOptimize()`. Auto-apply is still strictly-better-or-nothing
   (`_auto_apply_result`); `AUTO_OPTIMIZE=0` still disables it (test isolation only).
@@ -669,7 +678,8 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   line, IST-stamped). **Feedback trigger** (2026-07-22; see the optimizer bullet
   above for the full mechanics): `_try_start_auto()`/`_auto_apply_result()`,
   endpoint `POST /optimize/done` (either role — the "Done entering — update plan"
-  button).
+  button), **Thursday-gated** via `_is_optimize_day()` (non-Thursday → `reason:
+  "not_optimize_day"`, facts refresh only; Thursday → the contest).
   **Absences:** `GET /absences` (any role, `{absences, orphans, operators}`), `POST
   /absences` / `DELETE /absences/{id}` (admin) — see the `book_store.py`/optimizer
   bullets above; `_absence_orphans` feeds the `ABSENT_OPERATOR_UNKNOWN` rows
@@ -695,10 +705,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `GET /operators`, same list either role sees on Settings — the form blocks
   submit and focuses the field when it's blank), per-entry **↺ Rollback** button,
   and the **"Done entering — update plan"** button for both roles — hits `POST
-  /optimize/done` to start a feedback-triggered, auto-applying contest (skipped
-  with a "plan unchanged" note if nothing material changed or one's already
-  running), blocks on `/optimize/status` progress, then refreshes the plan to
-  pick up the winner), an always-visible
+  /optimize/done`: **on Thursday** it starts a feedback-triggered, auto-applying
+  contest (skipped with a "plan unchanged" note if nothing material changed or one's
+  already running), blocks on `/optimize/status` progress, then refreshes the plan
+  to pick up the winner; **on any other day** it just refreshes the plan facts
+  ("…runs on Thursday")), an always-visible
   **Operator Absences** panel (list visible to both roles; add/remove controls
   admin-only), a Settings **Operators & shifts** panel (`#operators-panel` — table
   of name/machines/shift/"Stays" pin + add-row; "Next rotation: Friday

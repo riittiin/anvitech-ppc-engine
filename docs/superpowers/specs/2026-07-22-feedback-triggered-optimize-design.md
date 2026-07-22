@@ -5,27 +5,45 @@
 > deletes, the Done button, etc. no longer started a contest) and replaced it with
 > a twice-weekly GitHub cron (Mon & Fri 11:00 IST), on the rationale that
 > re-sequencing the floor on every change destroys schedule trust. **The owner has
-> reversed that decision (2026-07-22):** the job order should re-optimize whenever
-> feedback is entered, block until the contest finishes, auto-apply the winner, and
-> immediately reflect it in the Gantt / schedule / analytics. The auto-apply,
-> cloud→local fallback, one-at-a-time, and book-fingerprint-skip machinery from the
-> 2026-07-18 design are **kept and reused** — only the *trigger* changes from a cron
-> to the Done button.
+> reset the cadence (2026-07-22):** the re-optimization fires from the **"Done
+> entering — update plan"** button, but **only on Thursday** (the weekly off day) —
+> the owner enters Wednesday's feedback on Thursday and re-optimizes then, so the new
+> schedule is ready for Friday. On every other day the button just refreshes the plan
+> with the latest **facts** (no re-sequencing). It blocks until the contest finishes,
+> auto-applies the winner, and reflects it in the Gantt / schedule / analytics. The
+> auto-apply, cloud→local fallback, one-at-a-time, and book-fingerprint-skip machinery
+> from the 2026-07-18 design are **kept and reused** — the *trigger* changes from a
+> fixed cron to the Thursday Done click, and the old Mon/Fri cron is removed.
 
 ## Why
 
-The owner's operating rhythm: each morning the previous day's shift output is
-punched as feedback (Thursday is the weekly off, so Wednesday's shifts are punched
-Thursday, etc.). The owner wants the plan to re-optimize **the moment that feedback
-is in**, not on a fixed Mon/Fri schedule, and to see the updated schedule/Gantt
-before acting on it. They accept that a run takes ~8–10 min on the free cloud tier
-and explicitly chose to **wait** for it (watching live progress) rather than have it
-apply silently in the background.
+The owner's operating rhythm: each working morning the previous day's shift output
+is punched as feedback. **Thursday is the weekly off day** — Wednesday's shifts are
+punched Thursday. The plan should always reflect the latest **facts** (produced /
+remaining quantities) as feedback comes in, every day — but the **re-optimization
+(re-sequencing) should fire only once a week, on Thursday**: the owner enters
+Wednesday's feedback on the off day and re-optimizes then, so the new schedule is
+ready for **Friday**, without re-sequencing the floor mid-week (which destroys
+schedule trust). A run takes ~8–10 min on the free cloud tier and the owner
+explicitly chose to **wait** for it (watching live progress) rather than have it
+apply silently.
 
 ## Trigger and flow
 
 The **"Done entering — update plan"** button in Capture Actuals (available to both
-the admin and the user/operator role, unchanged) becomes the trigger. On click:
+the admin and the user/operator role) is the trigger. Its behavior is **gated by
+the weekday (IST):**
+
+- **On any non-Thursday day:** it does **not** re-optimize — it just calls
+  `runPlan(false)`, so the plan/schedule/Gantt refresh with the latest facts. No
+  contest, no wait. (This is the plain plan-refresh the button always did.)
+- **On Thursday (the weekly optimize day):** it fires the full auto-applying
+  re-optimization contest described below.
+
+The manual admin **"Start deep search"** button is unaffected — an admin can run a
+manual optimization on any day.
+
+On a **Thursday** click:
 
 1. Start a full optimization contest on the current book — which already includes
    the feedback just punched (the contest loads current actuals).
@@ -63,7 +81,15 @@ material changed since the last one it ran — see Server changes.)
 - **Auth:** any logged-in role (no `require_admin`) — same access as the feedback
   form itself. The operators entering feedback must be able to trigger it. CSRF is
   handled by the existing `gatekeeper` middleware for unsafe methods.
-- **Fingerprint skip:** if the current book+inputs signature matches **either** the
+- **Weekday gate:** the endpoint first checks `_is_optimize_day()` (today, IST, is
+  Thursday — `_ist_today().weekday() == _OPTIMIZE_WEEKDAY`, `_OPTIMIZE_WEEKDAY = 3`).
+  If it is **not** the optimize day, it returns `{"started": False, "reason":
+  "not_optimize_day", "state": …}` **without** starting or deciding a contest — the
+  client then just `runPlan(false)`s (facts refresh). Only on the optimize day does
+  it proceed to `_try_start_auto()`. The response carries a `reason`
+  (`"not_optimize_day"` | `"started"` | `"skipped"`) so the client can message
+  correctly. (The admin manual `/optimize` path is unaffected — no weekday gate.)
+- **Fingerprint skip** (optimize day only): if the current book+inputs signature matches **either** the
   last applied optimization's saved signature **or** the last *searched* signature
   (Done clicked twice with no new feedback between), return a "no new feedback — plan
   unchanged" note **without running** a contest. The last-searched marker
