@@ -1,0 +1,118 @@
+# Feedback-triggered re-optimization — design (2026-07-22)
+
+> **Supersedes the cadence half of `2026-07-18-scheduled-optimize-design.md`.**
+> That design deliberately *removed* event-triggered auto-optimization (uploads,
+> deletes, the Done button, etc. no longer started a contest) and replaced it with
+> a twice-weekly GitHub cron (Mon & Fri 11:00 IST), on the rationale that
+> re-sequencing the floor on every change destroys schedule trust. **The owner has
+> reversed that decision (2026-07-22):** the job order should re-optimize whenever
+> feedback is entered, block until the contest finishes, auto-apply the winner, and
+> immediately reflect it in the Gantt / schedule / analytics. The auto-apply,
+> cloud→local fallback, one-at-a-time, and book-fingerprint-skip machinery from the
+> 2026-07-18 design are **kept and reused** — only the *trigger* changes from a cron
+> to the Done button.
+
+## Why
+
+The owner's operating rhythm: each morning the previous day's shift output is
+punched as feedback (Thursday is the weekly off, so Wednesday's shifts are punched
+Thursday, etc.). The owner wants the plan to re-optimize **the moment that feedback
+is in**, not on a fixed Mon/Fri schedule, and to see the updated schedule/Gantt
+before acting on it. They accept that a run takes ~8–10 min on the free cloud tier
+and explicitly chose to **wait** for it (watching live progress) rather than have it
+apply silently in the background.
+
+## Trigger and flow
+
+The **"Done entering — update plan"** button in Capture Actuals (available to both
+the admin and the user/operator role, unchanged) becomes the trigger. On click:
+
+1. Start a full optimization contest on the current book — which already includes
+   the feedback just punched (the contest loads current actuals).
+2. Show **live progress** next to the button (`#optimize-done-status`): plans tried
+   / budget and best-so-far, refreshed by polling `GET /optimize/status`, with a
+   **Stop** button. Stop keeps the best plan found so far (existing cancel path).
+3. On completion, the winner is **auto-applied iff strictly better** than the plan
+   currently applied (`_auto_apply_result` — unchanged), and the client calls
+   `runPlan(false)` once so the Gantt, schedule, Rule-6 allocation, and analytics
+   all refresh together to the new optimized plan.
+4. A one-line note is written (`book_store.save_auto_note`, IST-stamped) and shown
+   on the Orders tab / `/run`'s `auto_note`: e.g. *"Plan re-optimized 11:04 — 44
+   late-days (was 52), overlap 80 → 85"* or *"Checked 11:04 — current plan still
+   best (52 late-days)."*
+
+This is a **rewiring**, not new engine code: the contest runner (`_start_optimize`),
+cloud→local fallback, progress polling, and strictly-better auto-apply already exist.
+
+### UX caveat (accepted by the owner)
+
+Each run is ~8–10 min on GitHub's free cloud, so every feedback session ends with an
+8–10 min wait before the schedule flips. The live progress bar + Stop button make
+this a visible, interruptible wait rather than a frozen spinner. Stop is the escape
+hatch (keeps best-so-far).
+
+## Server changes
+
+### New endpoint: `POST /optimize/done`
+
+- **Auth:** any logged-in role (no `require_admin`) — same access as the feedback
+  form itself. The operators entering feedback must be able to trigger it. CSRF is
+  handled by the existing `gatekeeper` middleware for unsafe methods.
+- **Fingerprint skip:** if the current book+inputs signature matches the last
+  applied optimization's saved signature (Done clicked twice with no new feedback
+  between), return a "no new feedback — plan unchanged" note **without running** a
+  contest. Reuses `_current_book_sig()` / `_applied_plan_meta()` / the
+  `_inputs_signature` OR-check from `_try_start_auto`.
+- **Start:** otherwise start `_start_optimize(_OPT_BUDGETS["deep"], "auto",
+  background=True, auto=True)`. `auto=True` gives auto-apply on completion via
+  `_finalize_optimize` → `_auto_apply_result`. `_start_optimize` already handles
+  cloud dispatch with a **local fallback** (capped budget), so — unlike the removed
+  cron path — this endpoint is **not** cloud-only: the button always does something.
+- **One-at-a-time:** if a contest is already running, `_start_optimize` raises 409;
+  the endpoint surfaces that and the client attaches to the running run (polls to
+  completion, then refreshes). No second run is queued.
+
+The shared "should we run, and start it" logic (fingerprint skip + one-at-a-time +
+start-auto) is factored so `/optimize/done` and any future caller use one path;
+`_try_start_auto` (cron-only, cloud-gated) is removed.
+
+### Removed
+
+- `.github/workflows/scheduled-optimize.yml` — the Mon/Fri cron. Deleted.
+- `POST /optimize/scheduled` + `_try_start_auto()` — the cron's server entry point.
+- `nextScheduledOptimize()` (web/app.js) and the two **"Next optimization: <date>"**
+  UI strings (status strip + Done-button status). Replaced with a static line, e.g.
+  *"Optimization runs when you finish entering feedback."*
+
+### Kept unchanged
+
+- The manual admin **"Start deep search"** button (`POST /optimize`) and its
+  Apply/Discard panel — a manual, non-auto-applying run stays available.
+- All cloud-worker endpoints (`/optimize/job|progress|result`), the engine, the
+  `_plan` replay of saved ranks, and the staleness banner.
+
+## Edge cases
+
+- **Operator (non-admin) clicks Done:** allowed (endpoint not admin-gated).
+- **Contest already running:** attach to it and refresh on completion; no queued
+  re-run (YAGNI — click Done again if newer feedback must be included).
+- **Nothing changed since last run:** skipped with a friendly message, no cloud burn.
+- **Cloud unavailable:** capped local search runs so the button still works.
+- **Stop mid-run:** keeps best-so-far, applied if better (existing behavior).
+
+## Tests (`tests/test_auto_optimize.py`)
+
+- `/optimize/done` starts an auto-applying contest when the book changed.
+- `/optimize/done` skips (no contest started) when the fingerprint matches the last
+  applied plan; writes the "no new feedback" note.
+- `/optimize/done` is reachable by **both** roles (admin + user), unlike admin-only
+  `/optimize`.
+- Auto-apply only when strictly better (existing test, retargeted to the new path).
+- Remove the tests asserting the twice-weekly `/optimize/scheduled` trigger.
+- Full suite stays green (currently 508 passing).
+
+## Docs
+
+- Update the CLAUDE.md scheduled-optimize bullet(s) to describe the feedback trigger
+  and the removal of the cron / `/optimize/scheduled` / `nextScheduledOptimize`.
+- This spec records the reversal of the 2026-07-18 scheduled-optimize cadence.
