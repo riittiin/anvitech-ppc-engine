@@ -6,6 +6,7 @@ services:
     name: anvitech-ppc
     runtime: python
     plan: free
+    autoDeploy: true          # deploy automatically on every push to the tracked branch (main)
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
     # Login credentials are baked into api/auth.py and work with no env vars set.
