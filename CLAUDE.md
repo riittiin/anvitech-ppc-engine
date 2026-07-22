@@ -403,48 +403,64 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   failure / worker error / `OPTIMIZE_CLOUD_TIMEOUT_MIN` (20) exceeded → compute
   locally (1,000-total split), so the button always works; env unset → pure local.
   `GITHUB_DISPATCH_TOKEN=manual` skips the GitHub call (run the worker by hand).
+- **Feedback-triggered optimize (2026-07-22,
+  `docs/superpowers/specs/2026-07-22-feedback-triggered-optimize-design.md`,
+  supersedes the twice-weekly cron below) — the job order re-optimizes when
+  feedback is entered.** The **"Done entering — update plan"** button (both roles)
+  hits **`POST /optimize/done`** → `_try_start_auto()`, which starts an
+  auto-applying contest unless a run is already going or nothing changed since the
+  last applied plan (book + inputs fingerprint; writes a "plan unchanged" note).
+  It is **NOT cloud-only** (local fallback), so the button always acts. The
+  frontend blocks on live progress (`/optimize/status`) then `runPlan(false)`s to
+  the auto-applied winner. **Removed:** the Mon/Fri GitHub cron
+  (`.github/workflows/scheduled-optimize.yml`), `POST /optimize/scheduled`, and
+  `nextScheduledOptimize()`. Auto-apply is still strictly-better-or-nothing
+  (`_auto_apply_result`); `AUTO_OPTIMIZE=0` still disables it (test isolation only).
 - **Scheduled optimize (2026-07-18, `docs/superpowers/specs/2026-07-18-scheduled-optimize-design.md`,
-  supersedes the event-triggered `2026-07-15-self-tuning-plan-design.md` Phase 1) — the
-  job order re-optimizes itself, but only **twice a week**, never on every change.** The
-  owner's rule: re-sequencing the floor daily destroys schedule trust; facts (punches)
-  update the plan every day, but the JOB ORDER is re-optimized only **Monday and Friday
-  at 11:00 IST (05:30 UTC)** — after the ~10:00 feedback entry, ready before shift 2, and
-  (with Thursday the weekly off) equally spread from both directions. **No event
-  triggers remain**: uploads, `/orders/delete`/`/orders/clear`, commit/uncommit/urgent,
-  `/absences` POST/DELETE, a `persist=True` `/run` (Settings save), and the Done button
-  no longer start a contest — new orders arrive Open and wait for the next scheduled run
-  or the owner's manual Optimize button. The **only** entry point into the decision logic
-  is `POST /optimize/scheduled` (worker-secret auth, same gatekeeper bypass list as the
+  supersedes the event-triggered `2026-07-15-self-tuning-plan-design.md` Phase 1; itself
+  **SUPERSEDED 2026-07-22** by the feedback-triggered bullet above — kept for the guard
+  mechanics the new trigger still reuses) — historical: the job order re-optimized
+  itself, but only **twice a week**, never on every change.** The owner's rule at the
+  time: re-sequencing the floor daily destroys schedule trust; facts (punches) updated
+  the plan every day, but the JOB ORDER was re-optimized only **Monday and Friday at
+  11:00 IST (05:30 UTC)** — after the ~10:00 feedback entry, ready before shift 2, and
+  (with Thursday the weekly off) equally spread from both directions. No event trigger
+  fired a contest on its own back then: uploads, `/orders/delete`/`/orders/clear`,
+  commit/uncommit/urgent, `/absences` POST/DELETE, and a `persist=True` `/run` (Settings
+  save) never started one — new orders arrived Open and waited for the next scheduled
+  run or the owner's manual Optimize button. The entry point into the decision logic was
+  `POST /optimize/scheduled` (worker-secret auth, same gatekeeper bypass list as the
   other worker endpoints), hit by a GitHub Actions cron
   (`.github/workflows/scheduled-optimize.yml`, `cron: "30 5 * * 1,5"` +
   `workflow_dispatch` for manual testing; wake-tolerant retry loop since the free Render
-  instance may be asleep). It calls `_try_start_auto()`, which keeps every guard from
-  the old design — **cloud-only** (`_cloud_config()` unset → skip with a note, never a
-  20-40 min local burn; the manual Optimize button keeps its local fallback),
-  **one-at-a-time** (a contest already running → no-op, no queueing — there's no pending
-  chain to drain since only the cron calls this), and the **book-fingerprint skip**
+  instance may be asleep) calling `_try_start_auto()`, which was gated **cloud-only**
+  (`_cloud_config()` unset → skip with a note, never a 20-40 min local burn on the cron
+  path; the manual Optimize button always kept its local fallback), **one-at-a-time**
+  (a contest already running → no-op, no queueing), and by the **book-fingerprint skip**
   (`optimize_service.book_signature(so_lines, absences=)` compared against the applied
   ranks' saved `book_sig` — nothing material changed since the last applied plan ⇒ skip
-  silently, zero cost). `_bump_book_changed()`, the `_AUTO` pending/chaining dict, and
-  `_drain_pending_auto()` are all **removed** — there is nothing left to debounce.
+  silently, zero cost). **All of this is now removed (2026-07-22):** the cron workflow
+  file, `POST /optimize/scheduled`, the fixed Mon/Fri clock, and the cloud-only gate —
+  see the feedback-triggered bullet above for the replacement (same `_try_start_auto()`
+  guard function, now invoked by `POST /optimize/done` and no longer cloud-restricted).
+  `_bump_book_changed()`, the `_AUTO` pending/chaining dict, and `_drain_pending_auto()`
+  stayed removed from the 2026-07-18 cutover — there was never anything left to debounce.
   **Auto-apply is still strictly-better-or-nothing**: `_finalize_optimize` calls
   `_auto_apply_result()` for auto runs, which computes the incumbent (`_incumbent_metrics`
   — the applied ranks, or none, replayed on TODAY'S book via `_all_lines_schedule`, scored
   over ALL active lines so both sides are on the same domain) and applies
   (`_optimize_apply()`) only if the contest's `best` strictly beats it; either way it
-  writes a one-line note via `book_store.save_auto_note` (`anvitech:auto_note`) — *"Plan
-  auto-re-optimized 11:00 — 445 late-days (was 471), overlap 80 → 70"* or *"Checked
-  11:00 — current plan still best (471 late-days)"* — surfaced on `/run`'s `auto_note`
-  field and the Orders tab. Note timestamps are stamped in **IST** (`_ist_now()` =
-  `utcnow() + timedelta(hours=5, minutes=30)`; the server itself runs UTC) since the
-  clock is now a named local time the owner reasons about. **The Capture Actuals "Done
-  entering — update plan" button** (relabeled) no longer calls a removed `/optimize/done`
-  endpoint — it's a plain client-side plan refresh (`runPlan(false)`) that reports the
-  next scheduled optimization day (`nextScheduledOptimize()` in `web/app.js`, pure/testable:
-  next Mon or Fri at 11:00 local, today counts if it's a scheduled day still before
-  11:00). `AUTO_OPTIMIZE=0` is an **internal test-isolation env var only**
-  (`_auto_enabled()`) — never documented or exposed in the UI; there is no user-facing
-  off switch by owner decision.
+  writes a one-line note via `book_store.save_auto_note` (`anvitech:auto_note`) — e.g.
+  *"Plan auto-re-optimized 14:32: 445 late-days (was 471), overlap 80 → 70"* if it
+  applied, *"Checked 14:32: current plan still best (471 late-days)"* if the contest
+  ran but didn't beat the incumbent, or *"No new feedback since the last optimization
+  — plan unchanged."* if `_try_start_auto()` skipped before running a contest at all
+  — surfaced on `/run`'s `auto_note` field and the Orders tab. Note timestamps are
+  stamped in **IST** (`_ist_now()` = `utcnow() + timedelta(hours=5, minutes=30)`; the
+  server itself runs
+  UTC) since the clock is a named local time the owner reasons about. `AUTO_OPTIMIZE=0`
+  is an **internal test-isolation env var only** (`_auto_enabled()`) — never documented
+  or exposed in the UI; there is no user-facing off switch by owner decision.
 - **Operator absences (Phase 3, same spec).** `anvitech:absences` (see `book_store.py`
   above) — day-granularity `{operator, from_date, to_date}` rows, ISO in the store,
   DD-MM-YYYY in the UI. `optimize_service.absence_reservations(absences)` turns them into
@@ -459,8 +475,9 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   in the validation report (`api._absence_orphans`/`_report_for_book`) — never fatal.
   API: `GET /absences` (any role) returns `{absences, orphans, operators}`; `POST
   /absences` / `DELETE /absences/{id}` (admin) validate dates/operator, no password
-  re-auth (non-destructive, reversible), no trigger call (see the scheduled-optimize
-  bullet above — event triggers were removed 2026-07-18). UI: an
+  re-auth (non-destructive, reversible), no trigger call (see the feedback-triggered
+  optimize bullet above — absences don't call `_try_start_auto` directly; only the
+  Done button does). UI: an
   always-visible Settings-area panel (not nested in the admin-only toolbar, so the user
   role sees the read-only list) with add/remove controls CSS- and server-gated admin-only.
 - **Operator & shift master rotation (2026-07-18,
@@ -497,7 +514,7 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `week_anchor` excluded; the masters sha alone no longer covers operators) so a
   rotation or an edit correctly flags an applied optimization `inputs_changed`;
   excluding `week_anchor` specifically avoids firing on a no-op double-Friday
-  catch-up (churn regression-tested). The scheduled-optimize skip check is an OR:
+  catch-up (churn regression-tested). The `_try_start_auto()` skip check is an OR:
   run when EITHER `book_sig` OR the current `_inputs_signature` differs from the
   applied meta's (a rotation alone doesn't change `book_sig`). **API**
   (`api/main.py`): `GET /operators` (any role, `{operators, next_rotation}`,
@@ -505,8 +522,9 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   /operators/{id}` / `DELETE /operators/{id}` (admin; each calls
   `_current_masters()` FIRST so a direct mutation on a fresh deploy can never
   suppress the one-time workbook seed — a review-caught data-loss hole, closed). No
-  trigger call (event triggers stay removed per the 2026-07-18 scheduled-optimize
-  pivot). **UI**: Settings "Operators & shifts" panel (`#operators-panel` in
+  trigger call (operator mutations don't call `_try_start_auto` directly — only the
+  Done button does; see the feedback-triggered optimize bullet above). **UI**:
+  Settings "Operators & shifts" panel (`#operators-panel` in
   `web/index.html`) — table (name, machines, shift, "Stays" pin, remove), add-row
   form, "Next rotation: Friday DD-MM-YYYY"; admin edits, user role read-only (the
   pin shows as plain text, not a checkbox).
@@ -638,20 +656,20 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   otherwise unchanged, either role. **Commitment endpoints (admin, role-gated, non-destructive,
   no password re-auth):** `/orders/commit`, `/orders/urgent`, `/orders/uncommit` — set
   status + snapshot an informational `promised_date` (Committed = current expected
-  completion from a fresh plan; Urgent = the SO delivery date). No trigger call (event
-  triggers removed 2026-07-18 — see the scheduled-optimize bullet above). They no
+  completion from a fresh plan; Urgent = the SO delivery date). No trigger call —
+  commit/urgent/uncommit don't call `_try_start_auto` directly (see the
+  feedback-triggered optimize bullet above; only the Done button does). They no
   longer gate on a push-preview/warning (the `_preview_urgent_pushes` confirm-modal
   was removed with the rest of Phase 2R).
   **`_plan` is a single pass, always** — every active line (all lanes) goes through
   one `run_forward` call; operator absences are the only `reserved=` (see the Rule 6
-  bullet above); a saved Optimize/scheduled-optimize result replays via `priority_rank=`
+  bullet above); a saved Optimize/auto-optimize result replays via `priority_rank=`
   (expedite forced off while ranks exist). Returns `optimize_meta` (staleness banner)
-  and `auto_note` (`book_store.load_auto_note()`, the scheduled trigger's status
-  line, IST-stamped). **Scheduled trigger** (see the optimizer bullet above for the
-  full mechanics): `_try_start_auto()`/`_auto_apply_result()`, endpoint `POST
-  /optimize/scheduled` (worker-secret only — the GitHub cron). `/optimize/done` no
-  longer exists (removed 2026-07-18; the Capture Actuals "Done entering" button now
-  just refreshes the plan client-side).
+  and `auto_note` (`book_store.load_auto_note()`, the auto-trigger's status
+  line, IST-stamped). **Feedback trigger** (2026-07-22; see the optimizer bullet
+  above for the full mechanics): `_try_start_auto()`/`_auto_apply_result()`,
+  endpoint `POST /optimize/done` (either role — the "Done entering — update plan"
+  button).
   **Absences:** `GET /absences` (any role, `{absences, orphans, operators}`), `POST
   /absences` / `DELETE /absences/{id}` (admin) — see the `book_store.py`/optimizer
   bullets above; `_absence_orphans` feeds the `ABSENT_OPERATOR_UNKNOWN` rows
@@ -676,9 +694,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   with an **SO No dropdown**, a **required Operator dropdown** (2026-07-18, fed by
   `GET /operators`, same list either role sees on Settings — the form blocks
   submit and focuses the field when it's blank), per-entry **↺ Rollback** button,
-  and the **"Done entering — update plan"** button for both roles — a facts-only
-  plan refresh that also reports the next scheduled optimization day; it no
-  longer starts a contest), an always-visible
+  and the **"Done entering — update plan"** button for both roles — hits `POST
+  /optimize/done` to start a feedback-triggered, auto-applying contest (skipped
+  with a "plan unchanged" note if nothing material changed or one's already
+  running), blocks on `/optimize/status` progress, then refreshes the plan to
+  pick up the winner), an always-visible
   **Operator Absences** panel (list visible to both roles; add/remove controls
   admin-only), a Settings **Operators & shifts** panel (`#operators-panel` — table
   of name/machines/shift/"Stays" pin + add-row; "Next rotation: Friday
