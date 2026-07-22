@@ -535,6 +535,13 @@ async function doneOptimize() {
     const body = await res.json();
     started = body.started;
     state = body.state;
+    if (body.reason === "not_optimize_day") {
+      await runPlan(false);
+      if (st) st.textContent = "Feedback saved — plan updated with the latest "
+        + "figures. Re-optimization runs on Thursday.";
+      if (doneBtn) doneBtn.disabled = false;
+      return;
+    }
   } catch (e) {
     if (st) st.textContent = "Could not start optimization: " + e.message;
     if (doneBtn) doneBtn.disabled = false;

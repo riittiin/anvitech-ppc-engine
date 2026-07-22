@@ -941,6 +941,15 @@ def _ist_today():
     return _ist_now().date()
 
 
+# Weekly re-optimization runs only on the shop's off day (Thursday, IST): the owner
+# enters the prior day's feedback on Thursday and re-optimizes then, so the new
+# schedule is ready for Friday. Other days' "Done" only refreshes the facts.
+_OPTIMIZE_WEEKDAY = 3   # Monday=0 … Thursday=3
+
+def _is_optimize_day() -> bool:
+    return _ist_today().weekday() == _OPTIMIZE_WEEKDAY
+
+
 def _resolve_config(config: Config) -> Config:
     """Resolve an 'auto' plan start (plan_start_date is None) to today (IST) so
     the pure engine NEVER sees None. Called at every planning entry; a config
@@ -1834,15 +1843,19 @@ def optimize_result_ep(req: WorkerResult, request: Request):
 
 @app.post("/optimize/done")
 def optimize_done_ep(request: Request):
-    """'Done entering — update plan': the feedback-driven re-optimization trigger.
-    Any logged-in role (operators enter the feedback that motivates it). Starts an
-    auto-applying contest unless nothing changed since the last applied plan or one
-    is already running. Poll GET /optimize/status for progress; the winner
-    auto-applies if strictly better and the next /run reflects it."""
+    """'Done entering — update plan'. Any logged-in role. On the weekly optimize day
+    (Thursday, IST) this fires an auto-applying re-optimization contest; on every
+    other day it does NOT re-optimize — the client refreshes the plan with the
+    latest facts only. Poll GET /optimize/status for progress when a contest starts;
+    the winner auto-applies if strictly better."""
     # No require_admin: the gatekeeper already verified a valid session for any
     # non-public path, and this must be reachable by the user role.
+    if not _is_optimize_day():
+        return {"started": False, "reason": "not_optimize_day",
+                "state": _optimize_status()["state"]}
     started = _try_start_auto()
-    return {"started": started, "state": _optimize_status()["state"]}
+    return {"started": started, "reason": ("started" if started else "skipped"),
+            "state": _optimize_status()["state"]}
 
 
 @app.get("/gantt")
