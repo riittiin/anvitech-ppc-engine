@@ -33,7 +33,7 @@ from typing import List, Optional
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -359,13 +359,6 @@ def _inputs_signature(config: Config) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def _report_table(masters):
-    return to_table([
-        {"Kind": r["kind"], "Reference": r["ref"], "Message": r["message"]}
-        for r in masters.report
-    ])
-
-
 def _report_after_upload(masters):
     """The validation report for the FILE just uploaded (upload endpoint only).
 
@@ -510,11 +503,6 @@ class ActualRequest(BaseModel):
 # --------------------------------------------------------------------------- #
 # Helper-tab augmentation (Rules 3/4/5/7 + Rule 6 machine view)
 # --------------------------------------------------------------------------- #
-def _machine_display(masters, mid):
-    m = masters.machines.get(mid)
-    return m.display_name if m else mid
-
-
 def _augment_helpers(trace, plan_run, config, masters, actuals=None):
     if "rule3" in trace and trace["rule3"].get("reached", True) and plan_run.batches_prioritized:
         breakdown = r3.build_priority_breakdown(plan_run.batches_prioritized, config, masters)

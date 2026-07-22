@@ -49,17 +49,6 @@ def finished_gate(routing) -> str:
     return routing.processes[-1].name
 
 
-def produced_good_by_order(actuals) -> dict:
-    """Sum net good qty (produced − rejected, summed then clamped ≥ 0) per ORDER
-    — keyed by the ``(SO number, item code)`` pair — across ALL processes: the
-    total output, including work-in-progress. NOT order fulfilment; use
-    ``finished_good_by_order`` for remaining-qty / completion logic."""
-    good = defaultdict(float)
-    for a in actuals:
-        good[a.key] += (a.qty_produced - a.qty_rejected)
-    return {k: max(v, 0.0) for k, v in good.items()}
-
-
 def finished_good_by_order(actuals, masters) -> dict:
     """Good qty that actually fulfils each order (keyed by the ``(SO number, item
     code)`` pair) = good produced at the item's **finished-goods gate** (DISPATCH,

@@ -71,13 +71,6 @@ def qualified_operators(machine_id, start_dt, masters, config) -> list:
             if _shift_kind(o) == want and (set(o.machines) & keys)]
 
 
-def operator_for(machine_id, start_dt, masters, config) -> str:
-    """First qualified operator for ``machine_id`` at ``start_dt`` (sheet order), or ''.
-    A display helper; Rule 6 does the real earliest-free assignment."""
-    ops = qualified_operators(machine_id, start_dt, masters, config)
-    return ops[0] if ops else ""
-
-
 def machine_windows(masters, config):
     """Return ``(windows, report)``.
 

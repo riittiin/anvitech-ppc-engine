@@ -330,7 +330,6 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
             cancelled = cancelled or bool(row.get("cancelled"))
     else:
         import multiprocessing as mp
-        import time as _time
         ctx = mp.get_context()
         counter = ctx.Value("i", 0)
         stop = ctx.Value("b", 0)

@@ -415,9 +415,6 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
         return [], True
     cands.sort(key=lambda c: (c[2], listed.index(c[0])))  # earliest free, first-listed tiebreak
 
-    def end_of(clk, f, q):
-        return clk.advance(f, cyc * q + setup)
-
     # Lay the whole quantity on the earliest-free machine, shift-segment by shift-segment
     # (operators handed off per shift; the op may extend when a shift's crew is all busy).
     bm, bclk, bf, bop = cands[0]
