@@ -49,7 +49,7 @@ body.role-pending .admin-only, body.role-user .admin-only { display: none !impor
 
 /* ---------------- Boot loading banner ---------------- */
 .boot-loading {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 300;
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 300;
   background: var(--accent); color: #fff; text-align: center;
   font-size: 13px; font-weight: 600; padding: 6px 14px;
 }
