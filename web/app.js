@@ -630,6 +630,7 @@ async function stopOptimize() {
 const REPORT_LABELS = {
   PENDING_MASTER_DATA: "provisional machines", NO_ROUTING: "orders without routing",
   TIME_COERCION: "time coercions", BAD_DELIVERY_DATE: "bad delivery dates", MISSING_SHEET: "missing sheets",
+  BAD_QTY: "unreadable SO quantities", DUPLICATE_PROCESS: "repeated process names in a routing",
 };
 function renderReport(report) {
   const panel = $("report-panel"), toggle = $("report-toggle"), detail = $("report-detail");

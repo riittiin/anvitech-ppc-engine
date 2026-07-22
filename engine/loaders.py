@@ -353,6 +353,21 @@ def _load_routings(wb, masters: Masters):
                     allotted_machine=(str(am).strip() if am else None),
                 )
             )
+        # Per-process progress (WIP 'continue from reality' re-planning) is keyed by the
+        # NORMALISED process name, so two steps in one routing that normalise to the same
+        # name would merge — their completed/remaining qty would be wrong and could exceed
+        # the ordered qty. Owner-confirmed this never happens in the current data; report
+        # it loudly (non-blocking) if a future workbook ever introduces it.
+        _by_name: dict = {}
+        for pr in processes:
+            _by_name.setdefault(normalize_process_name(pr.name), []).append(pr.seq)
+        for _nm, _seqs in _by_name.items():
+            if len(_seqs) > 1:
+                masters.add_report(
+                    "DUPLICATE_PROCESS", str(code),
+                    f"process name {_nm!r} appears at steps {_seqs}: per-step progress "
+                    f"would merge — give each step a distinct name")
+
         masters.routings[code] = Routing(
             item_code=code,
             description=str(_cell(row, 2)).strip() if _cell(row, 2) else "",
