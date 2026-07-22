@@ -7,8 +7,8 @@ const RULES = {
   rule3: { n: 3, title: "Smart priority (slack)" },
   rule4: { n: 4, title: "Setup time" },
   rule5: { n: 5, title: "Overlap mode" },
-  rule6: { n: 6, title: "Allocate to machines" },
-  rule7: { n: 7, title: "Capture actuals" },
+  rule6: { n: 6, title: "Machine schedule" },
+  rule7: { n: 7, title: "Daily entry" },
   rule8: { n: 8, title: "Plan (book → remaining qty)" },
 };
 const ORDER = ["rule1","rule2","rule3","rule4","rule5","rule6","rule7","rule8"];
@@ -31,6 +31,10 @@ let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour det
 let currentRole = "user";   // set from /me; default to the least-privileged role
 let currentConfig = null;   // /run's config (both roles) — feeds the status strip's plan basis
 let nextRotation = null;    // /operators next_rotation (admin only) — status strip segment
+let planEverLoaded = false; // true once the first /run response (success or failure) lands —
+                             // distinguishes "still loading" from a genuinely empty plan
+let bootLoadingTimer = null;
+let optimizePollFailures = 0;   // consecutive failed /optimize/status polls
 
 // ---- View router ----
 // Six destinations, one visible at a time. Each maps to an existing render call
@@ -40,8 +44,31 @@ const VIEWS = ["orders", "schedule", "gantt", "entry", "analytics", "settings"];
 let activeView = "orders";
 
 const $ = (id) => document.getElementById(id);
-const setStatus = (m) => { $("status").textContent = m; };
-const setDatasetStatus = (m) => { $("dataset-status").innerHTML = m; };
+const setStatus = (m, isError = false) => {
+  const el = $("status");
+  el.textContent = m;
+  el.title = m;   // full message on hover — the line itself is truncated for long text
+  el.classList.toggle("status-error", !!isError);
+};
+const setDatasetStatus = (m, isError = false) => {
+  const el = $("dataset-status");
+  el.innerHTML = m;
+  el.classList.toggle("status-error", !!isError);
+};
+
+// ---- Boot-loading banner (fixed in index.html; removed/updated once the first
+// plan lands) — distinguishes "still loading" (a cold Render instance waking
+// up) from "broken". See boot() below for the 5s "still loading" bump.
+function bootLoadingSuccess() {
+  const el = $("boot-loading");
+  if (el) el.remove();
+  if (bootLoadingTimer) { clearTimeout(bootLoadingTimer); bootLoadingTimer = null; }
+}
+function bootLoadingError(msg) {
+  const el = $("boot-loading");
+  if (el) { el.textContent = msg; el.classList.add("boot-error"); }
+  if (bootLoadingTimer) { clearTimeout(bootLoadingTimer); bootLoadingTimer = null; }
+}
 
 function mountFor(key) {
   if (key === "orders") return $("orders-mount");
@@ -64,7 +91,8 @@ function renderView(v) {
 
 function showView(v, push) {
   if (!VIEWS.includes(v)) v = "orders";
-  if (v === "settings" && currentRole !== "admin") v = "orders";   // never land users on admin-only
+  // Settings shows Operators & shifts / Absences read-only to the user role too
+  // (the truly admin-only sections inside it are their own admin-only cards).
   activeView = v;
   try { localStorage.setItem("anvitech-view", v); } catch (e) { /* private mode */ }
   document.querySelectorAll(".view").forEach((s) => s.classList.toggle("active", s.id === "view-" + v));
@@ -156,6 +184,10 @@ async function initSession() {
   } catch (e) {
     currentRole = "user";
   }
+  // Fail closed: drop the default "role-pending" gate (CSS hides .admin-only for
+  // it too) and apply the real one — an admin control never flashes visible to
+  // a user account while the role is still in flight.
+  document.body.classList.remove("role-pending");
   document.body.classList.toggle("role-user", currentRole !== "admin");
 }
 
@@ -210,9 +242,12 @@ async function runPlan(persist = false) {
   // would persist an incomplete config — block it; the admin just retries.
   const cfg = readConfig();
   if (persist && cfg === null) {
-    setStatus("Plan is still loading, try again in a moment.");
+    setStatus("Plan is still loading, try again in a moment.", true);
     return;
   }
+  const runBtn = $("run-btn");
+  const runBtnLabel = runBtn ? runBtn.textContent : null;
+  if (runBtn) { runBtn.disabled = true; runBtn.textContent = "Saving & re-planning…"; }
   setStatus("Planning…");
   try {
     // With no complete config yet (pre-boot refresh), send none: the server
@@ -224,7 +259,11 @@ async function runPlan(persist = false) {
       body: JSON.stringify(body),
     });
     if (res.status === 401) { window.location = "/login"; return; }
-    if (!res.ok) { setStatus("Error: " + (await res.text())); return; }
+    if (!res.ok) {
+      setStatus("Error: " + (await res.text()), true);
+      bootLoadingError("Could not reach the server. Check your connection and reload the page.");
+      return;
+    }
     const data = await res.json();
     currentTrace = data.trace;
     currentGantt = data.gantt || null;
@@ -241,18 +280,34 @@ async function runPlan(persist = false) {
     renderStatusStrip();
     renderView(activeView);
     setStatus("Plan " + data.run_id + " complete.");
-  } catch (e) { setStatus("Request failed: " + e.message); }
+    bootLoadingSuccess();
+  } catch (e) {
+    setStatus("Request failed: " + e.message, true);
+    bootLoadingError("Could not reach the server. Check your connection and reload the page.");
+  } finally {
+    planEverLoaded = true;
+    if (runBtn) { runBtn.disabled = false; runBtn.textContent = runBtnLabel; }
+  }
 }
 
 // ---- Upload & merge into the order book ----
 async function uploadExcel() {
   const f = $("xlsx-file").files[0];
-  if (!f) { setDatasetStatus("Choose an .xlsx file first."); return; }
+  if (!f) { setDatasetStatus("Choose an .xlsx file first.", true); return; }
+  if (!window.confirm(
+    `Merge "${f.name}" into the live order book?\n\nNew/changed order lines will be added `
+    + `immediately. This can't be undone in one step — you'd need to delete affected orders `
+    + `individually afterwards. Continue?`)) {
+    return;
+  }
   const fd = new FormData(); fd.append("file", f);
   setDatasetStatus("Uploading & merging…");
+  const btn = $("upload-btn");
+  const btnLabel = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = "Uploading…"; }
   try {
     const res = await fetch("/upload", { method: "POST", body: fd });
-    if (!res.ok) { setDatasetStatus("Upload failed: " + (await res.text())); return; }
+    if (!res.ok) { setDatasetStatus("Upload failed: " + (await res.text()), true); return; }
     const d = await res.json();
     ITEMS = null;  // item metadata may have changed
     let msg = `<strong>${escapeHtml(d.name)}</strong>: ${d.added} new order(s) added`;
@@ -260,7 +315,7 @@ async function uploadExcel() {
       const detail = d.flagged.map((f) => `${escapeHtml(f.so_no)}/${escapeHtml(f.item_code || "")} (${escapeHtml(f.reason)})`).join("; ");
       msg += ` · <span class="pill-pending">${d.flagged.length} flagged</span>: ${detail}`;
     }
-    if (d.masters_updated) msg += " · masters updated";
+    if (d.masters_updated) msg += " · uploaded machine/operator/item data updated";
     setDatasetStatus(msg);
     // The upload's OWN (loader-scoped) report drives the always-visible
     // missing-routings note — it still shows any item codes the file dropped
@@ -268,8 +323,12 @@ async function uploadExcel() {
     // /run report is book-scoped and those codes never reached the book).
     renderMissingRoutings(d.report);
     await runPlan();           // refresh the book + schedule
+    msg += ' · Schedule is ready — <a href="#schedule">view the Machine schedule</a>'
+      + ' or <a href="#gantt">the Gantt</a>.';
+    setDatasetStatus(msg);
     showView("orders", true);
-  } catch (e) { setDatasetStatus("Upload error: " + e.message); }
+  } catch (e) { setDatasetStatus("Upload error: " + e.message, true); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = btnLabel; } }
 }
 
 // ---- Optimize (admin: search for a better job sequence; banner for everyone) ----
@@ -295,8 +354,9 @@ function renderOptimizeBanner() {
          `run Optimize again for the best plan</span>`;
   }
   if (optimizeMeta.inputs_changed) {
-    h += ` · <span class="pill-pending">Settings or masters have changed since this ` +
-         `optimization was computed. Its numbers will differ; run Optimize again</span>`;
+    h += ` · <span class="pill-pending">Your Settings or your uploaded machine/operator/item ` +
+         `data have changed since this optimization ran. Its numbers may no longer match — run ` +
+         `Optimize again to refresh them</span>`;
   }
   if (currentRole === "admin") {
     h += ` <button id="optimize-clear-btn" class="ghost-btn small">Remove optimization</button>`;
@@ -307,7 +367,7 @@ function renderOptimizeBanner() {
     if (!window.confirm("Remove the optimized order and go back to the standard plan?")) return;
     const res = await fetch("/optimize/clear", { method: "POST" });
     if (res.ok) { setStatus("Optimization removed."); await runPlan(false); }
-    else setStatus("Could not remove optimization: " + (await res.text()));
+    else setStatus("Could not remove optimization: " + (await res.text()), true);
   };
 }
 
@@ -342,6 +402,19 @@ function countLateOrders() {
   return late;
 }
 
+// The shop's weekly re-optimization runs on its off day (Thursday, IST). Compute
+// the next occurrence client-side (browser-local date — a display approximation,
+// not the authoritative server clock) so the status strip shows a concrete date
+// instead of a bare day name.
+function nextOptimizeDayLabel() {
+  const d = new Date();
+  const diff = (4 - d.getDay() + 7) % 7;   // 0=Sun … 4=Thu … 6=Sat; 0 if today is Thursday
+  const next = new Date(d);
+  next.setDate(d.getDate() + diff);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(next.getDate())}-${p(next.getMonth() + 1)}-${next.getFullYear()}`;
+}
+
 function renderStatusStrip() {
   const el = $("status-strip");
   if (!el) return;
@@ -359,7 +432,7 @@ function renderStatusStrip() {
     ? `<span class="ss-seg">Plan follows today (${escapeHtml(startDisp)})</span>`
     : `<span class="ss-seg">Plan starts ${escapeHtml(isoToDdmmyyyy(currentConfig.plan_start_date))}</span>`);
 
-  segs.push(`<span class="ss-seg">Re-optimization runs Thursday</span>`);
+  segs.push(`<span class="ss-seg">Next re-optimization: Thu ${escapeHtml(nextOptimizeDayLabel())}</span>`);
   if (currentRole === "admin" && nextRotation) {
     segs.push(`<span class="ss-seg">Next rotation: ${escapeHtml(isoToDdmmyyyy(nextRotation))}</span>`);
   }
@@ -373,7 +446,7 @@ function renderStatusStrip() {
   // Warning chip: staleness and/or unstaffed hours (both from the /run response).
   const warns = [];
   if (optimizeMeta && optimizeMeta.inputs_changed) {
-    warns.push("Settings or masters changed since the applied optimization. Its numbers will differ; run Optimize again.");
+    warns.push("Your Settings or your uploaded machine/operator/item data changed since the applied optimization. Its numbers may no longer match — run Optimize again.");
   }
   const unstaffed = currentTrace && currentTrace.analytics && currentTrace.analytics.headline
     ? currentTrace.analytics.headline.unstaffed_hrs : 0;
@@ -426,16 +499,30 @@ function _showRunningControls(running) {
   if (stopBtn) stopBtn.classList.toggle("hidden", !running);
 }
 
+// After 3 consecutive failed polls (~15s), say so on the progress line instead
+// of silently freezing — the search itself may still be running server-side.
+function _pollFailure() {
+  optimizePollFailures++;
+  if (optimizePollFailures >= 3) {
+    const prog = $("optimize-progress");
+    if (prog && !/connection hiccup/.test(prog.textContent)) {
+      prog.textContent += " (connection hiccup, retrying — the search is still running on the server)";
+    }
+  }
+  _schedulePoll(5000);
+}
+
 async function pollOptimizeStatus() {
   let st;
   try {
     const res = await fetch("/optimize/status");
-    if (!res.ok) { _schedulePoll(5000); return; }   // transient — try again, don't die
+    if (!res.ok) { _pollFailure(); return; }   // transient — try again, don't die
     st = await res.json();
   } catch (e) {
-    _schedulePoll(5000);                              // network blip — try again, don't die
+    _pollFailure();                                   // network blip — try again, don't die
     return;
   }
+  optimizePollFailures = 0;
   const prog = $("optimize-progress");
   if (st.state === "running") {
     _showRunningControls(true);
@@ -489,9 +576,10 @@ function renderOptimizeResult(st) {
     const isChunks = st.knob === "flow_chunks";
     const name = isChunks ? "Batch flow (chunks)" : "Overlap";
     const unit = isChunks ? "" : "%";
+    const nameLabel = isChunks ? name : `${name} (how early the next step can start)`;
     h += st.best_overlap !== st.current_overlap
-      ? `<p>Best setting found: <strong>${name} ${st.best_overlap}${unit}</strong> (currently ${st.current_overlap}${unit}). Applying this plan also updates it automatically.</p>`
-      : `<p>Your ${name} setting (${st.current_overlap}${unit}) was also tested against the alternatives. It is already the best.</p>`;
+      ? `<p>Best setting found: <strong>${nameLabel} ${st.best_overlap}${unit}</strong> (currently ${st.current_overlap}${unit}). Applying this plan also updates it automatically.</p>`
+      : `<p>Your ${nameLabel} setting (${st.current_overlap}${unit}) was also tested against the alternatives. It is already the best.</p>`;
   }
   h += '<div class="table-wrap"><table><thead><tr><th></th><th>Standard plan</th><th>Optimized</th></tr></thead><tbody>';
   rows.forEach((r) => {
@@ -628,8 +716,10 @@ async function stopOptimize() {
 
 // ---- Loader report (collapsible) ----
 const REPORT_LABELS = {
-  PENDING_MASTER_DATA: "provisional machines", NO_ROUTING: "orders without routing",
-  TIME_COERCION: "time coercions", BAD_DELIVERY_DATE: "bad delivery dates", MISSING_SHEET: "missing sheets",
+  PENDING_MASTER_DATA: "machines not yet in your Machine master (used anyway)",
+  NO_ROUTING: "orders without routing",
+  TIME_COERCION: "cycle times auto-converted to minutes",
+  BAD_DELIVERY_DATE: "bad delivery dates", MISSING_SHEET: "missing sheets",
   BAD_QTY: "unreadable SO quantities", DUPLICATE_PROCESS: "repeated process names in a routing",
 };
 function renderReport(report) {
@@ -672,25 +762,50 @@ function renderTab(key) {
   const entry = currentTrace ? currentTrace[key] : null;
   const meta = RULES[key];
   const root = mountFor(key);
-  if (!entry) { root.innerHTML = '<p class="placeholder">Click <strong>Plan</strong> to run the rules.</p>'; return; }
+  if (!entry) {
+    root.innerHTML = planEverLoaded
+      ? '<p class="placeholder">No plan yet. Upload a sales-order Excel on the Orders tab to get started.</p>'
+      : '<p class="placeholder">Loading your plan…</p>';
+    return;
+  }
 
-  let html = `<div class="rule-header"><h2>Rule ${meta.n}: ${meta.title}</h2></div>`;
+  // Machine schedule: don't fall through to an empty table shell — guide the
+  // owner back to Orders, same pattern already used by Gantt/Analytics.
+  if (key === "rule6" && (!entry.output || !entry.output.rows || !entry.output.rows.length)) {
+    root.innerHTML = '<p class="placeholder">No schedule yet. Add orders on the Orders tab to see the machine allocation.</p>';
+    return;
+  }
+
+  const noActiveOrders = !currentOrders || !currentOrders.rows || !currentOrders.rows.length;
+
+  // "Machine schedule" and "Daily entry" already carry a heading on their card
+  // (index.html) — don't repeat it here with an internal "Rule N:" label.
+  let html = (key === "rule6" || key === "rule7")
+    ? ""
+    : `<div class="rule-header"><h2>Rule ${meta.n}: ${meta.title}</h2></div>`;
   if (entry.reached === false) {
-    html += '<div class="not-reached-box">Not reached: a previous rule stopped the chain.</div>';
+    html += '<div class="not-reached-box">This step didn’t run because an earlier step hit a '
+      + 'problem — check the warning above, fix the data, then Save &amp; re-plan.</div>';
     root.innerHTML = html; return;
   }
   if (entry.error) {
-    html += `<div class="error-box"><strong>Rule error</strong> in record `
-      + `<code>${escapeHtml(String(entry.error.record_id))}</code>: ${escapeHtml(entry.error.message)}</div>`;
+    html += `<div class="error-box"><strong>Planning stopped</strong> on order `
+      + `<code>${escapeHtml(String(entry.error.record_id))}</code>: ${escapeHtml(entry.error.message)}. `
+      + `Fix this order's data, then Save &amp; re-plan.</div>`;
   }
-  if (key === "rule7") html += actualsFormHtml();
+  if (key === "rule7") {
+    html += noActiveOrders
+      ? '<p class="placeholder">No orders to log yet. Upload your sales-order Excel on the '
+        + '<strong>Orders</strong> tab first — then come back here to record what the floor produced.</p>'
+      : actualsFormHtml();
+  }
 
   // Task 3: let operators download the machine schedule to print and follow.
   if (key === "rule6" && entry.output && entry.output.rows && entry.output.rows.length) {
     html += '<div class="dl-toolbar">'
-      + '<button id="dl-schedule" class="primary">⬇ Download schedule (CSV)</button>'
-      + '<button id="dl-machine">⬇ Download machine-wise view</button>'
-      + '<button id="dl-shiftwise">⬇ Download shift-wise schedule</button>'
+      + '<button id="dl-schedule" class="primary" title="Every operation, one row each">⬇ Download schedule (CSV)</button>'
+      + '<button id="dl-machine" title="Same schedule grouped by machine — post at each machine">⬇ Download machine-wise view</button>'
+      + '<button id="dl-shiftwise" title="Grouped by shift — hand to shift supervisors">⬇ Download shift-wise schedule</button>'
       + '<span class="muted"> (opens in Excel; print it for the floor)</span></div>';
   }
 
@@ -713,7 +828,7 @@ function renderTab(key) {
     html += "</ul></div>";
   }
   root.innerHTML = html;
-  if (key === "rule7") { wireActualsForm(); wireRollback(); }
+  if (key === "rule7") { if (!noActiveOrders) wireActualsForm(); wireRollback(); }
   if (key === "rule6") {
     const sched = $("dl-schedule");
     if (sched) sched.onclick = () => downloadCsv(`anvitech-schedule-${todayStamp()}.csv`, entry.output);
@@ -767,29 +882,34 @@ async function renderOrders() {
   const isAdmin = currentRole === "admin";
   let html = "";
   if (!currentOrders || !currentOrders.rows.length) {
-    html += isAdmin
-      ? '<p class="placeholder">No orders yet. Upload your Excel to begin.</p>'
-      : '<p class="placeholder">No orders yet.</p>';
+    if (!planEverLoaded) {
+      html += '<p class="placeholder">Loading your plan…</p>';
+    } else {
+      html += isAdmin
+        ? '<p class="placeholder">No orders yet. Upload your Excel to begin.</p>'
+        : '<p class="placeholder">No orders yet. Ask an admin to upload the sales-order Excel to get started.</p>';
+    }
     root.innerHTML = html; return;
   }
   // Commitment controls are admin-only (server enforces this too). Danger actions
   // (delete) live in a separate strip at the bottom, visually set apart.
   if (isAdmin) {
     html += '<div class="ord-toolbar">'
-      + '<button id="ord-commit-sel">Commit selected</button> '
-      + '<button id="ord-urgent-sel">Mark Urgent</button> '
-      + '<button id="ord-uncommit-sel">Uncommit selected</button>'
+      + '<button id="ord-commit-sel" class="ghost-btn" title="Label only — does not change the machine schedule">Commit selected</button> '
+      + '<button id="ord-urgent-sel" class="ghost-btn" title="Select exactly one order — label only, does not change the machine schedule">Mark Urgent (label only)</button> '
+      + '<button id="ord-uncommit-sel" class="ghost-btn" title="Label only — does not change the machine schedule">Uncommit selected</button>'
       + '</div>';
   }
   html += orderTableHtml(currentOrders, isAdmin);
-  html += '<p class="g-note">Pending = not started · Running = production logged · Complete = marked complete on a Rule 7 entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty. '
-    + 'Lane: status labels only (no scheduling effect): <strong>open</strong> = newly arrived · <strong>committed</strong> = released, promised date snapshotted · <strong>urgent</strong> = flagged, promised = delivery date. The plan sequences all orders together by delivery date.</p>';
+  html += '<p class="g-note">Pending = not started · Running = production logged · Complete = marked complete on a Daily Entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty. '
+    + 'Lane: status labels only (no scheduling effect): <strong>open</strong> = newly arrived · <strong>committed</strong> = released, promised date snapshotted · <strong>urgent</strong> = flagged, promised = delivery date. The plan sequences all orders together by delivery date. '
+    + '<strong>Red</strong> "Current expected" = later than the Promised date shown in the same row (the order has slipped).</p>';
   if (isAdmin) {
     html += '<div class="danger-strip">'
       + '<span class="danger-label">Danger zone</span>'
-      + '<button id="ord-del-sel">Delete selected</button> '
+      + '<button id="ord-del-sel" class="danger">Delete selected</button> '
       + '<button id="ord-del-all" class="danger">Delete ALL data</button>'
-      + '<span class="muted"> · deletes permanently from the database (and their actuals)</span></div>';
+      + '<span class="muted"> · deletes permanently from the database (and their production entries)</span></div>';
   }
   root.innerHTML = html;
   if (isAdmin) { wireOrdersDelete(); wireOrdersCommit(); }
@@ -903,7 +1023,7 @@ function wireOrdersDelete() {
   const delSel = $("ord-del-sel");
   if (delSel) delSel.onclick = async () => {
     const sel = [...document.querySelectorAll(".ordsel:checked")].map((c) => [c.dataset.so, c.dataset.item]);
-    if (!sel.length) { setStatus("No rows selected to delete."); return; }
+    if (!sel.length) { setStatus("No rows selected to delete.", true); return; }
     const okd = await deleteWithPassword(
       `Permanently delete ${sel.length} order(s) and their production data?`,
       (pw) => fetch("/orders/delete", {
@@ -938,54 +1058,80 @@ function wireOrdersCommit() {
   const commitBtn = $("ord-commit-sel");
   if (commitBtn) commitBtn.onclick = async () => {
     const sel = selectedOrderPairs();
-    if (!sel.length) { setStatus("Select orders to commit."); return; }
+    if (!sel.length) { setStatus("Select orders to commit.", true); return; }
     try {
       const res = await fetch("/orders/commit", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ orders: sel }),
       });
-      if (!res.ok) { setStatus("Commit failed: " + (await res.text())); return; }
+      if (!res.ok) { setStatus("Commit failed: " + (await res.text()), true); return; }
       setStatus(`Committed ${sel.length} order(s).`);
       currentOrders = null; await runPlan();
-    } catch (e) { setStatus("Commit error: " + e.message); }
+    } catch (e) { setStatus("Commit error: " + e.message, true); }
   };
 
   const uncommitBtn = $("ord-uncommit-sel");
   if (uncommitBtn) uncommitBtn.onclick = async () => {
     const sel = selectedOrderPairs();
-    if (!sel.length) { setStatus("Select orders to uncommit."); return; }
+    if (!sel.length) { setStatus("Select orders to uncommit.", true); return; }
     try {
       const res = await fetch("/orders/uncommit", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ orders: sel }),
       });
-      if (!res.ok) { setStatus("Uncommit failed: " + (await res.text())); return; }
+      if (!res.ok) { setStatus("Uncommit failed: " + (await res.text()), true); return; }
       setStatus(`Uncommitted ${sel.length} order(s).`);
       currentOrders = null; await runPlan();
-    } catch (e) { setStatus("Uncommit error: " + e.message); }
+    } catch (e) { setStatus("Uncommit error: " + e.message, true); }
   };
 
   const urgentBtn = $("ord-urgent-sel");
+  // Mark Urgent only ever applies to exactly one order — disable it (with a
+  // tooltip explaining why) until exactly one row is checked, instead of
+  // letting the owner click it and find out only afterwards.
+  const updateUrgentState = () => {
+    if (!urgentBtn) return;
+    const n = selectedOrderPairs().length;
+    urgentBtn.disabled = n !== 1;
+    urgentBtn.title = n === 1
+      ? "Applies to this one order — label only, does not change the machine schedule."
+      : "Select exactly one order to mark urgent.";
+  };
+  document.querySelectorAll(".ordsel").forEach((c) => c.addEventListener("change", updateUrgentState));
+  const allCheck = $("ord-all-check");
+  if (allCheck) allCheck.addEventListener("change", updateUrgentState);
+  updateUrgentState();
   if (urgentBtn) urgentBtn.onclick = async () => {
     const sel = selectedOrderPairs();
-    if (sel.length !== 1) { setStatus("Select exactly one order to mark urgent."); return; }
+    if (sel.length !== 1) { setStatus("Select exactly one order to mark urgent.", true); return; }
     const [so, item] = sel[0];
+    if (!window.confirm(
+      `Mark SO ${so} / ${item} as Urgent?\n\nThis only flags it for tracking — it does NOT move `
+      + `it up the machine queue or change delivery timing. To actually change the job order, use `
+      + `Optimize (Schedule tab). Continue?`)) {
+      return;
+    }
     try {
       const res = await fetch("/orders/urgent", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ so, item }),
       });
-      if (!res.ok) { setStatus("Mark urgent failed: " + (await res.text())); return; }
+      if (!res.ok) { setStatus("Mark urgent failed: " + (await res.text()), true); return; }
       setStatus(`Marked ${so} (${item}) urgent.`);
       currentOrders = null; await runPlan();
-    } catch (e) { setStatus("Mark urgent error: " + e.message); }
+    } catch (e) { setStatus("Mark urgent error: " + e.message, true); }
   };
 }
 
 // ---- Gantt ----
 function renderGantt() {
   const root = mountFor("gantt");
-  if (!currentGantt) { root.innerHTML = '<p class="placeholder">No schedule yet. Add orders on the Orders view to build the Gantt.</p>'; return; }
+  if (!currentGantt) {
+    root.innerHTML = planEverLoaded
+      ? '<p class="placeholder">No schedule yet. Add orders on the Orders view to build the Gantt.</p>'
+      : '<p class="placeholder">Loading your plan…</p>';
+    return;
+  }
   const g = currentGantt;
   if (!g.rows || !g.rows.length) {
     root.innerHTML = '<p class="placeholder">No schedule to chart. Add orders on the Orders view.</p>';
@@ -1039,11 +1185,12 @@ function renderGantt() {
       <tr><th class="g-corner" colspan="7" rowspan="2">Dates →</th>
           <th class="g-axis"><div class="g-band" style="width:${axisW}px">${monthCells}</div></th></tr>
       <tr><th class="g-axis"><div class="g-band" style="width:${axisW}px">${dayCells}</div></th></tr>
-      <tr><th>Item name</th><th>Item Code</th><th>SO No</th><th>SO Qty</th><th>SO Del date</th><th>Expected completion</th><th>Status</th>
+      <tr><th>Item name</th><th>Item Code</th><th>SO No</th><th>SO Qty</th><th>SO Delivery Date</th><th>Expected completion</th><th>Status</th>
           <th class="g-axis"><div class="g-band" style="width:${axisW}px"></div></th></tr>
     </thead><tbody>${rowsHtml}</tbody></table></div>
     <div class="g-legend"><strong>Machines (bar colour):</strong> ${legend}</div>
-    <p class="g-note">Each process sits on its own line, coloured by machine, placed on the day(s) it runs, with its start → end date shown. Hover a bar for machine · operator · time · qty. Status = Pending/Running per order.</p>`;
+    <p class="g-note">"OS / Outsourced" and "Off-machine" above are not physical machines — they mark work sent outside the shop or a dispatch/paperwork step.</p>
+    <p class="g-note">Each process sits on its own line, coloured by machine, placed on the day(s) it runs, with its start → end date shown. Hover a bar for machine · operator · time · qty. Status = Pending/Running per order. <strong>Red</strong> Expected completion = this order is expected to finish after its SO Delivery Date (late).</p>`;
   $("g-zoom-in").onclick = () => { ganttDayWidth = Math.min(ganttDayWidth + 40, 560); renderGantt(); };
   $("g-zoom-out").onclick = () => { ganttDayWidth = Math.max(ganttDayWidth - 40, 80); renderGantt(); };
   fitGantt();
@@ -1067,7 +1214,9 @@ function renderAnalytics() {
   const root = mountFor("analytics");
   const a = currentTrace && currentTrace.analytics;
   if (!a || !a.machines || !a.machines.length) {
-    root.innerHTML = '<p class="placeholder">No analytics yet. Add orders on the Orders view to see utilization &amp; bottlenecks.</p>';
+    root.innerHTML = planEverLoaded
+      ? '<p class="placeholder">No analytics yet. Add orders on the Orders view to see utilization &amp; bottlenecks.</p>'
+      : '<p class="placeholder">Loading your plan…</p>';
     return;
   }
   const h = a.headline || {};
@@ -1117,9 +1266,9 @@ function renderAnalytics() {
       <span class="a-kpi-sub">total machine time</span>
     </div>
     <div class="a-kpi">
-      <span class="a-kpi-lab">Makespan</span>
+      <span class="a-kpi-lab">Total plan length</span>
       <span class="a-kpi-val">${h.makespan_days || "?"}<span class="a-kpi-unit">days</span></span>
-      <span class="a-kpi-sub">${a.window ? escapeHtml(a.window.start + " → " + a.window.end) : ""}</span>
+      <span class="a-kpi-sub">days from the first scheduled job to the last</span>
     </div>
   </div>`;
 
@@ -1161,7 +1310,7 @@ function renderAnalytics() {
         ${a.operators.length ? table(a.operators) : ""}
       </section>
       <section class="a-card a-span">
-        <div class="a-card-head"><h3>Where the work goes</h3><span class="muted">share of total machine-hours</span></div>
+        <div class="a-card-head"><h3>Where the work goes</h3><span class="muted">share of total machine-hours — bar length only, not a hot/healthy/under-used rating</span></div>
         <div class="au-list au-cols">${procBars}</div>
         ${table(a.processes)}
       </section>
@@ -1207,7 +1356,10 @@ function actualsFormHtml() {
     <div class="optimize-done-row">
       <button id="optimize-done" class="primary">Done entering: update plan</button>
       <span id="optimize-done-status" class="status"></span>
-    </div>`;
+    </div>
+    <p class="explainer">Each Save already refreshes today's schedule with what you just
+      entered. Click this once you're done entering for the day — on the scheduled
+      re-optimization day it also re-checks the job order for a better sequence.</p>`;
 }
 
 // Populate the Capture Actuals Operator dropdown from the app-owned operator
@@ -1341,14 +1493,33 @@ async function wireActualsForm() {
       mark_complete: $("a-complete").checked,
     };
     if (!body.operator || !body.so_no || !body.item_code) {
-      setStatus("⚠ Select Operator, SO No, and Item Code before saving.");
+      setStatus("⚠ Select Operator, SO No, and Item Code before saving.", true);
       $(!body.operator ? "a-operator" : body.so_no ? "a-item" : "a-so").focus();
+      return;
+    }
+    // Quantity/downtime fields carry min="0" but Save is a plain button (not a
+    // form submit), so the browser never enforces it — check for negatives here.
+    const negFields = [
+      ["a-prod", "Qty Produced"], ["a-rej", "Qty Rejected"], ["a-setup", "Actual Setting Time"],
+      ["a-nopower", "No Power"], ["a-noop", "No Operator"], ["a-tool", "Tool Problem"],
+      ["a-mbd", "Machine Breakdown"], ["a-noload", "No Load"], ["a-other", "Other Work"],
+    ].filter(([id]) => Number($(id).value) < 0);
+    if (negFields.length) {
+      setStatus("⚠ " + negFields.map((f) => f[1]).join(", ") + " cannot be negative.", true);
       return;
     }
     // Guard against re-saving the exact same entry (the #1 cause of duplicates).
     if (actualIsDuplicate(body) && !confirm(
         `An identical entry is already saved (SO ${body.so_no}, ${body.process || "-"}, `
         + `${body.qty_produced} produced on ${body.entry_date}). Save another?`)) {
+      return;
+    }
+    // Marking an order complete archives it out of active planning immediately —
+    // it sits right above Save in the same block, so confirm before it's too late.
+    if (body.mark_complete && !confirm(
+        `Mark SO ${body.so_no} / ${body.item_code} COMPLETE? This removes it from active `
+        + `planning. You can undo this later via Rollback on this saved entry, but it will `
+        + `not reappear automatically. Continue?`)) {
       return;
     }
     // Immediate feedback so you know the click registered.
@@ -1360,25 +1531,25 @@ async function wireActualsForm() {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
       if (!res.ok) {
-        setStatus("Save failed: " + (await res.text()));
+        setStatus("Save failed: " + (await res.text()), true);
         btn.disabled = false; btn.textContent = label; return;
       }
       const d = await res.json();
       // Close the feedback loop on the punch: immediately re-plan so the schedule,
       // machine allotment, Gantt and Orders all reflect what the floor just reported
       // (per-process quantity produced/rejected). This is what makes the plan dynamic.
-      setStatus("✓ Saved. Re-planning from the new actuals…");
+      setStatus("✓ Saved. Re-planning from what you just entered…");
       await runPlan(false);                    // refreshes currentTrace/gantt/orders/report
       if (d.completed_order) {
         // The order was archived — show the result on the Orders view.
         setStatus(`✓ Saved & re-planned. Order ${body.so_no} marked complete and archived.`);
         showView("orders", true);
       } else {
-        setStatus(`✓ Saved & re-planned. Schedule, Gantt and Orders updated from the new actuals.`);
+        setStatus(`✓ Saved & re-planned. Schedule, Gantt and Orders updated with today's entry.`);
         renderTab("rule7");   // fresh blank form + updated output (stays on Daily Entry)
       }
     } catch (e) {
-      setStatus("Save error: " + e.message); btn.disabled = false; btn.textContent = label;
+      setStatus("Save error: " + e.message, true); btn.disabled = false; btn.textContent = label;
     }
   };
   // "Done entering — update plan": re-optimizes the job order from the day's
@@ -1418,7 +1589,7 @@ function wireRollback() {
         const res = await fetch("/actuals/rollback", {
           method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }),
         });
-        if (!res.ok) { setStatus("Rollback failed: " + (await res.text())); b.disabled = false; return; }
+        if (!res.ok) { setStatus("Rollback failed: " + (await res.text()), true); b.disabled = false; return; }
         const d = await res.json();
         if (currentTrace && currentTrace.rule7) {
           currentTrace.rule7.output = d.actuals;
@@ -1433,7 +1604,7 @@ function wireRollback() {
         renderTab("rule7");
         await runPlan(false);                    // refreshes currentTrace/gantt/orders/report
         setStatus("✓ Entry rolled back." + (d.uncompleted_order ? " Order reopened (it was marked complete)." : "") + " Plan refreshed.");
-      } catch (e) { setStatus("Rollback error: " + e.message); b.disabled = false; }
+      } catch (e) { setStatus("Rollback error: " + e.message, true); b.disabled = false; }
     };
   });
 }
@@ -1481,13 +1652,13 @@ function effYearMonth() {
 async function previewEfficiency() {
   const ym = effYearMonth();
   const el = $("eff-table");
-  if (!ym) { setStatus("Pick a month first."); return; }
+  if (!ym) { setStatus("Pick a month first.", true); return; }
   try {
     const res = await fetch(`/efficiency?year=${ym.year}&month=${ym.month}`);
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) { setStatus("Efficiency error: " + (body.detail || res.status)); return; }
+    if (!res.ok) { setStatus("Efficiency error: " + (body.detail || res.status), true); return; }
     renderEfficiencyTable(body.rows, el);
-  } catch (e) { setStatus("Efficiency error: " + e.message); }
+  } catch (e) { setStatus("Efficiency error: " + e.message, true); }
 }
 
 function renderEfficiencyTable(rows, el) {
@@ -1500,7 +1671,7 @@ function renderEfficiencyTable(rows, el) {
 
 function downloadEfficiencyCsv() {
   const ym = effYearMonth();
-  if (!ym) { setStatus("Pick a month first."); return; }
+  if (!ym) { setStatus("Pick a month first.", true); return; }
   window.location.href = `/efficiency.csv?year=${ym.year}&month=${ym.month}`;
 }
 
@@ -1540,29 +1711,34 @@ async function loadAbsences() {
 
 async function addAbsence() {
   const op = $("absence-operator"), from = $("absence-from"), to = $("absence-to");
-  if (!op || !op.value) { setStatus("Pick an operator to mark absent."); return; }
-  if (!from.value || !to.value) { setStatus("Pick both absence dates."); return; }
+  if (!op || !op.value) { setStatus("Pick an operator to mark absent.", true); return; }
+  if (!from.value || !to.value) { setStatus("Pick both absence dates.", true); return; }
+  if (new Date(to.value) < new Date(from.value)) {
+    setStatus("'To' date must be on or after 'From' date.", true);
+    return;
+  }
   try {
     const res = await fetch("/absences", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ operator: op.value, from_date: from.value, to_date: to.value }),
     });
-    if (!res.ok) { setStatus("Mark absent failed: " + (await res.text())); return; }
+    if (!res.ok) { setStatus("Mark absent failed: " + (await res.text()), true); return; }
     setStatus(`Marked ${op.value} absent.`);
     from.value = ""; to.value = "";
     await loadAbsences();
     await runPlan(false);
-  } catch (e) { setStatus("Mark absent error: " + e.message); }
+  } catch (e) { setStatus("Mark absent error: " + e.message, true); }
 }
 
 async function removeAbsence(id) {
+  if (!window.confirm("Remove this absence? The operator will be treated as available for scheduling again.")) return;
   try {
     const res = await fetch(`/absences/${encodeURIComponent(id)}`, { method: "DELETE" });
-    if (!res.ok) { setStatus("Remove absence failed: " + (await res.text())); return; }
+    if (!res.ok) { setStatus("Remove absence failed: " + (await res.text()), true); return; }
     setStatus("Absence removed.");
     await loadAbsences();
     await runPlan(false);
-  } catch (e) { setStatus("Remove absence error: " + e.message); }
+  } catch (e) { setStatus("Remove absence error: " + e.message, true); }
 }
 
 // ---- Operators & shifts (Settings-area block). The list is visible to both
@@ -1577,7 +1753,10 @@ function renderOperatorsTable(operators) {
   if (!tbody) return;
   const isAdmin = currentRole === "admin";
   if (!operators || operators.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="${isAdmin ? 5 : 4}" class="empty">No operators yet.</td></tr>`;
+    const msg = "No operators yet — the first Excel you upload seeds this list automatically "
+      + "from its \"Operator &amp; shift Master\" sheet"
+      + (isAdmin ? ", or add one below." : ".");
+    tbody.innerHTML = `<tr><td colspan="${isAdmin ? 5 : 4}" class="empty">${msg}</td></tr>`;
     return;
   }
   tbody.innerHTML = operators.map((o) => {
@@ -1641,16 +1820,16 @@ async function patchOperator(id, body) {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!res.ok) { setStatus("Update operator failed: " + (await res.text())); await loadOperators(); return; }
+    if (!res.ok) { setStatus("Update operator failed: " + (await res.text()), true); await loadOperators(); return; }
     setStatus("Operator updated.");
     await loadOperators();
     await runPlan(false);
-  } catch (e) { setStatus("Update operator error: " + e.message); }
+  } catch (e) { setStatus("Update operator error: " + e.message, true); }
 }
 
 async function addOperator() {
   const name = $("op-add-name"), machines = $("op-add-machines"), shift = $("op-add-shift");
-  if (!name || !name.value.trim()) { setStatus("Enter an operator name."); return; }
+  if (!name || !name.value.trim()) { setStatus("Enter an operator name.", true); return; }
   try {
     const res = await fetch("/operators", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -1660,23 +1839,23 @@ async function addOperator() {
         shift: shift ? shift.value : "",
       }),
     });
-    if (!res.ok) { setStatus("Add operator failed: " + (await res.text())); return; }
+    if (!res.ok) { setStatus("Add operator failed: " + (await res.text()), true); return; }
     setStatus(`Added operator ${name.value.trim()}.`);
     name.value = ""; if (machines) machines.value = ""; if (shift) shift.value = "";
     await loadOperators();
     await runPlan(false);
-  } catch (e) { setStatus("Add operator error: " + e.message); }
+  } catch (e) { setStatus("Add operator error: " + e.message, true); }
 }
 
 async function removeOperator(id) {
   if (!confirm("Remove this operator? Any absences recorded against them are kept but will show as unknown.")) return;
   try {
     const res = await fetch(`/operators/${encodeURIComponent(id)}`, { method: "DELETE" });
-    if (!res.ok) { setStatus("Remove operator failed: " + (await res.text())); return; }
+    if (!res.ok) { setStatus("Remove operator failed: " + (await res.text()), true); return; }
     setStatus("Operator removed.");
     await loadOperators();
     await runPlan(false);
-  } catch (e) { setStatus("Remove operator error: " + e.message); }
+  } catch (e) { setStatus("Remove operator error: " + e.message, true); }
 }
 
 // Wire the admin controls (null-guarded — they're absent/hidden for the user role).
@@ -1719,6 +1898,14 @@ if (_effDownloadBtn) _effDownloadBtn.onclick = downloadEfficiencyCsv;
 // Boot: learn the role, restore the last view, then auto-load the current plan (no
 // persist) so the schedule/Gantt/views populate without a Plan click.
 (async function boot() {
+  // "Still loading" bump for a cold Render instance waking up — cleared by
+  // bootLoadingSuccess()/bootLoadingError() the moment the first /run response
+  // (in runPlan()) lands, success or failure.
+  bootLoadingTimer = setTimeout(() => {
+    const el = $("boot-loading");
+    if (el) el.textContent = "Still loading — the server may be waking up after a period "
+      + "of inactivity, this can take up to a minute…";
+  }, 5000);
   await initSession();
   window.addEventListener("hashchange", onHashChange);
   document.querySelectorAll(".nav-item").forEach((n) => {
@@ -1727,10 +1914,10 @@ if (_effDownloadBtn) _effDownloadBtn.onclick = downloadEfficiencyCsv;
   // Land on the hash's view, else the last view visited (defaults to Orders).
   const initial = VIEWS.includes(location.hash.replace(/^#/, "")) ? location.hash.replace(/^#/, "") : lastView();
   showView(initial, true);
-  if (currentRole === "admin") {
-    loadAbsences();   // Settings cards (admin-only): operator/absence masters
-    loadOperators();
-  }
+  // Operators & shifts / Absences are read-only for the user role but still
+  // visible (only their edit controls are admin-only) — load for both roles.
+  loadAbsences();
+  loadOperators();
   await runPlan(false);
   // A search may still be running (or have finished) from before a page reload.
   // Resume the progress display so a refresh mid-run never loses the work — the

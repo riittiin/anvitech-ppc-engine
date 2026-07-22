@@ -6,7 +6,8 @@
   <title>Anvitech PPC Engine</title>
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
+<body class="role-pending">
+  <div id="boot-loading" class="boot-loading" role="status" aria-live="polite">Loading your plan…</div>
   <header class="app-header">
     <div class="brand">
       <span class="brand-mark">A</span>
@@ -21,7 +22,7 @@
       <a class="nav-item" data-view="gantt" href="#gantt">Gantt</a>
       <a class="nav-item" data-view="entry" href="#entry">Daily Entry</a>
       <a class="nav-item" data-view="analytics" href="#analytics">Analytics</a>
-      <a class="nav-item admin-only" data-view="settings" href="#settings">Settings</a>
+      <a class="nav-item" data-view="settings" href="#settings">Settings</a>
     </nav>
     <div class="session-bar">
       <span id="status" class="status"></span>
@@ -154,21 +155,33 @@
           <label>Consolidation window (days)
             <input id="cfg-window" type="number" value="10" min="0" />
           </label>
+          <p class="cfg-help">Orders for the same item due within this many days are grouped into
+            one production batch instead of run separately.</p>
           <label>Setup time (min)
             <input id="cfg-setup" type="number" value="90" min="0" />
           </label>
-          <p class="cfg-readonly">Overlap between steps: tuned automatically by Optimize
-            (currently <span id="cfg-overlap-info">50</span>%)</p>
+          <p class="cfg-help">Minutes added before each CNC/VMC job starts, to account for machine
+            changeover.</p>
+          <p class="cfg-readonly">Overlap between steps (tuned automatically by Optimize — you
+            don't set this; currently <span id="cfg-overlap-info">50</span>%): how much of a job's
+            next step can start before the previous step is completely finished. Higher overlap
+            finishes orders sooner but runs two of that order's processes at the same time.</p>
         </fieldset>
         <fieldset class="settings-group">
-          <legend>Priority (Rule 3)</legend>
+          <legend>Order priority</legend>
+          <p class="cfg-help">Decides which order gets scheduled first when several are due soon.</p>
           <label>Metric
             <select id="cfg-priority-metric">
-              <option value="slack">Least slack</option>
-              <option value="critical_ratio">Critical ratio</option>
-              <option value="process_time">Process time (legacy)</option>
+              <option value="slack">Most urgent first (recommended)</option>
+              <option value="critical_ratio">Workload pressure ratio</option>
+              <option value="process_time">Shortest job first (old method)</option>
             </select>
           </label>
+          <p class="cfg-help"><strong>Most urgent first:</strong> ranks jobs by how little spare
+            time is left before the delivery date is at risk. <strong>Workload pressure
+            ratio:</strong> ranks by how much work remains vs. how many days remain.
+            <strong>Shortest job first:</strong> ignores due dates and runs the quickest jobs first
+            (older method).</p>
           <label>Window
             <select id="cfg-priority-window">
               <option value="">No limit</option>
@@ -182,12 +195,16 @@
           <legend>Options</legend>
           <label class="cfg-check">
             <input id="cfg-operator-logic" type="checkbox" checked />
-            Apply operator &amp; shift logic
+            Apply operator &amp; shift logic (assigns a real, available operator to every shift;
+            turn off only to preview a machine-only schedule that ignores who's actually free to
+            run it)
           </label>
           <label class="cfg-check">
             <input id="cfg-split-parallel" type="checkbox" checked />
-            Split alternative machines in parallel
+            Run big batches across multiple eligible machines at once
           </label>
+          <p class="cfg-help">When a job step can run on more than one machine, share the work
+            across them so it finishes sooner. Turn off to always keep a batch on one machine.</p>
           <label class="cfg-check">
             <input id="cfg-balance-ops" type="checkbox" />
             Balance operator workload (share load fairly; same schedule)
@@ -199,10 +216,12 @@
       </div>
     </div>
 
-    <div class="card admin-only">
+    <div class="card">
       <div class="card-head">
         <h2>Operators &amp; shifts</h2>
-        <p class="explainer">Who runs which machines and on which shift. Shifts rotate every Friday.</p>
+        <p class="explainer">Who runs which machines and on which shift. Shifts rotate every
+          Friday. Seeded once from your uploaded Excel's "Operator &amp; shift Master" sheet; edit
+          or add operators here afterward.</p>
       </div>
       <p id="operators-header" class="muted"></p>
       <div class="table-wrap">
@@ -219,7 +238,7 @@
           <tbody id="operators-tbody"></tbody>
         </table>
       </div>
-      <div class="cfg-row">
+      <div class="cfg-row admin-only">
         <input type="text" id="op-add-name" placeholder="Name" />
         <input type="text" id="op-add-machines" placeholder="Machines (e.g. CNC 1/CNC 2)" />
         <select id="op-add-shift">
@@ -231,12 +250,12 @@
       </div>
     </div>
 
-    <div class="card admin-only">
+    <div class="card">
       <div class="card-head">
         <h2>Absences</h2>
         <p class="explainer">Mark an operator away for a date range: the plan skips them while absent.</p>
       </div>
-      <div class="cfg-row">
+      <div class="cfg-row admin-only">
         <select id="absence-operator"></select>
         <input type="date" id="absence-from" />
         <input type="date" id="absence-to" />
@@ -257,6 +276,16 @@
         <button id="eff-preview-btn" class="ghost-btn" type="button">Preview</button>
         <button id="eff-download-btn" class="ghost-btn" type="button">⬇ Download CSV</button>
       </div>
+      <p class="explainer">
+        <strong>Attended (min)</strong> = time on shift minus recorded downtime and setup.
+        <strong>Earned (min)</strong> = standard time credited for GOOD pieces only — rejects earn
+        nothing. <strong>Efficiency %</strong> = Earned ÷ Attended × 100.
+        <strong>Pace vs standard (x)</strong> = how many times faster/slower than standard cycle
+        time (1.0 = exactly standard, 1.2 = 20% faster). <strong>Reject %</strong> = rejected ÷
+        (good + rejected) qty. <strong>No-standard punches</strong> = entries for an item/process
+        with no time standard on file — excluded from both earned and attended time, so they never
+        count against the operator.
+      </p>
       <div id="eff-table" class="eff-table"></div>
     </div>
   </section>

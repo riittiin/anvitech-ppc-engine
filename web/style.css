@@ -42,8 +42,18 @@ body {
 h1, h2, h3 { margin: 0; }
 
 /* Role gating: hide admin-only controls for the user role. The server still
-   enforces every restriction — this is the UI polish on top. */
-body.role-user .admin-only { display: none !important; }
+   enforces every restriction — this is the UI polish on top. Fail CLOSED: also
+   hide while the role is still being resolved (role-pending, the body's default
+   class) so an admin control never flashes visible before /me resolves. */
+body.role-pending .admin-only, body.role-user .admin-only { display: none !important; }
+
+/* ---------------- Boot loading banner ---------------- */
+.boot-loading {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 300;
+  background: var(--accent); color: #fff; text-align: center;
+  font-size: 13px; font-weight: 600; padding: 6px 14px;
+}
+.boot-loading.boot-error { background: var(--danger); }
 
 /* ---------------- Header + fixed nav ---------------- */
 .app-header {
@@ -73,6 +83,7 @@ body.role-user .admin-only { display: none !important; }
 
 .session-bar { display: flex; align-items: center; gap: 14px; font-size: 13px; margin-left: auto; }
 #status { color: var(--muted); font-size: 12px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#status.status-error, #dataset-status.status-error { color: var(--danger); font-weight: 600; }
 #session-info { color: var(--muted); display: flex; align-items: center; gap: 10px; }
 #session-info strong { color: var(--ink); }
 .logout-form { display: inline; margin: 0; }
@@ -195,6 +206,10 @@ button.danger:hover { filter: brightness(1.05); color: #fff; }
   margin-top: 11px; font-size: 12px; color: var(--muted); line-height: 1.4;
 }
 .settings-group .cfg-readonly span { color: var(--ink); font-weight: 700; }
+.settings-group .cfg-help {
+  margin: 4px 0 0; font-size: 11.5px; color: var(--muted); line-height: 1.4;
+}
+.settings-group .cfg-help strong { color: var(--ink); }
 
 .cfg-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
 .cfg-row select, .cfg-row input[type="date"], .cfg-row input[type="text"], .cfg-row input[type="month"] {
