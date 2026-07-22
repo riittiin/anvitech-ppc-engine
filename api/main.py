@@ -246,6 +246,15 @@ _RUNS: "OrderedDict[str, dict]" = OrderedDict()
 _RUNS_MAX = 40
 _MASTERS_CACHE: dict = {"key": None, "masters": None}
 
+# Plan-result cache (in-process). `_plan` is CPU-heavy (the operator-stable engine
+# schedules the whole book) and re-runs on every login/refresh even when nothing
+# changed — the dominant latency on Render's weak free CPU. We cache the last plan
+# result keyed by a fingerprint of EVERY input that determines it (see
+# _plan_fingerprint), so a login with no changes is served instantly. The fingerprint
+# self-invalidates on any real change (orders, actuals, absences, masters, operators,
+# config, applied ranks, or a new day), so a stale plan can never be served.
+_PLAN_CACHE: dict = {"key": None, "result": None}
+
 
 def _store_run(run_id: str, trace: dict) -> None:
     _RUNS[run_id] = trace
@@ -660,6 +669,13 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
 # Core: plan the active order book
 # --------------------------------------------------------------------------- #
 def _plan(config: Config):
+    # Serve the cached plan when EVERY input is unchanged (the common login/refresh
+    # case) — the fingerprint is complete, so a hit is byte-identical to recomputing.
+    _fp = _plan_fingerprint(config)
+    _cached = _PLAN_CACHE.get("result")
+    if _cached is not None and _PLAN_CACHE.get("key") == _fp:
+        return _cached
+
     masters = _current_masters()
     # Fingerprint of the plan-shaping inputs as REQUESTED (base config, before the
     # actuals-driven start advance) — compared against the applied optimization's.
@@ -824,6 +840,7 @@ def _plan(config: Config):
               "resolved_plan_start": resolved_plan_start,
               "expected_end": exp_end, "optimize_meta": optimize_meta,
               "auto_note": book_store.load_auto_note()}
+    _PLAN_CACHE.update(key=_fp, result=result)
     return result
 
 
@@ -1005,6 +1022,29 @@ def _current_book_sig() -> str:
                                       actuals, masters)
     absences = book_store.load_absences()
     return optimize_service.book_signature(lines, absences=absences)
+
+
+def _plan_fingerprint(config: Config) -> str:
+    """A hash of EVERY input that determines the plan output, so the plan cache serves
+    a stored result only when it would be byte-identical to a fresh compute. Covers:
+    the book (orders + actuals + absences, via `_current_book_sig`), the masters
+    workbook (`_masters_sha`), the app-owned operator table, the FULL resolved config
+    (all scheduling knobs + the resolved plan-start date, which moves with 'today'),
+    and any applied optimization ranks. Any change flips the fingerprint → recompute;
+    nothing changed → instant cache hit. All the store reads here are deduped by the
+    per-request cache, so this is cheap relative to the plan compute it can skip."""
+    parts = {
+        "book": _current_book_sig(),
+        "masters": _masters_sha(),
+        "operators": book_store.load_operator_table(),
+        "config": _resolve_config(config).to_dict(),
+        "ranks": (book_store.load_plan_priority() or {}).get("ranks"),
+        # The plan response also carries the scheduled-optimize note; fold it in so a
+        # new note is never served stale from the cache (a note change is rare).
+        "note": book_store.load_auto_note(),
+    }
+    return hashlib.sha256(
+        json.dumps(parts, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def _auto_note_write(text: str):
