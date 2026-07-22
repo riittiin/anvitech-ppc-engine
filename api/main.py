@@ -929,7 +929,10 @@ def _dispatch_workflow(cloud, job_id) -> bool:
 def _worker_secret_ok(request: Request) -> bool:
     secret = os.environ.get("OPTIMIZE_WORKER_SECRET", "")
     given = request.headers.get("x-worker-secret", "")
-    return bool(secret) and hmac.compare_digest(secret, given)
+    try:
+        return bool(secret) and hmac.compare_digest(secret.encode("utf-8"), given.encode("utf-8"))
+    except (AttributeError, TypeError):
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -1700,6 +1703,17 @@ def _validate_year_month(year: int, month: int) -> None:
         raise HTTPException(status_code=400, detail="year must be 2000-2100")
 
 
+def _csv_safe(value):
+    """Neutralize CSV formula injection: a cell whose text starts with
+    =, +, -, @, a tab, or a CR would be executed as a formula by spreadsheet
+    apps that open the download — prefix a leading single quote (mirrors the
+    client-side tableToCsv guard in web/app.js)."""
+    s = str(value)
+    if s[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + s
+    return value
+
+
 def _efficiency_rows(year: int, month: int) -> list:
     masters = _current_masters()
     actuals = book_store.load_actuals()
@@ -1731,7 +1745,7 @@ def efficiency_report_csv(year: int, month: int, request: Request):
     writer = csv.writer(buf)
     writer.writerow(columns)
     for row in rows:
-        writer.writerow(["-" if row[c] is None else row[c] for c in columns])
+        writer.writerow(["-" if row[c] is None else _csv_safe(row[c]) for c in columns])
     filename = f"operator-efficiency-{year:04d}-{month:02d}.csv"
     return Response(
         content="﻿" + buf.getvalue(),
@@ -1933,6 +1947,8 @@ def post_actuals(req: ActualRequest):
         entry_date = date.fromisoformat(req.entry_date)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="entry_date must be YYYY-MM-DD")
+    if entry_date > _ist_today():
+        raise HTTPException(status_code=400, detail="entry_date cannot be in the future")
     operator = req.operator.strip()
     if not operator:
         raise HTTPException(status_code=400, detail="operator is required")

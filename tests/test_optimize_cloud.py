@@ -60,6 +60,18 @@ def test_worker_endpoints_require_the_secret(monkeypatch):
     assert r.status_code == 404                                         # authed, no job
 
 
+def test_worker_secret_check_does_not_500_on_non_ascii_header(monkeypatch):
+    """hmac.compare_digest(str, str) raises TypeError on non-ASCII input;
+    the check must fail closed (401/403), never 500."""
+    _cloud_env(monkeypatch)
+    m = _api()
+    client = TestClient(m.app)
+    r = client.post("/optimize/progress",
+                     json={"job_id": "xyz"},
+                     headers={"X-Worker-Secret": "£key".encode("latin-1")})
+    assert r.status_code in (401, 403)
+
+
 def test_cloud_round_trip_via_the_worker_endpoints(monkeypatch):
     """The full loop, in-process: dispatch (stubbed) → worker fetches the
     payload → runs the contest with the SAME service functions the real

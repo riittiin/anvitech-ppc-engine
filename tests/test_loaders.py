@@ -206,6 +206,37 @@ def test_so_lines_missing_required_column_reports_and_returns_empty():
     assert "MISSING_SO_COLUMNS" in kinds
 
 
+def test_bad_qty_is_reported_not_silently_zeroed():
+    # A present-but-unparseable SO Qty (e.g. "5 Nos") must be reported
+    # (BAD_QTY), not silently coerced to 0.0 with no warning.
+    wb = _build_so_workbook(SHIFTED_HEADERS, [
+        {14: "SO-1", 17: "Cust A", 28: "ITEM-1", 29: "Widget", 30: "5 Nos",
+         32: "10/08/2026", 35: 5},
+    ])
+    masters = Masters()
+    so_lines = _load_so_lines(wb, masters)
+    assert len(so_lines) == 1
+    assert so_lines[0].qty == 0.0
+    bad_qty = [r for r in masters.report if r["kind"] == "BAD_QTY"]
+    assert len(bad_qty) == 1
+    assert bad_qty[0]["ref"] == "SO-1"
+    assert "5 Nos" in bad_qty[0]["message"]
+
+
+def test_blank_qty_stays_silent_zero_no_report():
+    # A truly empty qty cell keeps the existing (silent) behaviour — only a
+    # present-but-unparseable value is reported.
+    wb = _build_so_workbook(SHIFTED_HEADERS, [
+        {14: "SO-1", 17: "Cust A", 28: "ITEM-1", 29: "Widget",
+         32: "10/08/2026", 35: 5},   # no col 30 (SO Qty) at all
+    ])
+    masters = Masters()
+    so_lines = _load_so_lines(wb, masters)
+    assert len(so_lines) == 1
+    assert so_lines[0].qty == 0.0
+    assert [r for r in masters.report if r["kind"] == "BAD_QTY"] == []
+
+
 def test_os_is_not_registered_as_a_machine():
     # An outsourced step (Allotted = OS) must NOT create a phantom 'OS' machine
     # or a PENDING_MASTER_DATA report — OS is a sentinel, not a resource.

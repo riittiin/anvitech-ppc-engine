@@ -35,6 +35,22 @@ def _row_status(source_so_refs, item_code, status_by_order):
     return "Mixed" if statuses else ""
 
 
+def _bar_operator(e):
+    """Operator label for one bar: when a shift handoff books more than one
+    person on this op (``op_segments``), join the distinct operators in
+    start order (e.g. "Alpha → Bravo") so the night operator isn't hidden.
+    Falls back to the entry's single ``operator`` when there are no segments
+    (OS / off-machine milestones, or operator logic off)."""
+    segs = sorted((getattr(e, "op_segments", None) or []), key=lambda s: s[0])
+    names = []
+    for _start, _end, op in segs:
+        if op and op not in names:
+            names.append(op)
+    if names:
+        return " → ".join(names)
+    return e.operator or ""
+
+
 def build_gantt(schedule, batches, masters, status_by_order=None):
     if not schedule:
         return _empty()
@@ -91,7 +107,7 @@ def build_gantt(schedule, batches, masters, status_by_order=None):
             bars.append({
                 "process": e.process_name,
                 "machine": disp(e.machine),
-                "operator": e.operator or "",
+                "operator": _bar_operator(e),
                 "color": color_by_id[e.machine],
                 "offset_days": round(offset, 4),
                 "duration_days": round(duration, 4),

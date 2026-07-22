@@ -65,6 +65,48 @@ def test_gantt_bars_carry_operator_when_logic_on():
     assert g["rows"][0]["bars"][0]["operator"] == "Asha"
 
 
+def test_gantt_bar_names_both_operators_on_a_shift_handoff():
+    # An op whose op_segments span a shift handoff (two different operators)
+    # must show both names on its bar, not just the first segment's operator.
+    from engine.models import Batch, ScheduleEntry, Machine, Masters, WorkCalendar
+    import datetime
+    machines = {"CNC1": Machine("CNC1", "CNC 1", "CNC lathe", available_hrs_per_day=19.5)}
+    masters = Masters(machines=machines, calendar=WorkCalendar())
+    b = Batch(batch_id="B", item_code="X", item_name="x", qty=5,
+              so_delivery_date=datetime.date(2025, 3, 20), source_so_refs=["S"])
+    start = datetime.datetime(2025, 3, 5, 8, 0)
+    handoff = datetime.datetime(2025, 3, 5, 19, 0)
+    end = datetime.datetime(2025, 3, 6, 5, 0)
+    entry = ScheduleEntry(
+        batch_id="B", item_code="X", process_seq=1, process_name="OP",
+        machine="CNC1", qty=5, occupancy_min=(end - start).total_seconds() / 60,
+        start=start, end=end, so_refs=["S"], operator="Alpha",
+        op_segments=[(start, handoff, "Alpha"), (handoff, end, "Bravo")],
+    )
+    g = build_gantt([entry], [b], masters)
+    assert g["rows"][0]["bars"][0]["operator"] == "Alpha → Bravo"
+
+
+def test_gantt_bar_falls_back_to_entry_operator_without_segments():
+    # OS/off-machine milestones (and operator-logic-off entries) carry no
+    # op_segments; the bar must still show the entry's single operator field.
+    from engine.models import Batch, ScheduleEntry, Masters, WorkCalendar
+    import datetime
+    masters = Masters(machines={}, calendar=WorkCalendar())
+    b = Batch(batch_id="B", item_code="X", item_name="x", qty=5,
+              so_delivery_date=datetime.date(2025, 3, 20), source_so_refs=["S"])
+    start = datetime.datetime(2025, 3, 5, 8, 0)
+    end = datetime.datetime(2025, 3, 5, 9, 0)
+    entry = ScheduleEntry(
+        batch_id="B", item_code="X", process_seq=1, process_name="OS",
+        machine="OS / Outsourced", qty=5, occupancy_min=60,
+        start=start, end=end, so_refs=["S"], operator="",
+        op_segments=[],
+    )
+    g = build_gantt([entry], [b], masters)
+    assert g["rows"][0]["bars"][0]["operator"] == ""
+
+
 def test_bar_offsets_are_time_accurate(loaded):
     so_lines, masters = loaded
     pr = PlanRun(so_lines=so_lines)

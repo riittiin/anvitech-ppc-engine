@@ -359,7 +359,7 @@ function renderStatusStrip() {
     ? `<span class="ss-seg">Plan follows today (${escapeHtml(startDisp)})</span>`
     : `<span class="ss-seg">Plan starts ${escapeHtml(isoToDdmmyyyy(currentConfig.plan_start_date))}</span>`);
 
-  segs.push(`<span class="ss-seg">Optimization runs when you finish entering feedback</span>`);
+  segs.push(`<span class="ss-seg">Re-optimization runs Thursday</span>`);
   if (currentRole === "admin" && nextRotation) {
     segs.push(`<span class="ss-seg">Next rotation: ${escapeHtml(isoToDdmmyyyy(nextRotation))}</span>`);
   }
@@ -737,7 +737,10 @@ function todayStamp() {
 
 function tableToCsv(table) {
   const esc = (v) => {
-    const s = v === null || v === undefined ? "" : String(v);
+    let s = v === null || v === undefined ? "" : String(v);
+    // Neutralize CSV formula injection: a leading =, +, -, @, tab, or CR
+    // would be executed as a formula by spreadsheet apps that open the file.
+    if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   };
   const lines = [table.columns.map(esc).join(",")];
@@ -1425,8 +1428,10 @@ function wireRollback() {
           }];
         }
         if (d.orders) currentOrders = d.orders;
-        setStatus("✓ Entry rolled back." + (d.uncompleted_order ? " Order reopened (it was marked complete)." : "") + " Click Plan to refresh the schedule.");
+        setStatus("✓ Entry rolled back." + (d.uncompleted_order ? " Order reopened (it was marked complete)." : "") + " Re-planning…");
         renderTab("rule7");
+        await runPlan(false);                    // refreshes currentTrace/gantt/orders/report
+        setStatus("✓ Entry rolled back." + (d.uncompleted_order ? " Order reopened (it was marked complete)." : "") + " Plan refreshed.");
       } catch (e) { setStatus("Rollback error: " + e.message); b.disabled = false; }
     };
   });

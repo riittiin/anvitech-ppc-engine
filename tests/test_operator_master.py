@@ -78,6 +78,16 @@ def test_rotate_flips_unpinned_two_shift_operators_across_one_friday():
     assert new_table["week_anchor"] == "2026-07-17"
 
 
+def test_rotate_flips_lowercase_shift_text_case_insensitively():
+    # "first shift" (lowercase, e.g. a manually-edited row) must rotate the
+    # same as the canonical "First shift" — matches engine.efficiency's
+    # case-insensitive shift normalization.
+    table = {"week_anchor": "2026-07-10", "operators": [_row("A", "first shift")]}
+    new_table, flips = om.rotate_table(table, date(2026, 7, 17))
+    assert flips == 1
+    assert new_table["operators"][0]["shift"] == "Second shift"
+
+
 def test_rotate_never_flips_a_pinned_operator():
     table = {"week_anchor": "2026-07-10",
              "operators": [_row("Pinned", "First shift", pinned=True)]}

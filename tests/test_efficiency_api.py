@@ -155,3 +155,19 @@ def test_zero_padded_month_in_filename():
     r = admin.get("/efficiency.csv", params={"year": 2025, "month": 3})
     assert r.status_code == 200
     assert 'filename="operator-efficiency-2025-03.csv"' in r.headers["content-disposition"]
+
+
+def test_csv_neutralizes_formula_injection_in_operator_name():
+    # An operator name starting with '=' (or +/-/@) would be executed as a
+    # formula by a spreadsheet app opening the CSV — the server must prefix
+    # a leading single quote so it renders as inert text.
+    m = _api(); _seed_book()
+    _punch(operator="=cmd|' /C calc'!A0", qty_produced=10.0)
+    admin = _admin_client(m)
+
+    r = admin.get("/efficiency.csv", params={"year": 2025, "month": 8})
+    assert r.status_code == 200
+    text = r.content.decode("utf-8-sig")
+    lines = [ln for ln in text.splitlines() if ln]
+    row = next(ln for ln in lines[1:] if "cmd|" in ln)
+    assert row.startswith("\"'=cmd|") or row.startswith("'=cmd|")

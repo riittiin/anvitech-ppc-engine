@@ -85,6 +85,25 @@ def test_actual_marks_order_complete(client):
     assert so[sti] == "Complete"
 
 
+def test_actual_rejects_future_entry_date(client):
+    # A future-dated punch (e.g. a typo'd year) would advance the whole plan
+    # clock decades forward via orderbook.effective_plan_start_date — reject
+    # it outright. A past/today date still works.
+    _upload_test_workbook(client)
+    r = client.post("/actuals", json={
+        "so_no": SO1, "item_code": ITEM_A, "operator": "Operator One",
+        "entry_date": "2099-01-01", "qty_produced": 5,
+    })
+    assert r.status_code == 400
+    assert "future" in r.json()["detail"]
+
+    r = client.post("/actuals", json={
+        "so_no": SO1, "item_code": ITEM_A, "operator": "Operator One",
+        "entry_date": "2025-03-10", "qty_produced": 5,
+    })
+    assert r.status_code == 200
+
+
 def test_delete_selected_and_clear_all(client):
     _upload_test_workbook(client)
     assert len(client.get("/orders").json()["orders"]["rows"]) == 3

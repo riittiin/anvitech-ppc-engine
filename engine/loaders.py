@@ -419,12 +419,18 @@ def _load_so_lines(wb, masters: Masters):
         item_name = _cell(row, col.get("item_name"))
         customer = _cell(row, col.get("customer"))
         remarks = _cell(row, col.get("remarks"))
+        qty_raw = _cell(row, col.get("qty"))
+        qty_val = _num(qty_raw)
+        if qty_val is None and qty_raw is not None and str(qty_raw).strip() != "":
+            masters.add_report(
+                "BAD_QTY", str(so_no), f"unparseable SO qty {qty_raw!r}"
+            )
         so_lines.append(
             SOLine(
                 so_no=str(so_no).strip() if so_no else "",
                 item_code=str(item_code).strip(),
                 item_name=str(item_name).strip() if item_name else "",
-                qty=_num(_cell(row, col.get("qty"))) or 0.0,
+                qty=qty_val or 0.0,
                 delivery_date=delivery,
                 pending_qty=_num(_cell(row, col.get("pending_qty"))),
                 customer=str(customer).strip() if customer else "",

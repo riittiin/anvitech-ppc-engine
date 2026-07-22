@@ -71,10 +71,20 @@ def _fridays_after(anchor: date, today: date) -> list:
     return out
 
 
+def _is_two_shift(shift: str) -> bool:
+    """A row is two-shift if its shift text contains "first"/"second",
+    case-insensitively — matches the case-insensitive normalization
+    engine.efficiency already applies, so e.g. "first shift" (lowercase)
+    rotates the same as "First shift"."""
+    low = (shift or "").lower()
+    return "first" in low or "second" in low
+
+
 def _flip_shift(shift: str) -> str:
-    if shift == "First shift":
+    low = (shift or "").lower()
+    if "first" in low:
         return "Second shift"
-    if shift == "Second shift":
+    if "second" in low:
         return "First shift"
     return shift
 
@@ -99,7 +109,7 @@ def rotate_table(table: dict, today: date):
     new_operators = []
     for row in table.get("operators", []):
         new_row = dict(row)
-        if net_flip and not row.get("pinned") and row.get("shift") in ("First shift", "Second shift"):
+        if net_flip and not row.get("pinned") and _is_two_shift(row.get("shift")):
             new_row["shift"] = _flip_shift(row["shift"])
         new_operators.append(new_row)
 
