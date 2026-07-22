@@ -359,7 +359,7 @@ function renderStatusStrip() {
     ? `<span class="ss-seg">Plan follows today (${escapeHtml(startDisp)})</span>`
     : `<span class="ss-seg">Plan starts ${escapeHtml(isoToDdmmyyyy(currentConfig.plan_start_date))}</span>`);
 
-  segs.push(`<span class="ss-seg">Next optimization: ${escapeHtml(nextScheduledOptimize())}</span>`);
+  segs.push(`<span class="ss-seg">Optimization runs when you finish entering feedback</span>`);
   if (currentRole === "admin" && nextRotation) {
     segs.push(`<span class="ss-seg">Next rotation: ${escapeHtml(isoToDdmmyyyy(nextRotation))}</span>`);
   }
@@ -513,6 +513,68 @@ function renderOptimizeResult(st) {
   $("optimize-discard-btn").onclick = () => { box.classList.add("hidden"); box.innerHTML = ""; };
 }
 
+const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// "Done entering — update plan": fire a feedback-driven re-optimization, then
+// block on live progress until it lands and refresh the whole plan to the winner.
+// The contest auto-applies server-side if it's strictly better (both roles).
+async function doneOptimize() {
+  const st = $("optimize-done-status");
+  const doneBtn = $("optimize-done");
+  if (doneBtn) doneBtn.disabled = true;
+  if (st) st.textContent = "Starting optimization…";
+  let started = false;
+  try {
+    const res = await fetch("/optimize/done", { method: "POST" });
+    if (!res.ok) {
+      if (st) st.textContent = "Could not start optimization: " + (await res.text());
+      if (doneBtn) doneBtn.disabled = false;
+      return;
+    }
+    started = (await res.json()).started;
+  } catch (e) {
+    if (st) st.textContent = "Could not start optimization: " + e.message;
+    if (doneBtn) doneBtn.disabled = false;
+    return;
+  }
+  if (!started) {
+    // Nothing changed since the last run (or auto disabled) — just refresh facts.
+    await runPlan(false);
+    if (st) st.textContent = "Plan updated. No new feedback to re-optimize.";
+    if (doneBtn) doneBtn.disabled = false;
+    return;
+  }
+  await pollDoneOptimize(st);
+  if (doneBtn) doneBtn.disabled = false;
+}
+
+// Poll the shared contest to completion, showing progress next to the Done
+// button. The contest auto-applies itself; on completion we refresh everything.
+async function pollDoneOptimize(st) {
+  for (;;) {
+    let status;
+    try {
+      const r = await fetch("/optimize/status");
+      if (!r.ok) { await _sleep(3000); continue; }
+      status = await r.json();
+    } catch (e) { await _sleep(3000); continue; }
+    if (status.state === "running") {
+      if (st) st.textContent = "Optimizing… " + optimizeProgressLine(status)
+        + " (this can take several minutes)";
+      await _sleep(3000);
+      continue;
+    }
+    await runPlan(false);   // pick up the auto-applied winner + new facts
+    if (st) {
+      st.textContent = status.state === "failed"
+        ? "Optimization could not finish: " + (status.error || "unknown error")
+          + ". Plan updated with the latest feedback."
+        : "Plan re-optimized and updated.";
+    }
+    return;
+  }
+}
+
 async function startOptimize() {
   const budget = "deep";   // one option (owner decision): ~1,000 plans total
   const prog = $("optimize-progress");
@@ -656,20 +718,6 @@ function todayStamp() {
   return formatDdmmyyyy(new Date());
 }
 
-// Next scheduled cloud optimize run: Mon or Fri at 11:00 local (the GitHub cron
-// fires Mon/Fri 05:30 UTC = 11:00 IST, after the ~10:00 feedback entry window).
-// If today IS a Mon/Fri and it's still before 11:00, today counts; otherwise the
-// next Mon/Fri. `now` is optional (defaults to the real clock) so this is
-// testable-by-reading without any mocking.
-function nextScheduledOptimize(now) {
-  const base = now instanceof Date ? new Date(now.getTime()) : new Date();
-  const isSchedDay = (d) => d.getDay() === 1 || d.getDay() === 5;   // Mon=1, Fri=5
-  const at11 = (d) => { const t = new Date(d.getTime()); t.setHours(11, 0, 0, 0); return t; };
-  if (isSchedDay(base) && base < at11(base)) return formatDdmmyyyy(at11(base));
-  const next = new Date(base.getTime());
-  do { next.setDate(next.getDate() + 1); } while (!isSchedDay(next));
-  return formatDdmmyyyy(at11(next));
-}
 function tableToCsv(table) {
   const esc = (v) => {
     const s = v === null || v === undefined ? "" : String(v);
@@ -1312,18 +1360,10 @@ async function wireActualsForm() {
       setStatus("Save error: " + e.message); btn.disabled = false; btn.textContent = label;
     }
   };
-  // Clerk's "Done entering" — refreshes the plan from the day's punches right
-  // away; the sequence re-optimization itself now runs on a schedule (GitHub
-  // Actions, Mon & Fri) rather than on this click. Available to both roles.
+  // "Done entering — update plan": re-optimizes the job order from the day's
+  // feedback (both roles), waits for the contest, then refreshes the whole plan.
   const doneBtn = $("optimize-done");
-  if (doneBtn) {
-    doneBtn.onclick = async () => {
-      const st = $("optimize-done-status");
-      st.textContent = "Updating plan…";
-      await runPlan(false);
-      st.textContent = `Entries saved. Plan updated. Next optimization: ${nextScheduledOptimize()}.`;
-    };
-  }
+  if (doneBtn) doneBtn.onclick = doneOptimize;
 }
 
 // Capture-actuals table with a per-row Rollback button (uses the parallel ids).
