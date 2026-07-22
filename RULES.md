@@ -470,8 +470,8 @@ a regression, not an aspiration (`tests/test_replay_single_pass.py`).
 > than the simple two-pass shape — zero-slack promises collapse the feasible search
 > region. The owner then redefined the model to the informational-only rule above; all
 > of that machinery (two-pass, the veto, promise recovery, the urgent push-warning
-> preview) was removed. See `docs/superpowers/specs/2026-07-15-self-tuning-plan-design.md`'s
-> SUPERSEDED Phase-2 block for the full account.
+> preview) was removed. (The full account lived in the self-tuning-plan design's
+> SUPERSEDED Phase-2 block; that spec has since been pruned as superseded.)
 
 ### Scheduled optimize — the job order re-optimizes itself, twice a week *(feature, 2026-07-18, supersedes the event-triggered "self-tuning plan" of 2026-07-16)*
 
