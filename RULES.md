@@ -539,9 +539,10 @@ keeps the best.
   (`_RESTART_AFTER`), and keeps the **global best** across all restarts. This reliably
   reaches better basins (Test5: → 39.7 d / **713 late-days** / 44 late). Fully
   deterministic (every restart's RNG is seeded off the base seed); never skips a run.
-- **Quick** ≈ 150 plans tried; **Deep** ≈ 400. Budgets are **evaluation counts** with
-  a fixed random seed, so the same book + settings + budget always yields the same
-  result on any machine. The scheduler is memoized (invariant machine-name parsing and
+- The UI exposes one **Deep search** (owner decision). On the production (new) engine it
+  runs **~1,800 plans in the cloud** (12 fine-grid overlap candidates × 150) or **~200
+  locally**. Budgets are **evaluation counts** with a fixed random seed, so the same
+  book + settings + budget always yields the same result on any machine. The scheduler is memoized (invariant machine-name parsing and
   per-day work-windows are cached), so each plan evaluates ~3.5× faster with identical
   results.
 - **Settings sweep (2026-07-15, fair contest).** The same click also auto-tunes the
@@ -558,11 +559,12 @@ keeps the best.
   competes in the same one pool (see "Order commitment (lanes)" above) — no lane gets
   a promise guard or reserved capacity in the search; only operator absences (below)
   reserve time.
-- **Cloud compute (2026-07-15).** When configured, clicking Optimize runs the full
-  2,400-plan fair contest on a free GitHub Actions runner (~8-10 min) instead of the
-  reduced 1,000-plan local fallback (~40 min on the free web instance) — same code,
-  byte-identical results either way. Falls back to local automatically if the cloud is
-  unavailable or times out.
+- **Cloud compute (2026-07-15).** When configured, clicking Optimize runs the full fair
+  contest on a free GitHub Actions runner instead of the reduced local fallback — same
+  code, byte-identical results either way. On the production (new) engine that is
+  **~1,800 plans** (12 overlap candidates × 150, ~15 min) in the cloud vs **~200** local.
+  (The retired classic engine used 6 candidates × 400 = 2,400 cloud / 1,000 local.) Falls
+  back to local automatically if the cloud is unavailable or times out.
 - The admin sees a before/after table and chooses **Apply** or Discard. Apply persists
   a **rank per (SO No, Item Code)**; every subsequent Plan replays it
   (`pipeline.apply_priority_rank`): ranked batches reorder among the slots they already

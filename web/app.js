@@ -593,7 +593,7 @@ async function pollDoneOptimize(st) {
 }
 
 async function startOptimize() {
-  const budget = "deep";   // one option (owner decision): ~1,000 plans total
+  const budget = "deep";   // one option (owner decision): ~1,800 plans in the cloud (~200 local)
   const prog = $("optimize-progress");
   const box = $("optimize-result");
   if (box) { box.classList.add("hidden"); box.innerHTML = ""; }
