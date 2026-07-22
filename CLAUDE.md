@@ -425,8 +425,8 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (`.github/workflows/scheduled-optimize.yml`), `POST /optimize/scheduled`, and
   `nextScheduledOptimize()`. Auto-apply is still strictly-better-or-nothing
   (`_auto_apply_result`); `AUTO_OPTIMIZE=0` still disables it (test isolation only).
-- **Scheduled optimize (2026-07-18, `docs/superpowers/specs/2026-07-18-scheduled-optimize-design.md`,
-  supersedes the event-triggered `2026-07-15-self-tuning-plan-design.md` Phase 1; itself
+- **Scheduled optimize (2026-07-18 — design spec since pruned as superseded,
+  superseded the event-triggered self-tuning-plan Phase 1; itself
   **SUPERSEDED 2026-07-22** by the feedback-triggered bullet above — kept for the guard
   mechanics the new trigger still reuses) — historical: the job order re-optimized
   itself, but only **twice a week**, never on every change.** The owner's rule at the
@@ -553,9 +553,8 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   again — every lane sorts/groups the same way). A regression pins the pivot: a committed
   +promised book plans **byte-identical** to the same book all-open
   (`tests/test_replay_single_pass.py`, `tests/test_optimize_service.py::
-  test_lanes_have_zero_scheduling_effect`). Design history:
-  `docs/superpowers/specs/2026-07-14-promise-recovery-committed-resequencing-design.md`
-  (superseded) and the self-tuning-plan spec's own SUPERSEDED Phase-2 block.
+  test_lanes_have_zero_scheduling_effect`). Design history: the promise-recovery /
+  committed-resequencing design (2026-07-14, spec pruned as superseded).
 - `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
   (per-order rows, time-positioned bars by machine, **operator** on each bar, split
   halves as separate bars, Pending/Running label).

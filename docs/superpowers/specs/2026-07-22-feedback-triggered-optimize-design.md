@@ -1,6 +1,7 @@
 # Feedback-triggered re-optimization — design (2026-07-22)
 
-> **Supersedes the cadence half of `2026-07-18-scheduled-optimize-design.md`.**
+> **Supersedes the cadence half of the 2026-07-18 scheduled-optimize design** (that
+> spec has since been pruned as superseded).
 > That design deliberately *removed* event-triggered auto-optimization (uploads,
 > deletes, the Done button, etc. no longer started a contest) and replaced it with
 > a twice-weekly GitHub cron (Mon & Fri 11:00 IST), on the rationale that
