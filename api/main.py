@@ -115,8 +115,7 @@ async def gatekeeper(request: Request, call_next):
     # paths simply fall through to the normal session gate (→ 401).
     if ((method == "GET" and path.startswith("/optimize/job/"))
             or (method == "POST" and path in ("/optimize/progress",
-                                              "/optimize/result",
-                                              "/optimize/scheduled"))):
+                                              "/optimize/result"))):
         if _worker_secret_ok(request):
             request.state.user = "cloud-worker"
             request.state.role = "worker"
@@ -917,14 +916,13 @@ def _worker_secret_ok(request: Request) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# Scheduled trigger (spec 2026-07-18-scheduled-optimize, supersedes the
-# event-triggered 2026-07-15-self-tuning-plan Phase 1): the job order is
-# re-optimized only twice a week (Mon/Fri 11:00 IST), via the GitHub cron
-# hitting POST /optimize/scheduled. No event triggers — uploads, commits/
-# urgent/uncommit, deletes, Settings saves, and absences no longer start a
-# contest; new orders arrive Open and wait for the next scheduled run (or the
-# owner's manual Optimize button). AUTO_OPTIMIZE=0 is internal test isolation
-# only — never user-facing.
+# Feedback trigger (spec 2026-07-22, replaces the Mon/Fri GitHub-cron design
+# of 2026-07-18-scheduled-optimize): the job order re-optimizes when POST
+# /optimize/done fires — the "Done entering — update plan" button, reachable
+# by either role. Admin mutations (uploads, commit/urgent/uncommit, deletes,
+# Settings saves) still never start a contest on their own; absences are
+# covered in tests/test_absences_api.py. AUTO_OPTIMIZE=0 is internal test
+# isolation only — never user-facing.
 # --------------------------------------------------------------------------- #
 def _auto_enabled() -> bool:
     return os.environ.get("AUTO_OPTIMIZE", "1") != "0"
@@ -990,23 +988,23 @@ def _applied_book_sig():
 
 
 def _try_start_auto() -> bool:
-    """The one decision point: start an auto contest now if it makes sense.
-    Invoked only by POST /optimize/scheduled (the twice-weekly GitHub cron)."""
+    """Start an auto-applying re-optimization if it makes sense. Invoked by
+    POST /optimize/done (the 'Done entering — update plan' button). Returns True
+    iff a contest was started. Returns False — starting nothing — when auto is
+    disabled, a contest is already running, or NOTHING material changed since the
+    last applied plan (book + inputs fingerprint match; a friendly note is written
+    in that case). Unlike the removed Mon/Fri cron this is NOT cloud-only:
+    _start_optimize falls back to local compute, so the button always does
+    something even with no cloud configured."""
     if not _auto_enabled():
         return False
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["state"] == "running":
             return False                         # one contest at a time
-    if _cloud_config() is None:
-        _auto_note_write("Auto-optimize skipped: cloud compute unavailable; "
-                         "will retry on the next scheduled run.")
-        return False                             # auto is cloud-only
-    # Skip only when NOTHING material changed since the last applied plan — and
-    # "material" now includes the inputs fingerprint (masters + settings +
-    # operator rotation/edits), not just the book. After a Friday rotation the
-    # book_sig is unchanged but the operators differ, so a book-only check would
-    # wrongly skip the re-optimize (spec 2026-07-18 DECISION). A legacy applied
-    # meta without an inputs_sig doesn't force a run on the missing field alone.
+    # Skip only when NOTHING material changed since the last applied plan —
+    # "material" includes the inputs fingerprint (masters + settings + operator
+    # rotation/edits), not just the book. A legacy applied meta without an
+    # inputs_sig doesn't force a run on the missing field alone.
     meta = _applied_plan_meta() or {}
     try:
         book_same = (meta.get("book_sig") == _current_book_sig())
@@ -1014,6 +1012,8 @@ def _try_start_auto() -> bool:
         inputs_same = (applied_inputs is None
                        or applied_inputs == _inputs_signature(_load_plan_config()))
         if book_same and inputs_same:
+            _auto_note_write("No new feedback since the last optimization — "
+                             "plan unchanged.")
             return False                         # nothing material changed
     except Exception:
         return False
@@ -1815,12 +1815,15 @@ def optimize_result_ep(req: WorkerResult, request: Request):
     return {"ok": True}
 
 
-@app.post("/optimize/scheduled")
-def optimize_scheduled_ep(request: Request):
-    """The twice-weekly trigger (GitHub cron; worker-secret auth). All of
-    _try_start_auto's guards apply — cloud-only, one-at-a-time, and the
-    book-fingerprint skip when nothing changed since the last applied plan."""
-    _require_worker(request)
+@app.post("/optimize/done")
+def optimize_done_ep(request: Request):
+    """'Done entering — update plan': the feedback-driven re-optimization trigger.
+    Any logged-in role (operators enter the feedback that motivates it). Starts an
+    auto-applying contest unless nothing changed since the last applied plan or one
+    is already running. Poll GET /optimize/status for progress; the winner
+    auto-applies if strictly better and the next /run reflects it."""
+    # No require_admin: the gatekeeper already verified a valid session for any
+    # non-public path, and this must be reachable by the user role.
     started = _try_start_auto()
     return {"started": started, "state": _optimize_status()["state"]}
 

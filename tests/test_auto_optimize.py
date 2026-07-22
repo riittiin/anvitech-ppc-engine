@@ -1,11 +1,10 @@
-"""Scheduled trigger (spec 2026-07-18): the ONLY way an auto contest starts is
-POST /optimize/scheduled (the twice-weekly GitHub cron, worker-secret auth).
-No event triggers remain — admin mutations (upload, commit, uncommit, urgent,
-delete, clear, /run persist) never start a contest on their own; absences are
-covered in tests/test_absences_api.py. All of _try_start_auto's other guards
-still apply: cloud-only, one-at-a-time, and the book-fingerprint skip when
-nothing changed since the last applied plan. AUTO_OPTIMIZE=0 (internal test
-isolation only) disables everything."""
+"""Feedback trigger (spec 2026-07-22): the auto contest starts from POST
+/optimize/done — the 'Done entering — update plan' button, available to BOTH
+roles. It starts an auto-applying contest unless auto is disabled, one is already
+running, or nothing material changed since the last applied plan (book + inputs
+fingerprint). Unlike the removed Mon/Fri cron it is NOT cloud-only. Admin
+mutations (upload, commit, delete, /run persist) still never start a contest on
+their own. AUTO_OPTIMIZE=0 (internal test isolation only) disables everything."""
 import time
 from datetime import date, datetime, timedelta
 
@@ -40,18 +39,9 @@ def _auto_env(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# POST /optimize/scheduled — the only entry point into _try_start_auto
+# POST /optimize/done — the feedback-driven trigger (both roles)
 # --------------------------------------------------------------------------- #
-def test_scheduled_requires_worker_secret(monkeypatch):
-    _auto_env(monkeypatch)
-    m = _api(); _seed_book()
-    c = TestClient(m.app)
-    assert c.post("/optimize/scheduled").status_code == 401
-    assert c.post("/optimize/scheduled",
-                  headers={"X-Worker-Secret": "wrong"}).status_code == 401
-
-
-def test_scheduled_starts_contest_with_secret(monkeypatch):
+def test_done_starts_contest_when_book_changed(monkeypatch):
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
     starts = []
@@ -59,81 +49,80 @@ def test_scheduled_starts_contest_with_secret(monkeypatch):
                         lambda budget_evals, label, background=True, auto=False:
                         starts.append((label, auto)))
     c = TestClient(m.app)
-    r = c.post("/optimize/scheduled", headers={"X-Worker-Secret": "s3"})
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    r = c.post("/optimize/done")
     assert r.status_code == 200
-    body = r.json()
-    assert body["started"] is True
-    assert "state" in body
+    assert r.json()["started"] is True
     assert starts == [("auto", True)]
 
 
-def test_scheduled_no_op_when_signature_matches_applied(monkeypatch):
+def test_done_reachable_by_user_role(monkeypatch):
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
-    sig = m._current_book_sig()
-    book_store.save_plan_priority({}, {"saved_at": "t", "book_sig": sig})
     starts = []
-    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    c = TestClient(m.app)
-    r = c.post("/optimize/scheduled", headers={"X-Worker-Secret": "s3"})
-    assert r.status_code == 200
-    assert r.json()["started"] is False
-    assert starts == []
-
-
-def test_scheduled_disabled_by_internal_env(monkeypatch):
-    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
-    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3")
-    m = _api(); _seed_book()
-    starts = []
-    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    c = TestClient(m.app)
-    r = c.post("/optimize/scheduled", headers={"X-Worker-Secret": "s3"})
-    assert r.status_code == 200
-    assert r.json()["started"] is False
-    assert starts == []
-
-
-def test_scheduled_is_cloud_only(monkeypatch):
-    _auto_env(monkeypatch)
-    m = _api(); _seed_book()
-    monkeypatch.delenv("GITHUB_DISPATCH_TOKEN")
-    starts = []
-    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    c = TestClient(m.app)
-    r = c.post("/optimize/scheduled", headers={"X-Worker-Secret": "s3"})
-    assert r.json()["started"] is False
-    assert starts == []
-    assert "retry" in (book_store.load_auto_note() or {}).get("text", "")
-    assert "scheduled run" in (book_store.load_auto_note() or {}).get("text", "")
-
-
-def test_scheduled_running_contest_returns_false(monkeypatch):
-    _auto_env(monkeypatch)
-    m = _api(); _seed_book()
-    with m._OPTIMIZE_LOCK:
-        m._OPTIMIZE["state"] = "running"          # simulate a running contest
-    starts = []
-    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
-    c = TestClient(m.app)
-    r = c.post("/optimize/scheduled", headers={"X-Worker-Secret": "s3"})
-    assert r.status_code == 200
-    assert r.json()["started"] is False
-    assert starts == []
-
-
-# --------------------------------------------------------------------------- #
-# The done button and every deliberate admin mutation no longer trigger a
-# contest — only the scheduled endpoint does.
-# --------------------------------------------------------------------------- #
-def test_optimize_done_endpoint_is_gone(monkeypatch):
-    _auto_env(monkeypatch)
-    m = _api(); _seed_book()
+    monkeypatch.setattr(m, "_start_optimize",
+                        lambda budget_evals, label, background=True, auto=False:
+                        starts.append((label, auto)))
     c = TestClient(m.app)
     c.post("/login", data={"username": "anvitech_user",
                            "password": "anvitech12345678"})
     r = c.post("/optimize/done")
-    assert r.status_code in (404, 405)
+    assert r.status_code == 200            # NOT 403 — user role may trigger it
+    assert r.json()["started"] is True
+    assert starts == [("auto", True)]
+
+
+def test_done_requires_login(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    c = TestClient(m.app)
+    assert c.post("/optimize/done").status_code == 401
+
+
+def test_done_skips_and_notes_when_nothing_changed(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    cfg = m._load_plan_config()
+    book_store.save_plan_priority({}, {"saved_at": "t",
+                                       "book_sig": m._current_book_sig(),
+                                       "inputs_sig": m._inputs_signature(cfg)})
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    r = c.post("/optimize/done")
+    assert r.status_code == 200
+    assert r.json()["started"] is False
+    assert starts == []
+    assert "plan unchanged" in (book_store.load_auto_note() or {}).get("text", "")
+
+
+def test_done_disabled_by_internal_env(monkeypatch):
+    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
+    m = _api(); _seed_book()
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    r = c.post("/optimize/done")
+    assert r.status_code == 200
+    assert r.json()["started"] is False
+    assert starts == []
+
+
+def test_done_no_op_when_contest_already_running(monkeypatch):
+    _auto_env(monkeypatch)
+    m = _api(); _seed_book()
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["state"] = "running"
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    r = c.post("/optimize/done")
+    assert r.status_code == 200
+    assert r.json()["started"] is False
+    assert starts == []
 
 
 def test_admin_mutations_do_not_start_contests(monkeypatch):
