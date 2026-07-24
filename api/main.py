@@ -1363,6 +1363,67 @@ def _all_lines_schedule(setup, masters, ranks):
     return pr.schedule, all_lines
 
 
+# How many days later an order must move (vs the plan that was on screen) before the
+# Thursday note flags it. 1 = only flag moves of 2+ days. Reporting-only threshold.
+_MOVE_LATER_THRESHOLD_DAYS = 1
+
+
+def _expected_by_order(schedule):
+    """Each order's expected completion DATE: the latest entry end across its
+    processes, keyed (so_no, item_code). Mirrors optimizer.plan_metrics' expected
+    map — the customer-facing 'when will it be done'."""
+    expected = {}
+    for e in schedule:
+        d = e.end.date()
+        for ref in (e.so_refs or []):
+            k = (ref, e.item_code)
+            if k not in expected or d > expected[k]:
+                expected[k] = d
+    return expected
+
+
+def _movers(exp_old, exp_new, threshold):
+    """(key, days_later, new_date) for every order whose new expected date is more
+    than ``threshold`` days later than before. Worst mover first."""
+    out = []
+    for k, nd in exp_new.items():
+        od = exp_old.get(k)
+        if od is not None and (nd - od).days > threshold:
+            out.append((k, (nd - od).days, nd))
+    out.sort(key=lambda m: m[1], reverse=True)
+    return out
+
+
+def _format_movers(movers):
+    """One-line ' ⚠ N order(s) now finish later …' suffix; '' when nothing moved."""
+    if not movers:
+        return ""
+    top = movers[:3]
+    parts = [f"{k[0]}-{k[1]} +{d}d (→ {nd.strftime('%d-%b')})" for k, d, nd in top]
+    more = f", +{len(movers) - 3} more" if len(movers) > 3 else ""
+    return (f" ⚠ {len(movers)} order(s) now finish later than before: "
+            + "; ".join(parts) + more + ".")
+
+
+def _movement_note(new_ranks):
+    """Compare the winning plan to the currently-applied one (both replayed on
+    today's book) and summarize which orders now finish later. '' if none.
+    Must be called BEFORE _optimize_apply() persists the new ranks."""
+    config = _resolve_config(_load_plan_config())
+    masters = _current_masters()
+    setup = optimize_service.prepare_contest(
+        book_store.load_active_orders(), book_store.load_actuals(), masters, config,
+        absences=book_store.load_absences(),
+        operator_table=book_store.load_operator_table())
+    prio = book_store.load_plan_priority()
+    old_ranks = (prio or {}).get("ranks") or None
+    old_sched, _ = _all_lines_schedule(setup, setup.masters, old_ranks)
+    new_sched, _ = _all_lines_schedule(setup, setup.masters, new_ranks or None)
+    movers = _movers(_expected_by_order(old_sched),
+                     _expected_by_order(new_sched), _MOVE_LATER_THRESHOLD_DAYS)
+    return _format_movers(movers)
+
+
 def _incumbent_metrics():
     """Score of the plan users currently see: the applied ranks (if any) replayed
     on TODAY'S book, measured over ALL active lines — the same domain the contest's
@@ -1402,13 +1463,17 @@ def _auto_apply_result():
         return
     stamp = _ist_now().strftime("%H:%M")
     if optimizer.score(best) < optimizer.score(inc):
+        try:
+            move = _movement_note(res.get("ranks") or None)
+        except Exception:  # noqa: BLE001 - the note is advisory; never block an apply
+            move = ""
         meta = _optimize_apply()          # persists ranks + overlap + inputs_sig + book_sig
         ov = res.get("best_overlap"); cur = res.get("current_overlap")
         word = "chunks" if res.get("knob") == "flow_chunks" else "overlap"
         ov_txt = f", {word} {cur} → {ov}" if ov != cur else ""
         _auto_note_write(f"Plan auto-re-optimized {stamp}: "
                          f"{best['total_late_days']} late-days "
-                         f"(was {inc['total_late_days']}){ov_txt}.")
+                         f"(was {inc['total_late_days']}){ov_txt}.{move}")
     else:
         _auto_note_write(f"Checked {stamp}: current plan still best "
                          f"({inc['total_late_days']} late-days).")
