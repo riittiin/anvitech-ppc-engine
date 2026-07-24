@@ -330,6 +330,7 @@ def _inputs_signature(config: Config) -> str:
     balance_operator_load never moves timing, and expedite is forced off whenever
     ranks replay, so neither can alter an optimized plan."""
     d = config.to_dict()
+    d.pop("worst_ceiling_days", None)   # transient per-run ceiling, not a saved input
     d.pop("balance_operator_load", None)
     d["expedite_window_min"] = 0
     # The scheduler's own semantics version: saved ranks were scored under a
@@ -1130,6 +1131,15 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         if new_engine_run:
             budget_evals = min(budget_evals, 200)
         config = _resolve_config(config)   # None -> today (IST) for the engine/contest
+        # Worst-order ceiling: the current plan's worst lateness. The search barrier +
+        # apply backstop use it so a re-optimization never pushes any order past today's
+        # worst-case. base_config (the fingerprint basis) is intentionally left without it.
+        try:
+            _ceiling = _incumbent_metrics().get("max_late_days")
+        except Exception:  # noqa: BLE001 - a ceiling failure must never block optimizing
+            _ceiling = None
+        if _ceiling is not None:
+            config = replace(config, worst_ceiling_days=float(_ceiling))
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()
         absences = book_store.load_absences()
@@ -1462,7 +1472,8 @@ def _auto_apply_result():
         _auto_note_write(f"Auto-optimize finished but could not compare: {e}")
         return
     stamp = _ist_now().strftime("%H:%M")
-    if optimizer.score(best) < optimizer.score(inc):
+    worst_ok = best.get("max_late_days", 0) <= inc.get("max_late_days", 0)
+    if optimizer.score(best) < optimizer.score(inc) and worst_ok:
         try:
             move = _movement_note(res.get("ranks") or None)
         except Exception:  # noqa: BLE001 - the note is advisory; never block an apply
@@ -1474,6 +1485,10 @@ def _auto_apply_result():
         _auto_note_write(f"Plan auto-re-optimized {stamp}: "
                          f"{best['total_late_days']} late-days "
                          f"(was {inc['total_late_days']}){ov_txt}.{move}")
+    elif not worst_ok:
+        regress = best.get("max_late_days", 0) - inc.get("max_late_days", 0)
+        _auto_note_write(f"Checked {stamp}: kept the current plan to protect the worst "
+                         f"order — the best alternative would push it {regress}d later.")
     else:
         _auto_note_write(f"Checked {stamp}: current plan still best "
                          f"({inc['total_late_days']} late-days).")

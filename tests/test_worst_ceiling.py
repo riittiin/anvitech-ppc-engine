@@ -44,3 +44,19 @@ def test_optimizer_score_uses_ceiling_breach():
     clean = {**base, "ceiling_breach": 0.0}
     breach = {**base, "ceiling_breach": 25.0}
     assert optimizer.score(breach) > optimizer.score(clean)
+
+
+from engine.config import Config
+
+
+def test_inputs_signature_ignores_worst_ceiling():
+    import api.main as m
+    base = Config(scheduler="new")
+    a = m._inputs_signature(base)
+    b = m._inputs_signature(replace(base, worst_ceiling_days=46.0))
+    assert a == b  # transient per-run value must never change the staleness fingerprint
+
+
+def test_worst_ceiling_round_trips_through_config_dict():
+    c = Config(scheduler="new", worst_ceiling_days=46.0)
+    assert Config.from_dict(c.to_dict()).worst_ceiling_days == 46.0
