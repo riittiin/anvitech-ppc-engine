@@ -142,3 +142,13 @@ Diagnosis on the real book (per-order lateness across consol-10 / consol-1 / con
   (over capacity) — [list]", so the owner can outsource / add capacity / renegotiate those.
 - This means REVERTING the raw-worst ceiling machinery (`worst_ceiling_days`, ceiling barrier,
   max-late apply backstop) in favor of the Judge + savable-protection + doomed surfacing.
+
+## Implementation status (branch optimization-engine-overhaul)
+- **Task 1 DONE** (commit 70b6065): consolidation engine-decided (forced 1 at
+  `_resolve_config`, normalized in the signature, removed from Settings). Classic default
+  stays 10 so golden/rule1 untouched. 553 pass. The measured ~6% Judge win.
+- **Task 5 DONE** (commit f40a060): "Order priority" setting removed; engine uses the
+  recommended PRIORITY_SLACK + no-window defaults. 553 pass.
+- **REMAINING:** Task 4 (surface the lateness distribution + doomed-order set in the panel —
+  the trust fix), Task 3 (replace the raw-worst ceiling with the Judge + savable-order guard),
+  Task 2 (explicit 4/10/20 band steps in the objective). Task 6 (final validation).
