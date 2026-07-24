@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
-from engine import book_store
+from engine import book_store, optimizer
 from engine.models import Order
 from tests.sample_workbook import build_sample_bytes, ITEM_A, ITEM_B
 
@@ -316,6 +316,49 @@ def test_auto_apply_keeps_current_when_no_plan(monkeypatch):
     assert note is not None
     assert "no plan" in note["text"]
     # Check: plan_priority unchanged
+    loaded_ranks = book_store.load_plan_priority()
+    assert loaded_ranks is not None
+    assert loaded_ranks["ranks"] == saved_ranks
+
+
+def test_auto_apply_keeps_current_when_worst_order_would_regress(monkeypatch):
+    """The worst-order backstop (owner non-negotiable: the worst order must
+    NEVER get later) — a contest result with a strictly BETTER score is still
+    REJECTED if it would push the single worst order later than the
+    incumbent's worst. Directly exercises the `elif not worst_ok` branch of
+    _auto_apply_result, which otherwise has zero test coverage."""
+    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
+    m = _api()
+    _seed_book()
+    # A known applied plan — must remain untouched if the backstop holds.
+    saved_ranks = {"k": 1}
+    book_store.save_plan_priority(saved_ranks, {"saved_at": "t"})
+    # Incumbent: worst order 46 days late (high total, to leave headroom for
+    # `best` to score strictly better while still regressing the worst order).
+    monkeypatch.setattr(m, "_incumbent_metrics",
+                         lambda: {"total_late_days": 500, "makespan_days": 50.0,
+                                  "max_late_days": 46})
+    # Contest best: strictly better score (far fewer total late-days) but its
+    # worst order is pushed to 61 days late — the backstop must reject it.
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["result"] = {"best": {"total_late_days": 100,
+                                          "makespan_days": 50.0,
+                                          "max_late_days": 61},
+                                 "ranks": {"k": 2}}
+        m._OPTIMIZE["auto"] = True
+    # Sanity check on the premise this test isolates: score is strictly
+    # better on its own — the backstop is the ONLY reason the plan is kept.
+    assert (optimizer.score({"total_late_days": 100, "makespan_days": 50.0}) <
+            optimizer.score({"total_late_days": 500, "makespan_days": 50.0}))
+
+    m._auto_apply_result()
+
+    note = book_store.load_auto_note()
+    assert note is not None
+    assert "protect the worst" in note["text"]
+    assert "15" in note["text"]              # regression amount: 61 - 46
+
+    # Not applied: the previously-saved ranks are untouched.
     loaded_ranks = book_store.load_plan_priority()
     assert loaded_ranks is not None
     assert loaded_ranks["ranks"] == saved_ranks
