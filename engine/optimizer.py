@@ -39,6 +39,14 @@ from .rules import rule1_consolidate, rule2_sort_by_date, rule3_tiebreak_process
 # choice — re-measure before moving it.
 MAKESPAN_WEIGHT = 40.0
 
+# Reputation guard — the mirror of ppc_engine's convex severity term (2026-07-24
+# spec). Kept numerically EQUAL to ppc_engine/config.py severity_* so the overlap
+# contest winner-pick and the Thursday auto-apply gate judge plans the same
+# reputation-aware way the sequence search does. Measured — re-measure before moving.
+SEVERITY_TOLERANCE_DAYS = 2.0   # == ppc_engine severity_tolerance_days (T)
+SEVERITY_WEIGHT = 2.0           # == ppc_engine severity_weight (mu)
+SEVERITY_CAP_DAYS = 30.0        # == ppc_engine severity_cap_days
+
 # Local-search shape. Multi-start iterated local search: each restart hill-climbs a
 # fresh random permutation until it has gone this many evaluations with no improvement,
 # then a new restart explores a different basin. Smaller = more diverse restarts,
@@ -59,8 +67,13 @@ class OptimizeResult:
 
 
 def score(metrics: dict) -> float:
-    """Lower is better (open-order objective: delivery lateness + makespan)."""
-    return metrics["total_late_days"] + MAKESPAN_WEIGHT * metrics["makespan_days"]
+    """Lower is better: delivery lateness + makespan + convex per-order slip guard.
+    ``slip_severity`` (added by plan_metrics) makes a big single-order slip cost far
+    more than the same days spread thin — the acceptance-side mirror of the sequence
+    search's objective (2026-07-24 spec). ``.get`` keeps any legacy metrics dict safe."""
+    return (metrics["total_late_days"]
+            + MAKESPAN_WEIGHT * metrics["makespan_days"]
+            + SEVERITY_WEIGHT * metrics.get("slip_severity", 0.0))
 
 
 def plan_metrics(schedule, so_lines, plan_start) -> dict:
@@ -86,11 +99,19 @@ def plan_metrics(schedule, so_lines, plan_start) -> dict:
     makespan = ((last_end - t0).total_seconds() / 86400.0) if last_end else 0.0
     gaps = [(expected[k] - due[k]).days for k in expected if k in due]
     late = [g for g in gaps if g > 0]
+    slip_severity = 0.0
+    for g in gaps:
+        over = g - SEVERITY_TOLERANCE_DAYS
+        if over > 0:
+            if over > SEVERITY_CAP_DAYS:
+                over = SEVERITY_CAP_DAYS
+            slip_severity += float(over * over)
     return {
         "makespan_days": round(makespan, 2),
         "late_orders": len(late),
         "total_late_days": int(sum(late)),
         "max_late_days": int(max(late)) if late else 0,
+        "slip_severity": round(slip_severity, 2),
         "orders": len(gaps),
     }
 
