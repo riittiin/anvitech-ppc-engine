@@ -78,3 +78,43 @@ analytics capacity (physical windows, post the 2026-07-24 manual-station fix).
 
 ## Progress log
 - (this doc created) — parameters + judge defined; harness next.
+- **Harness built** (scratch/overhaul/): judge + plan-runner (distribution + machine/operator
+  util) + book fabricator (Test5-based variants: real/tight/loose/small).
+- **Baseline (current engine, judged):** the optimizer improves the tardiness DISTRIBUTION
+  (real book: 20+ orders 23→13, bad(10+) 32→28, J 12786→8678) but consistently SACRIFICES
+  (a) worst-order (42→51, ceiling is app-layer only, not in the raw search), (b) makespan
+  (45→48), (c) utilization (67.5→64.6). On the overloaded "tight" book it barely helps and
+  worsens the worst (62→71). ⇒ objective must fold in worst-order + makespan + utilization,
+  not just tardiness.
+- **STAFFING RULE ALREADY EXISTS:** `ppc_engine/scheduler/staffing.py` enforces one operator
+  per machine per shift BY CONSTRUCTION (assignments keyed by (machine, date, shift); a person
+  mans ≤1 machine/shift; decoder asks per-shift only). Owner's rule is the engine's foundation.
+  Remaining: the SHORT-JOB EXCEPTION (let an operator cover a 2nd machine when a job is tiny)
+  as a utilization lever — to evaluate, not assumed beneficial.
+- **Order Priority UI** = `web/index.html:171` fieldset (`#cfg-priority-window` →
+  `priority_window_days`) + `web/app.js` readConfig. To remove; engine auto-decides the value.
+- **Objective sweep DONE — objective is NOT the lever.** All 5 formulations landed within 0.3%
+  of the current engine (best F4 33958 vs current 33863). The sequence search is at its ceiling;
+  objective shape barely moves J. (Matches prior codebase research: "sequencing converged.")
+- **Structural sweep DONE — consolidation is the big lever.** operator_pick × consolidation on
+  real+tight: consolidation **10d (current default) is the WORST**; dropping to ≤3d is a ~5-6%
+  J win (best: balanced+≤3d = 31046 vs current scarce+10d = 32905). consolidation 0/1/3 tie
+  (few same-item orders within 3d). operator_pick: balanced ≈ scarce overall; scarce gives
+  FEWER bad(10+) orders on the real book, balanced wins the overloaded book. Matches the
+  codebase note "consolidation window 1 day is best" — but the shipped DEFAULT is 10.
+- **Order Priority UI** = `web/index.html:170-193` fieldset (metric `#cfg-priority-metric` +
+  window `#cfg-priority-window`). Remove entirely; engine uses recommended defaults (slack
+  metric, no window limit). Overlap is already auto-tuned + shown read-only (the pattern).
+
+## Converging implementation plan (pending final confirmation sweep)
+1. **Consolidation default 10 → 1** — measured ~5% win; matches codebase memory. (config.py)
+2. **Objective: modest explicit 10/20 band-step penalties** (judge-align) — validated J-neutral;
+   makes "a bad order" an explicit cost so the objective reflects the owner's values. (ppc
+   objective + engine/optimizer mirror)
+3. **Optimize panel: show the lateness DISTRIBUTION** (on-time / 1-4 / 5-9 / 10-19 / 20+) +
+   worst-order for standard vs optimized, so a genuinely-better plan reads as better (kills the
+   "55 late" false alarm). (backend optimize result + frontend)
+4. **Remove the "Order priority" fieldset**; engine decides (slack + no-limit). (index.html/app.js/config)
+5. operator_pick: keep scarce (fewer bad orders on the real book) unless confirmation says otherwise.
+6. Short-job staffing exception: DEFERRED — engine already enforces one-op-per-machine-per-shift;
+   the exception is a big change with unproven payoff. Revisit if utilization stays low.
