@@ -590,3 +590,354 @@ numbers in the spec. fairness_weight decision recorded in-comment."
 ## Deployment (after Task 5)
 
 Standard: `pytest` green → Render dashboard → **Manual Deploy → Deploy latest commit** (auto-deploy is ON per the latest memory, but confirm). No env var, no schema, no UI change beyond the richer auto-note text. Watch the first Thursday auto-optimize note for the "what moved later" line.
+
+---
+
+## Amendment tasks (2026-07-24, owner review) — the worst order must never get later
+
+See the spec's "Amendment" section. Adds a per-run **worst-order ceiling** = the currently-applied
+plan's max lateness: a search barrier in both objectives (steer toward win-win plans) + a hard
+apply-time backstop (never apply a plan whose worst order regressed). Global constraints from the
+spec still bind. New constraint: **`worst_ceiling_days` is transient** — excluded from
+`_inputs_signature`, never persisted into the saved plan config, `None` ⇒ byte-identical to today.
+`ppc_engine` `ceiling_days`/`ceiling_weight` must stay numerically consistent with
+`engine/optimizer.py` `CEILING_WEIGHT`.
+
+### Task 6: Ceiling-barrier term in both objectives + config plumbing
+
+**Files:**
+- Modify: `engine/config.py` (add `worst_ceiling_days` field + validation)
+- Modify: `ppc_engine/config.py` (add `ceiling_days` + `ceiling_weight`)
+- Modify: `ppc_engine/objective/objective.py` (add `_ceiling_breach`, extend `score`)
+- Modify: `engine/optimizer.py` (add `CEILING_WEIGHT`; `plan_metrics(ceiling_days=)`; `score`)
+- Modify: `engine/new_engine.py` (`_plan_config` map; pass `ceiling_days` to both `plan_metrics` calls)
+- Test: `tests/test_worst_ceiling.py` (create)
+
+**Interfaces:**
+- Produces: `PlanConfig.ceiling_days` (ppc), `Config.worst_ceiling_days` (engine), `plan_metrics(..., ceiling_days=None)` returning a dict with `"ceiling_breach"`, and `score` folding in `CEILING_WEIGHT * ceiling_breach`.
+- Barrier math (identical both layers): for each order lateness `g` (signed days), `breach = Σ max(0, g − ceiling)²` when `ceiling` is set, else 0.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/test_worst_ceiling.py`:
+
+```python
+from dataclasses import replace
+from datetime import date, datetime
+from types import SimpleNamespace as NS
+
+from ppc_engine.config import PlanConfig
+from ppc_engine.objective.metrics import PlanMetrics
+from ppc_engine.objective.objective import score as ppc_score
+from engine import optimizer
+
+
+def _m(latenesses, makespan=40.0):
+    lb = {("SO", str(i)): float(v) for i, v in enumerate(latenesses)}
+    tard = [max(0.0, v) for v in latenesses]
+    return PlanMetrics(total_tardiness_days=sum(tard),
+                       max_tardiness_days=max(tard) if tard else 0.0,
+                       late_order_count=sum(1 for t in tard if t > 0),
+                       makespan_days=makespan, lateness_by_order=lb)
+
+
+def test_ppc_ceiling_barrier_penalizes_exceeding_the_ceiling():
+    # incumbent worst is 46; a plan that pushes an order to 61 breaches by 15.
+    cfg = PlanConfig(plan_start=datetime(2025, 3, 1), ceiling_days=46.0)
+    within = _m([46.0, 30.0])     # nothing exceeds 46
+    breach = _m([61.0, 20.0])     # one order past the ceiling
+    assert ppc_score(breach, cfg) > ppc_score(within, cfg)
+    # With no ceiling, the barrier is inert (byte-identical to ceiling off):
+    off = replace(cfg, ceiling_days=None)
+    assert ppc_score(breach, off) == ppc_score(breach, replace(cfg, ceiling_days=None))
+
+
+def test_optimizer_plan_metrics_ceiling_breach():
+    e = NS(end=datetime(2025, 3, 16, 10, 0), so_refs=["SO1"], item_code="A")  # 15 late
+    lines = [NS(so_no="SO1", item_code="A", delivery_date=date(2025, 3, 1))]
+    # ceiling 10 -> breach (15-10)^2 = 25
+    m = optimizer.plan_metrics([e], lines, date(2025, 3, 1), ceiling_days=10.0)
+    assert m["ceiling_breach"] == 25.0
+    # no ceiling -> zero breach, and score is unchanged by the term
+    m0 = optimizer.plan_metrics([e], lines, date(2025, 3, 1))
+    assert m0["ceiling_breach"] == 0.0
+
+
+def test_optimizer_score_uses_ceiling_breach():
+    base = {"total_late_days": 20, "makespan_days": 30.0, "slip_severity": 0.0}
+    clean = {**base, "ceiling_breach": 0.0}
+    breach = {**base, "ceiling_breach": 25.0}
+    assert optimizer.score(breach) > optimizer.score(clean)
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python3 -m pytest tests/test_worst_ceiling.py -v`
+Expected: FAIL — `TypeError`/`AttributeError` (`ceiling_days` not a PlanConfig field; `plan_metrics` has no `ceiling_days` param).
+
+- [ ] **Step 3: Add the engine Config field**
+
+In `engine/config.py`, add a field alongside the other tunables (near `expedite_window_min`):
+
+```python
+    # Worst-order ceiling (2026-07-24 amendment) — TRANSIENT, per optimize run, never
+    # saved. Set by api._start_optimize to the currently-applied plan's max lateness
+    # (days) so the search/apply refuses to push any order past the current worst-case.
+    # None = no ceiling (byte-identical). Excluded from _inputs_signature.
+    worst_ceiling_days: float | None = None
+```
+
+In `Config.validate` (follow the existing `errs` pattern), add:
+
+```python
+        if self.worst_ceiling_days is not None and self.worst_ceiling_days < 0:
+            errs.append("worst_ceiling_days must be >= 0 or None")
+```
+
+- [ ] **Step 4: Add the ppc config fields**
+
+In `ppc_engine/config.py`, after the severity fields, add:
+
+```python
+
+    # Worst-order ceiling barrier (2026-07-24 amendment). ceiling_days is the current
+    # plan's worst lateness (days); the objective heavily penalizes any order pushed
+    # PAST it, so re-optimization never worsens the worst order. None = no barrier
+    # (byte-identical). ceiling_weight MEASURED on the real book — re-measure before
+    # moving; must equal engine/optimizer.py CEILING_WEIGHT.
+    ceiling_days: float | None = None
+    ceiling_weight: float = 100.0
+```
+
+- [ ] **Step 5: Extend the ppc objective**
+
+In `ppc_engine/objective/objective.py`, add `_ceiling_breach` and fold it into `score`:
+
+```python
+def _ceiling_breach(metrics: PlanMetrics, config: PlanConfig) -> float:
+    """Sum of squared lateness beyond the worst-order ceiling — the barrier that stops
+    a re-optimization pushing any order past the current worst-case. 0 when no ceiling."""
+    ceiling = config.ceiling_days
+    if ceiling is None:
+        return 0.0
+    total = 0.0
+    for late in metrics.lateness_by_order.values():
+        over = late - ceiling
+        if over > 0:
+            total += over * over
+    return total
+
+
+def score(metrics: PlanMetrics, config: PlanConfig) -> float:
+    """Score a plan from its metrics. Lower is better."""
+    return (
+        metrics.total_tardiness_days
+        + config.severity_weight * _severity(metrics, config)
+        + config.ceiling_weight * _ceiling_breach(metrics, config)
+        + config.fairness_weight * metrics.max_tardiness_days
+        + config.makespan_weight * metrics.makespan_days
+    )
+```
+
+- [ ] **Step 6: Add the optimizer mirror**
+
+In `engine/optimizer.py`, after `SEVERITY_CAP_DAYS`, add:
+
+```python
+# Worst-order ceiling barrier (2026-07-24 amendment) — mirror of ppc_engine's
+# ceiling term. == ppc_engine ceiling_weight. Measured — re-measure before moving.
+CEILING_WEIGHT = 100.0
+```
+
+Change `plan_metrics` to accept the ceiling and return the breach. Its signature becomes
+`def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None) -> dict:`, and in the
+return-building block (where `slip_severity` is computed) add:
+
+```python
+    ceiling_breach = 0.0
+    if ceiling_days is not None:
+        for g in gaps:
+            over = g - ceiling_days
+            if over > 0:
+                ceiling_breach += float(over * over)
+```
+
+and add `"ceiling_breach": round(ceiling_breach, 2),` to the returned dict.
+
+Extend `score`:
+
+```python
+def score(metrics: dict) -> float:
+    """Lower is better: lateness + makespan + convex slip guard + worst-order ceiling
+    barrier. Each added term reads a field plan_metrics supplies; ``.get`` keeps legacy
+    metrics dicts safe (byte-identical when the field is absent/zero)."""
+    return (metrics["total_late_days"]
+            + MAKESPAN_WEIGHT * metrics["makespan_days"]
+            + SEVERITY_WEIGHT * metrics.get("slip_severity", 0.0)
+            + CEILING_WEIGHT * metrics.get("ceiling_breach", 0.0))
+```
+
+- [ ] **Step 7: Thread the ceiling through new_engine**
+
+In `engine/new_engine.py` `_plan_config`, add to the `PlanConfig(...)` constructor:
+
+```python
+        ceiling_days=getattr(config, "worst_ceiling_days", None),
+```
+
+In `optimize_sequence`, change the winner-metrics line to pass the ceiling:
+
+```python
+    winner_metrics = plan_metrics(run(best_batches, config, masters), so_lines, plan_start,
+                                  ceiling_days=getattr(config, "worst_ceiling_days", None))
+```
+
+In `tune`, change its `plan_metrics(...)` call the same way (add the `ceiling_days=` kwarg with
+`getattr(config, "worst_ceiling_days", None)`).
+
+- [ ] **Step 8: Run the tests + full suite**
+
+Run: `python3 -m pytest tests/test_worst_ceiling.py -v` → PASS.
+Run: `python3 -m pytest -q` → expect 547 passed, 1 skipped (544 + 3 new). Run `python3 -m pytest -k golden -v` → PASS, no regen. If an existing optimizer/new-engine test shifts, apply the Task-4 rule (justified improvement + comment, never loosen).
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add engine/config.py ppc_engine/config.py ppc_engine/objective/objective.py engine/optimizer.py engine/new_engine.py tests/test_worst_ceiling.py
+git commit -m "feat: worst-order ceiling barrier in both objectives + config plumbing
+
+A per-run ceiling (the current plan's worst lateness) threaded into the search:
+heavily penalize any order pushed past it, so re-optimization steers toward
+win-win plans below the current worst-case. Soft barrier; ceiling None =
+byte-identical. Not yet wired to a live ceiling value (Task 7)."
+```
+
+---
+
+### Task 7: Wire the ceiling into the contest + the apply backstop
+
+**Files:**
+- Modify: `api/main.py` (`_start_optimize` inject ceiling; `_auto_apply_result` backstop; `_inputs_signature` exclude)
+- Test: `tests/test_worst_ceiling.py` (append api-level tests)
+
+**Interfaces:**
+- Consumes: `_incumbent_metrics()["max_late_days"]`, `Config.worst_ceiling_days` (Task 6).
+- Produces: every contest runs against `worst_ceiling_days = incumbent max`; `_auto_apply_result` applies only when the worst order did not regress.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_worst_ceiling.py`:
+
+```python
+from engine.config import Config
+
+
+def test_inputs_signature_ignores_worst_ceiling():
+    import api.main as m
+    base = Config(scheduler="new")
+    a = m._inputs_signature(base)
+    b = m._inputs_signature(replace(base, worst_ceiling_days=46.0))
+    assert a == b  # transient per-run value must never change the staleness fingerprint
+
+
+def test_worst_ceiling_round_trips_through_config_dict():
+    c = Config(scheduler="new", worst_ceiling_days=46.0)
+    assert Config.from_dict(c.to_dict()).worst_ceiling_days == 46.0
+```
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `python3 -m pytest tests/test_worst_ceiling.py -k "inputs_signature or round_trips" -v`
+Expected: `test_inputs_signature_ignores_worst_ceiling` FAILS (signature currently includes the field); the round-trip test likely PASSES already (asdict/from_dict), which is fine.
+
+- [ ] **Step 3: Exclude the ceiling from the inputs signature**
+
+In `api/main.py` `_inputs_signature`, right after `d = config.to_dict()`, add:
+
+```python
+    d.pop("worst_ceiling_days", None)   # transient per-run ceiling, not a saved input
+```
+
+- [ ] **Step 4: Inject the incumbent ceiling in `_start_optimize`**
+
+In `api/main.py` `_start_optimize`, immediately after `config = _resolve_config(config)` (the line that maps None→today) and before `setup = optimize_service.prepare_contest(...)`, add:
+
+```python
+        # Worst-order ceiling: the current plan's worst lateness. The search barrier +
+        # apply backstop use it so a re-optimization never pushes any order past today's
+        # worst-case. base_config (the fingerprint basis) is intentionally left without it.
+        try:
+            _ceiling = _incumbent_metrics().get("max_late_days")
+        except Exception:  # noqa: BLE001 - a ceiling failure must never block optimizing
+            _ceiling = None
+        if _ceiling is not None:
+            config = replace(config, worst_ceiling_days=float(_ceiling))
+```
+
+(`config` here flows into both `prepare_contest`/local sweep and `build_payload`/cloud, so the
+ceiling reaches the winner-pick and the cloud worker. `base_config` is captured earlier and stays
+ceiling-free, so `searched_inputs_sig` is unaffected.)
+
+- [ ] **Step 5: Add the apply backstop in `_auto_apply_result`**
+
+In `api/main.py` `_auto_apply_result`, replace the applied-branch condition and the else-note so the
+worst order can never regress. The block that begins `if optimizer.score(best) < optimizer.score(inc):`
+becomes:
+
+```python
+    worst_ok = best.get("max_late_days", 0) <= inc.get("max_late_days", 0)
+    if optimizer.score(best) < optimizer.score(inc) and worst_ok:
+        try:
+            move = _movement_note(res.get("ranks") or None)
+        except Exception:  # noqa: BLE001 - the note is advisory; never block an apply
+            move = ""
+        meta = _optimize_apply()
+        ov = res.get("best_overlap"); cur = res.get("current_overlap")
+        word = "chunks" if res.get("knob") == "flow_chunks" else "overlap"
+        ov_txt = f", {word} {cur} → {ov}" if ov != cur else ""
+        _auto_note_write(f"Plan auto-re-optimized {stamp}: "
+                         f"{best['total_late_days']} late-days "
+                         f"(was {inc['total_late_days']}){ov_txt}.{move}")
+    elif not worst_ok:
+        regress = best.get("max_late_days", 0) - inc.get("max_late_days", 0)
+        _auto_note_write(f"Checked {stamp}: kept the current plan to protect the worst "
+                         f"order — the best alternative would push it {regress}d later.")
+    else:
+        _auto_note_write(f"Checked {stamp}: current plan still best "
+                         f"({inc['total_late_days']} late-days).")
+```
+
+(The existing `if not best:` early-return above this block stays unchanged, so `best` is a dict here.)
+
+- [ ] **Step 6: Run the tests + full suite**
+
+Run: `python3 -m pytest tests/test_worst_ceiling.py tests/test_auto_optimize.py -v` → PASS.
+Run: `python3 -m pytest -q` → expect 549 passed, 1 skipped (547 + 2 new). If a pre-existing auto-optimize test asserts the old note text or applies a worst-regressing plan, update it with a comment noting the backstop.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add api/main.py tests/test_worst_ceiling.py
+git commit -m "feat: wire worst-order ceiling into the contest + hard apply backstop
+
+_start_optimize injects the incumbent's max lateness as worst_ceiling_days
+(reaches local sweep, cloud payload, and winner-pick); _auto_apply_result
+applies only when the worst order did not regress, else keeps the plan with a
+protect-the-worst note. worst_ceiling_days excluded from _inputs_signature."
+```
+
+---
+
+### Task 8: Measure and lock `ceiling_weight` on the real book (controller-run)
+
+**Files:**
+- Modify (if the sweep says so): `ppc_engine/config.py` + `engine/optimizer.py` (`ceiling_weight`/`CEILING_WEIGHT`)
+- Modify: the spec (record the measured before/after)
+
+- [ ] **Step 1: Measure on Test5.** With the ceiling wired, run the new-engine search at the shipped `ceiling_weight` with `worst_ceiling_days` = the incumbent (OFF/naive) max, and confirm: (a) the winner's `max_late_days` ≤ the ceiling (worst order never regresses), (b) on-time→late count stays 0, (c) when a win-win exists it still rescues orders / cuts total. If the winner still breaches, raise `ceiling_weight` until it holds, keeping both files equal.
+
+- [ ] **Step 2: Record** the measured numbers in the spec's Amendment section and the code comments.
+
+- [ ] **Step 3: Full suite + golden** at the final weight (`python3 -m pytest -q`; `python3 -m pytest -k golden -v`).
+
+- [ ] **Step 4: Commit** the locked weight + docs.

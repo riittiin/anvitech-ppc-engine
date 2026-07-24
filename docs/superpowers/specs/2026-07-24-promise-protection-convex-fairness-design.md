@@ -236,6 +236,53 @@ behaviour-driven starting values. Owner-facing nuance to accept: the guard conce
 unavoidable lateness onto already-late orders (a 46 can become a 61) in exchange for
 never sacrificing an on-time one.
 
+## Amendment (2026-07-24, after owner review of the measurement) — the worst order must never get later
+
+The measurement above surfaced a behaviour the owner rejected: while the convex guard pushes
+**zero on-time orders late** (the original Aug-8 problem — solved), it lets the single *worst*
+(already-late) order drift further (46→61 d) because the cap makes lateness beyond ~32 d free.
+Owner ruling: **whatever the worst order's date is in the current plan, a re-optimization must
+never push it later.** It need not be finished on time — it must simply not regress.
+
+A λ (max-lateness) sweep confirmed this cannot be met by tuning alone: only λ≈1000 held the worst
+at 46 d, and that reproduced the un-optimized plan (0 rescues). So protecting the worst is a
+*constraint*, not a weight. Owner chose the "smart search + hard backstop" option.
+
+**The worst-order ceiling.** Define `ceiling = the currently-applied plan's max lateness in days`
+(from `_incumbent_metrics()["max_late_days"]`; for a first-ever optimize with nothing applied,
+this is the naive Rule-3 plan's worst — so even the first optimize can't worsen the worst order).
+Two complementary parts, both soft-or-safe (no repeat of the July feasibility collapse):
+
+1. **Search barrier (the "smart" part).** Add a strong convex barrier to BOTH objectives that
+   penalizes any order whose lateness exceeds `ceiling`:
+   `+ ceiling_weight · Σ max(0, gᵢ − ceiling)²`. Below the ceiling the convex tail guard optimizes
+   normally; the barrier only bites when a plan would push some order past the current worst-case,
+   so the search prefers win-win plans that help others *without* breaching the ceiling. Soft
+   (unavoidable breaches still return the least-breaching plan, never infeasible).
+   `ceiling` is threaded per-run; `ceiling=None` (no incumbent / not an optimize) = byte-identical
+   to today.
+
+2. **Apply backstop (the guarantee).** In `_auto_apply_result`, apply the winner only if
+   `best["max_late_days"] <= inc["max_late_days"]` **in addition to** the strictly-better score
+   check. If the only improving plan regresses the worst order, keep the current plan and write a
+   note saying so. This makes the guarantee absolute even if the search barrier couldn't hold.
+
+**Honest trade-off (owner-accepted):** on the current book the tail rescues *come from* breaching
+the worst, so protecting it means some Thursdays keep the plan unchanged. That is the owner's
+stated priority — the worst order's reputation over aggregate churn.
+
+**Plumbing.** `engine/config.py` gains a transient `worst_ceiling_days: float | None` (serialized
+by `to_dict`/`from_dict`, so it reaches the cloud worker via the payload; **excluded from
+`_inputs_signature`** since it is per-run, not a saved input; **never persisted** into the saved
+plan config). `_start_optimize` computes the incumbent ceiling and injects it before
+`prepare_contest`/`build_payload`. `ppc_engine/config.py` gains `ceiling_days`/`ceiling_weight`;
+`ppc_engine/objective/objective.py` adds the barrier. `engine/optimizer.py` `plan_metrics` gains
+an optional `ceiling_days=` (computes `ceiling_breach`; `score` folds in `CEILING_WEIGHT`), kept
+numerically consistent with the ppc side. `new_engine._plan_config` maps `worst_ceiling_days →
+ceiling_days`, and `optimize_sequence`/`sweep_optimize` pass `ceiling_days` to their `plan_metrics`
+calls so the contest winner-pick and reported metrics see the breach. `ceiling_weight` is MEASURED
+on the real book (the winner must never exceed the incumbent max).
+
 ## Rollout
 
 Single change set, behind the existing engine seam. No env var, no schema change, no UI
