@@ -234,11 +234,15 @@ def test_done_fires_optimize_on_thursday(monkeypatch):
     assert starts == [("auto", True)]
 
 
-def test_is_optimize_day_reflects_thursday(monkeypatch):
+def test_is_optimize_day_reflects_configured_weekday(monkeypatch):
+    # Robust to _OPTIMIZE_WEEKDAY (Thursday=3 normally; may be temporarily flipped
+    # for owner testing): derive the on/off dates from the constant itself.
     m = _api()
-    monkeypatch.setattr(m, "_ist_today", lambda: date(2026, 7, 23))  # a Thursday
+    monday = date(2026, 7, 20)                          # weekday 0
+    on_day = monday + timedelta(days=m._OPTIMIZE_WEEKDAY)
+    monkeypatch.setattr(m, "_ist_today", lambda: on_day)
     assert m._is_optimize_day() is True
-    monkeypatch.setattr(m, "_ist_today", lambda: date(2026, 7, 22))  # a Wednesday
+    monkeypatch.setattr(m, "_ist_today", lambda: on_day + timedelta(days=1))
     assert m._is_optimize_day() is False
 
 

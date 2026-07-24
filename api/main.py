@@ -988,7 +988,7 @@ def _ist_today():
 # Weekly re-optimization runs only on the shop's off day (Thursday, IST): the owner
 # enters the prior day's feedback on Thursday and re-optimizes then, so the new
 # schedule is ready for Friday. Other days' "Done" only refreshes the facts.
-_OPTIMIZE_WEEKDAY = 3   # Monday=0 … Thursday=3
+_OPTIMIZE_WEEKDAY = 4   # TEMP 2026-07-24: Friday for owner testing — REVERT to 3 (Thursday) after
 
 def _is_optimize_day() -> bool:
     return _ist_today().weekday() == _OPTIMIZE_WEEKDAY
