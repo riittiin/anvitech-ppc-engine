@@ -71,6 +71,20 @@ def qualified_operators(machine_id, start_dt, masters, config) -> list:
             if _shift_kind(o) == want and (set(o.machines) & keys)]
 
 
+def eligible_window(machine, config):
+    """A machine's PHYSICAL working window by its Available Hrs/Day, IGNORING operator
+    coverage: a two-shift machine runs first + second, a single-shift/manual resource
+    runs 09:00-18:00. This is the un-gated version of ``machine_windows`` (before the
+    "is an operator qualified this shift?" filter). Used by analytics so a station the
+    plan actually uses is never reported as zero-capacity just because no operator
+    currently qualifies for it — staffing is a separate concern (the operator panel).
+    Returns a list of (start_min, end_min) intervals."""
+    first, second, manual = _shift_windows(config)
+    if machine.is_two_shift(config.two_shift_threshold_hours):
+        return [first, second]
+    return [manual]
+
+
 def machine_windows(masters, config):
     """Return ``(windows, report)``.
 

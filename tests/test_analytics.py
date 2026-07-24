@@ -152,6 +152,29 @@ def test_headline_flags_bottleneck_and_underused():
     assert all(m["Utilization %"] <= 30 for m in a["headline"]["underused"])
 
 
+def test_used_manual_machine_uncovered_still_shows_utilization():
+    # Production (new engine) schedules work on a manual station that has NO
+    # first-shift operator (uncovered by operator_coverage). Analytics must NOT report
+    # "no capacity" (util '-') for a machine the plan actually uses — it measures the
+    # station against its PHYSICAL manual window (09:00-18:00). Staffing is a separate
+    # panel. Regression for the live 2026-07-24 "manual machines show '-'" report.
+    masters = _masters([Process(1, "Wash", 6, 6, "MW", None)],
+                       [("MW", "Manual Washing", 9.5)])          # single-shift (< 12h)
+    masters.operators = [Operator("Night Only", "MW", machines=["MW"],
+                                  shift="Second shift")]          # no FIRST-shift cover
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)  # a Wednesday
+    e = ScheduleEntry(batch_id="B", item_code="X", process_seq=1, process_name="Wash",
+                      machine="MW", qty=5, occupancy_min=30,
+                      start=datetime(2025, 3, 5, 9, 0), end=datetime(2025, 3, 5, 10, 0),
+                      so_refs=["SO"])
+    a = analytics.build_analytics([e], masters, cfg)
+    row = next(r for r in a["machines"] if r["Machine"] == "MW")
+    assert row["Busy (hrs)"] == 0.5
+    assert row["Available (hrs)"] == 1.0        # manual 09-18 window ∩ [09:00,10:00] = 60 min
+    assert row["Utilization %"] == 50.0         # was None (0-capacity) — the bug
+    assert row["Status"] != "no capacity"
+
+
 def test_empty_plan_returns_empty_analytics():
     masters = _masters([Process(1, "CNC", 4, 4, "M", None)], [("M", "CNC lathe", 19.5)])
     a = analytics.build_analytics([], masters, Config())

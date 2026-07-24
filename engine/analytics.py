@@ -11,7 +11,9 @@ from collections import defaultdict
 from datetime import timedelta
 
 from .models import fmt_date
+from .operator_coverage import eligible_window
 from .rules.rule6_allocate import _clock_factory, build_shiftwise_timeline, UNSTAFFED
+from .worktime import WorkClock
 
 NON_MACHINE_LANES = {"OS / Outsourced", "Off-machine"}
 BOTTLENECK_PCT = 85.0
@@ -97,6 +99,22 @@ def build_analytics(schedule, masters, config, batches=None, absences=None):
     win_end = max(e.end for e in schedule)
     clock_for, _ = _clock_factory(masters, config)
 
+    def avail_hrs(mid):
+        """Available machine-hours in the plan window. Normally the operator-coverage
+        clock (matches how the OLD engine scheduled). But the NEW (production) engine
+        schedules manual/finishing work regardless of first-shift operator coverage, so
+        an uncovered-but-used station would get a 0-capacity clock and show '-' ("no
+        capacity") for a machine the plan actually uses (live 2026-07-24 report). When
+        the gated clock is empty, fall back to the machine's PHYSICAL window so
+        utilization stays honest; a covered machine is unchanged (byte-identical)."""
+        mins = clock_for(mid).working_minutes_between(win_start, win_end)
+        if mins == 0:
+            mac = masters.machines.get(mid)
+            if mac is not None:
+                mins = WorkClock(masters.calendar, eligible_window(mac, config)) \
+                    .working_minutes_between(win_start, win_end)
+        return mins / 60.0
+
     def disp(mid):
         m = masters.machines.get(mid)
         return m.display_name if m else mid
@@ -115,7 +133,7 @@ def build_analytics(schedule, masters, config, batches=None, absences=None):
     machines = []
     for mid, ops in by_machine.items():
         busy = sum(e.occupancy_min for e in ops) / 60.0
-        avail = clock_for(mid).working_minutes_between(win_start, win_end) / 60.0
+        avail = avail_hrs(mid)
         u = _util(busy, avail)
         machines.append({
             "Machine": disp(mid), "Type": mtype(mid),
@@ -131,7 +149,7 @@ def build_analytics(schedule, masters, config, batches=None, absences=None):
     for mid, ops in by_machine.items():
         g = groups[mtype(mid)]
         g["busy"] += sum(e.occupancy_min for e in ops) / 60.0
-        g["avail"] += clock_for(mid).working_minutes_between(win_start, win_end) / 60.0
+        g["avail"] += avail_hrs(mid)
         g["machines"] += 1
     machine_groups = _by_util([
         {"Type": t, "Machines": v["machines"],
