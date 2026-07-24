@@ -89,8 +89,10 @@ def test_config_change_invalidates():
     m = _fresh_api(); _seed()
 
     def mut():
+        # consolidation is engine-decided now (normalized out of the signature); mutate a
+        # real config input instead — setup time shapes the schedule and must invalidate.
         cfg = m._load_plan_config().to_dict()
-        cfg["consolidation_window_days"] = (cfg.get("consolidation_window_days") or 10) + 5
+        cfg["setup_time_min"] = (cfg.get("setup_time_min") or 90) + 5
         book_store.save_plan_config(json.dumps(cfg))
     assert _recomputes(m, mut)
 

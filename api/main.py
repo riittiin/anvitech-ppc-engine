@@ -333,6 +333,7 @@ def _inputs_signature(config: Config) -> str:
     d.pop("worst_ceiling_days", None)   # transient per-run ceiling, not a saved input
     d.pop("balance_operator_load", None)
     d["expedite_window_min"] = 0
+    d["consolidation_window_days"] = 1   # engine-decided now; a stale saved value is ignored
     # The scheduler's own semantics version: saved ranks were scored under a
     # specific allocation policy, so a deploy that changes it (e.g. the
     # scarce-first operator pick, 2026-07-19) must flag the applied plan stale
@@ -999,6 +1000,12 @@ def _resolve_config(config: Config) -> Config:
     the pure engine NEVER sees None. Called at every planning entry; a config
     that already carries an explicit date is returned unchanged. The SAVED config
     keeps None — this resolution is per-run only, never persisted."""
+    # Consolidation is engine-decided (research 2026-07-24: a 1-day window beats the old
+    # 10-day default by ~6% on the Judge — batching orders up to 10 days apart delays the
+    # earlier-due one). The owner no longer sets it; force it every run so a stale saved
+    # value can't reintroduce the regression.
+    if config.consolidation_window_days != 1:
+        config = replace(config, consolidation_window_days=1)
     if config.plan_start_date is None:
         return replace(config, plan_start_date=_ist_today())
     return config

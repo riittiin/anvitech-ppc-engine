@@ -121,7 +121,6 @@ function readConfig() {
   // There is deliberately no fallback value here.
   if (!currentConfig || currentConfig.overlap_percent == null) return null;
   const cfgObj = {
-    consolidation_window_days: Number($("cfg-window").value),
     setup_time_min: Number($("cfg-setup").value),
     overlap_mode: "overlap",   // sequential mode retired — always overlap
     // A settings Save must PRESERVE the optimizer-chosen overlap: echo back the
@@ -215,7 +214,6 @@ function applyConfig(cfg, resolvedStart) {
   if (resolvedStart) lastResolvedStart = resolvedStart;
   setVal("cfg-plan-start", _isAuto ? (resolvedStart || todayIso()) : cfg.plan_start_date);
   updatePlanStartEcho();
-  setVal("cfg-window", cfg.consolidation_window_days);
   setVal("cfg-setup", cfg.setup_time_min);
   // Overlap % is read-only (Optimize owns it): reflect the saved value into the
   // info line rather than an editable input.
