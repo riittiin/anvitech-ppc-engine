@@ -152,3 +152,26 @@ Diagnosis on the real book (per-order lateness across consol-10 / consol-1 / con
 - **REMAINING:** Task 4 (surface the lateness distribution + doomed-order set in the panel —
   the trust fix), Task 3 (replace the raw-worst ceiling with the Judge + savable-order guard),
   Task 2 (explicit 4/10/20 band steps in the objective). Task 6 (final validation).
+
+## DEEP EXPERIMENTATION (2026-07-24, owner pushed to experiment harder — rigorous this time)
+- **Search budget IS a modest lever:** budget 150→800 dropped J 8339→7751 (fewer very-bad,
+  higher util). Production uses 200 local / thousands cloud, so real runs get more.
+- **Packing/makespan weight does NOT lift utilization:** swept the search makespan weight 4→400,
+  machine util stayed 31-34% while J worsened. Low util is STRUCTURAL, not sequencing.
+- **Capacity truth (per-order SOLO floor, scheduled alone):** only **16** of 57 orders are TRULY
+  impossible (≥10 late even alone); **10** are deliverable-solo but wrecked in the plan (SO120
+  on-time solo → 27 late). Machine mean util **31%**, operator **53%** (some at 94%).
+- **Short-job exception BUILT + shipped** (commit): interval-based operator booking, feasibility-
+  proven (0 double-bookings), 21 operator-shifts cover >1 machine. Impact on the real book:
+  **roughly neutral** (worst 63→53, total-days 734→694, but bad 25→30). The freed operators
+  aren't the binding constraint — idle machines need specific qualifications/ready-work they
+  can't supply. Kept (owner-requested, correct, helps other books).
+- **Scheduler head-to-head (naive plan):** new(ppc) J=12324 BEATS flow 12915 and classic 23254
+  on every axis. The current engine is the best scheduler available — no better one to swap in.
+- **VERDICT (rigorous):** the objective AND the scheduler are near the CREW-limited frontier.
+  Machines are ~30% idle because the shop is over CREW capacity for this book (16 orders
+  literally impossible; machines idle for lack of qualified operators, not scheduling). The real
+  win found = consolidation 10→1 (~6%, shipped). The remaining ENGINE value is TRUST/HONESTY
+  (show the distribution + surface the 16 impossible orders for business action — outsource / add
+  crew / renegotiate) + protecting deliverable orders from being sacrificed (savable guard).
+  "More on-time" beyond this is a BUSINESS lever (crew/qualifications), not a software one.
