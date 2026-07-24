@@ -166,27 +166,8 @@
         </fieldset>
         <fieldset class="settings-group">
           <legend>Order priority</legend>
-          <p class="cfg-help">Decides which order gets scheduled first when several are due soon.</p>
-          <label>Metric
-            <select id="cfg-priority-metric">
-              <option value="slack">Most urgent first (recommended)</option>
-              <option value="critical_ratio">Workload pressure ratio</option>
-              <option value="process_time">Shortest job first (old method)</option>
-            </select>
-          </label>
-          <p class="cfg-help"><strong>Most urgent first:</strong> ranks jobs by how little spare
-            time is left before the delivery date is at risk. <strong>Workload pressure
-            ratio:</strong> ranks by how much work remains vs. how many days remain.
-            <strong>Shortest job first:</strong> ignores due dates and runs the quickest jobs first
-            (older method).</p>
-          <label>Window
-            <select id="cfg-priority-window">
-              <option value="">No limit</option>
-              <option value="3">Within 3 days</option>
-              <option value="10">Within 10 days</option>
-              <option value="0">Exact date only</option>
-            </select>
-          </label>
+          <p class="cfg-readonly">The order in which jobs are scheduled is decided automatically by
+            the engine (most-urgent-first, tuned by Optimize) — you don't set it.</p>
         </fieldset>
         <fieldset class="settings-group">
           <legend>Options</legend>

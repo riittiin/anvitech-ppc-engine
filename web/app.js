@@ -126,8 +126,6 @@ function readConfig() {
     // A settings Save must PRESERVE the optimizer-chosen overlap: echo back the
     // last-loaded config's value (never a form field, never a hardcoded default).
     overlap_percent: currentConfig.overlap_percent,
-    priority_metric: $("cfg-priority-metric").value,
-    priority_window_days: $("cfg-priority-window").value,
     apply_operator_logic: $("cfg-operator-logic").checked,
     split_parallel: $("cfg-split-parallel").checked,
     // Expedite was removed from Settings (measured harmful, and always forced off
@@ -219,10 +217,6 @@ function applyConfig(cfg, resolvedStart) {
   // info line rather than an editable input.
   const ov = $("cfg-overlap-info");
   if (ov && cfg.overlap_percent != null) ov.textContent = cfg.overlap_percent;
-  setSel("cfg-priority-metric", cfg.priority_metric);
-  const pw = $("cfg-priority-window");
-  if (pw) pw.value = (cfg.priority_window_days === null || cfg.priority_window_days === undefined)
-    ? "" : String(cfg.priority_window_days);
   const ol = $("cfg-operator-logic");
   if (ol) ol.checked = !!cfg.apply_operator_logic;
   const sp = $("cfg-split-parallel");
