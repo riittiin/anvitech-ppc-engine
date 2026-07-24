@@ -344,6 +344,10 @@ td.slip { color: var(--danger); background: rgba(248,81,73,.12); font-weight: 60
 .optimize-result { margin-top: 12px; max-width: 680px; }
 .optimize-result p { margin: 0 0 8px; font-size: 13px; }
 .optimize-actions { display: flex; gap: 10px; margin-top: 10px; }
+.optimize-impossible { margin-top: 12px; padding: 10px 14px; border-radius: 8px;
+  background: rgba(240, 173, 78, 0.12); border: 1px solid rgba(240, 173, 78, 0.4); }
+.optimize-impossible ul { margin: 6px 0 0; padding-left: 20px; }
+.optimize-impossible li { margin: 2px 0; }
 .optimize-banner {
   padding: 10px 14px; font-size: 13px; color: var(--ink);
   background: rgba(59,130,246,.10); border: 1px solid rgba(59,130,246,.35);

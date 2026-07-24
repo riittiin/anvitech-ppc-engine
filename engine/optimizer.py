@@ -84,12 +84,17 @@ def score(metrics: dict) -> float:
             + CEILING_WEIGHT * metrics.get("ceiling_breach", 0.0))
 
 
-def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None) -> dict:
+def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
+                 with_distribution=False) -> dict:
     """Owner-facing quality of one plan: makespan + lateness vs SO delivery dates.
 
     Each order (SO#, item) is judged by its OWN delivery date — a consolidated
     batch's schedule entries carry every member's so_ref, so members due earlier
     are correctly measured against their earlier date.
+
+    ``with_distribution`` (only for the two plans SHOWN in the Optimize panel — never
+    in the hot search loop) adds ``bands`` (order counts per lateness band) and
+    ``worst_orders`` (the 20+ day ones — the shop-over-capacity list the owner acts on).
     """
     from datetime import datetime
     due = {(l.so_no, l.item_code): l.delivery_date for l in so_lines}
@@ -120,7 +125,7 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None) -> dict:
             over = g - ceiling_days
             if over > 0:
                 ceiling_breach += float(over * over)
-    return {
+    result = {
         "makespan_days": round(makespan, 2),
         "late_orders": len(late),
         "total_late_days": int(sum(late)),
@@ -129,6 +134,17 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None) -> dict:
         "ceiling_breach": round(ceiling_breach, 2),
         "orders": len(gaps),
     }
+    if with_distribution:
+        per = sorted(((k[0], k[1], (expected[k] - due[k]).days)
+                      for k in expected if k in due), key=lambda t: -t[2])
+        bands = {"on_time": 0, "d1_4": 0, "d5_9": 0, "d10_19": 0, "d20_plus": 0}
+        for _so, _it, g in per:
+            bands["on_time" if g <= 0 else "d1_4" if g <= 4 else "d5_9" if g <= 9
+                  else "d10_19" if g <= 19 else "d20_plus"] += 1
+        result["bands"] = bands
+        result["worst_orders"] = [{"so": so, "item": it, "days": g}
+                                  for so, it, g in per if g >= 20][:20]
+    return result
 
 
 def _work(batch, masters) -> float:

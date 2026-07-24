@@ -89,3 +89,21 @@ def test_new_engine_sequence_search_runs_reputation_aware():
     assert res.best["total_late_days"] >= 0
     # slip_severity is present on the reported metrics (mirror wired end-to-end):
     assert "slip_severity" in res.best
+
+
+def test_plan_metrics_distribution_and_worst_orders():
+    # Overhaul display data: bands + the 20+ "impossible" list, only when asked.
+    from datetime import date, datetime
+    from types import SimpleNamespace as NS
+    entries = [
+        NS(end=datetime(2025, 3, 1, 10), so_refs=["A"], item_code="X"),   # on time
+        NS(end=datetime(2025, 3, 4, 10), so_refs=["B"], item_code="Y"),   # 3 days late
+        NS(end=datetime(2025, 3, 26, 10), so_refs=["C"], item_code="Z"),  # 25 days late
+    ]
+    lines = [NS(so_no="A", item_code="X", delivery_date=date(2025, 3, 1)),
+             NS(so_no="B", item_code="Y", delivery_date=date(2025, 3, 1)),
+             NS(so_no="C", item_code="Z", delivery_date=date(2025, 3, 1))]
+    m = optimizer.plan_metrics(entries, lines, date(2025, 3, 1), with_distribution=True)
+    assert m["bands"] == {"on_time": 1, "d1_4": 1, "d5_9": 0, "d10_19": 0, "d20_plus": 1}
+    assert m["worst_orders"] == [{"so": "C", "item": "Z", "days": 25}]
+    assert "bands" not in optimizer.plan_metrics(entries, lines, date(2025, 3, 1))  # search loop unaffected

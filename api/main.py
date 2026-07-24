@@ -1209,7 +1209,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             if real_baseline is None:
                 base_sched, base_lines = _all_lines_schedule(setup, setup.masters, None)
                 real_baseline = optimizer.plan_metrics(base_sched, base_lines,
-                                                       setup.config.plan_start_date)
+                                                       setup.config.plan_start_date,
+                                                       with_distribution=True)
 
             # One pool: search ALL active lines together (lanes are status labels
             # with no scheduling effect). Only operator absences reserve time.
@@ -1233,7 +1234,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             # is ready whatever the worker does.
             base_sched, base_lines = _all_lines_schedule(setup, setup.masters, None)
             real_baseline = optimizer.plan_metrics(base_sched, base_lines,
-                                                   setup.config.plan_start_date)
+                                                   setup.config.plan_start_date,
+                                                   with_distribution=True)
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE["baseline"] = real_baseline
 

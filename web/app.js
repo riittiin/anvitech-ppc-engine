@@ -558,6 +558,20 @@ function renderOptimizeResult(st) {
     ["Worst order lateness (days)", st.baseline ? st.baseline.max_late_days : "-",
      st.best ? st.best.max_late_days : "-"],
   ];
+  // Lateness distribution — what actually matters (how MANY orders, and how far late),
+  // not just the raw count. A good plan reads as good here even if "late orders" looks high.
+  const band = (label, key) => [label,
+    st.baseline && st.baseline.bands ? st.baseline.bands[key] : "-",
+    st.best && st.best.bands ? st.best.bands[key] : "-"];
+  if (st.best && st.best.bands) {
+    rows.push(
+      band("• On-time orders", "on_time"),
+      band("• Late 1–4 days (fine)", "d1_4"),
+      band("• Late 5–9 days", "d5_9"),
+      band("• Late 10–19 days", "d10_19"),
+      band("• Late 20+ days (catastrophic)", "d20_plus"),
+    );
+  }
   const stoppedNote = st.cancelled ? " (stopped early: this is the best of the plans tried so far)" : "";
   let h = st.improved
     ? `<p><strong>A better plan was found${stoppedNote}.</strong> Apply it to use this order in every plan from now on.</p>`
@@ -578,6 +592,17 @@ function renderOptimizeResult(st) {
     h += `<tr><td>${escapeHtml(String(r[0]))}</td><td>${escapeHtml(String(r[1]))}</td><td><strong>${escapeHtml(String(r[2]))}</strong></td></tr>`;
   });
   h += "</tbody></table></div>";
+  // The orders that are physically impossible for the current crew (20+ days late) — the
+  // ones to outsource, add a shift for, or renegotiate. The engine surfaces them instead
+  // of silently juggling them; no software setting can make them on-time.
+  const worst = (st.best && st.best.worst_orders) || [];
+  if (worst.length) {
+    h += `<div class="optimize-impossible"><p><strong>${worst.length} order${worst.length === 1 ? " is" : "s are"} 20+ days late — beyond your crew's capacity for this workload.</strong> No scheduling can make these on-time; consider outsourcing, adding a shift, or renegotiating these dates:</p><ul>`;
+    worst.forEach((w) => {
+      h += `<li>${escapeHtml(String(w.so))}-${escapeHtml(String(w.item))} — <strong>${w.days} days late</strong></li>`;
+    });
+    h += "</ul></div>";
+  }
   h += `<div class="optimize-actions">
           <button id="optimize-apply-btn" class="primary">Apply this plan</button>
           <button id="optimize-discard-btn" class="ghost-btn">Discard</button>
