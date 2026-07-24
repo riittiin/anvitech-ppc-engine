@@ -118,3 +118,27 @@ analytics capacity (physical windows, post the 2026-07-24 manual-station fix).
 5. operator_pick: keep scarce (fewer bad orders on the real book) unless confirmation says otherwise.
 6. Short-job staffing exception: DEFERRED — engine already enforces one-op-per-machine-per-shift;
    the exception is a big change with unproven payoff. Revisit if utilization stays low.
+
+## KEY INSIGHT (2026-07-24) — the worst-vs-distribution conflict was a broken metric
+Diagnosis on the real book (per-order lateness across consol-10 / consol-1 / consol-1+ceiling):
+- **24 of 57 orders are DOOMED** — ≥10 days late in EVERY plan (structurally impossible from a
+  mid-cycle start; the shop is over capacity for this book). The top-5 worst are all doomed
+  (best-case 41/51/46/28/31 days late). 33 orders are savable.
+- **The raw-worst-order ceiling was SACRIFICING savable orders for a doomed one:** to hold the
+  doomed SO82 at 46 vs 63, the ceiling pushed **7 SAVABLE orders** (SO123/124/139/140/69/74/95,
+  all 6-9 days late) into badly-late (10-14 days). bad(10+) 25 → 32.
+- ⇒ "worst never increases" (raw number) and "fewest badly-late" only conflict because the raw
+  metric conflates DOOMED and SAVABLE orders. They are NOT really in conflict.
+
+**Resolution (satisfies both — owner-endorsed direction "make it satisfy both"):**
+- **The Judge is the single arbiter** (objective + apply gate). Its convex+step per-order cost
+  makes pushing a SAVABLE order into "bad" very expensive (protects the Aug-8 case) while a
+  DOOMED order drifting is nearly free (no wasted distortion). REPLACES the raw-worst ceiling
+  (`worst_ceiling_days` + the `_auto_apply_result` max-late backstop shipped on main 2026-07-24).
+- Optional hard floor for owner certainty: an order that is ON-TIME in the incumbent may not be
+  pushed to badly-late (≥10) by a re-optimize — the literal Aug-8 guarantee, compatible with the
+  Judge.
+- **Surface the doomed set** in the panel: "N orders cannot be delivered on time regardless
+  (over capacity) — [list]", so the owner can outsource / add capacity / renegotiate those.
+- This means REVERTING the raw-worst ceiling machinery (`worst_ceiling_days`, ceiling barrier,
+  max-late apply backstop) in favor of the Judge + savable-protection + doomed surfacing.
