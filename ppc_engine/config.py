@@ -89,8 +89,12 @@ class PlanConfig:
     # Reputation guard (2026-07-24 spec). A CONVEX, capped per-order tardiness
     # penalty. Unlike fairness_weight (which only shields the SINGLE worst order),
     # this penalizes EVERY order's lateness on an accelerating curve, so no savable
-    # order is sacrificed for the aggregate. MEASURED on the real book (Task 5) —
-    # re-measure before moving. Must equal engine/optimizer.py SEVERITY_* .
+    # order is sacrificed for the aggregate. Must equal engine/optimizer.py SEVERITY_* .
+    # MEASURED on the real book (Test5, 71 orders, 2026-07-24): OFF->ON pushed ZERO
+    # on-time orders late (the Aug-8 failure mode = 0 cases), RESCUED 12 late orders
+    # to on-time, and cut total late-days 1596->1451; the only orders made worse were
+    # already-late ones (the cap deliberately concentrates unavoidable slip there).
+    # w2 and w4 gave identical plans, so mu=2 suffices. Re-measure before moving.
     #   severity_tolerance_days (T): first T late days cost nothing extra.
     #   severity_weight (mu):        strength of the squared overage.
     #   severity_cap_days:           overage capped at this many days before

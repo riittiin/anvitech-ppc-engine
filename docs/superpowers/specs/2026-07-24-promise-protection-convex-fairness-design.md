@@ -206,6 +206,36 @@ the same rigor:
 - **Two score functions diverging over time.** Kept numerically consistent and covered by
   the consistency test (step 4); a comment in each points at the other.
 
+## Measurement result (2026-07-24, real book Test5, 71 orders)
+
+Measured OFF (severity_weight 0 = the old max-only behaviour) vs ON (the shipped
+defaults tol 2 / weight 2 / cap 30) on identical inputs, seed, and budget (the
+same new-engine sequence search; measured at the engine's default overlap, so the
+*absolute* numbers differ from the tuned-overlap production plan, but the OFF-vs-ON
+contrast on identical inputs is the valid signal):
+
+| Metric | OFF (old) | ON (default) |
+|---|---|---|
+| Total late-days | 1596 | **1451** (−9%) |
+| Orders >14 days late | 56 | **44** |
+| Worst single order | 46 d | 61 d |
+
+Per-order OFF→ON diff (the decisive check):
+
+- **On-time → late (the Aug-8 failure mode): 0 orders.** The guard never pushes a
+  savable/on-time order late.
+- **Late → on-time (rescued): 12 orders.**
+- **Already-late got worse: 22** (the worst 46→61 lives here) — the per-order **cap**
+  deliberately lets the optimizer pile *unavoidable* slip onto orders already missing
+  their date, to shield the savable ones. This is the intended trade, not a regression.
+- **Already-late got better: 33.**
+
+**Decision:** lock the defaults (tol 2 / weight 2 / cap 30) — `weight 2` and `weight 4`
+produced byte-identical plans, so μ=2 is sufficient. No constant change from the
+behaviour-driven starting values. Owner-facing nuance to accept: the guard concentrates
+unavoidable lateness onto already-late orders (a 46 can become a 61) in exchange for
+never sacrificing an on-time one.
+
 ## Rollout
 
 Single change set, behind the existing engine seam. No env var, no schema change, no UI
