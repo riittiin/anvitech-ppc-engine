@@ -92,7 +92,7 @@ In `ppc_engine/config.py`, immediately after line 87 (`makespan_weight: float = 
     #   severity_weight (mu):        strength of the squared overage.
     #   severity_cap_days:           overage capped at this many days before
     #                                squaring, so an impossible order can't dominate.
-    severity_tolerance_days: float = 3.0
+    severity_tolerance_days: float = 2.0
     severity_weight: float = 2.0
     severity_cap_days: float = 30.0
 ```
@@ -176,25 +176,25 @@ def test_optimizer_score_convex_protects_second_worst():
     # Same scenario as the ppc test, in the old-space metrics dict. Makespan is
     # equal on both plans, so only the severity term can flip the preference.
     sacrifice = {"total_late_days": 35, "makespan_days": 40.0,
-                 "slip_severity": (20 - 3) ** 2 + (15 - 3) ** 2}
+                 "slip_severity": (20 - 2) ** 2 + (15 - 2) ** 2}
     protect = {"total_late_days": 24, "makespan_days": 40.0,
-               "slip_severity": (22 - 3) ** 2 + 0}
+               "slip_severity": (22 - 2) ** 2 + 0}
     assert optimizer.score(protect) < optimizer.score(sacrifice)
 
 
 def test_plan_metrics_slip_severity_is_convex_and_capped():
-    # One order 15 days late: overage 12 -> 144. Tolerance 3 is not penalized.
+    # One order 15 days late: overage 13 -> 169. The first 2 days (tolerance) are free.
     entry = NS(end=__import__("datetime").datetime(2025, 3, 16, 10, 0),
                so_refs=["SO1"], item_code="A")
     lines = [NS(so_no="SO1", item_code="A", delivery_date=date(2025, 3, 1))]
     m = optimizer.plan_metrics([entry], lines, date(2025, 3, 1))
     assert m["max_late_days"] == 15
-    assert m["slip_severity"] == (15 - 3) ** 2  # 144.0
+    assert m["slip_severity"] == (15 - 2) ** 2  # 169.0
 
 
 def test_plan_metrics_severity_zero_within_tolerance():
     entry = NS(end=__import__("datetime").datetime(2025, 3, 3, 10, 0),
-               so_refs=["SO1"], item_code="A")   # 2 days late < tolerance 3
+               so_refs=["SO1"], item_code="A")   # 2 days late == tolerance 2 -> free
     lines = [NS(so_no="SO1", item_code="A", delivery_date=date(2025, 3, 1))]
     m = optimizer.plan_metrics([entry], lines, date(2025, 3, 1))
     assert m["slip_severity"] == 0.0
@@ -215,7 +215,7 @@ In `engine/optimizer.py`, immediately after line 40 (`MAKESPAN_WEIGHT = 40.0`), 
 # spec). Kept numerically EQUAL to ppc_engine/config.py severity_* so the overlap
 # contest winner-pick and the Thursday auto-apply gate judge plans the same
 # reputation-aware way the sequence search does. Measured — re-measure before moving.
-SEVERITY_TOLERANCE_DAYS = 3.0   # == ppc_engine severity_tolerance_days (T)
+SEVERITY_TOLERANCE_DAYS = 2.0   # == ppc_engine severity_tolerance_days (T)
 SEVERITY_WEIGHT = 2.0           # == ppc_engine severity_weight (mu)
 SEVERITY_CAP_DAYS = 30.0        # == ppc_engine severity_cap_days
 ```
