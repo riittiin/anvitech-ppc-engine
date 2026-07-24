@@ -48,7 +48,11 @@ SEVERITY_WEIGHT = 2.0           # == ppc_engine severity_weight (mu)
 SEVERITY_CAP_DAYS = 30.0        # == ppc_engine severity_cap_days
 
 # Worst-order ceiling barrier (2026-07-24 amendment) — mirror of ppc_engine's
-# ceiling term. == ppc_engine ceiling_weight. Measured — re-measure before moving.
+# ceiling term. == ppc_engine ceiling_weight. MEASURED on the real book (Test5,
+# 2026-07-24): at weight 100 the search winner's worst order stays exactly AT the
+# ceiling (46 d) and never above it, for ceilings 46 and 61 alike — so 100 holds
+# the guarantee (the apply backstop is the ultimate safety net regardless).
+# Re-measure before moving.
 CEILING_WEIGHT = 100.0
 
 # Local-search shape. Multi-start iterated local search: each restart hill-climbs a

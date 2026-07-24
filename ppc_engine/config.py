@@ -106,7 +106,13 @@ class PlanConfig:
     # Worst-order ceiling barrier (2026-07-24 amendment). ceiling_days is the current
     # plan's worst lateness (days); the objective heavily penalizes any order pushed
     # PAST it, so re-optimization never worsens the worst order. None = no barrier
-    # (byte-identical). ceiling_weight MEASURED on the real book — re-measure before
-    # moving; must equal engine/optimizer.py CEILING_WEIGHT.
+    # (byte-identical). Must equal engine/optimizer.py CEILING_WEIGHT.
+    # MEASURED (Test5, 2026-07-24): at weight 100, with the ceiling set to the naive
+    # worst (46 d), the search winner's worst order stays exactly at 46 and never
+    # exceeds it (same at ceiling 61). The price on that book: holding the worst at 46
+    # leaves no room to improve the rest (total/rescues unchanged) because the worst
+    # order is on the critical path — so a re-optimize PROTECTS rather than churns
+    # there; on a book with a genuine win-win (worst <= ceiling AND others better) it
+    # still applies. Re-measure before moving.
     ceiling_days: float | None = None
     ceiling_weight: float = 100.0

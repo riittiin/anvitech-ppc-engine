@@ -283,6 +283,29 @@ ceiling_days`, and `optimize_sequence`/`sweep_optimize` pass `ceiling_days` to t
 calls so the contest winner-pick and reported metrics see the breach. `ceiling_weight` is MEASURED
 on the real book (the winner must never exceed the incumbent max).
 
+## Ceiling measurement result (2026-07-24, real book Test5)
+
+With the ceiling wired (`worst_ceiling_days` = the naive incumbent's worst = **46 d**), swept
+`ceiling_weight ∈ {100, 300, 1000}` on the real 71-order book:
+
+| ceiling_weight | winner's worst | ≤ ceiling? | total late | rescued | on-time harmed |
+|---|---|---|---|---|---|
+| 100 | 46 | **YES** | 1596 | 0 | 0 |
+| 300 | 46 | YES | 1596 | 0 | 0 |
+| 1000 | 46 | YES | 1596 | 0 | 0 |
+
+- **Guarantee proven:** the search winner's worst order stays exactly at the ceiling (46) and never
+  exceeds it, at weight 100 already (also verified with a looser ceiling of 61 → winner 57 ≤ 61).
+  With the hard apply backstop on top, "the worst order never gets later" is guaranteed. **Lock
+  `ceiling_weight = 100`.**
+- **Honest cost on this book:** holding the worst at 46 reproduces the naive plan (total 1596, 0
+  rescues) — the worst order is on the critical path, so every tail improvement would push it past
+  46 and is therefore refused. Consequence: on the current book a Thursday re-optimize *protects*
+  (keeps the plan) rather than churns; the winner isn't strictly better than the incumbent, so the
+  backstop/strictly-better check keeps the current plan. On a book where a real win-win exists
+  (worst ≤ ceiling AND others improve), it still applies. This is the owner's accepted trade:
+  the worst order's reputation over aggregate churn.
+
 ## Rollout
 
 Single change set, behind the existing engine seam. No env var, no schema change, no UI
