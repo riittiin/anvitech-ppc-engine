@@ -67,3 +67,25 @@ def test_plan_metrics_severity_zero_within_tolerance():
     lines = [NS(so_no="SO1", item_code="A", delivery_date=date(2025, 3, 1))]
     m = optimizer.plan_metrics([entry], lines, date(2025, 3, 1))
     assert m["slip_severity"] == 0.0
+
+
+import io
+
+from engine import book_store, loaders, new_engine
+from engine.config import Config
+from tests.new_sample_workbook import build_new_sample_bytes
+
+
+def test_new_engine_sequence_search_runs_reputation_aware():
+    wb = build_new_sample_bytes()
+    book_store.save_masters_bytes(wb)                 # new_engine reads masters from the store
+    so_lines, masters = loaders.load_all(io.BytesIO(wb))
+    config = Config(scheduler="new", plan_start_date=date(2025, 3, 3),
+                    apply_operator_logic=True)
+    res = new_engine.optimize_sequence(so_lines, config, masters,
+                                       budget_evals=60, seed=42)
+    # The search produced a ranked plan and reported metrics including the guard.
+    assert res.ranks
+    assert res.best["total_late_days"] >= 0
+    # slip_severity is present on the reported metrics (mirror wired end-to-end):
+    assert "slip_severity" in res.best
