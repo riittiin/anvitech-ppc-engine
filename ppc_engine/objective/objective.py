@@ -20,10 +20,30 @@ from ppc_engine.config import PlanConfig
 from ppc_engine.objective.metrics import PlanMetrics
 
 
+def _severity(metrics: PlanMetrics, config: PlanConfig) -> float:
+    """Convex, capped per-order tardiness — the reputation guard. Each order's
+    lateness beyond a tolerance is squared (accelerating) and capped, so a savable
+    order is never dumped for the aggregate and one impossible order can't dominate.
+    Protects EVERY order, not just the single worst (that was max_tardiness's blind
+    spot — see the 2026-07-24 spec)."""
+    tol = config.severity_tolerance_days
+    cap = config.severity_cap_days
+    total = 0.0
+    for late in metrics.lateness_by_order.values():
+        over = late - tol            # `late` is signed; early/on-time -> <= 0
+        if over <= 0.0:
+            continue
+        if over > cap:
+            over = cap
+        total += over * over
+    return total
+
+
 def score(metrics: PlanMetrics, config: PlanConfig) -> float:
     """Score a plan from its metrics. Lower is better."""
     return (
         metrics.total_tardiness_days
+        + config.severity_weight * _severity(metrics, config)
         + config.fairness_weight * metrics.max_tardiness_days
         + config.makespan_weight * metrics.makespan_days
     )

@@ -85,3 +85,16 @@ class PlanConfig:
     # worst order regress.
     fairness_weight: float = 30.0
     makespan_weight: float = 0.1
+
+    # Reputation guard (2026-07-24 spec). A CONVEX, capped per-order tardiness
+    # penalty. Unlike fairness_weight (which only shields the SINGLE worst order),
+    # this penalizes EVERY order's lateness on an accelerating curve, so no savable
+    # order is sacrificed for the aggregate. MEASURED on the real book (Task 5) —
+    # re-measure before moving. Must equal engine/optimizer.py SEVERITY_* .
+    #   severity_tolerance_days (T): first T late days cost nothing extra.
+    #   severity_weight (mu):        strength of the squared overage.
+    #   severity_cap_days:           overage capped at this many days before
+    #                                squaring, so an impossible order can't dominate.
+    severity_tolerance_days: float = 2.0
+    severity_weight: float = 2.0
+    severity_cap_days: float = 30.0
