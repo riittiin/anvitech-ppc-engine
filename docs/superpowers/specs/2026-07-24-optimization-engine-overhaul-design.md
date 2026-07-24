@@ -175,3 +175,19 @@ Diagnosis on the real book (per-order lateness across consol-10 / consol-1 / con
   (show the distribution + surface the 16 impossible orders for business action — outsource / add
   crew / renegotiate) + protecting deliverable orders from being sacrificed (savable guard).
   "More on-time" beyond this is a BUSINESS lever (crew/qualifications), not a software one.
+
+## FINAL STATE (branch optimization-engine-overhaul, 2026-07-25) — SHIPPED to the branch
+Owner decisions after seeing per-order numbers:
+- **Consolidation 10→1** (engine-decided) — the ~6% measured win. [commit]
+- **"Order priority" setting removed** — engine decides. [commit]
+- **Short-job staffing exception** — interval-based operator booking; feasible (0 double-books),
+  used (21 multi-machine shifts); ~neutral on this book but owner-requested + helps others. [commit]
+- **Severity cap 30→60 ("distribute the pain")** — owner's explicit choice with numbers in hand:
+  spread unavoidable lateness (worst 53→40; doomed SO108 53→26, SO107 47→23) accepting ~15 orders
+  sliding on-time→5-13d. The single-worst-order ceiling is KEPT (owner: worst still protected). [commit]
+- **Optimize panel now shows the lateness DISTRIBUTION + the impossible-order list** (15 orders
+  20+ days late on the real book) — the trust + actionable-capacity fix. [commit]
+- Objective band-steps (old Task 2) + raw-ceiling removal (old Task 3): SUPERSEDED — the cap change
+  delivers the owner's shape and the owner chose to KEEP the worst-order ceiling.
+- **Verdict:** the engine is at the crew-limited frontier; the real 'more on-time' lever is crew
+  capacity, which the panel now surfaces (the 15 impossible orders). 557 pass, golden intact.
