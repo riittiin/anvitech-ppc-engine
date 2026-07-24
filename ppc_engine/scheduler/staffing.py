@@ -19,7 +19,7 @@ overlay is needed while laying a single operation.)
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 from ppc_engine.config import PlanConfig
 from ppc_engine.domain.masters import Masters
@@ -44,13 +44,21 @@ def build_machine_pools(masters: Masters) -> dict[str, tuple[Operator, ...]]:
 
 
 class StaffingBoard:
-    """Tracks which operator mans which machine, per shift."""
+    """Tracks which operator mans which machine, and each operator's busy TIME intervals.
+
+    Short-job exception (2026-07-24): an operator is reserved for a machine only for the
+    actual DURATION of the work, not the whole shift. So a LONG job keeps its operator
+    busy all shift (one-operator-per-machine-per-shift stability is preserved by
+    construction — they can't be anywhere else), while a SHORT job frees the operator to
+    man another idle machine later that shift. Availability is an interval-overlap check.
+    """
 
     def __init__(self, pools: dict[str, tuple[Operator, ...]] | None = None) -> None:
-        # (machine_id, shift_date, shift) -> operator name currently manning it.
+        # (machine_id, shift_date, shift) -> operator name that (last) manned it — a soft
+        # preference for machine stability, not a hard lock (short jobs may share).
         self._assign: dict[tuple[str, date, Shift], str] = {}
-        # (shift_date, shift) -> set of operator names already committed that shift.
-        self._busy: dict[tuple[date, Shift], set[str]] = {}
+        # operator name -> list of committed busy (start, end) intervals.
+        self._intervals: dict[str, list[tuple[datetime, datetime]]] = {}
         # machine id -> pre-sorted eligible operators (scarce-first). See build_machine_pools.
         self._pools: dict[str, tuple[Operator, ...]] = pools or {}
         # operator name -> cumulative committed busy minutes (for the "balanced" pick).
@@ -61,18 +69,24 @@ class StaffingBoard:
         self._load[name] = self._load.get(name, 0.0) + minutes
 
     def operator_for(self, machine_id: str, day: date, shift: Shift) -> str | None:
-        """The operator already manning ``machine_id`` on this shift, or None."""
+        """The operator that (last) manned ``machine_id`` on this shift, or None. A
+        machine-stability PREFERENCE — reuse them only if still free for the new interval."""
         return self._assign.get((machine_id, day, shift))
 
-    def _is_free(self, name: str, day: date, shift: Shift) -> bool:
-        """True if ``name`` is not already committed to some machine this shift."""
-        return name not in self._busy.get((day, shift), ())
+    def free_during(self, name: str, start: datetime, end: datetime) -> bool:
+        """True if ``name`` has no committed busy interval overlapping [start, end)."""
+        for s, e in self._intervals.get(name, ()):
+            if s < end and start < e:
+                return False
+        return True
 
     def candidate_operator(
         self,
         machine: Machine,
         day: date,
         shift: Shift,
+        start: datetime,
+        end: datetime,
         masters: Masters,
         config: PlanConfig,
     ) -> str | None:
@@ -100,7 +114,7 @@ class StaffingBoard:
             for op in self._pools.get(machine.id, ())
             if effective_shift(op, day, config) == shift
             and masters.calendar.is_operator_available(op.name, day)
-            and self._is_free(op.name, day, shift)
+            and self.free_during(op.name, start, end)
         ]
         if not free:
             return None
@@ -113,15 +127,11 @@ class StaffingBoard:
             return min(free, key=lambda o: (self._load.get(o.name, 0.0), o.flexibility, o.name)).name
         return free[0].name  # "scarce" (default): least flexible
 
-    def commit(self, machine_id: str, day: date, shift: Shift, name: str) -> None:
-        """Fix ``name`` onto ``machine_id`` for this shift (idempotent for the same
-        person; enforces one-machine-per-person-per-shift for a different person)."""
-        key = (machine_id, day, shift)
-        existing = self._assign.get(key)
-        if existing == name:
-            return
-        assert existing is None, (
-            f"machine {machine_id} already staffed by {existing} on {day}/{shift.value}"
-        )
-        self._assign[key] = name
-        self._busy.setdefault((day, shift), set()).add(name)
+    def commit(self, machine_id: str, day: date, shift: Shift, name: str,
+               start: datetime, end: datetime) -> None:
+        """Book ``name`` onto ``machine_id`` for the interval [start, end) this shift.
+        The operator is now busy for exactly that time (not the whole shift), so a short
+        job leaves them free to man another machine later. ``_assign`` records them as the
+        machine's shift operator (a stability preference for the next op on this machine)."""
+        self._assign[(machine_id, day, shift)] = name
+        self._intervals.setdefault(name, []).append((start, end))

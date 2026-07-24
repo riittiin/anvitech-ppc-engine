@@ -142,8 +142,8 @@ def decode(
         placement = placements[key]
         # Commit the winning placement onto the real state. The machine frees after its
         # actual cutting (placement["end"]) — pacing affects only the ORDER's downstream.
-        for machine_id, day, shift, name in placement["assignments"]:
-            staffing.commit(machine_id, day, shift, name)
+        for machine_id, day, shift, name, seg_start, seg_end in placement["assignments"]:
+            staffing.commit(machine_id, day, shift, name, seg_start, seg_end)
         if placement["machine_id"] is not None:
             machine_free[placement["machine_id"]] = placement["end"]
         for seg in placement["segments"]:
@@ -325,20 +325,6 @@ def _lay_on_machine(
         if remaining <= _EPS_MIN:
             break
 
-        # Who mans this machine this shift? Reuse the shift's operator if already set;
-        # otherwise assign a free qualified one (scarce-first). No operator → the
-        # machine can't run this shift, so idle through it.
-        name = staffing.operator_for(machine.id, win.shift_date, win.shift)
-        if name is None:
-            name = staffing.candidate_operator(machine, win.shift_date, win.shift, masters, config)
-            if name is None:
-                cursor = win.end
-                continue
-            # Record (don't commit) — the decoder commits only the chosen placement.
-            # Within one operation each (machine, date, shift) is unique, so we never
-            # re-query this key, and reading the committed board stays correct.
-            assignments.append((machine.id, win.shift_date, win.shift, name))
-
         seg_start = max(cursor, win.start)
         avail = (win.end - seg_start).total_seconds() / 60.0
         if avail <= 0:
@@ -347,6 +333,22 @@ def _lay_on_machine(
 
         take = min(avail, remaining)
         seg_end = seg_start + timedelta(minutes=take)
+
+        # Who mans this machine for THIS work interval? Prefer the machine's existing
+        # shift operator if they are still free during [seg_start, seg_end) (machine
+        # stability); otherwise any free-during-interval qualified operator — the
+        # short-job exception, which lets an operator freed by a short job elsewhere
+        # cover this machine. Nobody free this interval → the machine idles the window.
+        name = staffing.operator_for(machine.id, win.shift_date, win.shift)
+        if name is None or not staffing.free_during(name, seg_start, seg_end):
+            name = staffing.candidate_operator(
+                machine, win.shift_date, win.shift, seg_start, seg_end, masters, config)
+            if name is None:
+                cursor = win.end
+                continue
+        # Record (don't commit) — the decoder commits only the chosen placement; each
+        # segment's interval is booked so the operator's busy time is tracked exactly.
+        assignments.append((machine.id, win.shift_date, win.shift, name, seg_start, seg_end))
         segments.append(Segment(order.key, op.seq, op.name, op.kind, machine.id, name, seg_start, seg_end, op_qty))
         if first_start is None:
             first_start = seg_start
