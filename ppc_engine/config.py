@@ -102,3 +102,11 @@ class PlanConfig:
     severity_tolerance_days: float = 2.0
     severity_weight: float = 2.0
     severity_cap_days: float = 30.0
+
+    # Worst-order ceiling barrier (2026-07-24 amendment). ceiling_days is the current
+    # plan's worst lateness (days); the objective heavily penalizes any order pushed
+    # PAST it, so re-optimization never worsens the worst order. None = no barrier
+    # (byte-identical). ceiling_weight MEASURED on the real book — re-measure before
+    # moving; must equal engine/optimizer.py CEILING_WEIGHT.
+    ceiling_days: float | None = None
+    ceiling_weight: float = 100.0

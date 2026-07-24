@@ -117,6 +117,12 @@ class Config:
     # the web UI can enable a small window (≈45).
     expedite_window_min: int = 0
 
+    # Worst-order ceiling (2026-07-24 amendment) — TRANSIENT, per optimize run, never
+    # saved. Set by api._start_optimize to the currently-applied plan's max lateness
+    # (days) so the search/apply refuses to push any order past the current worst-case.
+    # None = no ceiling (byte-identical). Excluded from _inputs_signature.
+    worst_ceiling_days: float | None = None
+
     # When True, the full operator/shift model applies in Rule 6:
     #   * each machine uses a per-availability working window (≥threshold → two
     #     shifts 08:00-05:00; else single-shift manual 09:00-18:00), AND
@@ -169,6 +175,8 @@ class Config:
             errs.append("split_min_qty must be >= 1")
         if self.expedite_window_min < 0:
             errs.append("expedite_window_min must be >= 0")
+        if self.worst_ceiling_days is not None and self.worst_ceiling_days < 0:
+            errs.append("worst_ceiling_days must be >= 0 or None")
         if errs:
             raise ValueError("Invalid config: " + "; ".join(errs))
 

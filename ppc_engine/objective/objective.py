@@ -39,11 +39,26 @@ def _severity(metrics: PlanMetrics, config: PlanConfig) -> float:
     return total
 
 
+def _ceiling_breach(metrics: PlanMetrics, config: PlanConfig) -> float:
+    """Sum of squared lateness beyond the worst-order ceiling — the barrier that stops
+    a re-optimization pushing any order past the current worst-case. 0 when no ceiling."""
+    ceiling = config.ceiling_days
+    if ceiling is None:
+        return 0.0
+    total = 0.0
+    for late in metrics.lateness_by_order.values():
+        over = late - ceiling
+        if over > 0:
+            total += over * over
+    return total
+
+
 def score(metrics: PlanMetrics, config: PlanConfig) -> float:
     """Score a plan from its metrics. Lower is better."""
     return (
         metrics.total_tardiness_days
         + config.severity_weight * _severity(metrics, config)
+        + config.ceiling_weight * _ceiling_breach(metrics, config)
         + config.fairness_weight * metrics.max_tardiness_days
         + config.makespan_weight * metrics.makespan_days
     )

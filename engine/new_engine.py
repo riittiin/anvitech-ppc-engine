@@ -131,6 +131,7 @@ def _plan_config(config) -> PlanConfig:
         setup_min=float(getattr(config, "setup_time_min", 90)),
         overlap=overlap,
         consolidation_window=0.0,
+        ceiling_days=getattr(config, "worst_ceiling_days", None),
     )
 
 
@@ -303,7 +304,8 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_eval=prog)
     best_batches = [batch_by_key[k] for k in res.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
-    winner_metrics = plan_metrics(run(best_batches, config, masters), so_lines, plan_start)
+    winner_metrics = plan_metrics(run(best_batches, config, masters), so_lines, plan_start,
+                                  ceiling_days=getattr(config, "worst_ceiling_days", None))
     return OptimizeResult(ranks=ranks, best=winner_metrics, evals=res.evaluations,
                           improved=True, cancelled=False)
 
@@ -347,7 +349,7 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     won_cfg = replace(base, overlap=overlap_pct / 100.0)
     winner_metrics = plan_metrics(
         _entries_from_schedule(decode(orders, tr.best_sequence, new_masters, won_cfg), batch_by_key),
-        so_lines, plan_start)
+        so_lines, plan_start, ceiling_days=getattr(config, "worst_ceiling_days", None))
     return ranks, overlap_pct, winner_metrics, tr.evaluations
 
 
