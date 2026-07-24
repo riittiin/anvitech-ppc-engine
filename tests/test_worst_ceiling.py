@@ -23,9 +23,10 @@ def test_ppc_ceiling_barrier_penalizes_exceeding_the_ceiling():
     within = _m([46.0, 30.0])     # nothing exceeds 46
     breach = _m([61.0, 20.0])     # one order past the ceiling
     assert ppc_score(breach, cfg) > ppc_score(within, cfg)
-    # With no ceiling, the barrier is inert (byte-identical to ceiling off):
+    # Turning the ceiling OFF must remove exactly ceiling_weight * breach from the
+    # score (order 61 is 15 past the ceiling -> 15**2 = 225; order 20 is under it).
     off = replace(cfg, ceiling_days=None)
-    assert ppc_score(breach, off) == ppc_score(breach, replace(cfg, ceiling_days=None))
+    assert ppc_score(breach, cfg) - ppc_score(breach, off) == cfg.ceiling_weight * (15 ** 2)
 
 
 def test_optimizer_plan_metrics_ceiling_breach():
