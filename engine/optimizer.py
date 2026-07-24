@@ -45,7 +45,7 @@ MAKESPAN_WEIGHT = 40.0
 # reputation-aware way the sequence search does. Measured — re-measure before moving.
 SEVERITY_TOLERANCE_DAYS = 2.0   # == ppc_engine severity_tolerance_days (T)
 SEVERITY_WEIGHT = 2.0           # == ppc_engine severity_weight (mu)
-SEVERITY_CAP_DAYS = 30.0        # == ppc_engine severity_cap_days
+SEVERITY_CAP_DAYS = 60.0        # == ppc_engine severity_cap_days (owner "distribute the pain", 2026-07-25)
 
 # Worst-order ceiling barrier (2026-07-24 amendment) — mirror of ppc_engine's
 # ceiling term. == ppc_engine ceiling_weight. MEASURED on the real book (Test5,

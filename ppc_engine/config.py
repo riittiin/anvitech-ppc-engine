@@ -86,22 +86,21 @@ class PlanConfig:
     fairness_weight: float = 30.0
     makespan_weight: float = 0.1
 
-    # Reputation guard (2026-07-24 spec). A CONVEX, capped per-order tardiness
-    # penalty. Unlike fairness_weight (which only shields the SINGLE worst order),
-    # this penalizes EVERY order's lateness on an accelerating curve, so no savable
-    # order is sacrificed for the aggregate. Must equal engine/optimizer.py SEVERITY_* .
-    # MEASURED on the real book (Test5, 71 orders, 2026-07-24): OFF->ON pushed ZERO
-    # on-time orders late (the Aug-8 failure mode = 0 cases), RESCUED 12 late orders
-    # to on-time, and cut total late-days 1596->1451; the only orders made worse were
-    # already-late ones (the cap deliberately concentrates unavoidable slip there).
-    # w2 and w4 gave identical plans, so mu=2 suffices. Re-measure before moving.
+    # Reputation guard. A CONVEX, capped per-order tardiness penalty that penalizes
+    # EVERY order's lateness on an accelerating curve. Must equal engine/optimizer.py
+    # SEVERITY_* . cap=60 is the owner's "DISTRIBUTE THE PAIN" choice (2026-07-25):
+    # measured on the real book, raising the cap 30->60 spreads unavoidable lateness so
+    # the worst orders drop hard (SO108 53->26, SO107 47->23, plan worst 53->40) instead
+    # of a few orders being catastrophically late while others sit on-time. The trade the
+    # owner explicitly accepted: ~15 orders slide from on-time into 5-13 days late (10 of
+    # them 10-13 d) so NO order is left catastrophically worse than it must be. cap 60/90/
+    # 120 gave identical plans (60 is the plateau). Re-measure before moving.
     #   severity_tolerance_days (T): first T late days cost nothing extra.
     #   severity_weight (mu):        strength of the squared overage.
-    #   severity_cap_days:           overage capped at this many days before
-    #                                squaring, so an impossible order can't dominate.
+    #   severity_cap_days:           overage capped at this many days before squaring.
     severity_tolerance_days: float = 2.0
     severity_weight: float = 2.0
-    severity_cap_days: float = 30.0
+    severity_cap_days: float = 60.0
 
     # Worst-order ceiling barrier (2026-07-24 amendment). ceiling_days is the current
     # plan's worst lateness (days); the objective heavily penalizes any order pushed
