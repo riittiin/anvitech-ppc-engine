@@ -146,6 +146,39 @@ def test_optimize_meta_flags_inputs_changed_when_settings_change():
     assert meta_changed["inputs_changed"] is True
 
 
+def test_optimize_meta_surfaces_achieved_vs_target_no_divergence():
+    """A freshly applied optimization: the live plan achieves what it targeted (the
+    ranks replay to the same plan), so optimize_meta carries achieved + target and
+    does NOT flag divergence."""
+    m = _api(); _seed_book()
+    assert m._start_optimize(budget_evals=10, label="quick", background=False)["state"] == "done"
+    m._optimize_apply()
+    meta = m._plan(m._load_plan_config())["optimize_meta"]
+    assert meta["target"]["makespan_days"] is not None
+    assert meta["achieved"]["makespan_days"] is not None
+    assert meta["diverged"] is False
+
+
+def test_optimize_meta_flags_divergence_when_plan_misses_target():
+    """When the live plan is meaningfully worse than the applied optimization's target
+    — a gap the inputs signature can't see (a code deploy mid-contest, a cloud/local
+    parity gap) — optimize_meta flags `diverged` so the UI can warn to re-optimize.
+    This is the 2026-07-25 'optimizer said 52, applied plan is 56' wiring gap."""
+    m = _api(); _seed_book()
+    m._start_optimize(budget_evals=10, label="quick", background=False)
+    m._optimize_apply()
+    # Rewrite the applied target to an impossibly-good makespan (as if the number the
+    # panel showed came from a state the live plan no longer reproduces).
+    saved = book_store.load_plan_priority()
+    meta = dict(saved["meta"]); meta["best"] = {"makespan_days": 0.0, "total_late_days": 0}
+    book_store.save_plan_priority(saved["ranks"], meta)
+    m._PLAN_CACHE.update(key=None, result=None)
+    om = m._plan(m._load_plan_config())["optimize_meta"]
+    assert om["target"]["total_late_days"] == 0
+    assert om["achieved"]["total_late_days"] >= 5      # the live plan is far worse
+    assert om["diverged"] is True
+
+
 def test_optimize_meta_flags_inputs_changed_when_masters_change():
     m = _api()
     _seed_book()

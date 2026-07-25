@@ -824,6 +824,30 @@ def _plan(config: Config):
                          # True when the masters/settings differ from what the
                          # optimization was computed on — its numbers will differ.
                          "inputs_changed": bool(saved_sig and saved_sig != current_inputs_sig)}
+        # Reconcile what the applied optimization TARGETED against what THIS plan
+        # actually achieves. They match under normal operation (ranks replay to the
+        # same plan), but a change the inputs signature can't see — a code deploy
+        # between the contest and now, a cloud/local parity gap, an untracked input —
+        # can leave the live plan worse than the number the Optimize panel showed.
+        # Surface both (+ a `diverged` flag) so that gap is never silent again.
+        _target = (prio.get("meta") or {}).get("best") or {}
+        _ach = optimizer.plan_metrics(plan_run.schedule, so_lines, config.plan_start_date)
+
+        def _num(d, k):
+            v = d.get(k)
+            return round(float(v), 1) if isinstance(v, (int, float)) else None
+        _t_ms, _a_ms = _num(_target, "makespan_days"), _num(_ach, "makespan_days")
+        _t_late, _a_late = _num(_target, "total_late_days"), _num(_ach, "total_late_days")
+        # Flag only when the live plan is meaningfully WORSE than the target (a
+        # better-than-target plan is no problem). Tolerances swallow a 1-day
+        # effective-start drift; the real gaps (this one was 4 days) trip it.
+        diverged = bool(_target) and (
+            (_t_ms is not None and _a_ms is not None and _a_ms - _t_ms >= 2.0)
+            or (_t_late is not None and _a_late is not None and _a_late - _t_late >= 5.0))
+        optimize_meta.update(
+            target={"makespan_days": _t_ms, "total_late_days": _t_late},
+            achieved={"makespan_days": _a_ms, "total_late_days": _a_late},
+            diverged=diverged)
 
     result = {"run_id": run_id, "trace": trace,
               "report": _report_for_book(masters, so_lines, absences=absences_raw),

@@ -350,6 +350,18 @@ function renderOptimizeBanner() {
          `data have changed since this optimization ran. Its numbers may no longer match — run ` +
          `Optimize again to refresh them</span>`;
   }
+  // The live plan is worse than the number the Optimize panel showed (a change the
+  // inputs check can't see — e.g. a code update or a cloud/local gap). Say so plainly.
+  if (optimizeMeta.diverged && optimizeMeta.target && optimizeMeta.achieved) {
+    const t = optimizeMeta.target, a = optimizeMeta.achieved;
+    const bits = [];
+    if (a.makespan_days != null && t.makespan_days != null && a.makespan_days - t.makespan_days >= 2)
+      bits.push(`${Math.round(a.makespan_days)} days now vs ${Math.round(t.makespan_days)} targeted`);
+    if (a.total_late_days != null && t.total_late_days != null && a.total_late_days - t.total_late_days >= 5)
+      bits.push(`${Math.round(a.total_late_days)} late-days now vs ${Math.round(t.total_late_days)} targeted`);
+    h += ` · <span class="pill-pending">This plan no longer matches the optimization it was based on` +
+         (bits.length ? ` (${bits.join("; ")})` : "") + ` — run Optimize again to refresh it</span>`;
+  }
   if (currentRole === "admin") {
     h += ` <button id="optimize-clear-btn" class="ghost-btn small">Remove optimization</button>`;
   }
