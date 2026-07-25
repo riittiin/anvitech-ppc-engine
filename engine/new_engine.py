@@ -355,7 +355,12 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_eval=prog)
     best_batches = [batch_by_key[k] for k in res.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
-    winner_metrics = plan_metrics(run(best_batches, config, masters), so_lines, plan_start,
+    # Measure the winner against the SAME crew + reservations the plan actually runs.
+    # (masters/reserved MUST be keyword args — run()'s 3rd positional is `notes`, so
+    # `run(best_batches, config, masters)` silently scored the winner with masters=None
+    # → the workbook's full operator sheet, promising a plan the app crew can't match.)
+    winner_sched = run(best_batches, config=config, masters=masters, reserved=reserved)
+    winner_metrics = plan_metrics(winner_sched, so_lines, plan_start,
                                   ceiling_days=getattr(config, "worst_ceiling_days", None),
                                   with_distribution=True)
     return OptimizeResult(ranks=ranks, best=winner_metrics, evals=res.evaluations,

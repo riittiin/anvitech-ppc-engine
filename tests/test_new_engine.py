@@ -225,6 +225,34 @@ def test_optimize_sequence_winner_matches_replay_with_consolidation(old_book, ne
         f"winner makespan {res.best['makespan_days']} != replay {replayed['makespan_days']}"
 
 
+def test_optimize_sequence_winner_uses_app_operators_not_workbook(old_book, new_masters):
+    """The reported winner metrics must be measured against the APP crew (the passed
+    masters), NOT the workbook's operator sheet. Regression for the positional-arg bug
+    (`run(best_batches, config, masters)` put masters in the `notes` slot → masters=None
+    → the workbook's full crew), which promised a plan the reduced app crew can't match
+    (live Test8: 53.7d/1191 promised vs 53.53d/1214 applied after an operator was
+    deleted in the app)."""
+    from dataclasses import replace
+    from datetime import date as _date
+    from engine import optimizer, new_engine
+    from engine.models import SOLine
+    from tests.new_sample_workbook import ITEM_A, ITEM_B
+    _, masters = old_book
+    # The owner deleted 'Bravo' in the app; the workbook sheet still lists them.
+    reduced = replace(masters, operators=[o for o in masters.operators if o.name != "Bravo"])
+    so_lines = [SOLine(so_no=f"S{n}", item_code=(ITEM_A if n % 2 == 0 else ITEM_B),
+                       item_name="x", qty=20 + n, delivery_date=_date(2025, 3, 18 + n))
+                for n in range(8)]
+    res = new_engine.optimize_sequence(so_lines, _CONF, reduced, budget_evals=120, seed=5)
+
+    pr = PlanRun(so_lines=so_lines)
+    pipeline.run_forward(pr, _CONF, reduced, priority_rank=res.ranks)
+    replay = optimizer.plan_metrics(pr.schedule, so_lines, _CONF.plan_start_date)
+    assert res.best["makespan_days"] == replay["makespan_days"], \
+        f"winner {res.best['makespan_days']} (workbook crew?) != replay {replay['makespan_days']} (app crew)"
+    assert res.best["total_late_days"] == replay["total_late_days"]
+
+
 def test_per_process_feedback_finishes_step_as_milestone(new_masters):
     # process_qty is keyed by the ORDER BOOK's normaliser (loaders.normalize_process_name),
     # NOT new_engine._norm — build it that way so this test exercises the REAL production
