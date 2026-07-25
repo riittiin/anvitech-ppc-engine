@@ -429,3 +429,74 @@ def test_finished_gate_uses_misspelled_dispatch():
 def test_finished_gate_falls_back_to_last_step_seq_helper():
     r = _seq_routing("OP", "PACKING")
     assert orderbook.finished_gate(r) == "PACKING"
+
+
+# --- Feedback precedence guardrail (2026-07-25 spec) ----------------------- #
+def _pg_routing():
+    return Routing(item_code="X", description="", customer="", rm_type="", moq=None,
+                   processes=[Process(1, "CNC FIRST SIDE", 5, 5, "CNC1", "CNC1"),
+                              Process(2, "VMC FIRST SIDE", 6, 6, "VMC1", "VMC1")])
+
+
+def _pg_act(proc, prod, rej=0):
+    return Actual(so_no="S1", item_code="X", entry_date=date(2025, 3, 1),
+                  qty_produced=prod, qty_rejected=rej, process=proc, item_name="X", operator="o")
+
+
+def test_pg_cannot_punch_downstream_before_upstream():
+    err = orderbook.precedence_cap_error([_pg_act("VMC FIRST SIDE", 10)],
+                                         "S1", "X", "VMC FIRST SIDE", _pg_routing(), 40)
+    assert err and "CNC FIRST SIDE" in err
+
+
+def test_pg_downstream_capped_at_upstream_good():
+    ok = [_pg_act("CNC FIRST SIDE", 20), _pg_act("VMC FIRST SIDE", 20)]
+    assert orderbook.precedence_cap_error(ok, "S1", "X", "VMC FIRST SIDE", _pg_routing(), 40) is None
+    bad = [_pg_act("CNC FIRST SIDE", 20), _pg_act("VMC FIRST SIDE", 21)]
+    assert orderbook.precedence_cap_error(bad, "S1", "X", "VMC FIRST SIDE", _pg_routing(), 40) is not None
+
+
+def test_pg_first_process_capped_at_ordered_qty():
+    assert orderbook.precedence_cap_error([_pg_act("CNC FIRST SIDE", 41)],
+                                          "S1", "X", "CNC FIRST SIDE", _pg_routing(), 40) is not None
+    assert orderbook.precedence_cap_error([_pg_act("CNC FIRST SIDE", 40)],
+                                          "S1", "X", "CNC FIRST SIDE", _pg_routing(), 40) is None
+
+
+def test_pg_rejects_reduce_good_passed_downstream():
+    base = [_pg_act("CNC FIRST SIDE", 25, 5)]   # good 20
+    assert orderbook.precedence_cap_error(base + [_pg_act("VMC FIRST SIDE", 20)],
+                                          "S1", "X", "VMC FIRST SIDE", _pg_routing(), 40) is None
+    assert orderbook.precedence_cap_error(base + [_pg_act("VMC FIRST SIDE", 21)],
+                                          "S1", "X", "VMC FIRST SIDE", _pg_routing(), 40) is not None
+
+
+def test_pg_no_routing_or_unknown_process_allows():
+    assert orderbook.precedence_cap_error([_pg_act("CNC FIRST SIDE", 99)], "S1", "X",
+                                          "CNC FIRST SIDE", None, 40) is None
+    assert orderbook.precedence_cap_error([_pg_act("MYSTERY", 99)], "S1", "X",
+                                          "MYSTERY", _pg_routing(), 40) is None
+
+
+def test_pg_other_orders_do_not_interfere():
+    other = Actual(so_no="S2", item_code="X", entry_date=date(2025, 3, 1),
+                   qty_produced=100, qty_rejected=0, process="CNC FIRST SIDE",
+                   item_name="X", operator="o")
+    assert orderbook.precedence_cap_error([other, _pg_act("CNC FIRST SIDE", 40)],
+                                          "S1", "X", "CNC FIRST SIDE", _pg_routing(), 40) is None
+
+
+def test_pg_rollback_blocked_when_downstream_depends():
+    after = [_pg_act("CNC FIRST SIDE", 10), _pg_act("VMC FIRST SIDE", 20)]
+    err = orderbook.rollback_cap_error(after, _pg_act("CNC FIRST SIDE", 10), _pg_routing())
+    assert err and "VMC FIRST SIDE" in err
+
+
+def test_pg_rollback_allowed_when_no_dependency():
+    after = [_pg_act("CNC FIRST SIDE", 10)]
+    assert orderbook.rollback_cap_error(after, _pg_act("CNC FIRST SIDE", 10), _pg_routing()) is None
+
+
+def test_pg_rollback_of_last_process_allowed():
+    after = [_pg_act("CNC FIRST SIDE", 20), _pg_act("VMC FIRST SIDE", 10)]
+    assert orderbook.rollback_cap_error(after, _pg_act("VMC FIRST SIDE", 10), _pg_routing()) is None

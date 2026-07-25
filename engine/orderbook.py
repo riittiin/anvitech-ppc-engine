@@ -86,6 +86,76 @@ def completed_by_process(actuals) -> dict:
     return {k: max(v, 0.0) for k, v in done.items()}
 
 
+def _process_totals(actuals, so_no, item_code):
+    """Per-process (produced, good) totals for ONE order — the accounting the feedback
+    precedence guard shares with ``completed_by_process`` (same ``_norm``, same good =
+    produced − rejected). ``produced`` = pieces the step consumed; ``good`` = pieces it
+    passed on (clamped ≥ 0)."""
+    produced, good = {}, {}
+    for a in actuals:
+        if a.so_no == so_no and a.item_code == item_code:
+            n = _norm(a.process)
+            produced[n] = produced.get(n, 0.0) + (a.qty_produced or 0.0)
+            good[n] = good.get(n, 0.0) + ((a.qty_produced or 0.0) - (a.qty_rejected or 0.0))
+    return produced, {k: max(v, 0.0) for k, v in good.items()}
+
+
+def precedence_cap_error(actuals, so_no, item_code, punched_process,
+                         routing, ordered_qty):
+    """Piece-flow guard (feedback-precedence spec, 2026-07-25): the cumulative pieces
+    recorded at ``punched_process`` (already reflected in ``actuals``) must not exceed
+    the good qty that cleared the process immediately before it in ``routing`` — or
+    ``ordered_qty`` for the first process. Returns an error message, or ``None`` when
+    allowed. Pure: ``actuals`` is the full list; only this order's entries count. A
+    missing routing or a process not in the routing is allowed (can't validate)."""
+    if routing is None:
+        return None
+    procs = sorted(routing.processes, key=lambda p: p.seq)
+    names = [_norm(p.name) for p in procs]
+    tgt = _norm(punched_process)
+    if tgt not in names:
+        return None
+    idx = names.index(tgt)
+    produced, good = _process_totals(actuals, so_no, item_code)
+    got = produced.get(tgt, 0.0)
+    if idx == 0:
+        if got > ordered_qty:
+            return (f"Can't record {got:g} at '{procs[0].name}' — the order is only for "
+                    f"{ordered_qty:g} pieces.")
+        return None
+    cap = good.get(names[idx - 1], 0.0)
+    if got > cap:
+        prev = procs[idx - 1]
+        return (f"Can't record {got:g} at '{procs[idx].name}' — only {cap:g} pieces have "
+                f"cleared the previous step '{prev.name}'. Record '{prev.name}' first.")
+    return None
+
+
+def rollback_cap_error(actuals_after_removal, removed, routing):
+    """Rollback guard: after removing ``removed``, the good qty at its process must
+    still be ≥ the pieces already recorded at the immediately-following process (you
+    can't retro-create the illegal downstream>upstream state). Returns a message or
+    ``None``. Pure."""
+    if routing is None:
+        return None
+    procs = sorted(routing.processes, key=lambda p: p.seq)
+    names = [_norm(p.name) for p in procs]
+    tgt = _norm(removed.process)
+    if tgt not in names:
+        return None
+    idx = names.index(tgt)
+    if idx + 1 >= len(procs):
+        return None
+    produced, good = _process_totals(actuals_after_removal, removed.so_no, removed.item_code)
+    succ_recorded = produced.get(names[idx + 1], 0.0)
+    if succ_recorded > good.get(tgt, 0.0):
+        succ = procs[idx + 1]
+        return (f"Can't roll back this '{procs[idx].name}' entry — {succ_recorded:g} pieces "
+                f"are already recorded at the later step '{succ.name}'. Roll back "
+                f"'{succ.name}' first.")
+    return None
+
+
 def latest_actual_date(actuals):
     """The most recent date any production was punched, or None if no actuals."""
     return max((a.entry_date for a in actuals), default=None)
