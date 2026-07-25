@@ -140,6 +140,23 @@ def decode(
                 key = min(conflict, key=lambda k: (priority[k], k)) if conflict else crit
 
         placement = placements[key]
+        # Piece-flow guard (2026-07-25 spec): a starved fast op must not finish its WORK
+        # before its predecessor delivered the last piece — else the machine-wise schedule
+        # processes pieces before they exist ("deburring skipped for the last jobs"). Re-lay
+        # it later (batch-at-end) so its work ends >= the predecessor's completion. Block
+        # model kept: same machine, same operator rule, same occupancy — just placed later.
+        if placement["machine_id"] is not None and placement["end"] < prev_end_of[key]:
+            # Push the op's START forward by the shortfall (based on its ACTUAL start,
+            # which already sits at the machine's free time — bumping `ready` alone
+            # wouldn't move an op pinned behind a busy machine). Re-lay until its work
+            # ends >= the predecessor's completion; a few passes absorb shift/day gaps.
+            for _ in range(8):
+                _r = placement["start"] + (prev_end_of[key] - placement["end"])
+                placement = _place_operation(
+                    ops_of[key][idx_of[key]], order_by_key[key], _r,
+                    machine_free, staffing, masters, config)
+                if placement["end"] >= prev_end_of[key]:
+                    break
         # Commit the winning placement onto the real state. The machine frees after its
         # actual cutting (placement["end"]) — pacing affects only the ORDER's downstream.
         for machine_id, day, shift, name, seg_start, seg_end in placement["assignments"]:

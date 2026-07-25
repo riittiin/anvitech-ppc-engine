@@ -25,6 +25,15 @@
 > - **Recent audit fixes (keep — regression tests exist):** unrouted orders are skipped not crashed;
 >   operator absences are honoured (`new_engine._with_absences`); the optimizer's before/after is
 >   reported at the applied overlap.
+> - **Piece-flow guard (2026-07-25, `docs/superpowers/specs/2026-07-25-piece-flow-no-premature-work-design.md`):**
+>   `ppc_engine/scheduler/flow_scheduler.py::decode` RE-LAYS a starved fast op later (batch-at-end)
+>   so its WORK never finishes before its predecessor delivered the last piece — the machine-wise
+>   schedule no longer processes pieces before they exist ("deburring skipped for the last jobs").
+>   Block model + speed kept (owner chose it over 5×-slower per-piece flow). It makes the schedule
+>   physically honest: on Test8 optimized makespan ~52.5→55.56 d, late-days ~1214→1323 (the old
+>   numbers were infeasible, not better). `new_engine._entries_from_schedule` still span-paces the
+>   entry `end` as belt-and-suspenders. Regression: `tests/test_new_engine.py::
+>   test_op_work_never_finishes_before_its_predecessor`.
 > - **Deploy:** repo `riittiin/anvitech-ppc-engine` (branch `main`) → Render service `anvitech-ppc`
 >   (https://anvitech-ppc.onrender.com). Env: `DEFAULT_SCHEDULER=new`, `GITHUB_DISPATCH_TOKEN`,
 >   `OPTIMIZE_WORKER_SECRET`, `MONGODB_URI`, `APP_USERNAME`/`APP_PASSWORD`. **Render auto-deploy is

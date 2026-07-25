@@ -355,3 +355,26 @@ def test_no_op_finishes_before_its_predecessor(old_book, new_masters):
             if es[i].end < es[i - 1].end:
                 bad.append((es[i - 1].process_name, es[i - 1].end, es[i].process_name, es[i].end))
     assert not bad, f"downstream op finishes before predecessor: {bad[:3]}"
+
+
+def test_op_work_never_finishes_before_its_predecessor(old_book, new_masters):
+    """A downstream step's real WORK (op_segments) can't finish before the step feeding
+    it — else the machine-wise schedule processes pieces before they exist (the
+    'deburring skipped for the last jobs' bug, at the WORK level, not just the Gantt
+    span). 2026-07-25 piece-flow spec."""
+    from dataclasses import replace
+    from engine import new_engine
+    so_lines, masters = old_book
+    cfg = replace(_CONF, overlap_percent=90)
+    sched = new_engine.run(rule1_consolidate.run(so_lines, cfg), cfg, None, masters=masters)
+    by_batch = defaultdict(list)
+    for e in sched:
+        if e.op_segments:
+            by_batch[e.batch_id].append((e.process_seq, max(s[1] for s in e.op_segments)))
+    bad = []
+    for es in by_batch.values():
+        es.sort()
+        for i in range(1, len(es)):
+            if es[i][1] < es[i - 1][1]:
+                bad.append((es[i - 1], es[i]))
+    assert not bad, f"downstream WORK finishes before predecessor: {bad[:3]}"
