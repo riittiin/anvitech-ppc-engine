@@ -125,6 +125,30 @@ def test_operator_hours_attributed_per_shift_never_over_100():
         assert o["Utilization %"] <= 100.0
 
 
+def test_operator_capacity_is_rotation_aware_never_over_100():
+    """A two-shift operator ROTATES shift every Friday. Analytics must size their
+    capacity by the shift they're EFFECTIVELY on each day, not their nominal shift —
+    else a Second-shift (10h) person working a rotated First-shift (11h) day shows
+    >100% (the live 2026-07-25 'Khansab Mulla 100.5%' bug)."""
+    masters = _masters([Process(1, "CNC", 30, 30, "M", None)],
+                       [("M", "CNC lathe", 19.5)])
+    masters.operators = [Operator("X", "M", machines=["M"], shift="Second shift")]
+    cfg = Config(scheduler="new", plan_start_date=date(2025, 3, 3),  # anchor Fri 28-02
+                 apply_operator_logic=True)
+    # 10-03 is a Monday AFTER the 07-03 Friday → X has rotated to First shift, so they
+    # legitimately work the full 08:00–19:00 (11h) first-shift window that day.
+    e = ScheduleEntry(
+        batch_id="B", item_code="X", process_seq=1, process_name="CNC", machine="M",
+        qty=22, occupancy_min=660.0,
+        start=datetime(2025, 3, 10, 8, 0), end=datetime(2025, 3, 10, 19, 0),
+        so_refs=["SO"], operator="X",
+        op_segments=[(datetime(2025, 3, 10, 8, 0), datetime(2025, 3, 10, 19, 0), "X")])
+    a = analytics.build_analytics([e], masters, cfg, [_batch(22)])
+    o = next(o for o in a["operators"] if o["Operator"] == "X")
+    assert o["Available (hrs)"] == 11.0, o          # rotated First-shift day = 11h, not 10h
+    assert o["Utilization %"] <= 100.0, o
+
+
 def test_operator_utilization_never_exceeds_100_on_multi_machine_plan():
     # Two machines sharing one first-shift man + a night man: per-shift attribution
     # keeps everyone <= 100% even when ops overlap machines and shifts.

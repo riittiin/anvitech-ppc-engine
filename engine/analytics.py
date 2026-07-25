@@ -55,37 +55,88 @@ def _working_days(calendar, start, end):
 
 
 def _shift_hours(shift, config):
-    """Standard hours for an operator's shift (a stated estimate, shown on the tab)."""
+    """Standard hours for a shift label. Two-shift operators: first 08->19 (11h),
+    second 19->05 (10h). A blank/day label is a manual/helper day window (09->18)."""
     s = (shift or "").lower()
     if "second" in s:                                   # 19:00 -> 05:00 next day
         return float(24 - config.first_shift_end_hour + config.second_shift_end_hour)
-    return float(config.first_shift_end_hour - config.first_shift_start_hour)   # first: 08->19
+    if "first" in s:
+        return float(config.first_shift_end_hour - config.first_shift_start_hour)   # 08->19
+    return float(getattr(config, "manual_end_hour", 18) - getattr(config, "manual_start_hour", 9))
 
 
-def _absent_working_days(operator, absences, calendar, win_start, win_end):
-    """How many of ``operator``'s absence days fall on a working day inside the
-    plan window [win_start, win_end]. Tolerates malformed rows (skip), same as
-    ``optimize_service.absence_reservations``."""
+def _friday_on_or_before(d):
+    return d - timedelta(days=(d.weekday() - 4) % 7)
+
+
+def _rotations(anchor, day):
+    """Fridays f with anchor < f <= day — how many Friday rotations have taken effect.
+    Mirrors ppc_engine.worktime._fridays_after so the analytics capacity matches the
+    shift the engine actually scheduled the operator on."""
+    if day <= anchor:
+        return 0
+    dtf = (4 - anchor.weekday()) % 7 or 7                 # to the first Friday strictly after
+    first = anchor + timedelta(days=dtf)
+    if first > day:
+        return 0
+    return (day - first).days // 7 + 1
+
+
+def _effective_shift(nominal, anchor, day, rotate):
+    """The operator's shift ON `day`. When ``rotate`` (the new engine, which flips
+    two-shift operators every Friday), a two-shift operator's shift flips on an odd
+    Friday count from the anchor; otherwise (classic engine — shifts are fixed for the
+    whole plan) the nominal shift stands. Manual/day operators never rotate."""
+    s = (nominal or "").lower()
+    if "first" in s:
+        base_second = False
+    elif "second" in s:
+        base_second = True
+    else:
+        return nominal                                   # manual/day — no rotation
+    if not rotate:
+        return nominal
+    is_second = base_second ^ (_rotations(anchor, day) % 2 == 1)
+    return "Second shift" if is_second else "First shift"
+
+
+def _absent_days(operator, absences, calendar, win_start_d, win_end_d):
+    """The SET of ``operator``'s absence dates that fall on a working day in the window.
+    Tolerates malformed rows (skip)."""
     from datetime import date as _date
-    win_start_d, win_end_d = win_start.date(), win_end.date()
-    n = 0
+    out = set()
     for a in absences or []:
         if a.get("operator") != operator:
             continue
         try:
-            f = _date.fromisoformat(a["from_date"])
-            t = _date.fromisoformat(a["to_date"])
+            f = _date.fromisoformat(a["from_date"]); t = _date.fromisoformat(a["to_date"])
         except (KeyError, ValueError, TypeError):
-            continue                                     # malformed row — skip
+            continue
         if t < f:
             f, t = t, f
         d = max(f, win_start_d)
-        last = min(t, win_end_d)
-        while d <= last:
+        while d <= min(t, win_end_d):
             if calendar.is_working_day(d):
-                n += 1
+                out.add(d)
             d += timedelta(days=1)
-    return n
+    return out
+
+
+def _operator_available_hours(nominal, calendar, win_start, win_end, plan_start, config,
+                              absent, rotate):
+    """The operator's available hours in the window = sum over each working day (not
+    absent) of that day's EFFECTIVE shift hours. When ``rotate`` (new engine), the
+    effective shift follows the Friday rotation — so a two-shift operator's capacity
+    matches the shift they were actually scheduled on, keeping them <=100% (they work
+    at most one shift/day). Classic engine (``rotate`` False): the nominal shift is
+    fixed for the whole plan, so this reduces to working-days x nominal-shift-hours."""
+    anchor = _friday_on_or_before(plan_start)
+    d, last, total = win_start.date(), win_end.date(), 0.0
+    while d <= last:
+        if calendar.is_working_day(d) and d not in absent:
+            total += _shift_hours(_effective_shift(nominal, anchor, d, rotate), config)
+        d += timedelta(days=1)
+    return total
 
 
 def build_analytics(schedule, masters, config, batches=None, absences=None):
@@ -181,14 +232,20 @@ def build_analytics(schedule, masters, config, batches=None, absences=None):
                 unstaffed_hrs += r["Minutes"] / 60.0
             elif r["Operator"]:
                 by_op[r["Operator"]].append(r)
-        wdays = _working_days(masters.calendar, win_start, win_end)
         shift_of = {o.name: o.shift for o in masters.operators}
+        # Rotation anchor = the engine's week_anchor (Friday on/before the plan start),
+        # so the per-day effective shift here matches the shift the engine scheduled.
+        plan_start = getattr(config, "plan_start_date", None) or win_start.date()
+        # Only the NEW engine rotates operator shifts every Friday WITHIN a plan; the
+        # classic engine keeps each operator's shift fixed, so capacity must match.
+        rotate = getattr(config, "scheduler", "classic") == "new"
         for name, rows in by_op.items():
             busy = sum(r["Minutes"] for r in rows) / 60.0
-            per_day = _shift_hours(shift_of.get(name, ""), config)
-            absent_days = _absent_working_days(name, absences, masters.calendar,
-                                                win_start, win_end)
-            avail = max(0.0, (wdays - absent_days) * per_day)
+            absent = _absent_days(name, absences, masters.calendar,
+                                  win_start.date(), win_end.date())
+            avail = _operator_available_hours(
+                shift_of.get(name, ""), masters.calendar, win_start, win_end,
+                plan_start, config, absent, rotate)
             u = _util(busy, avail)
             # Distinct operations the person manned (a multi-shift op shared with
             # another shift's operator counts for each participant).
