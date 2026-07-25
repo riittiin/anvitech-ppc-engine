@@ -64,6 +64,49 @@ def test_heavy_later_order_beats_trivial_earlier_order():
     assert [b.batch_id for b in ordered] == ["BIG", "SMALL"]
 
 
+def _os_masters():
+    """Item Y: one real machine step (10 min/pc) + a big OUTSOURCED block
+    (machine cell = 'OS', 5000 min vendor turnaround). The OS block is a flat
+    calendar wait, NOT per-piece machine work — it must never be multiplied by qty
+    into Rule 3's work/slack, nor summed into the per-piece cycle-time total."""
+    masters = Masters(
+        machines={"M": Machine(machine_no="M", display_name="M", machine_type="t")},
+        calendar=WorkCalendar(),
+    )
+    masters.routings["Y"] = Routing(
+        item_code="Y", description="", customer="", rm_type="", moq=None,
+        processes=[
+            Process(1, "TURN", cycle_time=10, total_time=None,
+                    suggested_machine="M", allotted_machine="M"),
+            Process(2, "PAINTING OS", cycle_time=5000, total_time=None,
+                    suggested_machine="OS", allotted_machine="OS"),
+        ],
+    )
+    return masters
+
+
+def test_os_turnaround_excluded_from_work_needed():
+    """Work needed = real machine occupancy only. The 5000-min OS block must NOT
+    be charged as 5000 x qty (that made an outsourced job masquerade as a
+    million-minute machining job and dominate the slack ranking)."""
+    masters = _os_masters()
+    cfg = Config(plan_start_date=date(2025, 6, 2))
+    routing = masters.routings["Y"]
+    # Only the 10 min/pc TURN step: 10*50 + 90 setup. NOT + 5000*50.
+    assert rule3_tiebreak_process_time._work_needed(routing, 50, cfg) == 10 * 50 + 90
+
+
+def test_os_turnaround_excluded_from_cycle_per_piece():
+    """The 'Cycle time per piece' column (Batch.total_process_time) = the real
+    per-piece machining cycle only; the OS turnaround is not per-piece time."""
+    masters = _os_masters()
+    cfg = Config(plan_start_date=date(2025, 6, 2))
+    batch = Batch(batch_id="Y", item_code="Y", item_name="Y", qty=50,
+                  so_delivery_date=date(2025, 6, 20), source_so_refs=["Y"])
+    rule3_tiebreak_process_time.run([batch], config=cfg, masters=masters)
+    assert batch.total_process_time == 10  # not 10 + 5000
+
+
 def test_legacy_window_zero_keeps_strict_date_order():
     """With window=0, a later-due heavy order does NOT jump an earlier one."""
     masters = _slack_masters()

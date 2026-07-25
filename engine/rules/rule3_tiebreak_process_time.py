@@ -37,6 +37,20 @@ from ..config import (
 from ..models import fmt_date
 from ..worktime import WorkClock
 from . import rule4_setup_time as r4
+# OS/off-machine classifiers — reused (not duplicated) from Rule 6 so this rule's
+# view of "what is machine work" stays identical to how Rule 6 actually schedules
+# it. rule6 does not import rule3, so this import is safe (no cycle).
+from .rule6_allocate import _is_os, _is_offmachine
+
+
+def _is_machine_work(proc):
+    """A step that occupies an in-house machine (so it counts toward workload /
+    per-piece cycle time). An OUTSOURCED (OS) step is a flat vendor turnaround, not
+    per-piece machine work; an off-machine milestone (DISPATCH, etc.) consumes no
+    machine. Rule 6 reserves both as flat/zero blocks — never cycle x qty — so Rule
+    3 must exclude them too, or an outsourced job masquerades as a huge machining
+    job (e.g. a 5000-min paint block charged as 5000 x qty) and distorts slack."""
+    return not _is_os(proc) and not _is_offmachine(proc)
 
 
 def _plan_start(config):
@@ -56,10 +70,24 @@ def _plan_start(config):
 
 
 def _work_needed(routing, qty, config):
-    """Total machine occupancy the batch needs (reuses Rule 4 — no duplication)."""
+    """Total machine occupancy the batch needs (reuses Rule 4 — no duplication).
+
+    In-house machine steps only: OS turnaround and off-machine milestones are
+    excluded (they are not cycle x qty machine work — see ``_is_machine_work``)."""
     if routing is None:
         return 0.0
-    return sum(r4.occupancy_minutes(p.cycle_time, qty, config) for p in routing.processes)
+    return sum(r4.occupancy_minutes(p.cycle_time, qty, config)
+               for p in routing.processes if _is_machine_work(p))
+
+
+def _cycle_per_piece(routing):
+    """Per-piece machining time shown as 'Cycle time per piece' — the sum of the
+    REAL in-house steps' cycle times. Excludes OS (flat vendor turnaround) and
+    off-machine milestones, which are not per-piece machine cycle time."""
+    if routing is None:
+        return 0.0
+    return sum(p.cycle_time for p in routing.processes
+               if isinstance(p.cycle_time, (int, float)) and _is_machine_work(p))
 
 
 def _time_available(clock, plan_start, due_date, config):
@@ -86,10 +114,9 @@ def run(batches, config=None, notes=None, masters=None, **kw):
     clock = WorkClock(masters.calendar, config)
     plan_start = _plan_start(config)
 
-    # Keep the cycle-time total for display continuity.
+    # Per-piece machining time for display (Schedule INPUT "Cycle time per piece").
     for b in batches:
-        routing = routings.get(b.item_code)
-        b.total_process_time = routing.total_cycle_time() if routing else 0.0
+        b.total_process_time = _cycle_per_piece(routings.get(b.item_code))
 
     def sort_key(b):
         work, avail, slack, cr = _metrics(b, masters, clock, plan_start, config)

@@ -10,7 +10,7 @@ Invariants that make the feature trustworthy:
 from datetime import date
 
 from engine.config import Config
-from engine.models import SOLine, Process, Routing, Machine, WorkCalendar, Masters, PlanRun
+from engine.models import SOLine, Process, Routing, Machine, WorkCalendar, Masters, PlanRun, Batch
 from engine.pipeline import run_forward, KEY_SEP
 from engine import optimizer
 
@@ -42,6 +42,22 @@ def _lines(n_items=6):
 
 def _cfg():
     return Config(plan_start_date=date(2025, 3, 5))
+
+
+def test_work_excludes_outsourced_turnaround():
+    """The ATC seed's 'work' estimate is in-house machine work only. A flat OS
+    turnaround block (machine cell 'OS') must not be charged as cycle x qty, or an
+    outsourced order looks like an enormous machining job and the seed mis-ranks it."""
+    mm = Masters(machines={"M": Machine(machine_no="M", display_name="M",
+                                        machine_type="CNC lathe")},
+                 calendar=WorkCalendar())
+    mm.routings["Z"] = Routing(item_code="Z", description="", customer="", rm_type="",
+                               moq=None, processes=[
+                                   Process(1, "CNC", 10, 0, "M", "M"),
+                                   Process(2, "PAINTING OS", 5000, 0, "OS", "OS")])
+    b = Batch(batch_id="Z", item_code="Z", item_name="Z", qty=50,
+              so_delivery_date=date(2025, 6, 20), source_so_refs=["Z"])
+    assert optimizer._work(b, mm) == 10 * 50  # not (10 + 5000) * 50
 
 
 def test_deterministic_same_inputs_same_result():

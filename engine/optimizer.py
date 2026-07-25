@@ -148,8 +148,12 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
 
 
 def _work(batch, masters) -> float:
+    # In-house machine work only (per-piece cycle x qty). OS turnaround / off-machine
+    # steps are excluded — same rule Rule 3 and Rule 6 use — so an outsourced block
+    # never masquerades as cycle x qty machining in the ATC seed. See
+    # rule3_tiebreak_process_time._cycle_per_piece.
     r = masters.routings.get(batch.item_code)
-    return (r.total_cycle_time() if r else 0.0) * batch.qty
+    return rule3_tiebreak_process_time._cycle_per_piece(r) * batch.qty
 
 
 def _atc_key(batch, masters, plan_start):
