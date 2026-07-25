@@ -24,16 +24,27 @@ def client():
     return c
 
 
-def _post(client, **kw):
-    # ITEM_A's routing ends at INSP (no DISPATCH) — its finished-goods gate. Posting
-    # there means the entry actually fulfils the order, so remaining drops (and is
-    # restored on rollback); intermediate-process production would not count.
-    body = {"so_no": SO1, "item_code": ITEM_A, "entry_date": "2025-03-10", "process": "INSP",
-            "operator": "Operator One"}
+# ITEM_A routing: BANDSAW -> CNC OS -> INSP (the finished-goods gate). The feedback
+# precedence guard (2026-07-25) requires upstream steps recorded before downstream, so
+# tests that hit the gate first record the upstream chain; tests that only need *a*
+# punch (mark-complete / latest-day / record-drop are process-agnostic) use the first
+# step, which is always allowed.
+def _punch(client, process, **kw):
+    body = {"so_no": SO1, "item_code": ITEM_A, "entry_date": "2025-03-10",
+            "process": process, "operator": "Operator One"}
     body.update(kw)
     r = client.post("/actuals", json=body)
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
     return r.json()["actuals_ids"][-1]   # the just-appended entry's id
+
+
+def _post_gate(client, qty_produced, **kw):
+    """Record the upstream chain then the finished gate (INSP) carrying kw. Returns the
+    INSP entry id."""
+    up = max(qty_produced, 1)
+    _punch(client, "BANDSAW", qty_produced=up)
+    _punch(client, "CNC OS", qty_produced=up)
+    return _punch(client, "INSP", qty_produced=qty_produced, **kw)
 
 
 def _status(client, so):
@@ -51,17 +62,21 @@ def _remaining(client, so):
 
 
 def test_rollback_normal_entry_restores_order(client):
-    eid = _post(client, qty_produced=3)               # SO-001 ordered 5
+    b = _punch(client, "BANDSAW", qty_produced=3)     # SO-001 ordered 5
+    c = _punch(client, "CNC OS", qty_produced=3)
+    i = _punch(client, "INSP", qty_produced=3)        # the finished gate → remaining drops
     assert _status(client, SO1) == "Running"
     assert _remaining(client, SO1) == 2
-    r = client.post("/actuals/rollback", json={"id": eid})
-    assert r.status_code == 200 and r.json()["removed"] is True
+    # Roll back in REVERSE (guard: can't remove upstream while downstream depends on it).
+    for eid in (i, c, b):
+        assert client.post("/actuals/rollback", json={"id": eid}).status_code == 200
     assert _status(client, SO1) == "Pending"          # no actuals left
     assert _remaining(client, SO1) == 5
 
 
 def test_rollback_mark_complete_unarchives_order(client):
-    eid = _post(client, qty_produced=5, mark_complete=True)
+    # mark-complete is order-level, so the first step suffices (single entry).
+    eid = _punch(client, "BANDSAW", qty_produced=5, mark_complete=True)
     assert _status(client, SO1) == "Complete"
     r = client.post("/actuals/rollback", json={"id": eid}).json()
     assert r["uncompleted_order"] is True
@@ -69,16 +84,18 @@ def test_rollback_mark_complete_unarchives_order(client):
 
 
 def test_rollback_one_of_many_keeps_the_rest(client):
-    e1 = _post(client, qty_produced=2)
-    _post(client, qty_produced=1)
+    _punch(client, "BANDSAW", qty_produced=3)
+    _punch(client, "CNC OS", qty_produced=3)
+    e1 = _punch(client, "INSP", qty_produced=2)
+    _punch(client, "INSP", qty_produced=1)
     client.post("/actuals/rollback", json={"id": e1})
-    assert _remaining(client, SO1) == 4               # only the qty-2 entry removed
+    assert _remaining(client, SO1) == 4               # only the qty-2 INSP entry removed
     assert _status(client, SO1) == "Running"
 
 
 def test_rollback_keeps_complete_if_another_entry_still_marks_it(client):
-    e1 = _post(client, qty_produced=5, mark_complete=True)   # completes + archives
-    _post(client, qty_produced=0, mark_complete=True)        # 2nd complete flag remains
+    e1 = _punch(client, "BANDSAW", qty_produced=5, mark_complete=True)   # completes + archives
+    _punch(client, "BANDSAW", qty_produced=0, mark_complete=True)        # 2nd complete flag remains
     r = client.post("/actuals/rollback", json={"id": e1}).json()
     assert r["uncompleted_order"] is False
     assert _status(client, SO1) == "Complete"               # stays complete
@@ -123,10 +140,10 @@ def test_unknown_operator_is_400(client):
 
 
 def test_only_latest_date_entries_are_shown_and_rollback_able(client):
-    old = {"so_no": SO1, "item_code": ITEM_A, "process": "INSP", "operator": "Operator One",
+    old = {"so_no": SO1, "item_code": ITEM_A, "process": "BANDSAW", "operator": "Operator One",
            "entry_date": "2025-03-01", "qty_produced": 1}
     e_old = client.post("/actuals", json=old).json()["actuals_ids"][-1]
-    new = {"so_no": SO1, "item_code": ITEM_A, "process": "INSP", "operator": "Operator One",
+    new = {"so_no": SO1, "item_code": ITEM_A, "process": "BANDSAW", "operator": "Operator One",
            "entry_date": "2025-03-02", "qty_produced": 1}
     resp = client.post("/actuals", json=new).json()
     e_new = resp["actuals_ids"][-1]
@@ -143,7 +160,7 @@ def test_only_latest_date_entries_are_shown_and_rollback_able(client):
 
 def test_rolled_back_entry_drops_out_of_the_record(client):
     # A rolled-back entry disappears from the actuals record (and so from any plan).
-    eid = _post(client, qty_produced=1, machine_breakdown_min=600)
+    eid = _punch(client, "BANDSAW", qty_produced=1, machine_breakdown_min=600)
     on = client.post("/run", json={}).json()
     assert any(a != "" for row in on["trace"]["rule7"]["output"]["rows"] for a in row)
     client.post("/actuals/rollback", json={"id": eid})

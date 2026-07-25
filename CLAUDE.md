@@ -326,7 +326,17 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   tested) separates protected (Committed + Urgent) from Open orders — **kept as a
   standalone helper but unused by planning**: `api._plan` and every contest are
   single-pass over the whole book, so lanes carry `commitment`/`promised_date` onto
-  `SOLine` for display only, not for grouping.
+  `SOLine` for display only, not for grouping. **Feedback precedence guard (2026-07-25,
+  `docs/superpowers/specs/2026-07-25-feedback-precedence-guardrail-design.md`):**
+  `precedence_cap_error` / `rollback_cap_error` (pure) enforce piece-flow — a process's
+  cumulative recorded qty (`produced`) can't exceed the good qty that cleared the
+  process *before* it in the routing (first step capped at ordered qty); rollback can't
+  retro-create the illegal downstream>upstream state. Wired at **`POST /actuals`**
+  (before `r7.run`) and **`POST /actuals/rollback`** (before `delete_actual`), both →
+  400 with a message naming the blocking step. Reuses `_norm` + `completed_by_process`
+  accounting (same as planning), so **capture and planning can never disagree** and the
+  planner never re-schedules already-done upstream work. Consequence: every step —
+  incl. OS/inspection — must be punched, or downstream caps at 0.
 - `engine/book_store.py` — durable persistence of the book: active orders + the
   completed archive (hashes keyed by a composite **`"<so_no>\x1f<item_code>"`** field;
   `complete`/`uncomplete`/`delete` target one (SO#, item) line), actuals (append-only

@@ -2198,6 +2198,18 @@ def post_actuals(req: ActualRequest):
         no_load_min=req.no_load_min, other_work_min=req.other_work_min,
         remarks=req.remarks, mark_complete=req.mark_complete,
     )
+    # Feedback precedence guard (2026-07-25 spec): a process's recorded qty can't
+    # exceed the good qty that cleared the process before it (first step ≤ ordered).
+    # Reject out-of-order / over-cap punches BEFORE they are stored.
+    _routing = _current_masters().routings.get(req.item_code)
+    _order = book_store.load_active_orders().get((req.so_no, req.item_code))
+    _ordered = _order.ordered_qty if _order else float("inf")
+    _err = orderbook.precedence_cap_error(
+        book_store.load_actuals() + [actual], req.so_no, req.item_code,
+        req.process, _routing, _ordered)
+    if _err:
+        raise HTTPException(status_code=400, detail=_err)
+
     all_actuals = r7.run(actual)
     completed = False
     if req.mark_complete:
@@ -2234,6 +2246,15 @@ def rollback_actual(req: RollbackRequest):
             status_code=400,
             detail="only the latest day's entries can be rolled back; earlier days are locked",
         )
+    # Feedback precedence guard: don't let a rollback retro-create the illegal
+    # downstream>upstream state (rolling back an upstream punch that a downstream
+    # punch still depends on). Checked BEFORE the delete.
+    _routing = _current_masters().routings.get(target.item_code)
+    _err = orderbook.rollback_cap_error(
+        [a for a in before if a.id != req.id], target, _routing)
+    if _err:
+        raise HTTPException(status_code=400, detail=_err)
+
     removed = book_store.delete_actual(req.id)
     if removed is None:
         raise HTTPException(status_code=404, detail="entry not found (already rolled back?)")
