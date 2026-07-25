@@ -81,6 +81,54 @@ def _new_masters():
     return cached
 
 
+def _apply_app_operators(new_masters, old_masters):
+    """Replace the new-engine masters' operators (parsed from the WORKBOOK, which is
+    now a FOSSIL) with the APP-OWNED operator set carried on ``old_masters``.
+
+    Operators are owned by the app (added/edited/removed/pinned/rotated in Settings),
+    NOT the Excel sheet — so the app table is authoritative for WHO exists and their
+    machines + shift. The one thing the app table does not carry is ROLE (operator /
+    helper / inspector), so role is inherited BY NAME from the workbook operators; a
+    person the workbook never had gets their role inferred from their qualified
+    machines' kinds (else OPERATOR). Machines, routings and calendar stay
+    workbook-owned. The input masters is never mutated.
+
+    ``old_masters is None`` (a bare caller that passes no app set, e.g. a unit test)
+    keeps the workbook operators — back-compat. An explicit EMPTY operator list is
+    honoured as "no operators" (e.g. the owner deleted everyone), never resurrected
+    from the workbook."""
+    if old_masters is None:
+        return new_masters
+    app_ops = getattr(old_masters, "operators", None)
+    if app_ops is None:
+        return new_masters
+    from dataclasses import replace as _replace
+    from collections import Counter
+    from ppc_engine.domain.resources import Operator as _NewOp, Role, ROLE_FOR_KIND
+    from ppc_engine.loaders.normalize import parse_machine_options, parse_shift
+
+    role_by_name = {o.name: o.role for o in new_masters.operators}
+    kind_by_machine = {mid: getattr(m, "kind", None)
+                       for mid, m in new_masters.machines.items()}
+
+    def _role_for(name, quals):
+        if name in role_by_name:
+            return role_by_name[name]               # inherit the workbook role by name
+        # App-added person the workbook never had: infer from their machines' kinds.
+        votes = Counter(ROLE_FOR_KIND[kind_by_machine[m]] for m in quals
+                        if kind_by_machine.get(m) in ROLE_FOR_KIND)
+        return votes.most_common(1)[0][0] if votes else Role.OPERATOR
+
+    ops = []
+    for a in app_ops:
+        quals = frozenset(parse_machine_options(
+            getattr(a, "preferred_machines_raw", "") or ""))
+        ops.append(_NewOp(name=a.name, role=_role_for(a.name, quals),
+                          qualified_machines=quals,
+                          base_shift=parse_shift(getattr(a, "shift", "") or "")))
+    return _replace(new_masters, operators=tuple(ops))
+
+
 def _friday_on_or_before(d: date) -> date:
     return d - timedelta(days=(d.weekday() - 4) % 7)
 
@@ -269,7 +317,9 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     """
     if not batches:
         return []
-    new_masters = _with_absences(_new_masters(), reserved)
+    # Operators are APP-OWNED — overlay them onto the workbook masters (the sheet is a
+    # fossil), so a delete/edit/rotation in Settings is what actually schedules.
+    new_masters = _with_absences(_apply_app_operators(_new_masters(), masters), reserved)
     orders, batch_by_key = _orders_from_batches(batches, new_masters)
     if not orders:
         return []
@@ -292,7 +342,8 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
 
     from ppc_engine.optimize import optimize as new_optimize
 
-    nm = _with_absences(_new_masters(), reserved)
+    # App-owned operators (the search must optimize against the SAME crew the plan runs).
+    nm = _with_absences(_apply_app_operators(_new_masters(), masters), reserved)
     cfg = _plan_config(config)
     plan_start = getattr(config, "plan_start_date", None) or date.today()
     batches = rule1_consolidate.run(so_lines, config)
@@ -330,7 +381,8 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     from ppc_engine.optimize import tune_overlap
     from ppc_engine.scheduler import decode
 
-    new_masters = _with_absences(_new_masters(), reserved)
+    # App-owned operators — same overlay as run()/optimize_sequence().
+    new_masters = _with_absences(_apply_app_operators(_new_masters(), masters), reserved)
     base = _plan_config(config)
     plan_start = getattr(config, "plan_start_date", None) or date.today()
 

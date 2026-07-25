@@ -373,7 +373,11 @@ def _report_after_upload(masters):
     absence-orphan rows (ABSENT_OPERATOR_UNKNOWN) for parity with the plan
     report. Does not touch or replay `_report_for_book`; /run stays book-scoped."""
     rows = list(masters.report)
-    for name in _absence_orphans(masters):
+    # Absence orphans are judged against the APP-OWNED operator table (operators are
+    # app-owned; this file's Operator sheet is a fossil). Overlaying keeps the loader
+    # rows from `masters.report` while checking absences against the real roster — so an
+    # app-added operator isn't mislabelled an orphan, nor a workbook name kept as valid.
+    for name in _absence_orphans(_with_operator_overlay(masters)):
         rows.append({"kind": "ABSENT_OPERATOR_UNKNOWN", "ref": name,
                      "message": f"absence entry for an operator not in the "
                                 f"current masters: ignored"})
@@ -1038,6 +1042,14 @@ def _plan_fingerprint(config: Config) -> str:
         # The plan response also carries the scheduled-optimize note; fold it in so a
         # new note is never served stale from the cache (a note change is rare).
         "note": book_store.load_auto_note(),
+        # FULL actuals content, plan-cache only (NOT book_signature — a net-zero-good
+        # punch must not fire the Thursday optimize trigger). `_current_book_sig` is
+        # quantity-derived, so a downtime-only / all-reject / rolled-back entry leaves
+        # it unchanged even though it advances the effective plan start (→ the schedule)
+        # and the Rule 7 downtime tab. Digesting every actual closes that stale window.
+        "actuals": hashlib.sha256(json.dumps(
+            [a.to_json() for a in book_store.load_actuals()],
+            sort_keys=True, default=str).encode("utf-8")).hexdigest(),
     }
     return hashlib.sha256(
         json.dumps(parts, sort_keys=True, default=str).encode("utf-8")).hexdigest()
@@ -1596,11 +1608,30 @@ def run(request: Request, req: Optional[RunRequest] = None):
     # admin auto-load on page open, or any user — plans with the saved config
     # (defaults if none saved). So everyone sees one consistent, planner-set plan.
     if role == auth.ADMIN and persist:
+        # MERGE the submitted fields over the currently-saved config, so knobs the
+        # Settings form does NOT send keep their stored values instead of resetting to
+        # code defaults. The form omits `scheduler` (deploy-level engine) and the
+        # optimizer-owned `consolidation_window_days`/`flow_chunks`; a bare
+        # from_dict(sent) would silently flip the live engine to the retired "classic"
+        # and undo the optimizer's tuned consolidation window. (Overlap % is already
+        # echoed by the form; merging is the general guard for the rest.)
+        base = {}
+        _raw_saved = book_store.load_plan_config()
+        if _raw_saved:
+            try:
+                base = json.loads(_raw_saved)
+            except Exception:  # noqa: BLE001 — a corrupt blob just means "no base"
+                base = {}
+        merged = {**base, **(sent or {})}
         try:
-            config = Config.from_dict(sent)   # bad date/type raises here
+            config = Config.from_dict(merged)   # bad date/type raises here
             config.validate()
         except (ValueError, TypeError) as e:
             raise HTTPException(status_code=400, detail=f"invalid config: {e}")
+        # Engine is a DEPLOY-level choice (DEFAULT_SCHEDULER), never a Settings field —
+        # pin the authoritative one so a Save can never persist a stale/other engine
+        # (and a store already corrupted with "classic" self-heals on the next Save).
+        config.scheduler = _load_plan_config().scheduler
         book_store.save_plan_config(json.dumps(config.to_dict()))
     elif book_store.load_plan_config():
         config = _load_plan_config()   # a saved plan exists → everyone sees it

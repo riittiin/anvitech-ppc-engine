@@ -79,6 +79,23 @@ def test_captured_actual_invalidates():
                process="CNC", operator="", item_name=ITEM_A)))
 
 
+def test_net_zero_good_actual_invalidates():
+    """A downtime-only / all-reject actual produces NO good qty, so it doesn't change
+    the quantity-derived book signature — but it DOES advance the latest-actual date
+    (→ the plan's effective start → the schedule) and the Rule 7 downtime tab. The
+    plan cache must still recompute, not serve the pre-punch schedule."""
+    m = _fresh_api(); _seed()
+    # A prior real punch so the order already has actuals (process_qty already a dict).
+    book_store.append_actual(Actual(so_no="SO1", item_code=ITEM_A, entry_date=date(2025, 3, 19),
+                                    qty_produced=2, qty_rejected=0, shift="1st shift",
+                                    process="CNC", operator="", item_name=ITEM_A))
+    # Now a downtime-only entry on a LATER date: 0 good produced.
+    assert _recomputes(m, lambda: book_store.append_actual(
+        Actual(so_no="SO1", item_code=ITEM_A, entry_date=date(2025, 3, 24),
+               qty_produced=0, qty_rejected=0, shift="1st shift", process="CNC",
+               operator="", item_name=ITEM_A, machine_breakdown_min=180)))
+
+
 def test_absence_invalidates():
     m = _fresh_api(); _seed()
     assert _recomputes(m, lambda: book_store.save_absence(

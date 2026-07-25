@@ -122,6 +122,66 @@ def test_unstaffed_op_is_skipped_not_crashed(new_masters):
     assert dropped == []
 
 
+def _ops_used(schedule):
+    """Every operator name the schedule assigns — the single-name field plus each
+    per-shift handoff segment (the truth for multi-shift ops)."""
+    used = set()
+    for e in schedule:
+        if e.operator:
+            used.add(e.operator)
+        for seg in e.op_segments:
+            if seg[2]:
+                used.add(seg[2])
+    return used
+
+
+def test_new_engine_only_uses_app_owned_operators(old_book, new_masters):
+    """Operators are APP-OWNED (managed in Settings); the workbook's operator sheet is
+    a fossil. Deleting/editing an operator in the app MUST change what the engine
+    schedules. Regression for the live wiring bug where the new engine re-read
+    operators from the workbook and kept scheduling a deleted person."""
+    from dataclasses import replace
+    so_lines, masters = old_book
+    batches = rule1_consolidate.run(so_lines, _CONF)
+    baseline = run(batches, _CONF, None, masters=masters)   # full app set (== workbook here)
+    used = _ops_used(baseline)
+    assert used, "the sample should assign operators"
+
+    victim = sorted(used)[0]                                 # the owner deletes this person
+    kept = [o for o in masters.operators if o.name != victim]
+    after = run(batches, _CONF, None, masters=replace(masters, operators=kept))
+    used_after = _ops_used(after)
+
+    assert victim not in used_after, (
+        f"{victim!r} was removed from the app operator table but the engine still "
+        f"scheduled them (it re-read the workbook operator sheet)")
+    assert used_after <= {o.name for o in kept}, (
+        f"engine used operators absent from the app table: {used_after - {o.name for o in kept}}")
+
+
+def test_optimize_search_uses_app_operators_not_workbook(old_book, new_masters):
+    """The SEQUENCE SEARCH must optimize against the app crew, not the workbook. With
+    an operator deleted in the app, the winner it returns (replayed exactly like the
+    plan) must not schedule that person. Regression: the search previously re-read the
+    workbook operators, so it 'optimized taking the deleted operator into consideration'."""
+    from dataclasses import replace
+    from engine import new_engine
+    so_lines, masters = old_book
+    victim = "Bravo"
+    kept = [o for o in masters.operators if o.name != victim]
+    app_masters = replace(masters, operators=kept)
+
+    res = new_engine.optimize_sequence(so_lines, _CONF, app_masters, budget_evals=15, seed=1)
+    assert res.ranks, "the search should return a ranked plan"
+
+    # Replay the winning ranks the same way _plan does, with the app crew.
+    batches = rule1_consolidate.run(so_lines, _CONF)
+    ordered, _ = pipeline.apply_priority_rank(batches, res.ranks)
+    used = _ops_used(new_engine.run(ordered, _CONF, None, masters=app_masters))
+    assert victim not in used
+    assert used <= {o.name for o in kept}
+
+
 def test_per_process_feedback_finishes_step_as_milestone(new_masters):
     # process_qty is keyed by the ORDER BOOK's normaliser (loaders.normalize_process_name),
     # NOT new_engine._norm — build it that way so this test exercises the REAL production
