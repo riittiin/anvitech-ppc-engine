@@ -146,6 +146,31 @@ def test_optimize_meta_flags_inputs_changed_when_settings_change():
     assert meta_changed["inputs_changed"] is True
 
 
+def test_finalize_recomputes_best_from_local_replay():
+    """The reported/stored 'best' must be the winner's ranks replayed LOCALLY, not the
+    number the contest (cloud worker) reported — so the panel and the applied plan
+    always agree (closes the 52.5-promised / 55.6-applied gap)."""
+    import time
+    m = _api(); _seed_book()
+    m._start_optimize(budget_evals=10, label="quick", background=False)
+    res = m._OPTIMIZE["result"]
+    ranks, ov = res["ranks"], res["best_overlap"]
+    baseline = m._OPTIMIZE["baseline"]
+    honest = m._metrics_for_ranks(ranks, ov)          # what the plan really achieves
+    assert honest and honest["makespan_days"] is not None
+
+    # Finalize a NEW job with a BOGUS best (as if the contest over-reported makespan).
+    m._OPTIMIZE.update(job_id="jobZ", started_mono=time.monotonic(),
+                       searched_book_sig="x", searched_inputs_sig="y", auto=False)
+    bogus = dict(honest); bogus["makespan_days"] = 1.0
+    m._finalize_optimize("jobZ", m._load_plan_config(), baseline, "quick",
+                         winner_overlap=ov, ranks=ranks, best=bogus,
+                         evals=10, table=[], cancelled=False)
+    stored = m._OPTIMIZE["result"]["best"]
+    assert stored["makespan_days"] == honest["makespan_days"], "best was not recomputed locally"
+    assert stored["makespan_days"] != 1.0
+
+
 def test_optimize_meta_surfaces_achieved_vs_target_no_divergence():
     """A freshly applied optimization: the live plan achieves what it targeted (the
     ranks replay to the same plan), so optimize_meta carries achieved + target and

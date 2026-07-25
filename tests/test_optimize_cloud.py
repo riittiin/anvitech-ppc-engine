@@ -110,7 +110,10 @@ def test_cloud_round_trip_via_the_worker_endpoints(monkeypatch):
     assert rr.status_code == 200 and rr.json()["ok"]
 
     st = _wait(m, "done")
-    assert st["mode"] == "cloud" and st["best"] == out["best"]
+    # `best` is now the winner's ranks replayed LOCALLY (so the panel number == the plan
+    # the user gets on Apply), which may differ a hair from the worker's own measurement.
+    assert st["mode"] == "cloud" and st["best"]["makespan_days"] is not None
+    assert st["best"] == m._metrics_for_ranks(out["ranks"], out["winner_overlap"])
     assert st["best_overlap"] == out["winner_overlap"]
     assert st["baseline"]                        # computed app-side
     meta = m._optimize_apply()                   # Apply works off a cloud result

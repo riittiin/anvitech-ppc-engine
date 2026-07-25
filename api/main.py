@@ -1330,6 +1330,17 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                        winner_overlap, ranks, best, evals, table, cancelled):
     """Store a finished contest (local sweep OR cloud worker result) as the
     Optimize outcome — one place computes improved/inputs_sig for both paths."""
+    # RECOMPUTE the winner's metrics locally, by replaying its ranks through the same
+    # path _plan uses. The contest's own `best` (especially a cloud worker's) can be
+    # measured a hair differently from how the app actually replays, so trusting it made
+    # the Optimize panel promise a plan the applied plan didn't reproduce (the 2026-07-25
+    # 52.5-vs-55.6 gap). Recomputing here makes "shown" == "applied" by construction.
+    # Both `best` and `real_baseline` (already local) are then on the same footing, so
+    # `improved` is judged honestly. Keep the contest's number only if the replay fails.
+    if ranks:
+        _local_best = _metrics_for_ranks(ranks, winner_overlap)
+        if _local_best is not None:
+            best = _local_best
     improved = (best is not None and real_baseline is not None
                 and optimizer.score(best) < optimizer.score(real_baseline))
     # Fingerprint against the WINNING settings: Apply persists the winning
@@ -1477,6 +1488,35 @@ def _movement_note(new_ranks):
     movers = _movers(_expected_by_order(old_sched),
                      _expected_by_order(new_sched), _MOVE_LATER_THRESHOLD_DAYS)
     return _format_movers(movers)
+
+
+def _metrics_for_ranks(ranks, overlap=None, *, with_distribution=True):
+    """Metrics of the plan that replays ``ranks`` through the SAME local path ``_plan``
+    uses (optionally at a given overlap). This is the ONE source of truth for "what
+    this optimized plan achieves": the contest (cloud worker OR local sweep) can report
+    a ``best`` computed a hair differently from how the app actually replays, so the
+    number the Optimize panel shows and the plan the user gets on Apply could disagree
+    (the 2026-07-25 52.5-promised / 55.6-applied gap). Recomputing here makes them one
+    number by construction. Returns None on any failure (caller keeps the contest's)."""
+    try:
+        config = _resolve_config(_load_plan_config())
+        if overlap is not None:
+            knob = optimizer.knob_for(config)[0]
+            config = replace(config, **{knob: overlap})
+        masters = _current_masters()
+        actuals = book_store.load_actuals()
+        orders = book_store.load_active_orders()
+        absences = book_store.load_absences()
+        setup = optimize_service.prepare_contest(
+            orders, actuals, masters, config, absences=absences,
+            operator_table=book_store.load_operator_table())
+        schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks or None)
+        return optimizer.plan_metrics(
+            schedule, all_lines, setup.config.plan_start_date,
+            ceiling_days=getattr(config, "worst_ceiling_days", None),
+            with_distribution=with_distribution)
+    except Exception:  # noqa: BLE001 — a metrics recompute must never crash finalize
+        return None
 
 
 def _incumbent_metrics():

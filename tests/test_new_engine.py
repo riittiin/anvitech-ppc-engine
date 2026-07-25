@@ -182,6 +182,49 @@ def test_optimize_search_uses_app_operators_not_workbook(old_book, new_masters):
     assert used <= {o.name for o in kept}
 
 
+def test_optimize_sequence_winner_matches_replay(old_book, new_masters):
+    """The CLOUD path (optimize_sequence) must report a winner the app reproduces when
+    it replays the ranks — else the Optimize panel promises a plan the user never gets
+    (the live 2026-07-25 '52.5 promised, 55.6 applied' gap). The local-sweep invariant
+    test covers `tune`, NOT this path."""
+    from engine import optimizer, new_engine
+    so_lines, masters = old_book
+    res = new_engine.optimize_sequence(so_lines, _CONF, masters, budget_evals=60, seed=1)
+    assert res.ranks and "makespan_days" in res.best
+
+    pr = PlanRun(so_lines=so_lines)
+    pipeline.run_forward(pr, _CONF, masters, priority_rank=res.ranks)
+    replayed = optimizer.plan_metrics(pr.schedule, so_lines, _CONF.plan_start_date)
+    assert replayed["makespan_days"] == res.best["makespan_days"], \
+        f"winner makespan {res.best['makespan_days']} != replay {replayed['makespan_days']}"
+    assert replayed["total_late_days"] == res.best["total_late_days"], \
+        f"winner late {res.best['total_late_days']} != replay {replayed['total_late_days']}"
+
+
+def test_optimize_sequence_winner_matches_replay_with_consolidation(old_book, new_masters):
+    """Same parity check, but with MULTIPLE SOs per item merged by Rule 1 into multi-SO
+    batches — the real-book shape (67 orders consolidated) the tiny 2-order sample lacks.
+    This is where the live '52.5 promised / 55.6 applied' gap lives."""
+    from datetime import date as _date
+    from engine import optimizer, new_engine
+    from engine.models import SOLine
+    from tests.new_sample_workbook import ITEM_A, ITEM_B
+    _, masters = old_book
+    # 8 SOs across the two items, delivery dates within the consolidation window so Rule 1
+    # merges each item's lines into ONE batch carrying several source SOs.
+    so_lines = [SOLine(so_no=f"S{n}", item_code=(ITEM_A if n % 2 == 0 else ITEM_B),
+                       item_name="x", qty=10 + n, delivery_date=_date(2025, 3, 18 + n))
+                for n in range(8)]
+    res = new_engine.optimize_sequence(so_lines, _CONF, masters, budget_evals=120, seed=5)
+    assert res.ranks and "makespan_days" in res.best
+
+    pr = PlanRun(so_lines=so_lines)
+    pipeline.run_forward(pr, _CONF, masters, priority_rank=res.ranks)
+    replayed = optimizer.plan_metrics(pr.schedule, so_lines, _CONF.plan_start_date)
+    assert replayed["makespan_days"] == res.best["makespan_days"], \
+        f"winner makespan {res.best['makespan_days']} != replay {replayed['makespan_days']}"
+
+
 def test_per_process_feedback_finishes_step_as_milestone(new_masters):
     # process_qty is keyed by the ORDER BOOK's normaliser (loaders.normalize_process_name),
     # NOT new_engine._norm — build it that way so this test exercises the REAL production
