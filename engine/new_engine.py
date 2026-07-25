@@ -297,6 +297,24 @@ def _entries_from_schedule(sched, batch_by_key):
             operator=operator,
             op_segments=op_segments,
         ))
+    # PACE the DISPLAY span: with overlap the new engine lets a fast downstream op
+    # finish its cutting before the slow step feeding it — physically impossible (the
+    # pieces don't exist yet). Extend each op's `end` to >= its predecessor's paced end
+    # so the Gantt/expected-completion never show a step finishing before its input.
+    # ONLY the span (`end`) grows — `op_segments` (operator busy) and `occupancy_min`
+    # (machine busy) are the real cutting time and stay untouched (span > occupancy,
+    # exactly how the classic engine reports it).
+    by_batch = defaultdict(list)
+    for e in entries:
+        by_batch[e.batch_id].append(e)
+    for es in by_batch.values():
+        es.sort(key=lambda e: e.process_seq)
+        paced = None
+        for e in es:
+            if paced is not None and e.end < paced:
+                e.end = paced
+            paced = e.end
+
     entries.sort(key=lambda e: (e.start, e.batch_id, e.process_seq))
     return entries
 

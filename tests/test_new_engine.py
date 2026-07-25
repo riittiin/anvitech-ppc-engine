@@ -332,3 +332,26 @@ def test_operator_absence_is_honoured(old_book, new_masters):
     pr = PlanRun(so_lines=so_lines)
     pipeline.run_forward(pr, _CONF, masters, reserved=reserved)
     assert all(e.operator != op for e in pr.schedule)
+
+
+def test_no_op_finishes_before_its_predecessor(old_book, new_masters):
+    """Piece-flow reality: a downstream op can never END before the step feeding it —
+    the pieces it processes don't exist until the predecessor finishes. High overlap
+    lets a fast downstream op finish its cutting early; the engine must PACE its
+    displayed end to >= its predecessor's (the classic engine did; the new engine
+    dropped it, re-introducing the 'deburring skipped for the last jobs' bug)."""
+    from dataclasses import replace
+    from engine import new_engine
+    so_lines, masters = old_book
+    _CONF_OV = replace(_CONF, overlap_percent=90)
+    sched = new_engine.run(rule1_consolidate.run(so_lines, _CONF_OV), _CONF_OV, None, masters=masters)
+    by_batch = defaultdict(list)
+    for e in sched:
+        by_batch[e.batch_id].append(e)
+    bad = []
+    for es in by_batch.values():
+        es.sort(key=lambda e: e.process_seq)
+        for i in range(1, len(es)):
+            if es[i].end < es[i - 1].end:
+                bad.append((es[i - 1].process_name, es[i - 1].end, es[i].process_name, es[i].end))
+    assert not bad, f"downstream op finishes before predecessor: {bad[:3]}"
