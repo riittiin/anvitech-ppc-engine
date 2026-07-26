@@ -1386,9 +1386,11 @@ function actualsFormHtml() {
       <button id="optimize-done" class="primary">Done entering: update plan</button>
       <span id="optimize-done-status" class="status"></span>
     </div>
-    <p class="explainer">Each Save already refreshes today's schedule with what you just
-      entered. Click this once you're done entering for the day — on the scheduled
-      re-optimization day it also re-checks the job order for a better sequence.</p>`;
+    <p class="explainer">Save records each entry instantly — it does <b>not</b> rebuild the
+      schedule, so you can punch quickly without waiting. Click <b>Done entering: update
+      plan</b> once you're finished for the day to refresh the plan from everything you
+      entered — on the scheduled re-optimization day it also re-checks the job order for a
+      better sequence.</p>`;
 }
 
 // Populate the Capture Actuals Operator dropdown from the app-owned operator
@@ -1564,19 +1566,24 @@ async function wireActualsForm() {
         btn.disabled = false; btn.textContent = label; return;
       }
       const d = await res.json();
-      // Close the feedback loop on the punch: immediately re-plan so the schedule,
-      // machine allotment, Gantt and Orders all reflect what the floor just reported
-      // (per-process quantity produced/rejected). This is what makes the plan dynamic.
-      setStatus("✓ Saved. Re-planning from what you just entered…");
-      await runPlan(false);                    // refreshes currentTrace/gantt/orders/report
-      if (d.completed_order) {
-        // The order was archived — show the result on the Orders view.
-        setStatus(`✓ Saved & re-planned. Order ${body.so_no} marked complete and archived.`);
-        showView("orders", true);
-      } else {
-        setStatus(`✓ Saved & re-planned. Schedule, Gantt and Orders updated with today's entry.`);
-        renderTab("rule7");   // fresh blank form + updated output (stays on Daily Entry)
+      // SAVE IS INSTANT — no re-plan here (owner rule, 2026-07-26). Re-planning the whole
+      // schedule is slow, and the owner wants that to happen ONLY on "Done entering —
+      // update plan", not on every punch. Update the Daily Entry saved-entries list +
+      // rollup DIRECTLY from the /actuals response (the same no-re-plan pattern the
+      // rollback handler uses), so the punch shows immediately without the pause.
+      if (currentTrace && currentTrace.rule7) {
+        currentTrace.rule7.output = d.actuals;
+        currentTrace.rule7.actuals_ids = d.actuals_ids;
+        currentTrace.rule7.tables = [{
+          title: "Per item code: output & downtime rollup (minutes summed across entries)",
+          table: d.by_item,
+        }];
       }
+      const doneHint = ' Click "Done entering — update plan" when finished to refresh the schedule.';
+      setStatus((d.completed_order
+        ? `✓ Saved. Order ${body.so_no} marked complete.`
+        : "✓ Saved.") + doneHint);
+      renderTab("rule7");   // instant: fresh blank form + updated saved-entries list
     } catch (e) {
       setStatus("Save error: " + e.message, true); btn.disabled = false; btn.textContent = label;
     }
