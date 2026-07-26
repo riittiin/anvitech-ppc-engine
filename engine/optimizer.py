@@ -84,6 +84,20 @@ def score(metrics: dict) -> float:
             + CEILING_WEIGHT * metrics.get("ceiling_breach", 0.0))
 
 
+def makespan_days(schedule, plan_start) -> float:
+    """The ONE makespan definition every surface must use: days from plan start
+    (midnight) to the last operation's end, to two decimals. Reused by
+    ``plan_metrics`` (the Optimize panel/header) and ``analytics`` (the Analytics
+    tab) so those tabs can never report a different number for the same plan
+    (cross-tab integration, 2026-07-26). Empty schedule -> 0.0."""
+    from datetime import datetime
+    last_end = max((e.end for e in schedule), default=None)
+    if last_end is None:
+        return 0.0
+    t0 = datetime.combine(plan_start, datetime.min.time())
+    return round((last_end - t0).total_seconds() / 86400.0, 2)
+
+
 def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
                  with_distribution=False) -> dict:
     """Owner-facing quality of one plan: makespan + lateness vs SO delivery dates.
@@ -96,20 +110,14 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
     in the hot search loop) adds ``bands`` (order counts per lateness band) and
     ``worst_orders`` (the 20+ day ones — the shop-over-capacity list the owner acts on).
     """
-    from datetime import datetime
     due = {(l.so_no, l.item_code): l.delivery_date for l in so_lines}
     expected: dict = {}
-    last_end = None
     for e in schedule:
-        if last_end is None or e.end > last_end:
-            last_end = e.end
         d = e.end.date()
         for ref in (e.so_refs or []):
             k = (ref, e.item_code)
             if k not in expected or d > expected[k]:
                 expected[k] = d
-    t0 = datetime.combine(plan_start, datetime.min.time())
-    makespan = ((last_end - t0).total_seconds() / 86400.0) if last_end else 0.0
     gaps = [(expected[k] - due[k]).days for k in expected if k in due]
     late = [g for g in gaps if g > 0]
     slip_severity = 0.0
@@ -126,7 +134,7 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
             if over > 0:
                 ceiling_breach += float(over * over)
     result = {
-        "makespan_days": round(makespan, 2),
+        "makespan_days": makespan_days(schedule, plan_start),
         "late_orders": len(late),
         "total_late_days": int(sum(late)),
         "max_late_days": int(max(late)) if late else 0,

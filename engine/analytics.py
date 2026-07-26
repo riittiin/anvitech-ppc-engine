@@ -12,6 +12,7 @@ from datetime import timedelta
 
 from .models import fmt_date
 from .operator_coverage import eligible_window
+from .optimizer import makespan_days as _makespan_days
 from .rules.rule6_allocate import _clock_factory, build_shiftwise_timeline, UNSTAFFED
 from .worktime import WorkClock
 
@@ -275,7 +276,11 @@ def build_analytics(schedule, masters, config, batches=None, absences=None):
         key=lambda r: -r["Work (hrs)"])
 
     total_busy = round(sum(m["Busy (hrs)"] for m in machines), 1)
-    makespan_days = (win_end.date() - win_start.date()).days + 1
+    # The SAME makespan the Optimize panel/header shows (days from plan start to the
+    # last end) — one shared definition so the tabs never disagree (2026-07-26). Not
+    # the old calendar-days-spanned count, which read a different number for one plan.
+    plan_start = getattr(config, "plan_start_date", None) or win_start.date()
+    makespan_days = _makespan_days(schedule, plan_start)
     return {
         "window": {"start": fmt_date(win_start), "end": fmt_date(win_end),
                    "makespan_days": makespan_days},

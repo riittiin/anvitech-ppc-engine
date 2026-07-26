@@ -36,19 +36,10 @@ def _row_status(source_so_refs, item_code, status_by_order):
 
 
 def _bar_operator(e):
-    """Operator label for one bar: when a shift handoff books more than one
-    person on this op (``op_segments``), join the distinct operators in
-    start order (e.g. "Alpha → Bravo") so the night operator isn't hidden.
-    Falls back to the entry's single ``operator`` when there are no segments
-    (OS / off-machine milestones, or operator logic off)."""
-    segs = sorted((getattr(e, "op_segments", None) or []), key=lambda s: s[0])
-    names = []
-    for _start, _end, op in segs:
-        if op and op not in names:
-            names.append(op)
-    if names:
-        return " → ".join(names)
-    return e.operator or ""
+    """Operator label for one bar — the shared ``ScheduleEntry.operator_label`` so the
+    Gantt, the Schedule table and the machine-wise view can never disagree on who runs
+    a job (a shift handoff shows "Alpha → Bravo"; a single-shift op shows one name)."""
+    return e.operator_label()
 
 
 def build_gantt(schedule, batches, masters, status_by_order=None):

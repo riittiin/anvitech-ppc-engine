@@ -268,6 +268,19 @@ class ScheduleEntry:
     # segments are the truth.
     op_segments: list = field(default_factory=list)
 
+    def operator_label(self):
+        """The operator(s) working this op, in start order, joined for display
+        ("Alpha → Bravo" for a shift handoff). Falls back to the single ``operator``
+        field when there are no per-shift segments (OS/off-machine milestones, or
+        operator logic off). Every operator-naming surface — the Schedule table
+        (``as_row``), the machine-wise view, and the Gantt — routes through this, so
+        they can never disagree on who runs a job (cross-tab integration, 2026-07-26)."""
+        seen = []
+        for _s, _e, op in sorted(self.op_segments or [], key=lambda x: x[0]):
+            if op and op not in seen:
+                seen.append(op)
+        return " → ".join(seen) if seen else (self.operator or "")
+
     def as_row(self):
         row = {
             "SO No": _fmt(self.so_refs),
@@ -277,8 +290,9 @@ class ScheduleEntry:
             "Process": self.process_name,
             "Machine": self.machine,
         }
-        if self.operator:
-            row["Operator"] = self.operator   # column appears only when assigned
+        _op = self.operator_label()
+        if _op:
+            row["Operator"] = _op   # column appears only when assigned (full handoff)
         row.update({
             "Qty": self.qty,
             "Occupancy (min)": round(self.occupancy_min, 2),

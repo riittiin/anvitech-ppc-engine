@@ -1218,8 +1218,9 @@ def build_machine_view(schedule, masters, config, batches=None):
                 "Busy (min)": round(e.occupancy_min, 1),
                 "Idle before (min)": round(idle, 1),
             }
-            if e.operator:
-                trow["Operator"] = e.operator
+            _op = e.operator_label()   # full shift handoff, same label as the Gantt/Schedule table
+            if _op:
+                trow["Operator"] = _op
             timeline.append(trow)
             busy += e.occupancy_min
             prev_end = e.end
