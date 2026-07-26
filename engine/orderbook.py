@@ -13,7 +13,7 @@ from datetime import timedelta
 import re as _re
 
 from .models import Order, SOLine, fmt_date
-from .loaders import normalize_process_name
+from .loaders import normalize_process_name, parse_resource_candidates
 
 PENDING = "Pending"
 RUNNING = "Running"
@@ -28,6 +28,28 @@ def is_dispatch(name) -> bool:
     """True if a process name is the DISPATCH gate — tolerant of case, spaces and
     the transposed misspelling 'DISAPTCH' seen in the real workbook."""
     return _re.sub(r"[^A-Z0-9]", "", str(name or "").upper()) in DISPATCH_NAMES
+
+
+def process_is_outsourced(routing, process_name) -> bool:
+    """True if the named process is an OUTSOURCED (OS) step — its ALLOTTED machine
+    resource is the sentinel ``OS``.
+
+    STRICT signal, owner-chosen (2026-07-26): the Allotted M/c column reading OS is the
+    definitive, guaranteed outsourcing signal. The Suggested cell and an 'OS' in the
+    process NAME alone do NOT count (a step named 'CNC OS' but allotted a real machine —
+    the sample's 'CNC OS' on CNC1/CNC2 — is in-house). An in-house operator does not run
+    outsourced work, so Capture Actuals does not require an operator for these steps.
+    Matches the process by normalized name; False when the routing/process is unknown or
+    the allotted machine is anything other than OS. (Real-data note: 9 Test8 steps named
+    '... OS' with a BLANK Allotted cell are NOT exempt under this strict rule — they need
+    'OS' written into their Allotted column in the master, an owner-accepted data fix.)"""
+    if routing is None:
+        return False
+    key = _norm(process_name or "")
+    for p in routing.processes:
+        if _norm(p.name) == key:
+            return "OS" in parse_resource_candidates(p.allotted_machine)
+    return False
 
 
 def finished_gate(routing) -> str:

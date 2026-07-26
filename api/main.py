@@ -2149,7 +2149,11 @@ def items():
     all_orders = {**completed, **active}   # active wins on any conflict
     items_map = {
         code: {"item_name": routing.description,
-               "processes": [p.name for p in routing.processes]}
+               "processes": [p.name for p in routing.processes],
+               # Outsourced (OS) steps (Allotted M/c = OS) need no operator at capture;
+               # the Daily Entry form uses this to relax the required-operator check.
+               "os_processes": [p.name for p in routing.processes
+                                if orderbook.process_is_outsourced(routing, p.name)]}
         for code, routing in masters.routings.items()
     }
 
@@ -2180,10 +2184,17 @@ def post_actuals(req: ActualRequest):
     if entry_date > _ist_today():
         raise HTTPException(status_code=400, detail="entry_date cannot be in the future")
     operator = req.operator.strip()
+    masters = _current_masters()
+    # OUTSOURCED (OS) steps — Allotted M/c = OS — run off-site; no in-house operator
+    # runs them, so Capture Actuals does not require an operator for them (owner rule,
+    # 2026-07-26). Every other step still requires one. A supplied operator is still
+    # validated against the master either way, so typos are caught.
+    os_step = orderbook.process_is_outsourced(
+        masters.routings.get(req.item_code), req.process)
     if not operator:
-        raise HTTPException(status_code=400, detail="operator is required")
-    known_operators = {o.name for o in _current_masters().operators}
-    if operator not in known_operators:
+        if not os_step:
+            raise HTTPException(status_code=400, detail="operator is required")
+    elif operator not in {o.name for o in masters.operators}:
         raise HTTPException(status_code=400, detail=f"unknown operator '{operator}'")
     actual = Actual(
         so_no=req.so_no, item_code=req.item_code,

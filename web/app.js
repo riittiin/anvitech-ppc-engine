@@ -1361,7 +1361,7 @@ function actualsFormHtml() {
   const left =
     fy("Date", `<input id="a-date" type="date" value="${today}" /> <span id="a-date-echo" class="date-echo"></span>`) +
     fy("Shift", `<select id="a-shift"><option value="1st shift">1st shift</option><option value="2nd shift">2nd shift</option></select>`) +
-    fr("Operator <span class=auto>(required)</span>", `<select id="a-operator"><option value="">Select operator</option></select>`) +
+    fr("Operator <span class=auto>(required, except OS steps)</span>", `<select id="a-operator"><option value="">Select operator</option></select>`) +
     fr("SO No <span class=auto>(step 1: pick from orders)</span>", `<select id="a-so"><option value="">Select SO No</option></select>`) +
     fr("Item Code <span class=auto>(step 2: pick this SO's item)</span>", `<select id="a-item"><option value="">Select SO No first</option></select>`) +
     fr("Item Name <span class=auto>(auto)</span>", `<input id="a-itemname" readonly />`) +
@@ -1523,9 +1523,15 @@ async function wireActualsForm() {
       other_work_min: num("a-other"), remarks: $("a-remarks").value,
       mark_complete: $("a-complete").checked,
     };
-    if (!body.operator || !body.so_no || !body.item_code) {
-      setStatus("⚠ Select Operator, SO No, and Item Code before saving.", true);
-      $(!body.operator ? "a-operator" : body.so_no ? "a-item" : "a-so").focus();
+    // Outsourced (OS) steps run off-site — no in-house operator runs them — so the
+    // operator is NOT required for them (owner rule, 2026-07-26). Every other step
+    // still requires one. The server enforces the same rule; this is the UX mirror.
+    const _meta = ITEMS && ITEMS.items ? ITEMS.items[body.item_code] : null;
+    const _osStep = !!(_meta && _meta.os_processes && _meta.os_processes.includes(body.process));
+    const _needOperator = !_osStep;
+    if ((_needOperator && !body.operator) || !body.so_no || !body.item_code) {
+      setStatus("⚠ Select SO No, Item Code" + (_needOperator ? ", and Operator" : "") + " before saving.", true);
+      $(!body.so_no ? "a-so" : !body.item_code ? "a-item" : "a-operator").focus();
       return;
     }
     // Quantity/downtime fields carry min="0" but Save is a plain button (not a
