@@ -91,6 +91,11 @@ function renderView(v) {
 
 function showView(v, push) {
   if (!VIEWS.includes(v)) v = "orders";
+  // Analytics is admin-only (owner rule, 2026-07-27): the nav link is CSS-hidden for
+  // the user role, and a direct #analytics hash / stored last-view is redirected here
+  // too, so the user role can never land on it. currentRole is resolved (initSession
+  // is awaited) before the first showView, so this never misfires for an admin.
+  if (v === "analytics" && currentRole !== "admin") v = "orders";
   // Settings shows Operators & shifts / Absences read-only to the user role too
   // (the truly admin-only sections inside it are their own admin-only cards).
   activeView = v;
