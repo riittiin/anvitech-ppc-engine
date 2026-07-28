@@ -1999,11 +1999,16 @@ _DELAY_DETAIL_COLS = ["SO No", "Item Code", "State", "Process", "Machine", "Oper
 
 
 def _delay_report_xlsx(report) -> bytes:
-    """Serialize the delay report into a 2-sheet .xlsx: Summary + Detail (colour-coded by
-    state). Datetimes -> 'DD-MM-YYYY HH:MM', dates -> 'DD-MM-YYYY'."""
+    """Serialize the delay report into a 2-sheet .xlsx: Summary + Detail. Datetimes ->
+    'DD-MM-YYYY HH:MM', dates -> 'DD-MM-YYYY'. Detail rows are colour-coded by State via
+    ONE conditional-formatting rule per state (O(1) styling) — styling every cell of
+    ~2000 rows took ~2s locally / ~20s on the free tier and timed the download out."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
+    from openpyxl.formatting.rule import FormulaRule
+
+    bold = Font(bold=True)
 
     def _cell(v, datetime_col):
         if v is None:
@@ -2014,27 +2019,32 @@ def _delay_report_xlsx(report) -> bytes:
             return v.strftime("%d-%m-%Y")
         return v
 
-    def _sheet(ws, rows, cols, colour=False):
+    def _sheet(ws, rows, cols):
         ws.append(cols)
         for c in ws[1]:
-            c.font = Font(bold=True)
+            c.font = bold
         ws.freeze_panes = "A2"
         for r in rows:
             ws.append([_cell(r.get(c), c in ("From", "To")) for c in cols])
-            if colour:
-                hexc = _DELAY_FILLS.get(r.get("State"))
-                if hexc:
-                    fill = PatternFill("solid", fgColor=hexc)
-                    for c in ws[ws.max_row]:
-                        c.fill = fill
         for i, name in enumerate(cols, 1):
             ws.column_dimensions[get_column_letter(i)].width = max(12, min(48, len(name) + 2))
+        return ws.max_row
 
     wb = Workbook()
-    s = wb.active
-    s.title = "Summary"
-    _sheet(s, report["summary"], _DELAY_SUMMARY_COLS)
-    _sheet(wb.create_sheet("Detail"), report["detail"], _DELAY_DETAIL_COLS, colour=True)
+    summary = wb.active
+    summary.title = "Summary"
+    _sheet(summary, report["summary"], _DELAY_SUMMARY_COLS)
+
+    detail = wb.create_sheet("Detail")
+    last = _sheet(detail, report["detail"], _DELAY_DETAIL_COLS)
+    if last >= 2:
+        state_col = get_column_letter(_DELAY_DETAIL_COLS.index("State") + 1)   # "C"
+        rng = f"A2:{get_column_letter(len(_DELAY_DETAIL_COLS))}{last}"
+        for state, hexc in _DELAY_FILLS.items():
+            detail.conditional_formatting.add(rng, FormulaRule(
+                formula=[f'${state_col}2="{state}"'],
+                fill=PatternFill("solid", fgColor=hexc)))
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
