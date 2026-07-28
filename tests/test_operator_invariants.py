@@ -118,7 +118,7 @@ def test_shiftwise_never_bills_a_busy_person():
     # a person's billed segments never overlap
     by_op = {}
     for r in staffed:
-        s = datetime.combine(r["Date"], datetime.strptime(r["Start"], "%H:%M").time())
+        s = datetime.combine(r["Date"], datetime.strptime(r["Start"], "%d-%m %H:%M").time())
         by_op.setdefault(r["Operator"], []).append((s, s.replace()))  # start ordering is enough
     # NightOp can man only ONE of the two concurrent machines; the other is unstaffed.
     assert sum(1 for r in rows if r["Operator"] == "NightOp") == 1

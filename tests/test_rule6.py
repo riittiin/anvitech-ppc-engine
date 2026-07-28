@@ -521,3 +521,49 @@ def test_shiftwise_splits_a_multi_shift_op_by_shift_with_real_operator():
     assert first["Item Description"] == "WIDGET"                     # carries full detail
     # the segment minutes cover only working shift time (no 05:00–08:00 gap double-count)
     assert first["Minutes"] == 11 * 60                              # 08:00–19:00
+    # New 'Qty this shift' column (owner, 2026-07-27) via the legacy path: pieces split
+    # per shift by working minutes, whole numbers summing to the order total.
+    assert first["Qty this shift"] + second["Qty this shift"] == 100
+
+
+def test_shiftwise_start_column_carries_the_date_like_end():
+    """Start must show DD-MM HH:MM (date + time), matching End, so a sheet spanning
+    several days is unambiguous (owner request for the director review, 2026-07-27)."""
+    masters = _shiftwise_masters()
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    s = datetime(2025, 3, 5, 8, 0)
+    handoff = datetime(2025, 3, 5, 19, 0)
+    en = datetime(2025, 3, 6, 5, 0)
+    e = ScheduleEntry(batch_id="B1", item_code="X", process_seq=1, process_name="CNC",
+                      machine="M", qty=100, occupancy_min=1260,
+                      start=s, end=en, notes="", so_refs=["SO1"], operator="DayOp",
+                      op_segments=[(s, handoff, "DayOp"), (handoff, en, "NightOp")])
+    b = Batch(batch_id="B1", item_code="X", item_name="X", qty=100,
+              so_delivery_date=date(2025, 3, 20), source_so_refs=["SO1"])
+    rows = rule6_allocate.build_shiftwise_timeline([e], masters, cfg, [b])
+    assert rows[0]["Start"] == "05-03 08:00"       # date + time, like End
+    assert rows[0]["End"] == "05-03 19:00"
+    assert rows[1]["Start"] == "05-03 19:00"       # night shift starts 05-03 19:00…
+    assert rows[1]["End"] == "06-03 05:00"         # …and crosses midnight — the date shows it
+
+
+def test_shiftwise_qty_this_shift_splits_pieces_per_window_and_sums_to_total():
+    """New 'Qty this shift' column (owner, 2026-07-27): pieces expected in THAT
+    operator's window, split proportional to working minutes as whole numbers that add
+    up to the order total. The existing 'Qty' (order total) is kept alongside."""
+    masters = _shiftwise_masters()
+    cfg = Config(plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+    s = datetime(2025, 3, 5, 8, 0)
+    handoff = datetime(2025, 3, 5, 19, 0)          # 08:00–19:00 = 660 min
+    en = datetime(2025, 3, 6, 5, 0)                # 19:00–05:00 = 600 min; occupancy 1260
+    e = ScheduleEntry(batch_id="B1", item_code="X", process_seq=1, process_name="CNC",
+                      machine="M", qty=100, occupancy_min=1260,
+                      start=s, end=en, notes="", so_refs=["SO1"], operator="DayOp",
+                      op_segments=[(s, handoff, "DayOp"), (handoff, en, "NightOp")])
+    b = Batch(batch_id="B1", item_code="X", item_name="X", qty=100,
+              so_delivery_date=date(2025, 3, 20), source_so_refs=["SO1"])
+    rows = rule6_allocate.build_shiftwise_timeline([e], masters, cfg, [b])
+    assert [r["Qty"] for r in rows] == [100, 100]                   # order total column, unchanged
+    assert rows[0]["Qty this shift"] == 52                          # 100 * 660/1260 = 52.4 -> 52
+    assert rows[1]["Qty this shift"] == 48                          # remainder
+    assert sum(r["Qty this shift"] for r in rows) == 100            # shifts add up to the total

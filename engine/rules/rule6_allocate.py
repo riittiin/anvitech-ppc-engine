@@ -978,6 +978,22 @@ def _rebalance_operators(schedule, masters, config, reserved=None) -> int:
     return moved
 
 
+def _split_qty_by_minutes(qty, minutes):
+    """Split ``qty`` pieces across an operation's shift segments in proportion to their
+    working minutes, as WHOLE pieces that sum EXACTLY to ``qty`` (cumulative rounding).
+    Powers the shift-wise download's 'Qty this shift' column so each operator's window
+    shows the pieces expected in it and the shifts add up to the order's total
+    (owner request, 2026-07-27)."""
+    total = sum(minutes)
+    out, prev, cum = [], 0, 0.0
+    for m in minutes:
+        cum += m
+        cum_pieces = round(qty * cum / total) if total > 0 else 0
+        out.append(int(cum_pieces - prev))
+        prev = cum_pieces
+    return out
+
+
 def build_shiftwise_timeline(schedule, masters, config, batches=None):
     """Split every operator-run operation into its per-day, per-shift segments and name
     the **actual operator** working each shift. A two-shift machine runs 08:00–19:00
@@ -1021,7 +1037,7 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
         if e.end > end_by_batch.get(e.batch_id, e.end - timedelta(days=1)):
             end_by_batch[e.batch_id] = e.end
 
-    def _row(s, en, label, e, op):
+    def _row(s, en, label, e, op, seg_qty=None):
         b = batch_by_id.get(e.batch_id)
         routing = masters.routings.get(e.item_code)
         return {
@@ -1033,10 +1049,13 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
             "SO Del date": b.so_delivery_date if b else "",
             "Expected completion": end_by_batch.get(e.batch_id, e.end).date(),
             "Process": f"{e.process_seq}. {e.process_name}",
-            "Qty": int(e.qty),
+            "Qty": int(e.qty),                        # the order's total qty (unchanged)
+            # Pieces expected in THIS operator's shift window (owner, 2026-07-27) — the
+            # op's total split across its shift segments by minutes; the shifts sum to Qty.
+            "Qty this shift": int(seg_qty) if seg_qty is not None else int(e.qty),
             "Date": s.date(),
             "Shift": label,
-            "Start": s.strftime("%H:%M"),
+            "Start": s.strftime("%d-%m %H:%M"),       # date + time, matching End
             "End": en.strftime("%d-%m %H:%M"),
             "Minutes": round((en - s).total_seconds() / 60),
             "Operator": op,
@@ -1059,11 +1078,17 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
 
         segs = []
         for e in schedule:
-            for (ss, se, op) in (getattr(e, "op_segments", None) or []):
-                if op and se > ss:
-                    segs.append((ss, se, _label(e.machine, ss), e, op))
+            # Split this op's pieces across ITS shift segments by working minutes, so
+            # each row's 'Qty this shift' is the pieces expected in that window and the
+            # segments sum to the op's total (owner, 2026-07-27).
+            e_segs = sorted([(ss, se, op) for (ss, se, op) in (getattr(e, "op_segments", None) or [])
+                             if op and se > ss], key=lambda x: x[0])
+            qtys = _split_qty_by_minutes(
+                int(e.qty), [(se - ss).total_seconds() / 60.0 for (ss, se, _) in e_segs])
+            for (ss, se, op), q in zip(e_segs, qtys):
+                segs.append((ss, se, _label(e.machine, ss), e, op, q))
         segs.sort(key=lambda x: (x[0], x[3].machine, x[4]))
-        return [_row(s, en, label, e, op) for (s, en, label, e, op) in segs]
+        return [_row(s, en, label, e, op, q) for (s, en, label, e, op, q) in segs]
 
     # Collect every shift-segment of every operator-run op, then assign operators in time
     # order (fair: free-now least-loaded qualified person for that machine + shift).
@@ -1125,29 +1150,22 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
             op = e.operator
         assigned[idx] = op
 
-    rows = []
+    # 'Qty this shift' (owner, 2026-07-27): split each op's pieces across ITS shift
+    # segments by working minutes (whole numbers summing to the op's total). Group the
+    # segments by operation, in start order (segs is sorted by start).
+    seg_qty: dict = {}
+    idx_by_op: dict = {}
     for idx, (s, en, label, e) in enumerate(segs):
-        op = assigned.get(idx)
-        b = batch_by_id.get(e.batch_id)
-        routing = masters.routings.get(e.item_code)
-        rows.append({
-            "Machine": e.machine,
-            "SO No": ", ".join(e.so_refs),
-            "Batch": e.batch_id,
-            "Item Code": e.item_code,
-            "Item Description": routing.description if routing else "",
-            "SO Del date": b.so_delivery_date if b else "",
-            "Expected completion": end_by_batch.get(e.batch_id, e.end).date(),
-            "Process": f"{e.process_seq}. {e.process_name}",
-            "Qty": int(e.qty),
-            "Date": s.date(),
-            "Shift": label,
-            "Start": s.strftime("%H:%M"),
-            "End": en.strftime("%d-%m %H:%M"),
-            "Minutes": round((en - s).total_seconds() / 60),
-            "Operator": op,
-        })
-    return rows
+        idx_by_op.setdefault(id(e), []).append(idx)
+    for idxs in idx_by_op.values():
+        e0 = segs[idxs[0]][3]
+        mins = [(segs[i][1] - segs[i][0]).total_seconds() / 60.0 for i in idxs]
+        for i, q in zip(idxs, _split_qty_by_minutes(int(e0.qty), mins)):
+            seg_qty[i] = q
+
+    # One row builder (``_row``) for BOTH paths, so the column layout can never drift.
+    return [_row(s, en, label, e, assigned.get(idx), seg_qty.get(idx))
+            for idx, (s, en, label, e) in enumerate(segs)]
 
 
 def build_machine_view(schedule, masters, config, batches=None):
