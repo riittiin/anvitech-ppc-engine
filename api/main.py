@@ -1984,6 +1984,107 @@ def efficiency_report_csv(year: int, month: int, request: Request):
     )
 
 
+_DELAY_FILLS = {
+    "RUNNING": "C6E0B4",                 # green
+    "WAITING (machine busy)": "FFE699",  # amber
+    "WAITING (off-hours)": "D9D9D9",     # grey
+    "WAITING (crew)": "F8CBAD",          # orange
+}
+_DELAY_SUMMARY_COLS = ["SO No", "Item Code", "Item Name", "Ordered Qty", "SO Delivery Date",
+                       "Expected Completion", "Days Late", "Working (days)",
+                       "Waiting: machine (days)", "Waiting: off-hours (days)",
+                       "Waiting: crew (days)", "Why"]
+_DELAY_DETAIL_COLS = ["SO No", "Item Code", "State", "Process", "Machine", "Operator",
+                      "From", "To", "Hours", "Why"]
+
+
+def _delay_report_xlsx(report) -> bytes:
+    """Serialize the delay report into a 2-sheet .xlsx: Summary + Detail (colour-coded by
+    state). Datetimes -> 'DD-MM-YYYY HH:MM', dates -> 'DD-MM-YYYY'."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    def _cell(v, datetime_col):
+        if v is None:
+            return ""
+        if datetime_col and hasattr(v, "hour"):          # datetime
+            return v.strftime("%d-%m-%Y %H:%M")
+        if hasattr(v, "isoformat") and not hasattr(v, "hour"):   # date
+            return v.strftime("%d-%m-%Y")
+        return v
+
+    def _sheet(ws, rows, cols, colour=False):
+        ws.append(cols)
+        for c in ws[1]:
+            c.font = Font(bold=True)
+        ws.freeze_panes = "A2"
+        for r in rows:
+            ws.append([_cell(r.get(c), c in ("From", "To")) for c in cols])
+            if colour:
+                hexc = _DELAY_FILLS.get(r.get("State"))
+                if hexc:
+                    fill = PatternFill("solid", fgColor=hexc)
+                    for c in ws[ws.max_row]:
+                        c.fill = fill
+        for i, name in enumerate(cols, 1):
+            ws.column_dimensions[get_column_letter(i)].width = max(12, min(48, len(name) + 2))
+
+    wb = Workbook()
+    s = wb.active
+    s.title = "Summary"
+    _sheet(s, report["summary"], _DELAY_SUMMARY_COLS)
+    _sheet(wb.create_sheet("Detail"), report["detail"], _DELAY_DETAIL_COLS, colour=True)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _plan_run_for_report(config: Config):
+    """Reproduce _plan's scheduling setup and return (plan_run, so_lines, masters, cfg).
+    Standalone (does NOT share _plan's body) so _plan stays byte-identical (golden). Same
+    inputs as /run: active orders at remaining qty, actuals-advanced start, operator
+    overlay as-of the effective start, applied optimization ranks, and absence reservations."""
+    masters = _current_masters()
+    config = _resolve_config(config)
+    active = book_store.load_active_orders()
+    actuals = book_store.load_actuals()
+    ab = optimize_service.absence_reservations(book_store.load_absences())
+    so_lines = orderbook.active_so_lines(active, actuals, masters)
+    eff_start = orderbook.effective_plan_start_date(actuals, config.plan_start_date,
+                                                    masters.calendar)
+    if eff_start != config.plan_start_date:
+        config = replace(config, plan_start_date=eff_start)
+    op_table = book_store.load_operator_table()
+    if op_table:
+        masters = replace(masters, operators=operator_master.operators_as_of(op_table, eff_start))
+    prio = book_store.load_plan_priority()
+    ranks = prio["ranks"] if prio else None
+    ranked_config = replace(config, expedite_window_min=0) if ranks else config
+    plan_run = PlanRun(so_lines=so_lines)
+    run_forward(plan_run, ranked_config, masters, reserved=ab or None, priority_rank=ranks)
+    return plan_run, so_lines, masters, config
+
+
+@app.get("/delay-report.xlsx")
+def delay_report_xlsx(request: Request):
+    """Per-(SO#, item) delay justification (admin only): every hour from plan start to
+    completion accounted for, waits attributed to machine contention (each blocking order
+    named), off-hours, or crew. A 2-sheet .xlsx download."""
+    require_admin(request)
+    from engine import delay_report as _dr
+    plan_run, so_lines, masters, cfg = _plan_run_for_report(_load_plan_config())
+    report = _dr.build_delay_report(plan_run.schedule, so_lines,
+                                    plan_run.batches_prioritized, cfg, masters)
+    data = _delay_report_xlsx(report)
+    fname = f"delay-justification-{_ist_today().isoformat()}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @app.post("/optimize")
 def optimize_ep(req: OptimizeRequest, request: Request):
     """Start a sequence-search job on the current order book (admin only).
