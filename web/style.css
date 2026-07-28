@@ -63,8 +63,7 @@ body.role-pending .admin-only, body.role-user .admin-only { display: none !impor
 }
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand-mark {
-  height: 36px; width: auto; display: block; flex: none;
-  color: var(--ink);   /* drives the oval ring (stroke=currentColor) on the dark header */
+  height: 38px; width: auto; display: block; flex: none;   /* real Anvitech mark, dark-adapted PNG */
 }
 .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
 .brand-name { font-size: 18px; font-weight: 700; letter-spacing: .2px; }
