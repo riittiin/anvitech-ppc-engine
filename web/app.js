@@ -840,6 +840,7 @@ function renderTab(key) {
       + '<button id="dl-schedule" class="primary" title="Every operation, one row each">⬇ Download schedule (CSV)</button>'
       + '<button id="dl-machine" title="Same schedule grouped by machine — post at each machine">⬇ Download machine-wise view</button>'
       + '<button id="dl-shiftwise" title="Grouped by shift — hand to shift supervisors">⬇ Download shift-wise schedule</button>'
+      + '<button id="dl-delay" class="admin-only" title="Per-order justification: why each order is delayed and by how much">⬇ Download delay justification</button>'
       + '<span class="muted"> (opens in Excel; print it for the floor)</span></div>';
   }
 
@@ -866,6 +867,9 @@ function renderTab(key) {
   if (key === "rule6") {
     const sched = $("dl-schedule");
     if (sched) sched.onclick = () => downloadCsv(`anvitech-schedule-${todayStamp()}.csv`, entry.output);
+    // Delay justification: a server-built 2-sheet .xlsx (admin only); a plain file download.
+    const dly = $("dl-delay");
+    if (dly) dly.onclick = () => { window.location.href = "/delay-report.xlsx"; };
     const mach = $("dl-machine");
     const mView = entry.tables && entry.tables[0] && entry.tables[0].table;
     if (mach && mView) mach.onclick = () => downloadCsv(`anvitech-machine-schedule-${todayStamp()}.csv`, mView);
