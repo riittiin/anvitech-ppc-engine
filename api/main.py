@@ -460,6 +460,11 @@ class UrgentRequest(BaseModel):
     item: str
 
 
+class CompleteRequest(BaseModel):
+    so_no: str
+    item_code: str
+
+
 class AbsenceRequest(BaseModel):
     operator: str
     from_date: str
@@ -1778,6 +1783,20 @@ def urgent_order_ep(req: UrgentRequest, request: Request):
                               order.delivery_date if order else None,
                               _ist_now().isoformat(timespec="seconds"))
     return {"urgent": True}
+
+
+@app.post("/orders/complete")
+def complete_order_ep(req: CompleteRequest, request: Request):
+    """Mark one SO+item complete (archive it) with ONLY the (SO No, item code) — NO
+    operator and no production punch (owner rule, 2026-07-28): closing out an order is
+    not a production entry, so it shouldn't demand the operator the Capture-Actuals form
+    requires. Available to both roles, like Capture Actuals. The production records
+    (actuals) are left untouched, so reports/efficiency still count them. 404 if the
+    (SO No, item code) isn't an active order."""
+    if not book_store.complete_order(req.so_no, req.item_code):
+        raise HTTPException(status_code=404,
+                            detail=f"no active order {req.so_no} / {req.item_code} to complete")
+    return {"completed": True}
 
 
 @app.get("/absences")

@@ -1391,6 +1391,7 @@ function actualsFormHtml() {
     <div class="entry-grid"><div class="entry-col">${left}</div><div class="entry-col">${right}</div></div>
     <label class="complete-check"><input id="a-complete" type="checkbox" /> <strong>Mark this order (this SO No + item) complete</strong>: archives just this item line; the engine never auto-completes.</label>
     <button id="a-save" class="primary">Save daily entry</button>
+    <button id="a-mark-complete" class="ghost-btn" title="Close out this order — needs only the SO No + Item Code, no operator or quantity">✓ Mark this SO+item complete</button>
     <div class="optimize-done-row">
       <button id="optimize-done" class="primary">Done entering: update plan</button>
       <span id="optimize-done-status" class="status"></span>
@@ -1517,6 +1518,34 @@ async function wireActualsForm() {
   dateEcho();
   $("a-date").addEventListener("change", dateEcho);
   $("a-date").addEventListener("input", dateEcho);
+
+  // Standalone "Mark this SO+item complete" (owner, 2026-07-28): needs ONLY the SO No +
+  // Item Code — no operator, no punch. Archives the order; its recorded production stays
+  // for reports. Like Save, it does NOT re-plan (only "Done entering" does).
+  const mc = $("a-mark-complete");
+  if (mc) mc.onclick = async () => {
+    const so = $("a-so").value.trim(), item = $("a-item").value.trim();
+    if (!so || !item) {
+      setStatus("⚠ Pick the SO No and Item Code, then Mark complete.", true);
+      $(!so ? "a-so" : "a-item").focus();
+      return;
+    }
+    if (!confirm(`Mark ${so} / ${item} complete and archive it?\nIts recorded production is kept for reports.`)) return;
+    mc.disabled = true; setStatus("Marking complete…");
+    try {
+      const res = await fetch("/orders/complete", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ so_no: so, item_code: item }),
+      });
+      if (!res.ok) { setStatus("Mark complete failed: " + (await res.text()), true); mc.disabled = false; return; }
+      // Refresh the order list (the archived line drops off) — do NOT null it, or the
+      // Daily Entry form would treat it as "no orders" and blank out (regression, 2026-07-28).
+      try { currentOrders = (await (await fetch("/orders")).json()).orders; } catch (e) { /* keep existing */ }
+      setStatus(`✓ ${so} / ${item} marked complete and archived. Its machining records are kept for reports. Click "Done entering — update plan" to refresh the schedule.`);
+      renderTab("rule7");     // reload the SO/Item pickers (the archived order drops off) — no re-plan
+    } catch (e) { setStatus("Mark complete error: " + e.message, true); mc.disabled = false; }
+  };
+
   $("a-save").onclick = async () => {
     const btn = $("a-save");
     const num = (id) => Number($(id).value) || 0;
