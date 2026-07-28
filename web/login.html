@@ -22,7 +22,9 @@
       border: 1px solid var(--line); border-radius: 10px; padding: 28px 26px;
       box-shadow: 0 4px 20px rgba(0,0,0,.35);
     }
-    .brand-logo { height: 50px; width: auto; display: block; margin: 0 0 16px; }
+    .brand-logo { background: #fff; border-radius: 10px; padding: 9px 13px; display: inline-flex;
+      margin: 0 0 16px; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+    .brand-logo img { height: 38px; width: auto; display: block; }
     h1 { margin: 0 0 4px; font-size: 20px; }
     .sub { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
     label { display: block; margin: 14px 0 6px; color: var(--muted); font-size: 13px; }
@@ -45,7 +47,7 @@
 </head>
 <body>
   <main class="card">
-    <img class="brand-logo" src="/logo.png" alt="Anvitech logo" />
+    <span class="brand-logo"><img src="/logo.png" alt="Anvitech logo" /></span>
     <h1>Anvitech PPC Engine</h1>
     <p class="sub">Please sign in to continue.</p>
     <form method="post" action="/login" autocomplete="off">

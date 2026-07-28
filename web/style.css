@@ -62,9 +62,11 @@ body.role-pending .admin-only, body.role-user .admin-only { display: none !impor
   background: var(--card); position: sticky; top: 0; z-index: 50;
 }
 .brand { display: flex; align-items: center; gap: 12px; }
-.brand-mark {
-  height: 38px; width: auto; display: block; flex: none;   /* real Anvitech mark, dark-adapted PNG */
+.brand-mark {   /* the real Anvitech logo, kept exactly as delivered, on a light chip so it reads on the dark bar */
+  background: #fff; border-radius: 8px; padding: 5px 9px; flex: none;
+  display: inline-flex; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,.45);
 }
+.brand-mark img { height: 26px; width: auto; display: block; }
 .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
 .brand-name { font-size: 18px; font-weight: 700; letter-spacing: .2px; }
 .brand-accent { color: var(--accent); }
