@@ -63,9 +63,8 @@ body.role-pending .admin-only, body.role-user .admin-only { display: none !impor
 }
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand-mark {
-  width: 34px; height: 34px; border-radius: 9px;
-  display: grid; place-items: center;
-  background: var(--accent); color: #fff; font-weight: 800; font-size: 18px;
+  height: 36px; width: auto; display: block; flex: none;
+  color: var(--ink);   /* drives the oval ring (stroke=currentColor) on the dark header */
 }
 .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
 .brand-name { font-size: 18px; font-weight: 700; letter-spacing: .2px; }

@@ -10,7 +10,26 @@
   <div id="boot-loading" class="boot-loading" role="status" aria-live="polite">Loading your plan…</div>
   <header class="app-header">
     <div class="brand">
-      <span class="brand-mark">A</span>
+      <svg class="brand-mark" viewBox="0 0 220 132" role="img" aria-label="Anvitech logo" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="anv-a" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#4f86ff"/><stop offset="1" stop-color="#1b2f97"/>
+          </linearGradient>
+          <linearGradient id="anv-wing" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#8fb0f2"/><stop offset="1" stop-color="#5a86e6"/>
+          </linearGradient>
+        </defs>
+        <ellipse cx="110" cy="66" rx="99" ry="57" fill="none" stroke="currentColor" stroke-width="13"/>
+        <g fill="url(#anv-wing)">
+          <rect x="34" y="42" width="87" height="7" rx="3.5"/>
+          <rect x="44" y="54" width="72" height="7" rx="3.5"/>
+          <rect x="54" y="66" width="57" height="7" rx="3.5"/>
+          <rect x="64" y="78" width="42" height="7" rx="3.5"/>
+          <rect x="74" y="90" width="27" height="7" rx="3.5"/>
+        </g>
+        <path d="M126 30 96 102 M126 30 156 102" fill="none" stroke="url(#anv-a)"
+              stroke-width="17" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
       <span class="brand-text">
         <span class="brand-name">Anvitech <span class="brand-accent">PPC</span></span>
         <span class="brand-sub">Production Planning &amp; Control</span>
