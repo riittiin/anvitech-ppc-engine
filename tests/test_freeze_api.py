@@ -170,15 +170,23 @@ def test_manual_optimize_unrestricted_auto_path_frozen(admin_client_with_book, m
     assert stored_frozen, "expected a non-empty frozen set from the partial punch"
 
     # Wrap prepare_contest to record the frozen= kwarg each call receives,
-    # then call through to the real implementation. As of Task 19,
-    # _incumbent_metrics() ALSO explicitly passes frozen= (so the incumbent is
-    # scored under the same freeze as the contest winner) — and
-    # _start_optimize calls _incumbent_metrics() once (for the worst-order
-    # ceiling) BEFORE building its own contest setup. So each /optimize click
-    # records TWO frozen= calls in order: the ceiling call's (always the
-    # currently-stored frozen set, regardless of auto), then _start_optimize's
-    # OWN contest-setup call (frozen=[] for manual, the stored set for auto)
-    # — the one this test is actually about. Assert on the LAST call per click.
+    # then call through to the real implementation. As of Task 19 + fix round
+    # 1, THREE call sites explicitly pass frozen= on the path a single
+    # /optimize click exercises, always in this fixed synchronous order:
+    #   1. _incumbent_metrics() (the worst-order ceiling, called first by
+    #      _start_optimize) — always the currently-stored frozen set.
+    #   2. _start_optimize's OWN contest-setup call — the one this test is
+    #      actually about (frozen=[] for manual, the stored set for auto).
+    #   3. _metrics_for_ranks() inside _finalize_optimize, IF the search found
+    #      any ranks — always the currently-stored frozen set (fix round 1,
+    #      Critical #1), regardless of auto.
+    # Calls 1 and 2 are guaranteed before the background search thread is
+    # even spawned; call 3 (and, for an auto run that applies, further calls
+    # from _auto_apply_result/_movement_note/_optimize_apply) land afterward
+    # and are NOT asserted on here — their count depends on whether ranks were
+    # found / whether the contest beat the incumbent, which is not
+    # deterministic to pin down. Only calls 1 and 2 (a fixed pair, at a fixed
+    # offset from a "before" checkpoint) are checked.
     recorded = []
     real_prepare_contest = m.optimize_service.prepare_contest
 
@@ -190,17 +198,15 @@ def test_manual_optimize_unrestricted_auto_path_frozen(admin_client_with_book, m
     monkeypatch.setattr(m.optimize_service, "prepare_contest", _recording_prepare_contest)
 
     # 1) Manual "Start deep search" (auto=False by default) — must be
-    #    unrestricted: frozen=[] reaches prepare_contest. _start_optimize makes
-    #    exactly two explicit-frozen= calls synchronously, in order, before it
-    #    ever spawns the background search thread: the incumbent-ceiling call
-    #    (always the currently-stored, non-empty frozen set) then its OWN
-    #    contest-setup call (frozen=[] for manual, the stored set for auto) —
-    #    the one this test is actually about, always the second of the pair.
+    #    unrestricted: frozen=[] reaches prepare_contest at _start_optimize's
+    #    own contest-setup call (the second of the fixed leading pair).
+    before = len(recorded)
     r = client.post("/optimize", json={"budget": "quick"})
     assert r.status_code == 200, r.text
     _wait_optimize_done(client)
-    assert len(recorded) == 2
-    assert not recorded[-1], f"manual optimize must pass empty frozen, got {recorded[-1]!r}"
+    assert len(recorded) >= before + 2
+    assert not recorded[before + 1], (
+        f"manual optimize must pass empty frozen, got {recorded[before + 1]!r}")
     # Checkpoint: everything from here on (finalize, possible auto-apply
     # bookkeeping) records additional frozen= calls whose COUNT depends on
     # whether the contest happened to beat the incumbent — not asserted on.
@@ -275,3 +281,61 @@ def test_plan_passes_stored_frozen_to_run_forward(admin_client_with_book, monkey
     assert recorded[-1] == stored_frozen, (
         "_plan did not pass the stored frozen set through to run_forward: "
         f"{recorded[-1]!r} != {stored_frozen!r}")
+
+
+def test_local_contest_search_is_frozen_aware(admin_client_with_book, monkeypatch):
+    """Fix round 1, Critical #2: _start_optimize's LOCAL fallback (local_job)
+    must pass the stored frozen set into optimizer.sweep_optimize — otherwise
+    the sequence SEARCH itself never honors the freeze on the local path
+    (cloud unconfigured/failed/timeout — the default in this fixture and on
+    the free Render instance), even though every scoring/replay call site
+    (prepare_contest/_all_lines_schedule) does."""
+    client = admin_client_with_book
+    import api.main as m
+
+    # Re-enable the auto trigger for this test (the suite-wide autouse
+    # fixture tests/conftest.py::_no_auto_optimize sets AUTO_OPTIMIZE=0 for
+    # every test by design; dedicated auto tests re-enable it via monkeypatch).
+    monkeypatch.setenv("AUTO_OPTIMIZE", "1")
+
+    # Force the LOCAL path: no cloud dispatch configured. The fixture already
+    # deletes these env vars; re-assert via monkeypatch (never raw os.environ)
+    # since this test's premise depends on the local fallback running.
+    monkeypatch.delenv("GITHUB_DISPATCH_TOKEN", raising=False)
+    monkeypatch.delenv("OPTIMIZE_WORKER_SECRET", raising=False)
+
+    # Apply an initial plan, punch a partial quantity, and compute+store a
+    # non-empty frozen set (mirrors the "Done" flow's
+    # _compute_and_store_frozen step).
+    r = client.post("/optimize", json={"budget": "quick"})
+    assert r.status_code == 200, r.text
+    _wait_optimize_done(client)
+    r = client.post("/optimize/apply")
+    assert r.status_code == 200, r.text
+    _punch_partial(client)
+    stored_frozen = m._compute_and_store_frozen()
+    assert stored_frozen, "expected a non-empty frozen set from the partial punch"
+
+    # Wrap optimizer.sweep_optimize to record the frozen= kwarg it receives on
+    # each call, then delegate to the real implementation.
+    recorded = []
+    real_sweep_optimize = m.optimizer.sweep_optimize
+
+    def _recording_sweep_optimize(*args, **kwargs):
+        recorded.append(kwargs.get("frozen"))
+        return real_sweep_optimize(*args, **kwargs)
+
+    monkeypatch.setattr(m.optimizer, "sweep_optimize", _recording_sweep_optimize)
+
+    # Trigger an AUTO contest directly (the book changed via the partial punch
+    # since the applied plan, so _try_start_auto must not skip).
+    started = m._try_start_auto()
+    assert started, ("expected _try_start_auto to start a contest "
+                     "(book changed since the applied plan)")
+    _wait_optimize_done(client)
+
+    assert recorded, ("optimizer.sweep_optimize was never called — expected "
+                      "the local search path to run")
+    assert recorded[0] == stored_frozen, (
+        "the local contest SEARCH did not receive the stored frozen set: "
+        f"{recorded[0]!r} != {stored_frozen!r}")

@@ -1292,7 +1292,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                                           setup.masters, budget_evals=budget_evals,
                                           seed=_OPT_SEED, on_progress=on_progress,
                                           should_cancel=lambda: _OPTIMIZE.get("cancel"),
-                                          base_reserved=setup.absence_reserved)
+                                          base_reserved=setup.absence_reserved,
+                                          frozen=setup.frozen)
             res = sw.result
             _finalize_optimize(job_id, base_config, real_baseline, label,
                                winner_overlap=sw.overlap_percent, ranks=res.ranks,
@@ -1548,7 +1549,8 @@ def _metrics_for_ranks(ranks, overlap=None, *, with_distribution=True):
         absences = book_store.load_absences()
         setup = optimize_service.prepare_contest(
             orders, actuals, masters, config, absences=absences,
-            operator_table=book_store.load_operator_table())
+            operator_table=book_store.load_operator_table(),
+            frozen=book_store.load_frozen_ops())
         schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks or None)
         return optimizer.plan_metrics(
             schedule, all_lines, setup.config.plan_start_date,
