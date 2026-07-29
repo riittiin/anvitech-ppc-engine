@@ -104,3 +104,31 @@ def test_frozen_op_hands_off_at_shift_boundary(ctx):
 
     from tests.test_new_engine import _assert_clean
     _assert_clean(sched.segments)
+
+
+def test_two_frozen_on_one_machine_resume_in_prev_plan_order_before_new_work(ctx):
+    orders, seq, nm = ctx
+    cfg = _plan_config(_CONF)
+    # Two different orders sharing one machine option for a machining op.
+    def first_machining(o):
+        return next(op for op in nm.routings[o.item_code].operations
+                    if op.machine_options and op.cycle_min > 0)
+    oa, ob = orders[0], orders[1]
+    opa, opb = first_machining(oa), first_machining(ob)
+    mid = opa.machine_options[0]
+    assert mid in opb.machine_options, "test needs two orders that can share a machine"
+    from datetime import timedelta
+    # ob's frozen op has the EARLIER prev_start, so it must resume first.
+    foa = FrozenOp(oa.key, opa.seq, mid, "Alpha", 4, cfg.plan_start + timedelta(hours=1))
+    fob = FrozenOp(ob.key, opb.seq, mid, "Alpha", 4, cfg.plan_start)
+    sched = decode(orders, seq, nm, cfg, frozen=[foa, fob])
+    on_mid = sorted([s for s in sched.segments if s.machine_id == mid], key=lambda s: s.start)
+    # ob's frozen op resumes first (earlier prev_start), then oa's, then any new work.
+    frozen_keys_in_order = [s.order_key for s in on_mid
+                            if (s.order_key, s.op_seq) in {(ob.key, opb.seq), (oa.key, opa.seq)}]
+    assert frozen_keys_in_order[0] == ob.key and frozen_keys_in_order[1] == oa.key
+    frozen_end = max(s.end for s in on_mid
+                     if (s.order_key, s.op_seq) in {(ob.key, opb.seq), (oa.key, opa.seq)})
+    new_starts = [s.start for s in on_mid
+                  if (s.order_key, s.op_seq) not in {(ob.key, opb.seq), (oa.key, opa.seq)}]
+    assert all(st >= frozen_end for st in new_starts), "new work started before frozen work finished"
