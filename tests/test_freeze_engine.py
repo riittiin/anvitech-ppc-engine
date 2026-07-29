@@ -180,3 +180,19 @@ def test_absent_planned_operator_gets_substitute_machine_still_pinned(ctx):
     # No operator double-booked (reuse the suite's invariant checker).
     from tests.test_new_engine import _assert_clean
     _assert_clean(sched.segments)
+
+
+def test_search_respects_frozen(ctx):
+    from ppc_engine.optimize import optimize as new_optimize
+    orders, seq, nm = ctx
+    cfg = _plan_config(_CONF)
+    o0 = orders[0]
+    fop = next(op for op in nm.routings[o0.item_code].operations
+               if op.machine_options and op.cycle_min > 0)
+    fo = FrozenOp(o0.key, fop.seq, fop.machine_options[0], "Alpha", 5, cfg.plan_start)
+    res = new_optimize(orders, nm, cfg, budget=40, seed=1, frozen=[fo])
+    # Re-decode the winning sequence WITH the frozen set → the frozen op is pinned there.
+    sched = decode(orders, list(res.best_sequence), nm, cfg, frozen=[fo])
+    segs = [s for s in sched.segments if s.order_key == o0.key and s.op_seq == fop.seq]
+    assert all(s.machine_id == fop.machine_options[0] for s in segs)
+    assert segs[0].start == cfg.plan_start
