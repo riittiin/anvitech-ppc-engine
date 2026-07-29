@@ -249,6 +249,50 @@ def _orders_from_batches(batches, masters):
     return orders, batch_by_key
 
 
+def _ppc_frozen(rows, orders, batch_by_key, masters):
+    """Map app-level frozen rows -> ppc FrozenOp[] for decode. Each row is
+    {so_no, item_code, process, op_seq, machine, operator, remaining_qty, prev_start-iso}.
+    A row maps to the scheduled batch whose source SOs include ``so_no`` (batch_id ==
+    ppc order_key[0]); its op_seq is taken from the row (or resolved via the routing by
+    normalised process name). Rows that don't map to a scheduled order, have an unknown/
+    OS machine, or have remaining_qty<=0 are dropped."""
+    from datetime import datetime
+    from ppc_engine.scheduler import FrozenOp
+    # Reverse index: (so_no, item_code) -> order_key of the batch that covers it.
+    so_to_key = {}
+    for key, batch in batch_by_key.items():
+        for so in (getattr(batch, "source_so_refs", None) or []):
+            so_to_key[(so, batch.item_code)] = key
+    order_by_key = {o.key: o for o in orders}
+    out = []
+    for r in rows or []:
+        key = so_to_key.get((r.get("so_no"), r.get("item_code")))
+        if key is None or key not in order_by_key:
+            continue
+        mid = r.get("machine")
+        if not mid or mid not in masters.machines:   # unknown / OS / off-lane
+            continue
+        qty = int(round(float(r.get("remaining_qty", 0))))
+        if qty <= 0:
+            continue
+        # Resolve op_seq: trust the row, else match the routing by normalised name.
+        op_seq = r.get("op_seq")
+        if op_seq is None:
+            want = _norm(r.get("process", ""))
+            op_seq = next((op.seq for op in masters.routings[order_by_key[key].item_code].operations
+                           if _norm(op.name) == want), None)
+            if op_seq is None:
+                continue
+        try:
+            prev_start = datetime.fromisoformat(r["prev_start"])
+        except (KeyError, ValueError):
+            continue
+        out.append(FrozenOp(order_key=key, op_seq=int(op_seq), machine_id=mid,
+                            operator=r.get("operator", "") or "",
+                            remaining_qty=qty, prev_start=prev_start))
+    return out
+
+
 def _machine_for(kind, machine_id) -> str:
     """The old Gantt/Analytics machine field: canonical id for in-house steps, the OS
     lane for outsourced, the off-machine lane for a resource-less in-house step."""
