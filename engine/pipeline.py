@@ -188,7 +188,8 @@ def _mark_not_reached(trace: dict, from_index: int):
 def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
                 machine_lost_min: dict | None = None,
                 reserved: dict | None = None,
-                priority_rank: dict | None = None) -> dict:
+                priority_rank: dict | None = None,
+                frozen: dict | None = None) -> dict:
     """Run the forward planning chain 1 → 2 → 3 → 6, returning the trace.
 
     Rules 4/5 are consumed inside Rule 6 (their effect is logged in rule6's
@@ -205,6 +206,9 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
     ``priority_rank`` (optional) maps composite order keys "<so>\\x1f<item>" → rank
     from a saved Optimize run; ranked batches replay in that order among the slots
     they occupy after Rule 3 (see ``apply_priority_rank``). ``None`` → no effect.
+
+    ``frozen`` (optional) maps machine id → list of FrozenOp specs; passed to the
+    scheduler to pre-place locked operations. ``None`` → no effect (new-engine only).
     """
     config.validate()
     trace: dict = {}
@@ -235,7 +239,7 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
         plan_run.schedule = run_rule(
             trace, "rule6", scheduler_for(config), plan_run.batches_prioritized,
             config=config, masters=masters, machine_lost_min=machine_lost_min,
-            reserved=reserved,
+            reserved=reserved, frozen=frozen,
         )
     except RuleError:
         # The failing rule's entry already holds the error; mark the rest unreached.

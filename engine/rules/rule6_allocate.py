@@ -486,7 +486,8 @@ def _allocate_op(proc, qty, cyc, setup, ready, machine_free, plan_start, clock_f
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
-        reserved=None, **kw):
+        reserved=None, frozen=None, **kw):
+    # classic engine ignores frozen (new-engine-only feature)
     # Imported lazily to avoid a circular import (pipeline imports this module).
     from ..pipeline import RuleError
 

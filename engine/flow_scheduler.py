@@ -432,10 +432,11 @@ class _Flow:
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
-        reserved=None):
+        reserved=None, frozen=None):
     """Flow-schedule the prioritized batches. Same signature as
     ``rule6_allocate.run``; ``machine_lost_min`` is accepted for signature
-    parity and ignored (the feedback loop is quantity-only)."""
+    parity and ignored (the feedback loop is quantity-only). ``frozen`` is
+    accepted but ignored (flow engine ignores frozen)."""
     from .config import Config
     config = config or Config()
     if masters is None:
