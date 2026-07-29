@@ -55,6 +55,11 @@ SEVERITY_CAP_DAYS = 60.0        # == ppc_engine severity_cap_days (owner "distri
 # Re-measure before moving.
 CEILING_WEIGHT = 100.0
 
+# Committed-promise ceiling (2026-07-29) — mirror of the worst-order ceiling, but
+# per-order: each committed order's ceiling is ITS promised_date + slack. MEASURED
+# on Test8 (see the committed-date-stability plan §Task 9); re-measure before moving.
+COMMITTED_PROMISE_WEIGHT = 100.0
+
 # Local-search shape. Multi-start iterated local search: each restart hill-climbs a
 # fresh random permutation until it has gone this many evaluations with no improvement,
 # then a new restart explores a different basin. Smaller = more diverse restarts,
@@ -76,12 +81,14 @@ class OptimizeResult:
 
 def score(metrics: dict) -> float:
     """Lower is better: lateness + makespan + convex slip guard + worst-order ceiling
-    barrier. Each added term reads a field plan_metrics supplies; ``.get`` keeps legacy
-    metrics dicts safe (byte-identical when the field is absent/zero)."""
+    barrier + committed-promise ceiling. Each added term reads a field plan_metrics
+    supplies; ``.get`` keeps legacy metrics dicts safe (byte-identical when the field
+    is absent/zero)."""
     return (metrics["total_late_days"]
             + MAKESPAN_WEIGHT * metrics["makespan_days"]
             + SEVERITY_WEIGHT * metrics.get("slip_severity", 0.0)
-            + CEILING_WEIGHT * metrics.get("ceiling_breach", 0.0))
+            + CEILING_WEIGHT * metrics.get("ceiling_breach", 0.0)
+            + COMMITTED_PROMISE_WEIGHT * metrics.get("committed_promise_breach", 0.0))
 
 
 def makespan_days(schedule, plan_start) -> float:
@@ -99,7 +106,7 @@ def makespan_days(schedule, plan_start) -> float:
 
 
 def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
-                 with_distribution=False) -> dict:
+                 with_distribution=False, promise_slack_days=None) -> dict:
     """Owner-facing quality of one plan: makespan + lateness vs SO delivery dates.
 
     Each order (SO#, item) is judged by its OWN delivery date — a consolidated
@@ -109,6 +116,9 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
     ``with_distribution`` (only for the two plans SHOWN in the Optimize panel — never
     in the hot search loop) adds ``bands`` (order counts per lateness band) and
     ``worst_orders`` (the 20+ day ones — the shop-over-capacity list the owner acts on).
+
+    ``promise_slack_days`` (optional) computes committed-promise breach and max slip
+    for each committed order's ceiling = promised_date + slack.
     """
     due = {(l.so_no, l.item_code): l.delivery_date for l in so_lines}
     expected: dict = {}
@@ -133,6 +143,19 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
             over = g - ceiling_days
             if over > 0:
                 ceiling_breach += float(over * over)
+    committed_promise_breach = 0.0
+    max_committed_slip = 0
+    if promise_slack_days is not None:
+        promised = {(l.so_no, l.item_code): l.promised_date for l in so_lines
+                    if l.commitment == "committed" and l.promised_date is not None}
+        for k, pdate in promised.items():
+            if k in expected:
+                slip = (expected[k] - pdate).days       # calendar days past promise
+                if slip > max_committed_slip:
+                    max_committed_slip = slip
+                over = slip - promise_slack_days
+                if over > 0:
+                    committed_promise_breach += float(over * over)
     result = {
         "makespan_days": makespan_days(schedule, plan_start),
         "late_orders": len(late),
@@ -140,6 +163,8 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
         "max_late_days": int(max(late)) if late else 0,
         "slip_severity": round(slip_severity, 2),
         "ceiling_breach": round(ceiling_breach, 2),
+        "committed_promise_breach": round(committed_promise_breach, 2),
+        "max_committed_slip": int(max_committed_slip),
         "orders": len(gaps),
     }
     if with_distribution:
