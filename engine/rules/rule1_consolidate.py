@@ -86,7 +86,23 @@ def _merge_process_qty(lines):
             for k in keys}
 
 
+def _batch_commitment(lines):
+    """The tightest committed promise among the batch's member SO-lines: the
+    EARLIEST ``promised_date`` of any line with ``commitment == "committed"``.
+    Returns ``("committed", date)`` if any such line exists, else ``("open",
+    None)`` — the Batch defaults, unchanged for an all-open group."""
+    dates = [
+        l.promised_date
+        for l in lines
+        if getattr(l, "commitment", "open") == "committed" and l.promised_date is not None
+    ]
+    if dates:
+        return "committed", min(dates)
+    return "open", None
+
+
 def _finalize(cur, idx) -> Batch:
+    commitment, promised_date = _batch_commitment(cur["lines"])
     return Batch(
         batch_id=f"B{idx + 1:03d}",
         item_code=cur["item_code"],
@@ -95,4 +111,6 @@ def _finalize(cur, idx) -> Batch:
         so_delivery_date=cur["so_date"],
         source_so_refs=list(cur["so_refs"]),
         process_qty=_merge_process_qty(cur["lines"]),
+        commitment=commitment,
+        promised_date=promised_date,
     )

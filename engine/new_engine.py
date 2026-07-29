@@ -29,6 +29,7 @@ from datetime import date, datetime, time, timedelta
 from engine import book_store
 from engine.loaders import normalize_process_name
 from engine.models import ScheduleEntry
+from engine.optimizer import COMMITTED_PROMISE_WEIGHT
 
 from ppc_engine.config import PlanConfig
 from ppc_engine.domain.order import Order
@@ -180,6 +181,8 @@ def _plan_config(config) -> PlanConfig:
         overlap=overlap,
         consolidation_window=0.0,
         ceiling_days=getattr(config, "worst_ceiling_days", None),
+        committed_promise_slack_days=float(getattr(config, "committed_promise_slack_days", 3)),
+        committed_promise_weight=COMMITTED_PROMISE_WEIGHT,
     )
 
 
@@ -240,10 +243,12 @@ def _orders_from_batches(batches, masters):
                for op in routing.operations):
             continue
 
+        promise_date = b.promised_date if getattr(b, "commitment", "open") == "committed" else None
         orders.append(Order(
             so_no=b.batch_id, item_code=b.item_code, item_name=b.item_name,
             qty=int(round(b.qty)), due_date=b.so_delivery_date,
             process_remaining=process_remaining,
+            promise_date=promise_date,
         ))
         batch_by_key[key] = b
     return orders, batch_by_key
