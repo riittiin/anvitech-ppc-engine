@@ -48,6 +48,7 @@ from engine import book_store, orderbook
 from engine import storage
 from engine import efficiency
 from engine import operator_master
+from engine import freeze
 from engine.rules import (
     rule3_tiebreak_process_time as r3,
     rule4_setup_time as r4,
@@ -1600,6 +1601,19 @@ def _optimize_apply():
                 "best_overlap": res.get("best_overlap"),
                 "book_sig": _current_book_sig()}
         book_store.save_plan_priority(res["ranks"], meta)
+        # Persist the applied plan's per-op assignment (machine/operator/time) so the
+        # next "Done" can freeze whatever is in progress on its real machine. Recompute
+        # from the winning ranks the same way the incumbent is scored.
+        try:
+            setup = optimize_service.prepare_contest(
+                book_store.load_active_orders(), book_store.load_actuals(),
+                _current_masters(), _resolve_config(_load_plan_config()),
+                absences=book_store.load_absences(),
+                operator_table=book_store.load_operator_table())
+            sched, _ = _all_lines_schedule(setup, setup.masters, res["ranks"])
+            book_store.save_last_applied_schedule(freeze.schedule_projection(sched))
+        except Exception:
+            pass  # never let schedule-snapshotting break an apply
         # Settings sweep: the winning overlap becomes THE saved plan setting (the
         # single config every Plan loads and the Settings panel shows). Unchanged
         # winner -> no write, no churn.
