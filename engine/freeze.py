@@ -49,7 +49,7 @@ def compute_frozen_set(applied_rows, so_lines, good_by_step, masters) -> list[di
         if routing is None:
             continue
         pq = line.process_qty or {}
-        for op in routing.operations:
+        for op in routing.processes:
             nkey = _norm(op.name)
             remaining = int(round(float(pq.get(nkey, 0))))
             good = int(round(float(good_by_step.get((line.so_no, line.item_code, nkey), 0))))
