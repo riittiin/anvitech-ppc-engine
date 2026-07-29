@@ -124,4 +124,4 @@ class PlanConfig:
     # promise date (PlanMetrics.promise_slip_by_order is empty) — additive,
     # byte-identical otherwise.
     committed_promise_slack_days: float = 3.0
-    committed_promise_weight: float = 100.0
+    committed_promise_weight: float = 5000.0

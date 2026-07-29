@@ -57,8 +57,11 @@ CEILING_WEIGHT = 100.0
 
 # Committed-promise ceiling (2026-07-29) — mirror of the worst-order ceiling, but
 # per-order: each committed order's ceiling is ITS promised_date + slack. MEASURED
-# on Test8 (see the committed-date-stability plan §Task 9); re-measure before moving.
-COMMITTED_PROMISE_WEIGHT = 100.0
+# on Test8 (2026-07-29, ~half the book committed at its expected date, optimize
+# budget 250): weight 5000 halved committed orders past promise+3 (8 -> 4) and cut
+# the worst committed slip 16 -> 9 days, at ~2% more total late-days; weight 100
+# helped less (8 -> 6). Re-measure on real committed patterns before moving.
+COMMITTED_PROMISE_WEIGHT = 5000.0
 
 # Local-search shape. Multi-start iterated local search: each restart hill-climbs a
 # fresh random permutation until it has gone this many evaluations with no improvement,
