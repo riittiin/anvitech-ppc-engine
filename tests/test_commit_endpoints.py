@@ -1,10 +1,11 @@
-"""commit / urgent / uncommit — the owner status actions.
+"""commit / uncommit — the owner status actions.
 
 Post-pivot (2026-07-16): lanes are pure status labels with no scheduling effect.
 Commit snapshots the current expected completion as an INFORMATIONAL promise;
-urgent flags the order and snapshots its SO delivery date; neither constrains the
-plan (the byte-identical regression lives in test_replay_single_pass). There is
-no push-warning preview anymore — urgent just sets and bumps.
+it does not constrain the plan (the byte-identical regression lives in
+test_replay_single_pass). There is no push-warning preview. The Urgent lane
+was removed 2026-07-29 (`POST /orders/urgent` is gone; stored "urgent" rows
+migrate to "committed" on load — see tests/test_no_urgent.py).
 
 Drives the internal helpers directly (`_commit_orders`) plus the thin endpoint
 functions; HTTP auth/CSRF wiring is covered elsewhere.
@@ -121,23 +122,3 @@ def test_uncommit_endpoint_function_clears():
     result = m.uncommit_orders_ep(req, _FakeRequest())
     assert result == {"uncommitted": 1}
     assert book_store.load_active_orders()[("SO1", ITEM_A)].commitment == "open"
-
-
-def test_urgent_endpoint_sets_status_and_promises_delivery_date():
-    """No preview / confirm anymore: marking urgent immediately sets the lane to
-    'urgent' and snapshots the SO delivery date as the informational promise."""
-    m = _api()
-    from engine import book_store
-    from engine.models import Order
-    from tests.sample_workbook import ITEM_A
-
-    _seed_masters()
-    book_store.add_orders([Order("SOc2", ITEM_A, ITEM_A, 4000, date(2025, 3, 10))])
-
-    req = m.UrgentRequest(so="SOc2", item=ITEM_A)
-    result = m.urgent_order_ep(req, _FakeRequest())
-    assert result == {"urgent": True}
-
-    o = book_store.load_active_orders()[("SOc2", ITEM_A)]
-    assert o.commitment == "urgent"
-    assert o.promised_date == date(2025, 3, 10)   # snapshotted delivery date

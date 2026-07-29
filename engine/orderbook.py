@@ -307,9 +307,9 @@ def active_so_lines(active_orders: dict, actuals, masters=None) -> list:
 
 
 def split_committed_open(so_lines):
-    """Partition SO-lines into (protected, open). Protected = committed or urgent."""
-    protected = [l for l in so_lines if l.commitment in ("committed", "urgent")]
-    open_lines = [l for l in so_lines if l.commitment not in ("committed", "urgent")]
+    """Partition SO-lines into (protected, open). Protected = committed."""
+    protected = [l for l in so_lines if l.commitment == "committed"]
+    open_lines = [l for l in so_lines if l.commitment != "committed"]
     return protected, open_lines
 
 

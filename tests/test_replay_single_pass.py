@@ -1,5 +1,6 @@
 """Task 19 (owner pivot, 2026-07-16): `_plan` is ALWAYS single-pass — lanes
-(open/committed/urgent) are pure status labels with no scheduling effect.
+(open/committed) are pure status labels with no scheduling effect. (The
+Urgent lane was removed 2026-07-29; see tests/test_no_urgent.py.)
 
 Covers:
   * saved ranks replay in ONE pass over a committed book (no two-pass, no
@@ -71,7 +72,7 @@ def test_incumbent_metrics_cover_all_active_lines():
 def test_committed_book_plans_byte_identical_to_all_open():
     """The pivot regression: committing + promising orders must NOT change the
     plan. The rule6 schedule and every expected end are byte-identical whether
-    the orders are committed/urgent or all open."""
+    the orders are committed or all open."""
     m = _api()
 
     def _plan_committed():
@@ -82,7 +83,7 @@ def test_committed_book_plans_byte_identical_to_all_open():
                   commitment="committed", promised_date=date(2025, 3, 20),
                   committed_at="t"),
             Order("SO2", ITEM_B, ITEM_B, 15, date(2025, 3, 21),
-                  commitment="urgent", promised_date=date(2025, 3, 21),
+                  commitment="committed", promised_date=date(2025, 3, 21),
                   committed_at="t"),
             Order("SO3", ITEM_A, ITEM_A, 8, date(2025, 3, 25)),
         ])

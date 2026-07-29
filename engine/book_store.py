@@ -114,7 +114,7 @@ def uncomplete_order(so_no: str, item_code: str) -> bool:
 def set_commitment(so_no: str, item_code: str, commitment: str,
                    promised_date, committed_at: str) -> bool:
     """Set an ACTIVE order's commitment lane + promised date. `commitment` is
-    'committed' or 'urgent'; `promised_date` is a date or None; `committed_at` is an
+    'committed'; `promised_date` is a date or None; `committed_at` is an
     ISO datetime string (passed in so this stays deterministic). False if unknown."""
     s = get_store()
     o = load_active_orders().get((so_no, item_code))

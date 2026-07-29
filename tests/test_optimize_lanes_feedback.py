@@ -1,10 +1,11 @@
-"""Optimize with committed + urgent + open orders all present, honouring the
+"""Optimize with committed + open orders all present, honouring the
 daily-actuals feedback loop.
 
-Post-pivot (2026-07-16) the contract is INFORMATIONAL: lanes (open/committed/
-urgent) are pure status labels with no scheduling effect. So:
+Post-pivot (2026-07-16) the contract is INFORMATIONAL: lanes (open/committed)
+are pure status labels with no scheduling effect (the Urgent lane was removed
+2026-07-29 — its orders migrate to committed). So:
   1. LANES: an applied optimization reorders the whole book as one pool; committing
-     or flagging orders urgent does not change the plan (proved in
+     orders does not change the plan (proved in
      test_replay_single_pass). Here we assert the optimization goes active and the
      feedback loop still works alongside it.
   2. FEEDBACK: after Optimize is applied, punching a Rule-7 actual on any order
@@ -29,23 +30,23 @@ def _api():
     return m
 
 
-def _seed_three_lanes():
-    """One committed, one urgent, two open orders (all real, routable items)."""
+def _seed_two_lanes():
+    """Two committed, two open orders (all real, routable items)."""
     book_store.save_masters_bytes(build_sample_bytes())
     book_store.add_orders([
         Order("C1", ITEM_A, "SAMPLE RING A", 20, date(2025, 3, 20)),   # -> committed
-        Order("U1", ITEM_B, "SAMPLE PIN B", 30, date(2025, 3, 18)),    # -> urgent
+        Order("U1", ITEM_B, "SAMPLE PIN B", 30, date(2025, 3, 18)),    # -> committed
         Order("O1", ITEM_A, "SAMPLE RING A", 40, date(2025, 3, 25)),   # open
         Order("O2", ITEM_B, "SAMPLE PIN B", 50, date(2025, 3, 26)),    # open
     ])
     # Labels only — no scheduling effect.
     book_store.set_commitment("C1", ITEM_A, "committed", date(2025, 3, 22), "t0")
-    book_store.set_commitment("U1", ITEM_B, "urgent", date(2025, 3, 18), "t0")
+    book_store.set_commitment("U1", ITEM_B, "committed", date(2025, 3, 18), "t0")
 
 
 def test_optimize_goes_active_over_the_whole_book():
     m = _api()
-    _seed_three_lanes()
+    _seed_two_lanes()
 
     m._start_optimize(budget_evals=40, label="quick", background=False)
     m._optimize_apply()
@@ -72,7 +73,7 @@ def test_feedback_reduces_remaining_even_with_optimize_applied():
     # feedback loop still drives quantities. After Optimize is applied, punching an
     # actual still reduces that order's remaining on the next Plan.
     m = _api()
-    _seed_three_lanes()
+    _seed_two_lanes()
     m._start_optimize(budget_evals=40, label="quick", background=False)
     m._optimize_apply()
 

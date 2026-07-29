@@ -198,7 +198,7 @@ class ContestSetup:
     config: Config = None                        # effective (start advanced), expedite as saved
     search_config: Config = None                 # effective, expedite forced off
     # Operator absences: physical unavailability (not a promise reservation).
-    # Lanes (open/committed/urgent) are pure status labels — they never reserve
+    # Lanes (open/committed) are pure status labels — they never reserve
     # time. ``absence_reserved`` is the raw ``absence_reservations(absences)`` dict.
     absences: list = field(default_factory=list)
     absence_reserved: object = None
@@ -215,7 +215,7 @@ class ContestSetup:
 def prepare_contest(orders: dict, actuals, masters, config: Config,
                     absences=None, operator_table=None, frozen=None) -> ContestSetup:
     """Everything the sweep needs, from the raw book. Every active line competes
-    in ONE pool — lanes (open/committed/urgent) have no scheduling effect. Only
+    in ONE pool — lanes (open/committed) have no scheduling effect. Only
     operator absences reserve time. Raises ValueError when there is nothing to
     optimize (no active orders with work remaining).
 

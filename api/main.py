@@ -457,11 +457,6 @@ class CommitRequest(BaseModel):
     orders: List[List[str]] = []
 
 
-class UrgentRequest(BaseModel):
-    so: str
-    item: str
-
-
 class CompleteRequest(BaseModel):
     so_no: str
     item_code: str
@@ -722,7 +717,7 @@ def _plan(config: Config):
             op_table, eff_start))
 
     # An applied Optimize run (the saved rank map) is replayed as ONE pass over
-    # every active line. Lanes (open/committed/urgent) are pure status labels —
+    # every active line. Lanes (open/committed) are pure status labels —
     # they have no scheduling effect (owner pivot, 2026-07-16). No saved
     # optimization -> plans are byte-identical to the pre-optimize plan.
     prio = book_store.load_plan_priority()
@@ -1002,7 +997,7 @@ def _worker_secret_ok(request: Request) -> bool:
 # Feedback trigger (spec 2026-07-22, replaces the Mon/Fri GitHub-cron design
 # of 2026-07-18-scheduled-optimize): the job order re-optimizes when POST
 # /optimize/done fires — the "Done entering — update plan" button, reachable
-# by either role. Admin mutations (uploads, commit/urgent/uncommit, deletes,
+# by either role. Admin mutations (uploads, commit/uncommit, deletes,
 # Settings saves) still never start a contest on their own; absences are
 # covered in tests/test_absences_api.py. AUTO_OPTIMIZE=0 is internal test
 # isolation only — never user-facing.
@@ -1173,7 +1168,7 @@ def _try_start_auto() -> bool:
 def _start_optimize(budget_evals: int, label: str, background: bool = True,
                     auto: bool = False):
     """Snapshot the book + config and run the settings-sweep contest. ONE pool
-    over every active line — lanes (Open/Committed/Urgent) are status labels
+    over every active line — lanes (Open/Committed) are status labels
     with no scheduling effect. Operator absences are reserved as blocked
     machine/operator intervals, same as in a normal Plan. Cloud-configured →
     dispatch the full contest to GitHub Actions; otherwise (or on any cloud
@@ -1833,19 +1828,6 @@ def uncommit_orders_ep(req: CommitRequest, request: Request):
         if len(o) == 2:
             book_store.clear_commitment(o[0], o[1])
     return {"uncommitted": len(req.orders)}
-
-
-@app.post("/orders/urgent")
-def urgent_order_ep(req: UrgentRequest, request: Request):
-    """Mark one order urgent: set its commitment to urgent and snapshot its SO
-    delivery date as the informational promise. Lanes are status labels only —
-    urgent has no scheduling effect. Admin only."""
-    require_admin(request)
-    order = book_store.load_active_orders().get((req.so, req.item))
-    book_store.set_commitment(req.so, req.item, "urgent",
-                              order.delivery_date if order else None,
-                              _ist_now().isoformat(timespec="seconds"))
-    return {"urgent": True}
 
 
 @app.post("/orders/complete")

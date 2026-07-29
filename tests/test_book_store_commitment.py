@@ -22,7 +22,7 @@ def test_set_commitment_persists_lane_and_promise():
 
 def test_clear_commitment_resets_to_open():
     _seed()
-    book_store.set_commitment("SO1", "X", "urgent", date(2026, 7, 25), "2026-07-13T09:00:00")
+    book_store.set_commitment("SO1", "X", "committed", date(2026, 7, 25), "2026-07-13T09:00:00")
     assert book_store.clear_commitment("SO1", "X") is True
     o = book_store.load_active_orders()[("SO1", "X")]
     assert o.commitment == "open" and o.promised_date is None

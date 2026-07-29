@@ -164,9 +164,6 @@ def test_admin_mutations_do_not_start_contests(monkeypatch):
     r = c.post("/orders/uncommit", json={"orders": [["SO2", ITEM_B]]})
     assert r.status_code == 200 and not starts
 
-    r = c.post("/orders/urgent", json={"so": "SO1", "item": ITEM_A, "confirm": True})
-    assert r.status_code == 200 and not starts
-
     r = c.post("/run", json={"config": {}, "persist": True})
     assert r.status_code == 200 and not starts
 

@@ -54,7 +54,7 @@ class SOLine:
     # ordered − already done at that step. None = no progress (run the full qty at
     # every step, today's behaviour). Internal scheduling input — not serialized.
     process_qty: Optional[dict] = None
-    # Commitment lane carried into planning: "open" (default) | "committed" | "urgent".
+    # Commitment lane carried into planning: "open" (default) | "committed".
     commitment: str = "open"
     promised_date: Optional[date] = None
 
@@ -95,7 +95,7 @@ class Batch:
     # scheduling input consumed by Rule 6 — not serialized into the trace.
     process_qty: Optional[dict] = None
     # Commitment lane carried from the merged SO-lines: "open" (default) |
-    # "committed" | "urgent". All lines in a batch share the same lane (Rule 1
+    # "committed". All lines in a batch share the same lane (Rule 1
     # never merges across lanes).
     commitment: str = "open"
     promised_date: Optional[date] = None
@@ -446,7 +446,7 @@ class Order:
     delivery_date: date
     completed: bool = False
     first_seen: str = ""
-    commitment: str = "open"            # "open" | "committed" | "urgent"
+    commitment: str = "open"            # "open" | "committed"
     promised_date: Optional[date] = None  # locked promise (None while open)
     committed_at: Optional[str] = None    # ISO datetime string, snapshot time
 
@@ -471,6 +471,11 @@ class Order:
 
     @classmethod
     def from_json(cls, d: dict) -> "Order":
+        # Legacy stored rows may carry the retired "urgent" lane (Urgent lane
+        # removed 2026-07-29) — normalize it to "committed" on load so every
+        # consumer only ever sees "open" | "committed".
+        _c = d.get("commitment", "open")
+        commitment = "committed" if _c == "urgent" else _c
         return cls(
             so_no=d["so_no"],
             item_code=d["item_code"],
@@ -479,7 +484,7 @@ class Order:
             delivery_date=date.fromisoformat(d["delivery_date"]),
             completed=d.get("completed", False),
             first_seen=d.get("first_seen", ""),
-            commitment=d.get("commitment", "open"),
+            commitment=commitment,
             promised_date=(date.fromisoformat(d["promised_date"])
                            if d.get("promised_date") else None),
             committed_at=d.get("committed_at"),
