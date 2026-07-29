@@ -255,7 +255,9 @@ def _ppc_frozen(rows, orders, batch_by_key, masters):
     A row maps to the scheduled batch whose source SOs include ``so_no`` (batch_id ==
     ppc order_key[0]); its op_seq is taken from the row (or resolved via the routing by
     normalised process name). Rows that don't map to a scheduled order, have an unknown/
-    OS machine, or have remaining_qty<=0 are dropped."""
+    OS machine, have remaining_qty<=0, or have a malformed remaining_qty/prev_start
+    (non-numeric, None, missing) are dropped -- never raised, so one bad row can't
+    take down the whole call (and, once wired into a Plan action, the whole plan)."""
     from datetime import datetime
     from ppc_engine.scheduler import FrozenOp
     # Reverse index: (so_no, item_code) -> order_key of the batch that covers it.
@@ -272,7 +274,10 @@ def _ppc_frozen(rows, orders, batch_by_key, masters):
         mid = r.get("machine")
         if not mid or mid not in masters.machines:   # unknown / OS / off-lane
             continue
-        qty = int(round(float(r.get("remaining_qty", 0))))
+        try:
+            qty = int(round(float(r.get("remaining_qty", 0))))
+        except (TypeError, ValueError):
+            continue
         if qty <= 0:
             continue
         # Resolve op_seq: trust the row, else match the routing by normalised name.
@@ -285,7 +290,7 @@ def _ppc_frozen(rows, orders, batch_by_key, masters):
                 continue
         try:
             prev_start = datetime.fromisoformat(r["prev_start"])
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             continue
         out.append(FrozenOp(order_key=key, op_seq=int(op_seq), machine_id=mid,
                             operator=r.get("operator", "") or "",

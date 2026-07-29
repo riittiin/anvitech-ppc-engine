@@ -46,3 +46,32 @@ def test_ppc_frozen_drops_unmappable_rows():
              "machine": "CNC1", "operator": "Alpha", "remaining_qty": 5,
              "prev_start": "2025-03-03T08:00:00"}]
     assert _ppc_frozen(rows, orders, batch_by_key, nm) == []
+
+
+def test_ppc_frozen_drops_malformed_rows_without_raising():
+    # Reviewer-caught robustness bug: a row that DOES map to a real scheduled batch but
+    # carries a malformed remaining_qty (None) or prev_start (None) must be DROPPED, not
+    # raise -- one bad row must never crash _ppc_frozen (or, once wired in, the whole Plan).
+    wb = build_new_sample_bytes()
+    book_store.save_masters_bytes(wb)
+    nm = new_load(io.BytesIO(wb)).masters
+    so_lines, masters = loaders.load_all(io.BytesIO(wb))
+    batches = rule1_consolidate.run(so_lines, _CONF)
+    orders, batch_by_key = _orders_from_batches(batches, nm)
+    o0 = orders[0]
+    batch = batch_by_key[o0.key]
+    routing = nm.routings[o0.item_code]
+    mop = next(op for op in routing.operations if op.machine_options and op.cycle_min > 0)
+    base = {"so_no": batch.source_so_refs[0], "item_code": o0.item_code,
+            "process": mop.name, "op_seq": mop.seq, "machine": mop.machine_options[0],
+            "operator": "Alpha", "remaining_qty": 7, "prev_start": "2025-03-03T08:00:00"}
+
+    bad_qty = dict(base, remaining_qty=None)
+    bad_qty_str = dict(base, remaining_qty="abc")
+    bad_prev_start = dict(base, prev_start=None)
+
+    assert _ppc_frozen([bad_qty], orders, batch_by_key, nm) == []
+    assert _ppc_frozen([bad_qty_str], orders, batch_by_key, nm) == []
+    assert _ppc_frozen([bad_prev_start], orders, batch_by_key, nm) == []
+    # The well-formed row still maps normally (valid path unaffected).
+    assert len(_ppc_frozen([base], orders, batch_by_key, nm)) == 1
