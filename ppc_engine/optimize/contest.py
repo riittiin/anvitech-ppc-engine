@@ -58,6 +58,7 @@ def optimize_overlap(
     overlap_candidates: tuple[float, ...] = DEFAULT_OVERLAP_CANDIDATES,
     total_budget: int = 1400,
     seeds: tuple[int, ...] = (0,),
+    frozen: list | None = None,
 ) -> ContestResult:
     """Run the sequence optimizer at each candidate overlap; return the overall best.
 
@@ -80,7 +81,7 @@ def optimize_overlap(
         cfg = replace(config, overlap=ov)
         best_res: OptimizeResult | None = None
         for sd in seeds:
-            res = optimize(orders, masters, cfg, budget=per, seed=sd)
+            res = optimize(orders, masters, cfg, budget=per, seed=sd, frozen=frozen)
             total_evals += res.evaluations
             if best_res is None or res.best_score < best_res.best_score:
                 best_res = res
@@ -176,6 +177,7 @@ def tune_overlap(
     coarse: int = 5,
     on_eval: Callable[[float, float], None] | None = None,
     on_step: Callable[[int, float], None] | None = None,
+    frozen: list | None = None,
 ) -> TuneResult:
     """Smart 1-D optimizer for the overlap value — homes in on the true optimum.
 
@@ -216,7 +218,7 @@ def tune_overlap(
                     on_step(_off + evals_in_probe, best_ever[0])
 
             res = optimize(orders, masters, replace(config, overlap=x),
-                           budget=budget_per_eval, seed=sd, on_eval=_step)
+                           budget=budget_per_eval, seed=sd, on_eval=_step, frozen=frozen)
             total_evals += res.evaluations
             if best is None or res.best_score < best.best_score:
                 best = res

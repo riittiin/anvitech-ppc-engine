@@ -196,3 +196,19 @@ def test_search_respects_frozen(ctx):
     segs = [s for s in sched.segments if s.order_key == o0.key and s.op_seq == fop.seq]
     assert all(s.machine_id == fop.machine_options[0] for s in segs)
     assert segs[0].start == cfg.plan_start
+
+
+def test_tune_overlap_forwards_frozen(ctx):
+    from ppc_engine.optimize import tune_overlap
+    orders, seq, nm = ctx
+    cfg = _plan_config(_CONF)
+    o0 = orders[0]
+    fop = next(op for op in nm.routings[o0.item_code].operations
+               if op.machine_options and op.cycle_min > 0)
+    fo = FrozenOp(o0.key, fop.seq, fop.machine_options[0], "Alpha", 5, cfg.plan_start)
+    tr = tune_overlap(orders, nm, cfg, lo=0.5, hi=0.9, seeds=(0,),
+                      budget_per_eval=20, coarse=3, frozen=[fo])
+    sched = decode(orders, list(tr.best_sequence), nm,
+                   _dc_replace(cfg, overlap=tr.best_overlap), frozen=[fo])
+    segs = [s for s in sched.segments if s.order_key == o0.key and s.op_seq == fop.seq]
+    assert all(s.machine_id == fop.machine_options[0] for s in segs)
