@@ -913,13 +913,12 @@ async function renderOrders() {
   if (isAdmin) {
     html += '<div class="ord-toolbar">'
       + '<button id="ord-commit-sel" class="ghost-btn" title="Label only — does not change the machine schedule">Commit selected</button> '
-      + '<button id="ord-urgent-sel" class="ghost-btn" title="Select exactly one order — label only, does not change the machine schedule">Mark Urgent (label only)</button> '
       + '<button id="ord-uncommit-sel" class="ghost-btn" title="Label only — does not change the machine schedule">Uncommit selected</button>'
       + '</div>';
   }
   html += orderTableHtml(currentOrders, isAdmin);
   html += '<p class="g-note">Pending = not started · Running = production logged · Complete = marked complete on a Daily Entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty. '
-    + 'Lane: status labels only (no scheduling effect): <strong>open</strong> = newly arrived · <strong>committed</strong> = released, promised date snapshotted · <strong>urgent</strong> = flagged, promised = delivery date. The plan sequences all orders together by delivery date. '
+    + 'Lane: <strong>open</strong> = newly arrived · <strong>committed</strong> = promised to the customer — the plan holds its completion date within +3 days when you re-optimize. Commit an order once you\'ve told the customer a date. '
     + '<strong>Red</strong> "Current expected" = later than the Promised date shown in the same row (the order has slipped).</p>';
   if (isAdmin) {
     html += '<div class="danger-strip">'
@@ -1070,7 +1069,7 @@ function selectedOrderPairs() {
   return [...document.querySelectorAll(".ordsel:checked")].map((c) => [c.dataset.so, c.dataset.item]);
 }
 
-// Wire the Commit / Mark Urgent / Uncommit toolbar buttons (admin only).
+// Wire the Commit / Uncommit toolbar buttons (admin only).
 function wireOrdersCommit() {
   const commitBtn = $("ord-commit-sel");
   if (commitBtn) commitBtn.onclick = async () => {
@@ -1100,43 +1099,6 @@ function wireOrdersCommit() {
       setStatus(`Uncommitted ${sel.length} order(s).`);
       currentOrders = null; await runPlan();
     } catch (e) { setStatus("Uncommit error: " + e.message, true); }
-  };
-
-  const urgentBtn = $("ord-urgent-sel");
-  // Mark Urgent only ever applies to exactly one order — disable it (with a
-  // tooltip explaining why) until exactly one row is checked, instead of
-  // letting the owner click it and find out only afterwards.
-  const updateUrgentState = () => {
-    if (!urgentBtn) return;
-    const n = selectedOrderPairs().length;
-    urgentBtn.disabled = n !== 1;
-    urgentBtn.title = n === 1
-      ? "Applies to this one order — label only, does not change the machine schedule."
-      : "Select exactly one order to mark urgent.";
-  };
-  document.querySelectorAll(".ordsel").forEach((c) => c.addEventListener("change", updateUrgentState));
-  const allCheck = $("ord-all-check");
-  if (allCheck) allCheck.addEventListener("change", updateUrgentState);
-  updateUrgentState();
-  if (urgentBtn) urgentBtn.onclick = async () => {
-    const sel = selectedOrderPairs();
-    if (sel.length !== 1) { setStatus("Select exactly one order to mark urgent.", true); return; }
-    const [so, item] = sel[0];
-    if (!window.confirm(
-      `Mark SO ${so} / ${item} as Urgent?\n\nThis only flags it for tracking — it does NOT move `
-      + `it up the machine queue or change delivery timing. To actually change the job order, use `
-      + `Optimize (Schedule tab). Continue?`)) {
-      return;
-    }
-    try {
-      const res = await fetch("/orders/urgent", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ so, item }),
-      });
-      if (!res.ok) { setStatus("Mark urgent failed: " + (await res.text()), true); return; }
-      setStatus(`Marked ${so} (${item}) urgent.`);
-      currentOrders = null; await runPlan();
-    } catch (e) { setStatus("Mark urgent error: " + e.message, true); }
   };
 }
 
