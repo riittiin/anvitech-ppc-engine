@@ -1636,6 +1636,18 @@ def _optimize_apply():
         if _OPTIMIZE["state"] != "done" or not res:
             raise HTTPException(status_code=409,
                                 detail="no completed optimization to apply")
+        # Committed-promise backstop (owner rule: a committed order never slips past
+        # promise+slack via re-optimize, on ANY apply path). The auto/Done path already
+        # gates on this in _auto_apply_result; enforce it here too so the manual
+        # "Apply this plan" button can't push a committed order past its promise.
+        inc = _incumbent_metrics()
+        best = res.get("best") or {}
+        if best.get("max_committed_slip", 0) > inc.get("max_committed_slip", 0):
+            raise HTTPException(status_code=409, detail=(
+                "This plan would push a committed order past its promised date "
+                "(committed orders are capped at promised + "
+                f"{_resolve_config(_load_plan_config()).committed_promise_slack_days} days). "
+                "Uncommit the affected order first, or apply a plan that keeps it within the cap."))
         meta = {"saved_at": _ist_now().isoformat(timespec="seconds"),
                 "budget": res["budget"], "seed": res["seed"],
                 "baseline": res["baseline"], "best": res["best"],
