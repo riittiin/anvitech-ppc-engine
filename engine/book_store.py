@@ -26,6 +26,8 @@ AUTO_NOTE_KEY = "anvitech:auto_note"        # kv: json note from the self-tuning
 LAST_SEARCHED_KEY = "anvitech:last_searched"  # kv: json {book_sig, inputs_sig} of the last completed contest
 ABSENCES_KEY = "anvitech:absences"          # kv: json list of operator absences
 OPERATORS_KEY = "anvitech:operators"        # kv: json {week_anchor, operators:[...]}
+LAST_APPLIED_SCHEDULE_KEY = "anvitech:last_applied_schedule"  # kv: json list of applied-schedule op rows
+FROZEN_OPS_KEY = "anvitech:frozen_ops"       # kv: json list of frozen (in-progress) op rows for today
 
 _SEP = "\x1f"   # ASCII unit separator — never appears in an SO# or item code
 
@@ -234,6 +236,33 @@ def save_last_searched(sig: dict) -> None:
 def load_last_searched():
     raw = get_store().kv_get(LAST_SEARCHED_KEY)
     return json.loads(raw) if raw else None
+
+
+# --- last-applied schedule (the plan the floor is following) --- #
+def save_last_applied_schedule(rows: list) -> None:
+    """Persist the applied plan's per-op assignment (machine/operator/time). Written
+    only when an optimize result is APPLIED — never on a display re-plan, so it stays
+    'the plan the floor is following' and doesn't drift with new actuals."""
+    get_store().kv_set(LAST_APPLIED_SCHEDULE_KEY, json.dumps(rows))
+
+
+def load_last_applied_schedule() -> list:
+    raw = get_store().kv_get(LAST_APPLIED_SCHEDULE_KEY)
+    return json.loads(raw) if raw else []
+
+
+# --- frozen (in-progress) ops for the current day --- #
+def save_frozen_ops(rows: list) -> None:
+    get_store().kv_set(FROZEN_OPS_KEY, json.dumps(rows))
+
+
+def load_frozen_ops() -> list:
+    raw = get_store().kv_get(FROZEN_OPS_KEY)
+    return json.loads(raw) if raw else []
+
+
+def clear_frozen_ops() -> None:
+    get_store().delete_key(FROZEN_OPS_KEY)
 
 
 # --- operator absences --- #
