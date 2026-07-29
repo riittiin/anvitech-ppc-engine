@@ -1,7 +1,17 @@
 """Committed-promise apply backstop (mirrors the worst-order backstop in
-tests/test_auto_optimize.py): a contest result that scores strictly better
-overall must still be REJECTED if it would push a committed order's promise
-slip past the incumbent's — `_auto_apply_result`'s `promise_ok` gate."""
+tests/test_auto_optimize.py): `_auto_apply_result`'s `promise_ok` gate.
+
+Owner's rule (committed-date-stability, 2026-07-29): a committed order may
+drift up to `committed_promise_slack_days` (default 3) worse than its
+promise WITHOUT that alone blocking an apply — only reject if the new plan
+pushes a committed order PAST the +slack cap, or makes an ALREADY-breaching
+order even worse. The threshold is `max(slack, inc.max_committed_slip)`:
+
+  inc=0, best=2  -> threshold max(3,0)=3 -> 2<=3            -> APPLIES
+  inc=0, best=5  -> threshold max(3,0)=3 -> 5>3              -> REJECTS
+  inc=6, best=6  -> threshold max(3,6)=6 -> 6<=6 (not worse)  -> APPLIES
+  inc=6, best=8  -> threshold max(3,6)=6 -> 8>6 (worse)       -> REJECTS
+"""
 from datetime import date
 
 import pytest
@@ -27,36 +37,31 @@ def _seed_book():
     ])
 
 
-def test_auto_apply_keeps_current_when_committed_promise_would_regress(monkeypatch):
-    """The committed-promise backstop (mirrors the worst-order one): a contest
-    result with a strictly BETTER score is still REJECTED if it would push a
-    committed order's promise slip later than the incumbent's max slip.
-    Directly exercises the `elif not promise_ok` branch of
-    _auto_apply_result."""
+def _run(monkeypatch, inc_slip, best_slip):
+    """Shared harness: seed a book, stub the incumbent at `inc_slip`, stage a
+    contest result (strictly better score, same worst order) at `best_slip`,
+    run `_auto_apply_result`, and return (module, note_text, loaded_ranks)."""
     monkeypatch.setenv("AUTO_OPTIMIZE", "0")
     m = _api()
     _seed_book()
-    # A known applied plan — must remain untouched if the backstop holds.
     saved_ranks = {"k": 1}
     book_store.save_plan_priority(saved_ranks, {"saved_at": "t"})
-    # Incumbent: a committed order sitting at 2 days of slip, high total
-    # late-days (headroom for `best` to score strictly better while still
-    # regressing the committed order).
     monkeypatch.setattr(m, "_incumbent_metrics",
                          lambda: {"total_late_days": 500, "makespan_days": 50.0,
-                                  "max_late_days": 46, "max_committed_slip": 2})
-    # Contest best: strictly better score (far fewer total late-days, same
-    # worst order) but its committed slip is pushed to 4 days — the backstop
-    # must reject it.
+                                  "max_late_days": 46, "max_committed_slip": inc_slip})
     with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["state"] = "done"
         m._OPTIMIZE["result"] = {"best": {"total_late_days": 100,
                                           "makespan_days": 50.0,
                                           "max_late_days": 46,
-                                          "max_committed_slip": 4},
-                                 "ranks": {"k": 2}}
+                                          "max_committed_slip": best_slip},
+                                 "ranks": {"k": 2},
+                                 "budget": 15, "seed": 42, "baseline": {},
+                                 "best_overlap": None, "current_overlap": None}
         m._OPTIMIZE["auto"] = True
-    # Sanity check on the premise this test isolates: score is strictly
-    # better on its own — the backstop is the ONLY reason the plan is kept.
+    # Sanity check on the premise every case isolates: score is strictly
+    # better on its own — the backstop (or lack of one) is the only reason
+    # apply/reject differs from a plain score comparison.
     assert (optimizer.score({"total_late_days": 100, "makespan_days": 50.0}) <
             optimizer.score({"total_late_days": 500, "makespan_days": 50.0}))
 
@@ -64,43 +69,41 @@ def test_auto_apply_keeps_current_when_committed_promise_would_regress(monkeypat
 
     note = book_store.load_auto_note()
     assert note is not None
-    assert "protect a committed promise" in note["text"]
-    assert "2" in note["text"]               # regression amount: 4 - 2
-
-    # Not applied: the previously-saved ranks are untouched.
-    loaded_ranks = book_store.load_plan_priority()
-    assert loaded_ranks is not None
-    assert loaded_ranks["ranks"] == saved_ranks
+    loaded = book_store.load_plan_priority()
+    return m, note["text"], loaded
 
 
-def test_auto_apply_applies_when_score_improves_and_promise_holds(monkeypatch):
-    """Positive case: when `best` improves the score, doesn't regress the
-    worst order, and doesn't raise the committed max slip, it DOES apply."""
-    monkeypatch.setenv("AUTO_OPTIMIZE", "0")
-    m = _api()
-    _seed_book()
-    saved_ranks = {"k": 1}
-    book_store.save_plan_priority(saved_ranks, {"saved_at": "t"})
-    monkeypatch.setattr(m, "_incumbent_metrics",
-                         lambda: {"total_late_days": 500, "makespan_days": 50.0,
-                                  "max_late_days": 46, "max_committed_slip": 4})
-    with m._OPTIMIZE_LOCK:
-        m._OPTIMIZE["state"] = "done"
-        m._OPTIMIZE["result"] = {"best": {"total_late_days": 100,
-                                          "makespan_days": 50.0,
-                                          "max_late_days": 46,
-                                          "max_committed_slip": 3},
-                                 "ranks": {"k": 2},
-                                 "budget": 15, "seed": 42, "baseline": {},
-                                 "best_overlap": None, "current_overlap": None}
-        m._OPTIMIZE["auto"] = True
+def test_auto_apply_applies_plan_within_cap_despite_drift(monkeypatch):
+    """The bug this branch fixes: a committed order drifting from 0 to +2
+    days is well within the +3 cap and must APPLY, not be rejected as a
+    'regression'."""
+    m, text, loaded = _run(monkeypatch, inc_slip=0, best_slip=2)
+    assert "auto-re-optimized" in text
+    assert loaded["ranks"] == {"k": 2}
 
-    m._auto_apply_result()
 
-    note = book_store.load_auto_note()
-    assert note is not None
-    assert "auto-re-optimized" in note["text"]
+def test_auto_apply_rejects_plan_that_pushes_committed_past_cap(monkeypatch):
+    """A plan that pushes a committed order to +5 (past the +3 cap, with the
+    incumbent at 0) must still be REJECTED."""
+    m, text, loaded = _run(monkeypatch, inc_slip=0, best_slip=5)
+    assert "protect a committed promise" in text
+    assert "5" in text  # regression amount: 5 - 0
+    assert loaded["ranks"] == {"k": 1}  # untouched
 
-    loaded_ranks = book_store.load_plan_priority()
-    assert loaded_ranks is not None
-    assert loaded_ranks["ranks"] == {"k": 2}
+
+def test_auto_apply_applies_when_already_breaching_and_not_worse(monkeypatch):
+    """The incumbent is already past cap (+6). A candidate that holds at the
+    same +6 (not worse) must APPLY — the cap doesn't retroactively veto an
+    already-bad situation the new plan doesn't make worse."""
+    m, text, loaded = _run(monkeypatch, inc_slip=6, best_slip=6)
+    assert "auto-re-optimized" in text
+    assert loaded["ranks"] == {"k": 2}
+
+
+def test_auto_apply_rejects_when_already_breaching_and_worse(monkeypatch):
+    """The incumbent is already past cap (+6). A candidate that pushes it
+    further to +8 must still be REJECTED."""
+    m, text, loaded = _run(monkeypatch, inc_slip=6, best_slip=8)
+    assert "protect a committed promise" in text
+    assert "2" in text  # regression amount: 8 - 6
+    assert loaded["ranks"] == {"k": 1}  # untouched

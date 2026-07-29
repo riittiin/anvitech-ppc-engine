@@ -1601,7 +1601,8 @@ def _auto_apply_result():
         return
     stamp = _ist_now().strftime("%H:%M")
     worst_ok = best.get("max_late_days", 0) <= inc.get("max_late_days", 0)
-    promise_ok = best.get("max_committed_slip", 0) <= inc.get("max_committed_slip", 0)
+    _slack = _resolve_config(_load_plan_config()).committed_promise_slack_days
+    promise_ok = best.get("max_committed_slip", 0) <= max(_slack, inc.get("max_committed_slip", 0))
     if optimizer.score(best) < optimizer.score(inc) and worst_ok and promise_ok:
         try:
             move = _movement_note(res.get("ranks") or None)
@@ -1642,11 +1643,12 @@ def _optimize_apply():
         # "Apply this plan" button can't push a committed order past its promise.
         inc = _incumbent_metrics()
         best = res.get("best") or {}
-        if best.get("max_committed_slip", 0) > inc.get("max_committed_slip", 0):
+        _slack = _resolve_config(_load_plan_config()).committed_promise_slack_days
+        if best.get("max_committed_slip", 0) > max(_slack, inc.get("max_committed_slip", 0)):
             raise HTTPException(status_code=409, detail=(
                 "This plan would push a committed order past its promised date "
                 "(committed orders are capped at promised + "
-                f"{_resolve_config(_load_plan_config()).committed_promise_slack_days} days). "
+                f"{_slack} days). "
                 "Uncommit the affected order first, or apply a plan that keeps it within the cap."))
         meta = {"saved_at": _ist_now().isoformat(timespec="seconds"),
                 "budget": res["budget"], "seed": res["seed"],
