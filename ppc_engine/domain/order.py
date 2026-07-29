@@ -28,6 +28,10 @@ class Order:
                     milestone, no re-do, no phantom setup). ``None`` on a fresh plan,
                     where every op runs the full ``qty`` (byte-identical to before).
                     Excluded from equality/hash (Orders are keyed by ``.key``).
+        promise_date: The committed-date snapshot for this order (informational —
+                    see CLAUDE.md's Phase-2 pivot: lanes/promises are display-only,
+                    never scheduling constraints). ``None`` on a fresh/uncommitted
+                    order — byte-identical to before. Excluded from equality/hash.
     """
 
     so_no: str
@@ -36,6 +40,7 @@ class Order:
     qty: int
     due_date: date
     process_remaining: dict | None = field(default=None, compare=False)
+    promise_date: date | None = field(default=None, compare=False)
 
     @property
     def key(self) -> tuple[str, str]:

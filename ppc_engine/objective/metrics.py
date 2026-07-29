@@ -7,7 +7,7 @@ objective (objective.py) and the human-facing reports later.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from ppc_engine.domain.order import Order
@@ -36,6 +36,10 @@ class PlanMetrics:
                               objective — we never minimise the *count*, LESSONS.md).
         makespan_days:        Span from plan start to the last order's completion.
         lateness_by_order:    Per-order signed lateness in days (for reports).
+        promise_slip_by_order: Per-order signed days vs ``Order.promise_date``
+                              (completion date − promise date), only for orders that
+                              carry a promise date. Empty dict when no order has one
+                              — byte-identical to before.
     """
 
     total_tardiness_days: float
@@ -43,13 +47,16 @@ class PlanMetrics:
     late_order_count: int
     makespan_days: float
     lateness_by_order: dict[tuple[str, str], float]
+    promise_slip_by_order: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
 def compute_metrics(schedule: Schedule, orders: list[Order], plan_start: datetime) -> PlanMetrics:
     """Compute the metrics for ``schedule`` against ``orders``' due dates."""
     due_by_key = {o.key: o.due_date for o in orders}
+    promise_by_key = {o.key: o.promise_date for o in orders if o.promise_date is not None}
 
     lateness_by_order: dict[tuple[str, str], float] = {}
+    promise_slip_by_order: dict[tuple[str, str], float] = {}
     total_tardiness = 0.0
     max_tardiness = 0.0
     late_count = 0
@@ -62,6 +69,8 @@ def compute_metrics(schedule: Schedule, orders: list[Order], plan_start: datetim
             max_tardiness = tardiness
         if tardiness > 0:
             late_count += 1
+        if key in promise_by_key:
+            promise_slip_by_order[key] = (completion.date() - promise_by_key[key]).days
 
     end = schedule.makespan_end()
     makespan_days = ((end - plan_start).total_seconds() / 86400.0) if end else 0.0
@@ -72,4 +81,5 @@ def compute_metrics(schedule: Schedule, orders: list[Order], plan_start: datetim
         late_order_count=late_count,
         makespan_days=round(makespan_days, 4),
         lateness_by_order=lateness_by_order,
+        promise_slip_by_order=promise_slip_by_order,
     )
