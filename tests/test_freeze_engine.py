@@ -1,5 +1,6 @@
 import io
 from datetime import date
+from dataclasses import replace as _dc_replace
 import pytest
 
 from engine.config import Config
@@ -154,3 +155,28 @@ def test_downstream_step_waits_for_frozen_predecessor(ctx):
                       if s.order_key == o.key and s.op_seq == succ.seq), default=None)
     if succ_start is not None:  # OS/dispatch successors may be zero-time milestones
         assert succ_start >= frozen_end, "successor started before the frozen op finished"
+
+
+def test_absent_planned_operator_gets_substitute_machine_still_pinned(ctx):
+    orders, seq, nm = ctx
+    cfg = _plan_config(_CONF)
+    # Use order[1] (Item B) to avoid conflicts; it has a different operator pool than order[0].
+    o1 = orders[1]
+    fop = next(op for op in nm.routings[o1.item_code].operations
+               if op.machine_options and op.cycle_min > 0)
+    mid = fop.machine_options[0]
+    # Mark the planned operator "Alpha" on leave for the plan-start day.
+    cal = nm.calendar
+    merged = dict(getattr(cal, "leaves", {}) or {})
+    merged["Alpha"] = frozenset({cfg.plan_start.date()})
+    nm_absent = _dc_replace(nm, calendar=_dc_replace(cal, leaves=merged))
+    # Freeze a small quantity (2 pieces) to minimize interference with other work.
+    fo = FrozenOp(o1.key, fop.seq, mid, "Alpha", 2, cfg.plan_start)
+    sched = decode(orders, seq, nm_absent, cfg, frozen=[fo])
+    segs = [s for s in sched.segments if s.order_key == o1.key and s.op_seq == fop.seq]
+    assert segs, "frozen op vanished when its planned operator was absent"
+    assert all(s.machine_id == mid for s in segs), "machine not pinned under absence"
+    assert all(s.operator != "Alpha" for s in segs), "absent operator was still assigned"
+    # No operator double-booked (reuse the suite's invariant checker).
+    from tests.test_new_engine import _assert_clean
+    _assert_clean(sched.segments)
