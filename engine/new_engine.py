@@ -374,7 +374,7 @@ SCHEDULER_FINGERPRINT = "new-engine-v1"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
-        reserved=None, **kw):
+        reserved=None, frozen=None, **kw):
     """Scheduler seam contract: prioritized `batches` -> list[ScheduleEntry], via the new
     operator-stable engine.
 
@@ -393,7 +393,8 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     # Sequence from the ROUTED orders only (unrouted batches were skipped above), preserving
     # the incoming priority order.
     sequence = [o.key for o in orders]
-    sched = decode(orders, sequence, new_masters, _plan_config(config))
+    ppc_frozen = _ppc_frozen(frozen, orders, batch_by_key, new_masters) if frozen else None
+    sched = decode(orders, sequence, new_masters, _plan_config(config), frozen=ppc_frozen)
     return _entries_from_schedule(sched, batch_by_key)
 
 
