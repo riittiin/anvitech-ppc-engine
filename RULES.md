@@ -556,8 +556,11 @@ place; only the rest of the backlog is re-optimized.
   import) → nothing to freeze, runs unrestricted; a step not found in the
   last-applied plan, or whose saved machine no longer exists in masters → not
   frozen, schedules normally (reported, never fatal).
-- **The admin's manual "Start deep search" is unchanged** — it stays fully
-  unrestricted (no freeze), for fresh SO imports when nothing is running yet.
+- **The admin's manual "Start deep search" also respects the freeze** (owner
+  decision, 2026-07-29 — deep-search is pressed in week 2 when week-1 work is
+  already running): it recomputes and honours the same frozen set as the daily
+  Done path. It is naturally unrestricted only when nothing is in progress yet
+  (a fresh SO import, no last-applied plan).
 
 ### Optimize plan (sequence search) *(feature)*
 

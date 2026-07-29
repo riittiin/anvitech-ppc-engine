@@ -52,8 +52,11 @@
 >   `frozen` empty/None is byte-identical to before). Threaded through
 >   `new_engine.run`/`optimize`/`tune`/`sweep_optimize`, `engine.optimizer`, `run_forward`, and
 >   the contest + cloud payload (`optimize_service`) — every candidate plan pins the same
->   frozen set. The admin's manual **"Start deep search"** (`POST /optimize`) stays
->   **unrestricted** (no freeze) — for fresh imports when nothing is running yet.
+>   frozen set. The admin's manual **"Start deep search"** (`POST /optimize`) now **also
+>   respects the freeze** (owner decision, 2026-07-29 — deep-search is pressed in week 2
+>   when week-1 work is already running): `_start_optimize` recomputes the frozen set
+>   itself, inside the lock, right before every run — manual and auto alike. It is
+>   naturally unrestricted only when nothing is in progress yet (a fresh first import).
 > - **Deploy:** repo `riittiin/anvitech-ppc-engine` (branch `main`) → Render service `anvitech-ppc`
 >   (https://anvitech-ppc.onrender.com). Env: `DEFAULT_SCHEDULER=new`, `GITHUB_DISPATCH_TOKEN`,
 >   `OPTIMIZE_WORKER_SECRET`, `MONGODB_URI`, `APP_USERNAME`/`APP_PASSWORD`. **Render auto-deploy is
@@ -491,8 +494,9 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `nextScheduledOptimize()`. **Now (2026-07-29):** `_is_optimize_day`/`_OPTIMIZE_WEEKDAY`
   are ALSO removed — `POST /optimize/done` calls `_try_start_auto()` unconditionally,
   every day (the freeze makes this safe; see the banner). The admin manual
-  **"Start deep search"** (`POST /optimize`) was never weekday-gated and remains
-  unrestricted (no freeze) either way. Auto-apply is still strictly-better-or-nothing
+  **"Start deep search"** (`POST /optimize`) was never weekday-gated, and (as of the
+  same day, see the banner) also now respects the freeze — naturally unrestricted only
+  when nothing is in progress. Auto-apply is still strictly-better-or-nothing
   (`_auto_apply_result`); `AUTO_OPTIMIZE=0` still disables it (test isolation only).
 - **Scheduled optimize (2026-07-18 — design spec since pruned as superseded,
   superseded the event-triggered self-tuning-plan Phase 1; itself

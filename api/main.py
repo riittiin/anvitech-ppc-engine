@@ -1162,7 +1162,6 @@ def _try_start_auto() -> bool:
     except Exception:
         return False
     try:
-        _compute_and_store_frozen()
         _start_optimize(_OPT_BUDGETS["deep"], "auto", background=True, auto=True)
         return True
     except HTTPException:
@@ -1181,6 +1180,14 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         if _OPTIMIZE["state"] == "running":
             raise HTTPException(status_code=409,
                                 detail="an optimization is already running")
+
+        # Recompute the frozen (in-progress) set from the latest punches +
+        # last-applied plan right before optimizing — both the Done/auto path
+        # and the admin's manual "Start deep search" now honour it (owner
+        # decision, 2026-07-29: deep-search is pressed in week 2 when week-1
+        # work is already running). Doing this inside the lock (rather than
+        # in the caller) also closes a race between the read and the write.
+        _compute_and_store_frozen()
 
         config = _load_plan_config()
         masters = _current_masters()
@@ -1209,12 +1216,13 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         orders = book_store.load_active_orders()
         absences = book_store.load_absences()
         operator_table = book_store.load_operator_table()
-        # The frozen (in-progress) set only restricts the Done/auto path — the
-        # admin's manual "Start deep search" stays unrestricted by design spec
-        # (docs/superpowers/specs/2026-07-29-...-design.md §2/§9). No caller
-        # ever clears anvitech:frozen_ops, so an unconditional load would leak
-        # a stale frozen set from a prior Done click into the manual button.
-        frozen = book_store.load_frozen_ops() if auto else []
+        # The frozen (in-progress) set now restricts BOTH paths — the Done/auto
+        # button and the admin's manual "Start deep search" (owner decision,
+        # 2026-07-29). It was just recomputed above from the latest punches +
+        # last-applied plan, so it's naturally empty on a fresh import with
+        # nothing in progress yet — manual deep-search stays fully unrestricted
+        # then, which is correct.
+        frozen = book_store.load_frozen_ops()
         try:
             setup = optimize_service.prepare_contest(orders, actuals, masters, config,
                                                      absences=absences,
