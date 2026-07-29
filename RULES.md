@@ -473,7 +473,7 @@ a regression, not an aspiration (`tests/test_replay_single_pass.py`).
 > preview) was removed. (The full account lived in the self-tuning-plan design's
 > SUPERSEDED Phase-2 block; that spec has since been pruned as superseded.)
 
-### Scheduled optimize — the job order re-optimizes itself, twice a week *(feature, 2026-07-18, supersedes the event-triggered "self-tuning plan" of 2026-07-16)*
+### Scheduled optimize — the job order re-optimizes itself, twice a week *(feature, 2026-07-18, supersedes the event-triggered "self-tuning plan" of 2026-07-16 — superseded in turn by the daily-cadence "Frozen zone" rule below)*
 
 The plan still re-optimizes itself without anyone remembering to click Optimize — but
 the owner drew a hard line between two very different things:
@@ -517,6 +517,47 @@ the owner drew a hard line between two very different things:
 - **No off switch.** The twice-weekly schedule is always on in the deployed app; there
   is no button or setting to turn it off (`AUTO_OPTIMIZE=0` exists only as an internal
   test-isolation switch, never exposed).
+
+### Frozen zone — in-progress work is pinned during daily re-optimization *(feature, 2026-07-29, supersedes the "twice a week" cadence above)*
+
+The scheduled-optimize cadence above is superseded: **"Done entering — update plan"
+now runs a re-optimization every day, not twice a week.** An *unrestricted* daily
+re-optimization would be unusable — reshuffling machines/operators for work that is
+physically running right now on the floor is impossible and would destroy schedule
+trust. The fix is a **frozen zone**: whatever is genuinely in progress is pinned in
+place; only the rest of the backlog is re-optimized.
+
+- **What freezes.** A routing step whose punches show it **partially done** —
+  `0 < good qty < required qty` for that (SO#, item, process). A step with `good == 0`
+  (untouched) is free to optimize; a step with `remaining == 0` (fully punched) is
+  already a zero-duration milestone and needs no pinning.
+- **Pinned machine and operator** come from the **last-applied plan** — the schedule
+  the floor was actually handed, not a re-derivation. **Remaining quantity** comes
+  from the punches (`required − good`), so the frozen block reflects reality, not
+  the plan's original estimate.
+- **Resume order.** Multiple in-progress operations can share one machine; they
+  resume in **previous-plan order**, and **all frozen work on a machine finishes
+  before any newly-optimized work** is placed on it.
+- **No setup on resume** — the machine is already set up mid-run; the 90-minute
+  CNC/VMC setup (Rule 4) is not re-charged.
+- **Shift crossing.** The machine stays pinned; if the remaining frozen work crosses
+  a shift boundary, it hands off to a qualified operator on the new shift exactly as
+  Rule 6's normal per-shift handoff does.
+- **Absent planned operator.** If the operator the last-applied plan assigned is now
+  marked absent, the engine staffs a **substitute** for the frozen block — the
+  machine stays pinned, only the person changes.
+- **Never frozen:** OS/outsourced steps and the DISPATCH milestone — they have no
+  in-house machine/operator to pin.
+- **Everything else re-optimizes freely** around the frozen blocks — this is what
+  makes the daily cadence safe: only the physically-committed slice of the floor is
+  locked, and the search still finds the best order for every operation that hasn't
+  started.
+- **Non-blocking edge cases:** no last-applied plan on file (first run / fresh
+  import) → nothing to freeze, runs unrestricted; a step not found in the
+  last-applied plan, or whose saved machine no longer exists in masters → not
+  frozen, schedules normally (reported, never fatal).
+- **The admin's manual "Start deep search" is unchanged** — it stays fully
+  unrestricted (no freeze), for fresh SO imports when nothing is running yet.
 
 ### Optimize plan (sequence search) *(feature)*
 

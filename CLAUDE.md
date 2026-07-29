@@ -1,6 +1,6 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-07-22)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-07-29)
 >
 > This app now runs a **NEW operator-stable scheduling engine**, swapped in behind the old
 > scheduler seam. **Everything below this banner describes the PRE-SWAP classic/flow engine and
@@ -34,6 +34,26 @@
 >   numbers were infeasible, not better). `new_engine._entries_from_schedule` still span-paces the
 >   entry `end` as belt-and-suspenders. Regression: `tests/test_new_engine.py::
 >   test_op_work_never_finishes_before_its_predecessor`.
+> - **Freeze in-progress work — daily restricted optimize (2026-07-29,
+>   `docs/superpowers/specs/2026-07-29-freeze-in-progress-restricted-optimize-design.md`) —
+>   "Done entering — update plan" now re-optimizes EVERY DAY, not just Thursday.** The
+>   Thursday-only gate (`_is_optimize_day`/`_OPTIMIZE_WEEKDAY`, including the temp-Sunday
+>   testing override) is **removed** from `POST /optimize/done` — it always calls
+>   `_try_start_auto()` (still a no-op when a contest is already running or nothing material
+>   changed). What makes daily re-sequencing safe: any operation the punches show
+>   **partially done** (`0 < good qty < required`) is **frozen** — pinned to its **last-applied
+>   plan's** machine + operator, remaining qty from the punches, no setup on resume, multiple
+>   frozen ops on one machine resume in previous-plan order before any new work, shift
+>   handoff/absent-operator substitution unchanged, OS/DISPATCH never frozen — so a
+>   physically-running part is never yanked onto a different machine/person. New pure module
+>   **`engine/freeze.py`** (`schedule_projection`, `compute_frozen_set`) + two store keys
+>   (`anvitech:last_applied_schedule`, `anvitech:frozen_ops`) + `ppc_engine.scheduler.decode(...,
+>   frozen=None)` / `FrozenOp` (pre-places frozen ops before the Giffler-Thompson loop;
+>   `frozen` empty/None is byte-identical to before). Threaded through
+>   `new_engine.run`/`optimize`/`tune`/`sweep_optimize`, `engine.optimizer`, `run_forward`, and
+>   the contest + cloud payload (`optimize_service`) — every candidate plan pins the same
+>   frozen set. The admin's manual **"Start deep search"** (`POST /optimize`) stays
+>   **unrestricted** (no freeze) — for fresh imports when nothing is running yet.
 > - **Deploy:** repo `riittiin/anvitech-ppc-engine` (branch `main`) → Render service `anvitech-ppc`
 >   (https://anvitech-ppc.onrender.com). Env: `DEFAULT_SCHEDULER=new`, `GITHUB_DISPATCH_TOKEN`,
 >   `OPTIMIZE_WORKER_SECRET`, `MONGODB_URI`, `APP_USERNAME`/`APP_PASSWORD`. **Render auto-deploy is
@@ -359,6 +379,26 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `load_absences`/`save_absence`/`delete_absence` (`anvitech:absences`) — a plain
   list of `{id, operator, from_date, to_date}`; `save_absence` assigns the uuid,
   `delete_absence` returns `False` on an unknown id (→ 404 at the API).
+  **Freeze keys (2026-07-29):** `save_last_applied_schedule`/`load_last_applied_schedule`
+  (`anvitech:last_applied_schedule`, `LAST_APPLIED_SCHEDULE_KEY`) — a compact per-op
+  projection (machine/operator/start/end) of "the plan the floor is following," written
+  **only when an optimize result is applied** (never on an ordinary display re-plan, or
+  it would drift with new actuals); `save_frozen_ops`/`load_frozen_ops`/`clear_frozen_ops`
+  (`anvitech:frozen_ops`, `FROZEN_OPS_KEY`) — the current frozen (in-progress) set,
+  recomputed on every "Done entering — update plan". See the freeze banner bullet + the
+  `engine/freeze.py` / `api/main.py` bullets below.
+- `engine/freeze.py` (2026-07-29,
+  `docs/superpowers/specs/2026-07-29-freeze-in-progress-restricted-optimize-design.md`) —
+  **pure freeze logic, reporting/derivation only — never mutates a plan.**
+  `schedule_projection(schedule)`: one row per real (machine) op in an applied schedule
+  (batch/item/process_seq/machine/operator/start/end/so_refs); OS/off-lane entries are
+  skipped (nothing in-house to pin). `compute_frozen_set(applied_rows, so_lines,
+  good_by_step, masters)`: for each active SO-line + routing step, freezes it iff
+  `good > 0` **and** `remaining > 0` (partially punched) — looks up machine/operator from
+  the `applied_rows` row covering that SO for that step's `op_seq`; a step **not** found
+  in the applied rows, or whose applied machine is OS/off-lane, is **not** frozen (falls
+  through to normal scheduling). Called from `api._compute_and_store_frozen()` on every
+  "Done entering — update plan," never from inside the pure engine.
 - `engine/storage.py` — the store interface (kv/hash/list) + backends:
   `MongoStore` / `UpstashStore` / `LocalStore`; `get_store()` picks by env.
   `MongoStore` **percent-encodes hash field names** (`_enc_field`/`_dec_field`)
@@ -384,7 +424,12 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   with a rank per **"<so>\x1f<item>"** key; `pipeline.apply_priority_rank` replays it
   (ranked batches reorder among their own slots; unranked keep their Rule-3 slot).
   `run_forward(priority_rank=)` is the replay hook — `None` (all existing callers) is
-  byte-identical. Persisted via `book_store.save/load/clear_plan_priority`
+  byte-identical. `run_forward`/`optimize`/`sweep_optimize` also accept `frozen=`
+  (2026-07-29, list of `FrozenOp`-shaping dicts) — threaded straight through to
+  `new_engine`/`decode` for every candidate in a contest so the frozen (in-progress)
+  set is honored identically whether the plan is a single pass or a search; `frozen=
+  None`/empty is byte-identical to before. See the freeze banner bullet +
+  `engine/freeze.py`. Persisted via `book_store.save/load/clear_plan_priority`
   (`anvitech:plan_priority`). API: `/optimize` (admin; quick=150/deep=400 evals, one
   background thread at a time), `/optimize/status`, `/optimize/apply`, `/optimize/clear`;
   `_plan` replays the saved ranks over its single pass (every active line — see the
@@ -424,25 +469,30 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `GITHUB_DISPATCH_TOKEN=manual` skips the GitHub call (run the worker by hand).
 - **Feedback-triggered optimize, THURSDAY-gated (2026-07-22,
   `docs/superpowers/specs/2026-07-22-feedback-triggered-optimize-design.md`,
-  supersedes the twice-weekly cron below) — the job order re-optimizes once a week,
-  on Thursday; the plan reflects new facts every day.** The **"Done entering —
-  update plan"** button (both roles) hits **`POST /optimize/done`**, which
-  **first checks `_is_optimize_day()`** (today, IST, is Thursday —
-  `_ist_today().weekday() == _OPTIMIZE_WEEKDAY`, `= 3`). **Non-Thursday:** it returns
-  `{started:False, reason:"not_optimize_day"}` and the client just `runPlan(false)`s
-  (facts refresh, NO contest). **Thursday** (the weekly off day — the owner punches
-  Wednesday's feedback then, so the new schedule is ready for Friday): it calls
-  `_try_start_auto()`, which starts an auto-applying contest unless a run is already
-  going or nothing changed since the last one it RAN (applied **or** last-searched
-  book+inputs fingerprint — `anvitech:last_searched`, written by `_finalize_optimize`
-  from the contest-start snapshot; writes a "plan unchanged" note). It is **NOT
-  cloud-only** (local fallback). The frontend blocks on live progress
+  supersedes the twice-weekly cron below — itself **SUPERSEDED 2026-07-29** by the
+  freeze-in-progress daily cadence, banner above — kept for the `_try_start_auto()`
+  guard mechanics the new cadence still reuses unchanged) — historical: the job
+  order re-optimized once a week, on Thursday; the plan reflected new facts every
+  day.** The **"Done entering — update plan"** button (both roles) hit
+  **`POST /optimize/done`**, which **first checked `_is_optimize_day()`** (today, IST,
+  is Thursday — `_ist_today().weekday() == _OPTIMIZE_WEEKDAY`, `= 3`). **Non-Thursday:**
+  it returned `{started:False, reason:"not_optimize_day"}` and the client just
+  `runPlan(false)`d (facts refresh, NO contest). **Thursday** (the weekly off day — the
+  owner punches Wednesday's feedback then, so the new schedule is ready for Friday): it
+  called `_try_start_auto()`, which started an auto-applying contest unless a run was
+  already going or nothing changed since the last one it RAN (applied **or**
+  last-searched book+inputs fingerprint — `anvitech:last_searched`, written by
+  `_finalize_optimize` from the contest-start snapshot; writes a "plan unchanged" note).
+  It was **NOT cloud-only** (local fallback). The frontend blocked on live progress
   (`/optimize/status`, **no Stop button** — owner's block-and-wait decision; admins
-  keep the Settings-panel Stop) then `runPlan(false)`s to the auto-applied winner.
-  The **admin manual "Start deep search"** (`POST /optimize`) is **NOT** weekday-gated
-  — runs any day. **Removed:** the Mon/Fri GitHub cron
+  keep the Settings-panel Stop) then `runPlan(false)`d to the auto-applied winner.
+  **Removed:** the Mon/Fri GitHub cron
   (`.github/workflows/scheduled-optimize.yml`), `POST /optimize/scheduled`, and
-  `nextScheduledOptimize()`. Auto-apply is still strictly-better-or-nothing
+  `nextScheduledOptimize()`. **Now (2026-07-29):** `_is_optimize_day`/`_OPTIMIZE_WEEKDAY`
+  are ALSO removed — `POST /optimize/done` calls `_try_start_auto()` unconditionally,
+  every day (the freeze makes this safe; see the banner). The admin manual
+  **"Start deep search"** (`POST /optimize`) was never weekday-gated and remains
+  unrestricted (no freeze) either way. Auto-apply is still strictly-better-or-nothing
   (`_auto_apply_result`); `AUTO_OPTIMIZE=0` still disables it (test isolation only).
 - **Scheduled optimize (2026-07-18 — design spec since pruned as superseded,
   superseded the event-triggered self-tuning-plan Phase 1; itself
@@ -693,11 +743,19 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   bullet above); a saved Optimize/auto-optimize result replays via `priority_rank=`
   (expedite forced off while ranks exist). Returns `optimize_meta` (staleness banner)
   and `auto_note` (`book_store.load_auto_note()`, the auto-trigger's status
-  line, IST-stamped). **Feedback trigger** (2026-07-22; see the optimizer bullet
-  above for the full mechanics): `_try_start_auto()`/`_auto_apply_result()`,
-  endpoint `POST /optimize/done` (either role — the "Done entering — update plan"
-  button), **Thursday-gated** via `_is_optimize_day()` (non-Thursday → `reason:
-  "not_optimize_day"`, facts refresh only; Thursday → the contest).
+  line, IST-stamped). **Feedback trigger** (2026-07-22, cadence updated 2026-07-29;
+  see the optimizer bullet above for the full mechanics): `_try_start_auto()`/
+  `_auto_apply_result()`, endpoint `POST /optimize/done` (either role — the "Done
+  entering — update plan" button) — runs **every day** (the Thursday gate /
+  `_is_optimize_day()` is removed); `_try_start_auto()` still no-ops when a contest
+  is already running or nothing material changed. Before starting the contest,
+  `_compute_and_store_frozen()` derives and persists the in-progress **frozen set**
+  (`engine/freeze.compute_frozen_set` over `book_store.load_last_applied_schedule()`
+  + the day's punches → `anvitech:frozen_ops`) so the contest pins already-started
+  ops to their last-applied machine/operator — this restriction is what makes the
+  daily cadence safe. `book_store.save_last_applied_schedule` is written only when
+  an optimize result is **applied** (`_optimize_apply()`), never on an ordinary
+  display re-plan.
   **Absences:** `GET /absences` (any role, `{absences, orphans, operators}`), `POST
   /absences` / `DELETE /absences/{id}` (admin) — see the `book_store.py`/optimizer
   bullets above; `_absence_orphans` feeds the `ABSENT_OPERATOR_UNKNOWN` rows
@@ -723,11 +781,12 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   `GET /operators`, same list either role sees on Settings — the form blocks
   submit and focuses the field when it's blank), per-entry **↺ Rollback** button,
   and the **"Done entering — update plan"** button for both roles — hits `POST
-  /optimize/done`: **on Thursday** it starts a feedback-triggered, auto-applying
-  contest (skipped with a "plan unchanged" note if nothing material changed or one's
-  already running), blocks on `/optimize/status` progress, then refreshes the plan
-  to pick up the winner; **on any other day** it just refreshes the plan facts
-  ("…runs on Thursday")), an always-visible
+  /optimize/done`: **every day (2026-07-29, no more Thursday-only gate)** it starts a
+  feedback-triggered, auto-applying RESTRICTED contest (in-progress ops frozen to
+  their last-applied machine/operator — see the freeze banner bullet; skipped with a
+  "plan unchanged" note if nothing material changed or one's already running), blocks
+  on `/optimize/status` progress, then refreshes the plan to pick up the winner), an
+  always-visible
   **Operator Absences** panel (list visible to both roles; add/remove controls
   admin-only), a Settings **Operators & shifts** panel (`#operators-panel` — table
   of name/machines/shift/"Stays" pin + add-row; "Next rotation: Friday
