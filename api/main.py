@@ -1213,7 +1213,12 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         orders = book_store.load_active_orders()
         absences = book_store.load_absences()
         operator_table = book_store.load_operator_table()
-        frozen = book_store.load_frozen_ops()
+        # The frozen (in-progress) set only restricts the Done/auto path — the
+        # admin's manual "Start deep search" stays unrestricted by design spec
+        # (docs/superpowers/specs/2026-07-29-...-design.md §2/§9). No caller
+        # ever clears anvitech:frozen_ops, so an unconditional load would leak
+        # a stale frozen set from a prior Done click into the manual button.
+        frozen = book_store.load_frozen_ops() if auto else []
         try:
             setup = optimize_service.prepare_contest(orders, actuals, masters, config,
                                                      absences=absences,

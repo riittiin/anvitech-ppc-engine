@@ -105,15 +105,17 @@ def test_apply_persists_last_applied_schedule(admin_client_with_book):
     assert SO1 in all_refs or SO2 in all_refs
 
 
-def _punch_partial(client):
+def _punch_partial(client, qty_produced=20, entry_date="2025-03-20"):
     """Punch a partial good quantity (less than the ordered qty) on the first
     in-house machining step of SO1/ITEM_A ("CNC FIRST SIDE", 50 ordered) —
     good=20 leaves remaining_qty=30 > 0, so the step is in-progress and
     should be frozen. Operator "Alpha" is qualified for CNC1/CNC2 (see
-    tests/new_sample_workbook.py OPERATORS)."""
+    tests/new_sample_workbook.py OPERATORS). A second call with a small extra
+    qty (still well under 50) keeps the step in-progress while moving the
+    book signature, for tests that need a fresh "book changed" edge."""
     r = client.post("/actuals", json={
         "so_no": SO1, "item_code": ITEM_A, "item_name": ITEM_A,
-        "entry_date": "2025-03-20", "qty_produced": 20, "qty_rejected": 0,
+        "entry_date": entry_date, "qty_produced": qty_produced, "qty_rejected": 0,
         "shift": "1st shift", "process": "CNC FIRST SIDE", "operator": "Alpha",
     })
     assert r.status_code == 200, r.text
@@ -137,3 +139,75 @@ def test_done_computes_frozen_set_from_partial_punch(admin_client_with_book):
     frozen = m._compute_and_store_frozen()
     assert frozen == book_store.load_frozen_ops()
     assert any(r["remaining_qty"] > 0 and r["machine"] for r in frozen)
+
+
+def test_manual_optimize_unrestricted_auto_path_frozen(admin_client_with_book, monkeypatch):
+    """Design-compliance guard (fix round 1): _start_optimize is shared by the
+    manual 'Start deep search' button (unrestricted, per
+    docs/superpowers/specs/2026-07-29-...-design.md §2/§9) and the Done-button
+    auto path (restricted to the frozen/in-progress set). Prove the frozen
+    kwarg reaching optimize_service.prepare_contest is EMPTY for the manual
+    run and NON-EMPTY for the auto run, even though a frozen set is stored
+    for both."""
+    client = admin_client_with_book
+    import api.main as m
+
+    # The suite-wide autouse fixture (tests/conftest.py::_no_auto_optimize)
+    # sets AUTO_OPTIMIZE=0 for every test so the self-tuning trigger never
+    # fires spontaneously; re-enable it here since this test exercises
+    # _try_start_auto directly (its documented override path).
+    monkeypatch.setenv("AUTO_OPTIMIZE", "1")
+
+    # Apply an initial plan, then punch a partial quantity so a non-empty
+    # frozen set gets stored ahead of both runs below.
+    r = client.post("/optimize", json={"budget": "quick"})
+    assert r.status_code == 200, r.text
+    _wait_optimize_done(client)
+    r = client.post("/optimize/apply")
+    assert r.status_code == 200, r.text
+    _punch_partial(client)
+    stored_frozen = m._compute_and_store_frozen()
+    assert stored_frozen, "expected a non-empty frozen set from the partial punch"
+
+    # Wrap prepare_contest to record the frozen= kwarg each call receives,
+    # then call through to the real implementation. Several OTHER call sites
+    # in api/main.py invoke prepare_contest too (incumbent/movement metrics)
+    # but never pass frozen= at all — only _start_optimize's call site does,
+    # explicitly, every time. Only record calls that explicitly pass it, so
+    # the assertions below are about _start_optimize specifically.
+    recorded = []
+    real_prepare_contest = m.optimize_service.prepare_contest
+
+    def _recording_prepare_contest(*args, **kwargs):
+        if "frozen" in kwargs:
+            recorded.append(kwargs["frozen"])
+        return real_prepare_contest(*args, **kwargs)
+
+    monkeypatch.setattr(m.optimize_service, "prepare_contest", _recording_prepare_contest)
+
+    # 1) Manual "Start deep search" (auto=False by default) — must be
+    #    unrestricted: frozen=[] reaches prepare_contest.
+    r = client.post("/optimize", json={"budget": "quick"})
+    assert r.status_code == 200, r.text
+    _wait_optimize_done(client)
+    assert len(recorded) == 1
+    assert not recorded[0], f"manual optimize must pass empty frozen, got {recorded[0]!r}"
+
+    # 2) Auto (Done-button) path — must be restricted: the stored frozen set
+    #    reaches prepare_contest. The manual run above wrote a last_searched
+    #    snapshot of the (unchanged-since) book, so _try_start_auto would
+    #    otherwise skip as "nothing material changed" — punch a bit more
+    #    (still leaving the step in-progress) so the book signature moves and
+    #    the auto path actually starts. _compute_and_store_frozen is pure/
+    #    deterministic over current actuals + the applied schedule, so calling
+    #    it here yields the exact same rows _try_start_auto computes
+    #    internally right before starting its own contest.
+    _punch_partial(client, qty_produced=5)
+    expected_frozen = m._compute_and_store_frozen()
+    assert expected_frozen, "expected the frozen set to remain non-empty after the extra punch"
+    started = m._try_start_auto()
+    assert started, "expected _try_start_auto to start a contest (book changed since the applied/searched snapshot)"
+    _wait_optimize_done(client)
+    assert len(recorded) == 2
+    assert recorded[1] == expected_frozen
+    assert recorded[1], "auto path must pass the non-empty frozen set"
