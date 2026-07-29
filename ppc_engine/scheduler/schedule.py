@@ -48,6 +48,21 @@ class Segment:
 
 
 @dataclass(frozen=True)
+class FrozenOp:
+    """An in-progress operation pinned in place for a re-plan: it must finish on its
+    machine (from the last-applied plan) before that machine takes any new work; its
+    owning order's next step waits for it. ``operator`` is the planned operator ("" =
+    let staffing pick). ``prev_start`` (last-applied start) orders multiple frozen ops
+    on one machine (previous-plan order)."""
+    order_key: tuple[str, str]
+    op_seq: int
+    machine_id: str
+    operator: str
+    remaining_qty: int
+    prev_start: datetime
+
+
+@dataclass(frozen=True)
 class Schedule:
     """The full schedule for a set of orders.
 

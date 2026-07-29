@@ -5,6 +5,6 @@ This is the truth-teller the whole system is measured against (OPTIMIZATION.md).
 """
 
 from ppc_engine.scheduler.flow_scheduler import decode
-from ppc_engine.scheduler.schedule import Schedule, Segment
+from ppc_engine.scheduler.schedule import Schedule, Segment, FrozenOp
 
-__all__ = ["decode", "Schedule", "Segment"]
+__all__ = ["decode", "Schedule", "Segment", "FrozenOp"]

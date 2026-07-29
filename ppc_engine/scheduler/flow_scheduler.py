@@ -46,6 +46,7 @@ def decode(
     masters: Masters,
     config: PlanConfig,
     dispatch: str = "gt",
+    frozen=None,
 ) -> Schedule:
     """Schedule ``orders`` following the priority ``sequence``.
 
@@ -72,7 +73,7 @@ def decode(
     # into batches, schedule the batches, then map each batch's completion back onto its
     # original orders — so the caller still sees per-original-order completions.
     if getattr(config, "consolidation_window", 0) and config.consolidation_window > 0:
-        return _decode_consolidated(orders, sequence, masters, config, dispatch)
+        return _decode_consolidated(orders, sequence, masters, config, dispatch, frozen)
 
     order_by_key = {o.key: o for o in orders}
     priority = {key: i for i, key in enumerate(sequence)}
@@ -205,6 +206,7 @@ def _decode_consolidated(
     masters: Masters,
     config: PlanConfig,
     dispatch: str,
+    frozen=None,
 ) -> Schedule:
     """Decode with order consolidation: schedule merged batches, then expand each
     batch's completion onto the original orders it covers."""
@@ -225,7 +227,7 @@ def _decode_consolidated(
             batch_seq.append(bkey)
 
     # Schedule the batches with consolidation OFF (avoid infinite recursion).
-    sub = decode(batches, batch_seq, masters, replace(config, consolidation_window=0.0), dispatch)
+    sub = decode(batches, batch_seq, masters, replace(config, consolidation_window=0.0), dispatch, frozen)
 
     # A batch's completion is every covered order's completion.
     completion: dict[tuple[str, str], datetime] = {}
