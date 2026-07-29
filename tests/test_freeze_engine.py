@@ -132,3 +132,25 @@ def test_two_frozen_on_one_machine_resume_in_prev_plan_order_before_new_work(ctx
     new_starts = [s.start for s in on_mid
                   if (s.order_key, s.op_seq) not in {(ob.key, opb.seq), (oa.key, opa.seq)}]
     assert all(st >= frozen_end for st in new_starts), "new work started before frozen work finished"
+
+
+def test_downstream_step_waits_for_frozen_predecessor(ctx):
+    orders, seq, nm = ctx
+    cfg = _plan_config(_CONF)
+    # An order whose routing has a machining op followed by a later in-house op.
+    o = next(o for o in orders
+             if len([op for op in nm.routings[o.item_code].operations
+                     if op.machine_options and op.cycle_min > 0]) >= 1
+             and len(nm.routings[o.item_code].operations) >= 2)
+    ops = nm.routings[o.item_code].operations
+    fop = next(op for op in ops if op.machine_options and op.cycle_min > 0)
+    succ = next((op for op in ops if op.seq > fop.seq), None)
+    assert succ is not None
+    fo = FrozenOp(o.key, fop.seq, fop.machine_options[0], "Alpha", 6, cfg.plan_start)
+    sched = decode(orders, seq, nm, cfg, frozen=[fo])
+    frozen_end = max(s.end for s in sched.segments
+                     if s.order_key == o.key and s.op_seq == fop.seq)
+    succ_start = min((s.start for s in sched.segments
+                      if s.order_key == o.key and s.op_seq == succ.seq), default=None)
+    if succ_start is not None:  # OS/dispatch successors may be zero-time milestones
+        assert succ_start >= frozen_end, "successor started before the frozen op finished"
