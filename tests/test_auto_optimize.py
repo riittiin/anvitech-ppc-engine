@@ -44,7 +44,6 @@ def _auto_env(monkeypatch):
 def test_done_starts_contest_when_book_changed(monkeypatch):
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
-    monkeypatch.setattr(m, "_is_optimize_day", lambda: True)
     starts = []
     monkeypatch.setattr(m, "_start_optimize",
                         lambda budget_evals, label, background=True, auto=False:
@@ -60,7 +59,6 @@ def test_done_starts_contest_when_book_changed(monkeypatch):
 def test_done_reachable_by_user_role(monkeypatch):
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
-    monkeypatch.setattr(m, "_is_optimize_day", lambda: True)
     starts = []
     monkeypatch.setattr(m, "_start_optimize",
                         lambda budget_evals, label, background=True, auto=False:
@@ -84,7 +82,6 @@ def test_done_requires_login(monkeypatch):
 def test_done_skips_and_notes_when_nothing_changed(monkeypatch):
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
-    monkeypatch.setattr(m, "_is_optimize_day", lambda: True)
     cfg = m._load_plan_config()
     book_store.save_plan_priority({}, {"saved_at": "t",
                                        "book_sig": m._current_book_sig(),
@@ -106,7 +103,6 @@ def test_done_skips_when_last_searched_matches_even_without_applied_plan(monkeyp
     redundant Done click must still be skipped, not re-run the full contest."""
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
-    monkeypatch.setattr(m, "_is_optimize_day", lambda: True)
     cfg = m._load_plan_config()
     book_store.save_last_searched({"book_sig": m._current_book_sig(),
                                    "inputs_sig": m._inputs_signature(cfg)})
@@ -125,7 +121,6 @@ def test_done_skips_when_last_searched_matches_even_without_applied_plan(monkeyp
 def test_done_disabled_by_internal_env(monkeypatch):
     monkeypatch.setenv("AUTO_OPTIMIZE", "0")
     m = _api(); _seed_book()
-    monkeypatch.setattr(m, "_is_optimize_day", lambda: True)
     starts = []
     monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
     c = TestClient(m.app)
@@ -139,7 +134,6 @@ def test_done_disabled_by_internal_env(monkeypatch):
 def test_done_no_op_when_contest_already_running(monkeypatch):
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
-    monkeypatch.setattr(m, "_is_optimize_day", lambda: True)
     with m._OPTIMIZE_LOCK:
         m._OPTIMIZE["state"] = "running"
     starts = []
@@ -197,12 +191,15 @@ def test_run_still_surfaces_the_auto_note(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Weekday gate (spec: re-optimize only on Thursday IST — the shop's off day)
+# No weekday gate (2026-07-29): the restricted optimize runs every day —
+# only "already running" / "nothing changed" skip it.
 # --------------------------------------------------------------------------- #
-def test_done_facts_only_on_non_thursday(monkeypatch):
+def test_done_runs_on_non_thursday_too(monkeypatch):
+    """The Thursday-only gate is removed: /optimize/done starts the
+    restricted re-optimization on ANY weekday when the book changed."""
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
-    monkeypatch.setattr(m, "_is_optimize_day", lambda: False)
+    monkeypatch.setattr(m, "_ist_today", lambda: date(2026, 7, 27))  # a Monday
     starts = []
     monkeypatch.setattr(m, "_start_optimize",
                         lambda budget_evals, label, background=True, auto=False:
@@ -212,15 +209,14 @@ def test_done_facts_only_on_non_thursday(monkeypatch):
     r = c.post("/optimize/done")
     assert r.status_code == 200
     body = r.json()
-    assert body["started"] is False
-    assert body["reason"] == "not_optimize_day"
-    assert starts == []            # no contest on a non-optimize day
+    assert body["reason"] != "not_optimize_day"
+    assert body["started"] is True
+    assert starts == [("auto", True)]
 
 
 def test_done_fires_optimize_on_thursday(monkeypatch):
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
-    monkeypatch.setattr(m, "_is_optimize_day", lambda: True)
     starts = []
     monkeypatch.setattr(m, "_start_optimize",
                         lambda budget_evals, label, background=True, auto=False:
@@ -232,18 +228,6 @@ def test_done_fires_optimize_on_thursday(monkeypatch):
     assert r.json()["started"] is True
     assert r.json()["reason"] == "started"
     assert starts == [("auto", True)]
-
-
-def test_is_optimize_day_reflects_configured_weekday(monkeypatch):
-    # Robust to _OPTIMIZE_WEEKDAY (Thursday=3 normally; may be temporarily flipped
-    # for owner testing): derive the on/off dates from the constant itself.
-    m = _api()
-    monday = date(2026, 7, 20)                          # weekday 0
-    on_day = monday + timedelta(days=m._OPTIMIZE_WEEKDAY)
-    monkeypatch.setattr(m, "_ist_today", lambda: on_day)
-    assert m._is_optimize_day() is True
-    monkeypatch.setattr(m, "_ist_today", lambda: on_day + timedelta(days=1))
-    assert m._is_optimize_day() is False
 
 
 # --------------------------------------------------------------------------- #
