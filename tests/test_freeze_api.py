@@ -103,3 +103,37 @@ def test_apply_persists_last_applied_schedule(admin_client_with_book):
     # Sanity: rows reference the two orders we seeded.
     all_refs = {ref for row in rows for ref in row["so_refs"]}
     assert SO1 in all_refs or SO2 in all_refs
+
+
+def _punch_partial(client):
+    """Punch a partial good quantity (less than the ordered qty) on the first
+    in-house machining step of SO1/ITEM_A ("CNC FIRST SIDE", 50 ordered) —
+    good=20 leaves remaining_qty=30 > 0, so the step is in-progress and
+    should be frozen. Operator "Alpha" is qualified for CNC1/CNC2 (see
+    tests/new_sample_workbook.py OPERATORS)."""
+    r = client.post("/actuals", json={
+        "so_no": SO1, "item_code": ITEM_A, "item_name": ITEM_A,
+        "entry_date": "2025-03-20", "qty_produced": 20, "qty_rejected": 0,
+        "shift": "1st shift", "process": "CNC FIRST SIDE", "operator": "Alpha",
+    })
+    assert r.status_code == 200, r.text
+    return r
+
+
+def test_done_computes_frozen_set_from_partial_punch(admin_client_with_book):
+    client = admin_client_with_book
+    # Apply an initial plan so a last-applied schedule exists.
+    r = client.post("/optimize", json={"budget": "quick"})
+    assert r.status_code == 200, r.text
+    _wait_optimize_done(client)
+    r = client.post("/optimize/apply")
+    assert r.status_code == 200, r.text
+
+    # Punch a PARTIAL quantity on an in-progress in-house machining step.
+    _punch_partial(client)
+
+    # Compute the frozen set (Done path helper) directly.
+    import api.main as m
+    frozen = m._compute_and_store_frozen()
+    assert frozen == book_store.load_frozen_ops()
+    assert any(r["remaining_qty"] > 0 and r["machine"] for r in frozen)

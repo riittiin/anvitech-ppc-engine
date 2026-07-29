@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from engine.config import Config, OVERLAP_SEQUENTIAL, OVERLAP_PERCENT
 from engine.loaders import load_all
+from engine import loaders
 from engine.models import PlanRun, Actual, Masters, fmt_date
 from engine.pipeline import run_forward, to_table, KEY_SEP
 from engine import optimizer
@@ -1108,6 +1109,24 @@ def _applied_plan_meta():
     return data.get("meta") or {}
 
 
+def _compute_and_store_frozen() -> list:
+    """Derive the frozen (in-progress) set from the last-applied plan + the punches and
+    persist it (anvitech:frozen_ops). Machine/operator from the applied plan; remaining
+    qty from the punches. Empty when nothing is in progress or no plan is on file yet."""
+    from collections import defaultdict
+    masters = _current_masters()
+    actuals = book_store.load_actuals()
+    active = book_store.load_active_orders()
+    so_lines = orderbook.active_so_lines(active, actuals, masters)
+    applied = book_store.load_last_applied_schedule()
+    good_by_step = defaultdict(float)
+    for a in actuals:
+        good_by_step[(a.so_no, a.item_code, loaders.normalize_process_name(a.process))] += a.good_qty()
+    rows = freeze.compute_frozen_set(applied, so_lines, dict(good_by_step), masters)
+    book_store.save_frozen_ops(rows)
+    return rows
+
+
 def _try_start_auto() -> bool:
     """Start an auto-applying re-optimization if it makes sense. Invoked by
     POST /optimize/done (the 'Done entering — update plan' button). Returns True
@@ -1147,6 +1166,7 @@ def _try_start_auto() -> bool:
     except Exception:
         return False
     try:
+        _compute_and_store_frozen()
         _start_optimize(_OPT_BUDGETS["deep"], "auto", background=True, auto=True)
         return True
     except HTTPException:
@@ -1193,10 +1213,12 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         orders = book_store.load_active_orders()
         absences = book_store.load_absences()
         operator_table = book_store.load_operator_table()
+        frozen = book_store.load_frozen_ops()
         try:
             setup = optimize_service.prepare_contest(orders, actuals, masters, config,
                                                      absences=absences,
-                                                     operator_table=operator_table)
+                                                     operator_table=operator_table,
+                                                     frozen=frozen)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -1215,7 +1237,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             payload = optimize_service.build_payload(
                 orders, actuals, book_store.load_masters_bytes(), config,
                 seed=_OPT_SEED, candidates=_cands, budget_per_candidate=_bpc,
-                absences=absences, operator_table=operator_table)
+                absences=absences, operator_table=operator_table, frozen=frozen)
             _knob, _ = optimizer.knob_for(setup.search_config)
             denom = _bpc * len(optimizer.sweep_contenders(
                 getattr(setup.search_config, _knob), _cands))
