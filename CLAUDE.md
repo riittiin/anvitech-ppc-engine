@@ -57,6 +57,36 @@
 >   when week-1 work is already running): `_start_optimize` recomputes the frozen set
 >   itself, inside the lock, right before every run — manual and auto alike. It is
 >   naturally unrestricted only when nothing is in progress yet (a fresh first import).
+> - **Committed-promise cap — soft +3-day ceiling (2026-07-29,
+>   `docs/superpowers/specs/2026-07-29-committed-date-stability-design.md`) — a
+>   committed order's completion may pull EARLIER by any amount on re-optimize but
+>   must not slip LATER than `promised_date + committed_promise_slack_days`
+>   (Config knob, default 3 days).** Reuses the proven 2026-07-24 worst-order-ceiling
+>   pattern, not the 2026-07-13/14 hard two-pass/veto that collapsed the feasible
+>   region (see the Phase-2R note below). **(1) Soft, in-search:** a convex penalty
+>   `COMMITTED_PROMISE_WEIGHT (= 5000.0, Test8-measured) × committed_promise_breach`
+>   is added to the score in **both** `engine/optimizer.score` and the
+>   `ppc_engine/objective/objective.py` mirror (`_committed_promise_breach`,
+>   weighted by `PlanConfig.committed_promise_weight`) — the search keeps committed
+>   orders inside the cap and delays **Open** orders instead, no reservation, no
+>   separate pass. **(2) Hard, at apply:** `api/main._auto_apply_result` gates
+>   auto-apply on `promise_ok = best.max_committed_slip <= inc.max_committed_slip`
+>   (no-regression), alongside the existing `worst_ok`. **Not wired to the manual
+>   `POST /optimize/apply` path** — the design intended the same gate there, but the
+>   admin's Apply button today applies unconditionally (verified in code; flag if
+>   this matters). New fields: `engine/optimizer.plan_metrics`'s
+>   `committed_promise_breach`/`max_committed_slip`; ppc `Order.promise_date`,
+>   `PlanMetrics.promise_slip_by_order`, `PlanConfig.committed_promise_slack_days`/
+>   `committed_promise_weight`; `rule1_consolidate` populates each consolidated
+>   batch's tightest committed promise. **This is a deliberate PARTIAL reversal of
+>   the 2026-07-16 "lanes are status labels, no scheduling effect" pivot below:
+>   committed now has a real (soft) scheduling effect; open remains a pure label.**
+>   **Urgent lane removed entirely** (owner decision, same day) — `/orders/urgent`
+>   deleted, Orders tab shows Committed + Open only; a stored
+>   `commitment == "urgent"` row migrates to `"committed"` on load
+>   (`Order.from_json`). Measured on Test8 (~half the book committed): weight 5000
+>   roughly halved committed-past-+3 orders (8→4) and cut the worst slip 16d→9d, at
+>   ~2% more total late-days.
 > - **Deploy:** repo `riittiin/anvitech-ppc-engine` (branch `main`) → Render service `anvitech-ppc`
 >   (https://anvitech-ppc.onrender.com). Env: `DEFAULT_SCHEDULER=new`, `GITHUB_DISPATCH_TOKEN`,
 >   `OPTIMIZE_WORKER_SECRET`, `MONGODB_URI`, `APP_USERNAME`/`APP_PASSWORD`. **Render auto-deploy is
@@ -292,7 +322,10 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (idealized 44-45 d, greedy replay loses it all). `OVERLAP_CANDIDATES` is now
   (70, 80, 85, 88) and `CLOUD_OVERLAP_CANDIDATES` (60, 70, 80, 85, 88, 95) — 85/88
   dominate under this scheduler; best plan settings: overlap 88 + consolidation
-  window 1 day (UI-settable) + split/metric unchanged.
+  window 1 day (UI-settable) + split/metric unchanged. Also
+  `committed_promise_slack_days` (default 3, validated ≥0) — the committed-promise
+  cap's slack in days (2026-07-29, see the banner bullet); folded into
+  `_inputs_signature` (it's plan-shaping, like the other knobs above).
 - `engine/flow_scheduler.py` — **the flow scheduler (2026-07-19,
   `docs/superpowers/specs/2026-07-19-flow-scheduler-design.md`)**: the productized
   from-scratch rebuild (owner mandate: only the three basics are rules). Same
@@ -310,14 +343,21 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   crew capacity floor 37.2d. Tests: `tests/test_flow_scheduler.py` (crafted
   piece-flow/no-holding/feedback/absence/setup cases + independent validators).
 - `engine/models.py` — dataclasses; each exposes `as_row()` for the trace tables.
-  `Order` and `SOLine` carry `commitment` (open|committed|urgent), `promised_date`,
-  and `committed_at`. **Informational only** (owner pivot 2026-07-16 — see the
-  self-tuning-plan spec's SUPERSEDED block): the lane is a status label, and
-  `promised_date` is a display-only snapshot (Orders tab shows Promised vs
-  Current-expected with a red drift flag when it slips) — neither constrains
-  the scheduler or Optimize. Historical note: an earlier design (2026-07-13/14)
-  had these fields drive a two-pass scheduler + a hard promise veto; that was
-  measured ~30% worse on both real books and discarded. `Actual` gains an
+  `Order` and `SOLine` carry `commitment` (**open|committed** — the `urgent` lane was
+  removed 2026-07-29; `Order.from_json` migrates any stored `"urgent"` row to
+  `"committed"` on load, keeping its `promised_date`), `promised_date`, and
+  `committed_at`. `promised_date` is a display-only snapshot either way (Orders tab
+  shows Promised vs Current-expected with a red drift flag when it slips). **Open is
+  still informational only** (owner pivot 2026-07-16 — see the self-tuning-plan
+  spec's SUPERSEDED block): a pure status label, no scheduler/Optimize effect.
+  **Committed is no longer purely informational** (2026-07-29 partial reversal, see
+  the banner's committed-promise-cap bullet): it now carries a soft ceiling
+  (`promised_date + committed_promise_slack_days`) enforced in the optimizer's score
+  + an apply-time no-regression backstop — see that bullet for the full mechanism.
+  Historical note: an earlier design (2026-07-13/14) had these fields drive a
+  two-pass scheduler + a hard promise veto; that was measured ~30% worse on both
+  real books and discarded (the 2026-07-29 mechanism is soft, not that veto).
+  `Actual` gains an
   `operator` field (2026-07-18, JSON round-trip) — **required at capture**:
   `POST /actuals` 400s on a blank operator or one not in the current operator
   master; legacy rows predating this feature default to `""` and are grouped
@@ -355,10 +395,13 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   item_code)`; the good-by-order / orders-with-actuals / per-process maps are all
   keyed by that pair. The DISPATCH gate (`finished_gate`) is matched via `is_dispatch`
   (tolerates the `DISAPTCH` misspelling). `split_committed_open` (still present, still
-  tested) separates protected (Committed + Urgent) from Open orders — **kept as a
-  standalone helper but unused by planning**: `api._plan` and every contest are
-  single-pass over the whole book, so lanes carry `commitment`/`promised_date` onto
-  `SOLine` for display only, not for grouping. **Feedback precedence guard (2026-07-25,
+  tested) separates Committed from Open orders (the `Urgent` lane it used to also pull
+  out was removed 2026-07-29) — **kept as a standalone helper but unused by planning**:
+  `api._plan` and every contest are single-pass over the whole book, so lanes carry
+  `commitment`/`promised_date` onto `SOLine` for display **and** (2026-07-29, committed
+  only) as the input to the promise-cap penalty in `optimizer.plan_metrics` — see the
+  banner's committed-promise-cap bullet; grouping/reservation is still never done here.
+  **Feedback precedence guard (2026-07-25,
   `docs/superpowers/specs/2026-07-25-feedback-precedence-guardrail-design.md`):**
   `precedence_cap_error` / `rollback_cap_error` (pure) enforce piece-flow — a process's
   cumulative recorded qty (`produced`) can't exceed the good qty that cleared the
@@ -626,8 +669,15 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   again — every lane sorts/groups the same way). A regression pins the pivot: a committed
   +promised book plans **byte-identical** to the same book all-open
   (`tests/test_replay_single_pass.py`, `tests/test_optimize_service.py::
-  test_lanes_have_zero_scheduling_effect`). Design history: the promise-recovery /
+  test_lanes_have_zero_scheduling_effect` — both now apply only to a book with
+  **nothing committed**; see the next note). Design history: the promise-recovery /
   committed-resequencing design (2026-07-14, spec pruned as superseded).
+  **Partially reversed 2026-07-29** (see the banner's committed-promise-cap bullet):
+  committed orders regained a scheduling effect, but a deliberately **soft** one — a
+  convex penalty in the search plus a no-regression backstop at apply, never the hard
+  veto/reserved-capacity/two-pass machinery this bullet describes as discarded. That
+  is precisely why it doesn't repeat the ~30% regression measured here. Open orders
+  are untouched by the reversal — still a pure label.
 - `engine/gantt.py` — `build_gantt`: Rule 6 schedule → worker-facing Gantt view-model
   (per-order rows, time-positioned bars by machine, **operator** on each bar, split
   halves as separate bars, Pending/Running label).
@@ -735,13 +785,16 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   non-empty `operator` that exists in the current operator master — 400
   `operator is required` (blank) / `unknown operator '<name>'` (not on file);
   otherwise unchanged, either role. **Commitment endpoints (admin, role-gated, non-destructive,
-  no password re-auth):** `/orders/commit`, `/orders/urgent`, `/orders/uncommit` — set
-  status + snapshot an informational `promised_date` (Committed = current expected
-  completion from a fresh plan; Urgent = the SO delivery date). No trigger call —
-  commit/urgent/uncommit don't call `_try_start_auto` directly (see the
-  feedback-triggered optimize bullet above; only the Done button does). They no
-  longer gate on a push-preview/warning (the `_preview_urgent_pushes` confirm-modal
-  was removed with the rest of Phase 2R).
+  no password re-auth):** `/orders/commit`, `/orders/uncommit` — set status +
+  snapshot `promised_date` (= current expected completion from a fresh plan).
+  **`/orders/urgent` is removed (2026-07-29)** — the Urgent lane is gone; a stored
+  `commitment == "urgent"` row migrates to `"committed"` on load (`Order.from_json`).
+  `promised_date` is no longer purely informational for Committed — see the banner's
+  committed-promise-cap bullet (soft ceiling at `promised_date +
+  committed_promise_slack_days`). No trigger call — commit/uncommit don't call
+  `_try_start_auto` directly (see the feedback-triggered optimize bullet above; only
+  the Done button does). They no longer gate on a push-preview/warning (the
+  `_preview_urgent_pushes` confirm-modal was removed with the rest of Phase 2R).
   **`_plan` is a single pass, always** — every active line (all lanes) goes through
   one `run_forward` call; operator absences are the only `reserved=` (see the Rule 6
   bullet above); a saved Optimize/auto-optimize result replays via `priority_rank=`
@@ -779,8 +832,9 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   month outside 1-12 or year outside 2000-2100). Pure reporting — no
   plan/schedule effect.
 - `web/` — `login.html` (self-contained login page), `📋 Orders` tab (order book +
-  delete, with a **password-confirm modal**, the commit/urgent/uncommit lane
-  controls, and the auto-note line), the per-rule tabs (Rule 7 = Capture Actuals,
+  delete, with a **password-confirm modal**, the commit/uncommit lane controls
+  (the Urgent button/badge was removed 2026-07-29 — two lanes only), and the
+  auto-note line), the per-rule tabs (Rule 7 = Capture Actuals,
   with an **SO No dropdown**, a **required Operator dropdown** (2026-07-18, fed by
   `GET /operators`, same list either role sees on Settings — the form blocks
   submit and focuses the field when it's blank), per-entry **↺ Rollback** button,

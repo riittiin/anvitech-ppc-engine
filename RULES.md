@@ -440,38 +440,88 @@ schedule — the feedback loop is driven **purely by quantity produced/rejected 
 process** (the director's spec). A power cut or over-long setup is logged for
 analysis but does not move the plan.
 
-### Order commitment (lanes) *(feature — informational only, owner pivot 2026-07-16)*
+### Order commitment (lanes) *(feature — TWO lanes; committed is soft-protected, 2026-07-29)*
 
 Every order occupies exactly one **commitment lane**, shown as a badge on the Orders tab:
-- **Open** (default) — new or not yet promised.
+- **Open** (default) — new or not yet promised. A pure status label — no scheduling
+  effect at all.
 - **Committed** — the admin has told a client this order is promised; snapshots its
-  **current expected completion date** as `promised_date`.
-- **Urgent** — driven by its own SO delivery date, which becomes `promised_date`.
+  **current expected completion date** as `promised_date`. Committed orders now DO
+  have a scheduling effect: the **promise cap** below.
 
-**Lanes are pure status labels — they have no effect on scheduling.** Every active
-order, in every lane, is planned together as ONE pool by the standard Rules 1–6 (least
-slack, non-delay allocation — see Rule 3/Rule 6 above); Committed/Urgent orders do not
-get reserved capacity, a separate pass, or priority over Open orders. `promised_date`
-is kept purely for **display**: the Orders tab shows Promised vs Current-expected side
-by side, with a **red drift flag** when the plan's current expected date has slipped
-past the promise — so the owner knows which customers to call. Nothing else reads it.
-The admin may **Commit**, **mark Urgent**, or **Uncommit** (returns to Open) an order at
-any time; none of these actions change the schedule.
+**Urgent is removed (2026-07-29).** It was the more-protected lane (its `promised_date`
+came from the SO delivery date instead of the current plan); the button, badge, and
+`POST /orders/urgent` endpoint are gone. A stored order with `commitment == "urgent"`
+migrates to `"committed"` on load (its `promised_date` is kept unchanged) — committed
+is the safe mapping since Urgent was the more-protected of the two. The Orders tab now
+shows **Committed** and **Open** only.
 
-**A committed/promised book plans byte-identical to the same book all-open** — this is
+`promised_date` is kept for **display** on Committed orders: the Orders tab shows
+Promised vs Current-expected side by side, with a **red drift flag** when the plan's
+current expected date has slipped past promise + slack — so the owner knows which
+customers to call. The admin may **Commit** or **Uncommit** (returns to Open) an order
+at any time.
+
+**An all-open book (nothing committed) plans byte-identical to before this feature** —
 a regression, not an aspiration (`tests/test_replay_single_pass.py`).
 
-> **Historical note (superseded 2026-07-16):** an earlier design (2026-07-13/14) made
-> lanes protective — a two-pass scheduler ran Committed+Urgent orders first and reserved
-> their machine/operator time so Open orders could never push a promise late, plus an
-> automatic "promise recovery" re-sequencer for disrupted committed orders (below). A
-> follow-on design added a hard promise **veto** (any candidate plan breaking a promise
-> scored infinite). Measured on both real books, the veto approach scored **~30% worse**
-> than the simple two-pass shape — zero-slack promises collapse the feasible search
-> region. The owner then redefined the model to the informational-only rule above; all
-> of that machinery (two-pass, the veto, promise recovery, the urgent push-warning
-> preview) was removed. (The full account lived in the self-tuning-plan design's
-> SUPERSEDED Phase-2 block; that spec has since been pruned as superseded.)
+> **Historical note (superseded 2026-07-16, then partially reversed 2026-07-29):** an
+> earlier design (2026-07-13/14) made lanes protective — a two-pass scheduler ran
+> Committed+Urgent orders first and reserved their machine/operator time so Open orders
+> could never push a promise late, plus an automatic "promise recovery" re-sequencer for
+> disrupted committed orders. A follow-on design added a hard promise **veto** (any
+> candidate plan breaking a promise scored infinite). Measured on both real books, the
+> veto approach scored **~30% worse** than the simple two-pass shape — zero-slack
+> promises collapse the feasible search region. The owner then redefined the model to a
+> purely informational one (2026-07-16): lanes were pure labels, no scheduling effect
+> at all, and all of that machinery (two-pass, the veto, promise recovery, the urgent
+> push-warning preview) was removed. **That informational-only model is itself now
+> partially reversed** by the committed-promise cap below: committed orders regained a
+> real, but *soft* (convex-penalty + no-regression backstop, never a hard veto or
+> reserved capacity), scheduling effect — see the cap's own note on why this doesn't
+> repeat the July collapse. Open orders remain exactly as informational as before.
+
+### Committed-promise cap — soft +3-day ceiling *(feature, 2026-07-29,
+`docs/superpowers/specs/2026-07-29-committed-date-stability-design.md`)*
+
+The owner's rule: on a rolling order book, re-optimizing to fit in new (Open) orders
+must never push an already-**committed** order's expected completion more than a
+few days past what the customer was promised. A committed order's expected date **may
+move earlier by any amount**; it must **not slip later** than `promised_date +
+committed_promise_slack_days` (a Config knob, default **3 days**). Open orders absorb
+the slack instead — they wait, not the customer's promise.
+
+This reuses the proven **2026-07-24 worst-order-ceiling** pattern rather than the
+2026-07-13/14 hard two-pass/veto shape that collapsed the feasible region (~30% worse,
+see the historical note above) — soft in the search, hard only at the moment a plan is
+adopted:
+
+- **Soft, in-search.** A convex penalty term — `COMMITTED_PROMISE_WEIGHT ×
+  committed_promise_breach`, where `committed_promise_breach` = Σ over committed
+  orders of `max(0, expected_completion_days − promise_ceiling_days)²` — is added to
+  the score in **both** search engines (`engine/optimizer.score` and the `ppc_engine`
+  objective mirror). High enough (measured on Test8) that the optimizer keeps
+  committed orders inside +3 whenever feasible by pushing **Open** orders later
+  instead — "committed protected, open waits" emerges from the penalty, with no
+  reservation and no separate pass. Open orders contribute nothing to the breach.
+- **Hard, at apply.** A no-regression backstop mirrors the existing worst-order
+  backstop: an automatic re-optimization is applied only if it does not increase
+  `max_committed_slip` (the single worst committed order's slip past its own promise)
+  versus the plan it would replace — so re-optimizing can never make an
+  already-promised delivery date worse.
+
+**Physical slip is flagged, not hidden.** If a committed order is already heading past
+promise+3 for a real reason (slow floor, breakdown — not re-optimization), the cap
+cannot undo that: the convex penalty naturally *prioritizes* it (minimizing the
+breach), and it is surfaced red ("past promise, +N d") on the Orders tab. The cap
+governs the optimizer's *choices* among feasible plans, not physical reality.
+
+- **All-open book:** `committed_promise_breach = 0` and `max_committed_slip = 0` for
+  every plan — byte-identical to a book with nothing committed.
+- **Measured cost (Test8, ~half the book committed):** the weight roughly halved the
+  number of committed orders sitting past +3 (8→4 orders) and cut the worst slip from
+  16 to 9 days, at a cost of ~2% more total late-days overall — the accepted price of
+  the promise (decision #7 in the design spec).
 
 ### Scheduled optimize — the job order re-optimizes itself, twice a week *(feature, 2026-07-18, supersedes the event-triggered "self-tuning plan" of 2026-07-16 — superseded in turn by the daily-cadence "Frozen zone" rule below)*
 
@@ -783,3 +833,4 @@ later.
 | Split alternative machines in parallel | on (UI) | Rule 6 |
 | Expedite window (least-slack tie-break) | 0 min = off (engine) | Rule 6 |
 | Balance operator workload (schedule-neutral) | off (engine) | Rule 6 |
+| Committed-promise slack (`committed_promise_slack_days`) | 3 days | Order commitment |
