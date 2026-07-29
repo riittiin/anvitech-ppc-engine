@@ -58,3 +58,49 @@ def test_single_frozen_op_pinned_to_machine_operator_no_setup(ctx):
     # No setup: total minutes == 5 * cycle (machining setup would add setup_min).
     total_min = sum((s.end - s.start).total_seconds() for s in segs) / 60.0
     assert abs(total_min - 5 * mach_op.cycle_min) < 1e-6, "frozen op charged setup time"
+
+
+def test_frozen_op_hands_off_at_shift_boundary(ctx):
+    """A frozen op long enough to span 19:00 must hand off from its planned FIRST-shift
+    operator to a SECOND-shift-qualified substitute — neither is_operator_available nor
+    free_during know about shifts, so without an explicit shift check the day-shift
+    operator would wrongly keep running the night window (Critical bug, fix round 1).
+
+    Freezes on order[1]'s (Item B) machining op (CNC SECOND SIDE) rather than order[0]'s
+    (Item A): Item A's very next op (VMC FIRST SIDE) draws from the exact same
+    operator/machine pool as its CNC step (both qualify only Alpha/Bravo across
+    CNC1/CNC2/VMC1), so an artificially huge frozen quantity there would immediately
+    chain the substitute onto a SECOND machine that same shift — a real, separately
+    tested short-job exception (tests/test_short_job_staffing.py), not this bug. Item
+    B's next op (WASHING) is a different role/pool (helper Charlie on MW1), so this
+    scenario isolates just the shift-handoff behaviour this fix is about.
+    """
+    orders, seq, nm = ctx
+    cfg = _plan_config(_CONF)
+    o1 = orders[1]
+    routing = nm.routings[o1.item_code]
+    mach_op = next(op for op in routing.operations if op.machine_options and op.cycle_min > 0)
+    mid = mach_op.machine_options[0]
+    # Enough pieces to run ~13 hours — First shift is only 08:00-19:00 (11h), so this
+    # must cross the 19:00 boundary into Second shift.
+    qty = int(780 / mach_op.cycle_min) + 1
+    fo = FrozenOp(order_key=o1.key, op_seq=mach_op.seq, machine_id=mid,
+                  operator="Alpha", remaining_qty=qty, prev_start=cfg.plan_start)
+    sched = decode(orders, seq, nm, cfg, frozen=[fo])
+    segs = _entry(sched.segments, o1.key, mach_op.seq)
+    assert len(segs) >= 2, "expected the frozen op to span the shift boundary"
+    assert all(s.machine_id == mid for s in segs), "frozen op left its pinned machine"
+
+    first_shift = [s for s in segs if s.start.hour < 19]
+    night_shift = [s for s in segs if s.start.hour >= 19 or s.start.hour < 8]
+    assert first_shift, "expected a First-shift segment before the handoff"
+    assert all(s.operator == "Alpha" for s in first_shift), \
+        "First-shift segment(s) should run under the planned operator Alpha"
+    assert night_shift, "expected a Second-shift segment after the 19:00 handoff"
+    assert all(s.operator != "Alpha" for s in night_shift), \
+        "night-shift segment kept the day-shift operator — no handoff happened"
+    assert all(s.operator == "Bravo" for s in night_shift), \
+        "expected the Second-shift-qualified substitute (Bravo) to cover the night segment"
+
+    from tests.test_new_engine import _assert_clean
+    _assert_clean(sched.segments)

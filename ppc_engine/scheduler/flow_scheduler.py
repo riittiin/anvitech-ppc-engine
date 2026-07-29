@@ -31,7 +31,7 @@ from ppc_engine.domain.routing import Operation, OperationKind
 from ppc_engine.scheduler.duration import operation_duration_min
 from ppc_engine.scheduler.schedule import Schedule, Segment
 from ppc_engine.scheduler.staffing import StaffingBoard, build_machine_pools
-from ppc_engine.worktime import iter_windows
+from ppc_engine.worktime import effective_shift, iter_windows
 
 # Tiny tolerance so floating-point minute arithmetic doesn't loop forever.
 _EPS_MIN = 1e-9
@@ -395,6 +395,13 @@ def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, planned_operator,
     segments: list[Segment] = []
     assignments: list[tuple] = []
     first_start = None
+    # Looked up once (not per window): the planned operator's Operator record, so we
+    # can check which SHIFT they're actually rostered on for a given day — neither
+    # `is_operator_available` (shop-open/leave only) nor `free_during` (busy-interval
+    # only) know about shifts, so without this a frozen op spanning the 19:00
+    # boundary would keep its day-shift operator on the night window.
+    operators_by_name = {o.name: o for o in masters.operators}
+    planned_op_obj = operators_by_name.get(planned_operator) if planned_operator else None
     for win in iter_windows(machine, earliest, masters.calendar, config):
         if remaining <= _EPS_MIN:
             break
@@ -406,7 +413,8 @@ def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, planned_operator,
         take = min(avail, remaining)
         seg_end = seg_start + timedelta(minutes=take)
         name = None
-        if (planned_operator
+        if (planned_op_obj
+                and effective_shift(planned_op_obj, win.shift_date, config) == win.shift
                 and masters.calendar.is_operator_available(planned_operator, win.shift_date)
                 and staffing.free_during(planned_operator, seg_start, seg_end)):
             name = planned_operator
