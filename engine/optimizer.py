@@ -183,7 +183,7 @@ def ranks_for(seq) -> dict:
 
 
 def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
-             seed=42, on_progress=None, should_cancel=None) -> OptimizeResult:
+             seed=42, on_progress=None, should_cancel=None, frozen=None) -> OptimizeResult:
     """Search for a better batch sequence for THIS book (rolling: call it on
     whatever the order book holds today; the result is disposable and re-computable).
 
@@ -201,7 +201,7 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
         from engine import new_engine
         return new_engine.optimize_sequence(
             so_lines, config, masters, reserved=reserved, budget_evals=budget_evals,
-            seed=seed, on_progress=on_progress, should_cancel=should_cancel)
+            seed=seed, on_progress=on_progress, should_cancel=should_cancel, frozen=frozen)
     config.validate()
 
     batches = rule1_consolidate.run(list(so_lines), config=config, masters=masters)
@@ -392,7 +392,7 @@ class SweepResult:
 
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None,
-                   candidates=OVERLAP_CANDIDATES, base_reserved=None) -> SweepResult:
+                   candidates=OVERLAP_CANDIDATES, base_reserved=None, frozen=None) -> SweepResult:
     """Search batch sequence AND overlap %. ``budget_evals`` is the TOTAL"""
     # The new engine owns its own search + objective; delegate there when it is the
     # selected scheduler (see engine/new_engine.py). The old sweep below runs only for the
@@ -401,7 +401,7 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
         from engine import new_engine
         return new_engine.sweep_optimize(
             so_lines, config, masters, budget_evals=budget_evals, seed=seed,
-            on_progress=on_progress, should_cancel=should_cancel, base_reserved=base_reserved)
+            on_progress=on_progress, should_cancel=should_cancel, base_reserved=base_reserved, frozen=frozen)
     return _sweep_optimize_classic(
         so_lines, config, masters, budget_evals=budget_evals, seed=seed,
         on_progress=on_progress, should_cancel=should_cancel,
