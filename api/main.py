@@ -839,7 +839,9 @@ def _plan(config: Config):
         # can leave the live plan worse than the number the Optimize panel showed.
         # Surface both (+ a `diverged` flag) so that gap is never silent again.
         _target = (prio.get("meta") or {}).get("best") or {}
-        _ach = optimizer.plan_metrics(plan_run.schedule, so_lines, config.plan_start_date)
+        _ach = optimizer.plan_metrics(
+            plan_run.schedule, so_lines, config.plan_start_date,
+            promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
 
         def _num(d, k):
             v = d.get(k)
@@ -1281,9 +1283,10 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             real_baseline = _OPTIMIZE.get("baseline")
             if real_baseline is None:
                 base_sched, base_lines = _all_lines_schedule(setup, setup.masters, None)
-                real_baseline = optimizer.plan_metrics(base_sched, base_lines,
-                                                       setup.config.plan_start_date,
-                                                       with_distribution=True)
+                real_baseline = optimizer.plan_metrics(
+                    base_sched, base_lines, setup.config.plan_start_date,
+                    with_distribution=True,
+                    promise_slack_days=getattr(setup.config, "committed_promise_slack_days", 3))
 
             # One pool: search ALL active lines together (lanes are status labels
             # with no scheduling effect). Only operator absences reserve time.
@@ -1307,9 +1310,10 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             # Baseline is computed HERE (one plan, seconds) so the before/after
             # is ready whatever the worker does.
             base_sched, base_lines = _all_lines_schedule(setup, setup.masters, None)
-            real_baseline = optimizer.plan_metrics(base_sched, base_lines,
-                                                   setup.config.plan_start_date,
-                                                   with_distribution=True)
+            real_baseline = optimizer.plan_metrics(
+                base_sched, base_lines, setup.config.plan_start_date,
+                with_distribution=True,
+                promise_slack_days=getattr(setup.config, "committed_promise_slack_days", 3))
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE["baseline"] = real_baseline
 
@@ -1554,7 +1558,8 @@ def _metrics_for_ranks(ranks, overlap=None, *, with_distribution=True):
         return optimizer.plan_metrics(
             schedule, all_lines, setup.config.plan_start_date,
             ceiling_days=getattr(config, "worst_ceiling_days", None),
-            with_distribution=with_distribution)
+            with_distribution=with_distribution,
+            promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
     except Exception:  # noqa: BLE001 — a metrics recompute must never crash finalize
         return None
 
@@ -1575,7 +1580,9 @@ def _incumbent_metrics():
     prio = book_store.load_plan_priority()
     ranks = (prio or {}).get("ranks") or None
     schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks)
-    return optimizer.plan_metrics(schedule, all_lines, setup.config.plan_start_date)
+    return optimizer.plan_metrics(
+        schedule, all_lines, setup.config.plan_start_date,
+        promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
 
 
 def _auto_apply_result():
@@ -1599,7 +1606,8 @@ def _auto_apply_result():
         return
     stamp = _ist_now().strftime("%H:%M")
     worst_ok = best.get("max_late_days", 0) <= inc.get("max_late_days", 0)
-    if optimizer.score(best) < optimizer.score(inc) and worst_ok:
+    promise_ok = best.get("max_committed_slip", 0) <= inc.get("max_committed_slip", 0)
+    if optimizer.score(best) < optimizer.score(inc) and worst_ok and promise_ok:
         try:
             move = _movement_note(res.get("ranks") or None)
         except Exception:  # noqa: BLE001 - the note is advisory; never block an apply
@@ -1615,6 +1623,11 @@ def _auto_apply_result():
         regress = best.get("max_late_days", 0) - inc.get("max_late_days", 0)
         _auto_note_write(f"Checked {stamp}: kept the current plan to protect the worst "
                          f"order — the best alternative would push it {regress}d later.")
+    elif not promise_ok:
+        regress = best.get("max_committed_slip", 0) - inc.get("max_committed_slip", 0)
+        _auto_note_write(f"Checked {stamp}: kept the current plan to protect a committed "
+                         f"promise — the best alternative would slip a committed order "
+                         f"{regress}d more.")
     else:
         _auto_note_write(f"Checked {stamp}: current plan still best "
                          f"({inc['total_late_days']} late-days).")

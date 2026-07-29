@@ -436,7 +436,8 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     winner_sched = run(best_batches, config=config, masters=masters, reserved=reserved, frozen=frozen)
     winner_metrics = plan_metrics(winner_sched, so_lines, plan_start,
                                   ceiling_days=getattr(config, "worst_ceiling_days", None),
-                                  with_distribution=True)
+                                  with_distribution=True,
+                                  promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
     return OptimizeResult(ranks=ranks, best=winner_metrics, evals=res.evaluations,
                           improved=True, cancelled=False)
 
@@ -483,7 +484,8 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     winner_metrics = plan_metrics(
         _entries_from_schedule(decode(orders, tr.best_sequence, new_masters, won_cfg, frozen=ppc_frozen), batch_by_key),
         so_lines, plan_start, ceiling_days=getattr(config, "worst_ceiling_days", None),
-        with_distribution=True)
+        with_distribution=True,
+        promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
     return ranks, overlap_pct, winner_metrics, tr.evaluations
 
 
