@@ -1,5 +1,7 @@
 from datetime import date, datetime
+import pytest
 from engine import optimizer
+from engine.config import Config
 from engine.models import SOLine, ScheduleEntry
 
 def _line(so, item, due, commitment="open", promised=None, qty=10):
@@ -39,3 +41,20 @@ def test_no_committed_is_byte_identical():
     assert withp["committed_promise_breach"] == 0.0
     assert withp["max_committed_slip"] == 0
     assert optimizer.score(base) == optimizer.score(withp)
+
+def test_config_slack_default_and_validation():
+    """committed_promise_slack_days has default 3 and validates >= 0."""
+    assert Config().committed_promise_slack_days == 3
+    with pytest.raises(Exception):
+        Config(committed_promise_slack_days=-1).validate()
+
+def test_config_slack_roundtrip():
+    """to_dict/from_dict preserve committed_promise_slack_days."""
+    cfg = Config(committed_promise_slack_days=5)
+    roundtrip = Config.from_dict(cfg.to_dict())
+    assert roundtrip.committed_promise_slack_days == 5
+
+def test_config_slack_missing_defaults():
+    """from_dict with missing committed_promise_slack_days defaults to 3."""
+    cfg = Config.from_dict({})
+    assert cfg.committed_promise_slack_days == 3

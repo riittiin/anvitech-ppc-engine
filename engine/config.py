@@ -123,6 +123,12 @@ class Config:
     # None = no ceiling (byte-identical). Excluded from _inputs_signature.
     worst_ceiling_days: float | None = None
 
+    # Committed promise slack (default 3 days). When scoring committed orders during
+    # the optimizer's search, add this many days to the promised delivery date as a
+    # buffer so the plan protects commitments with headroom, not just at the edge.
+    # Included in _inputs_signature (a plan-shaping knob).
+    committed_promise_slack_days: int = 3
+
     # When True, the full operator/shift model applies in Rule 6:
     #   * each machine uses a per-availability working window (≥threshold → two
     #     shifts 08:00-05:00; else single-shift manual 09:00-18:00), AND
@@ -177,6 +183,8 @@ class Config:
             errs.append("expedite_window_min must be >= 0")
         if self.worst_ceiling_days is not None and self.worst_ceiling_days < 0:
             errs.append("worst_ceiling_days must be >= 0 or None")
+        if self.committed_promise_slack_days < 0:
+            errs.append("committed_promise_slack_days must be >= 0")
         if errs:
             raise ValueError("Invalid config: " + "; ".join(errs))
 
