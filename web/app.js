@@ -392,8 +392,8 @@ function renderAutoNote() {
 
 // ---- Status strip (both roles) ----
 // One calm line, entirely from data already fetched: order/late counts, the plan
-// basis, next scheduled optimization, next shift rotation (admin only), the latest
-// auto-note (collapsible), and a colored warning chip for staleness / unstaffed hrs.
+// basis, next shift rotation (admin only), the latest auto-note (collapsible), and
+// a colored warning chip for staleness / unstaffed hrs.
 function countLateOrders() {
   if (!currentOrders || !currentOrders.rows || !currentExpected) return 0;
   const cols = currentOrders.columns;
@@ -411,18 +411,6 @@ function countLateOrders() {
   return late;
 }
 
-// The shop's weekly re-optimization runs on its off day (Thursday, IST). Compute
-// the next occurrence client-side (browser-local date — a display approximation,
-// not the authoritative server clock) so the status strip shows a concrete date
-// instead of a bare day name.
-function nextOptimizeDayLabel() {
-  const d = new Date();
-  const diff = (4 - d.getDay() + 7) % 7;   // 0=Sun … 4=Thu … 6=Sat; 0 if today is Thursday
-  const next = new Date(d);
-  next.setDate(d.getDate() + diff);
-  const p = (n) => String(n).padStart(2, "0");
-  return `${p(next.getDate())}-${p(next.getMonth() + 1)}-${next.getFullYear()}`;
-}
 
 function renderStatusStrip() {
   const el = $("status-strip");
@@ -440,8 +428,6 @@ function renderStatusStrip() {
   segs.push(isAuto
     ? `<span class="ss-seg">Plan follows today (${escapeHtml(startDisp)})</span>`
     : `<span class="ss-seg">Plan starts ${escapeHtml(isoToDdmmyyyy(currentConfig.plan_start_date))}</span>`);
-
-  segs.push(`<span class="ss-seg">Next re-optimization: Thu ${escapeHtml(nextOptimizeDayLabel())}</span>`);
   if (currentRole === "admin" && nextRotation) {
     segs.push(`<span class="ss-seg">Next rotation: ${escapeHtml(isoToDdmmyyyy(nextRotation))}</span>`);
   }
@@ -1392,8 +1378,7 @@ function actualsFormHtml() {
     <p class="explainer">Save records each entry instantly — it does <b>not</b> rebuild the
       schedule, so you can punch quickly without waiting. Click <b>Done entering: update
       plan</b> once you're finished for the day to refresh the plan from everything you
-      entered — on the scheduled re-optimization day it also re-checks the job order for a
-      better sequence.</p>`;
+      entered — it also re-optimizes the job order for a better sequence, keeping any work already in progress in place.</p>`;
 }
 
 // Populate the Capture Actuals Operator dropdown from the app-owned operator
