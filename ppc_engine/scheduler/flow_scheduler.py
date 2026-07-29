@@ -99,6 +99,11 @@ def decode(
     segments: list[Segment] = []
     completion: dict[tuple[str, str], datetime] = {}
 
+    if frozen:
+        segments.extend(_preplace_frozen(
+            frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of,
+            machine_free, staffing, completion, masters, config))
+
     # Orders that still have operations left to schedule.
     remaining = [key for key in sequence if idx_of[key] < len(ops_of[key])]
 
@@ -377,3 +382,98 @@ def _lay_on_machine(
     if remaining > _EPS_MIN or first_start is None:
         return None  # unschedulable within the lookahead horizon
     return {"start": first_start, "end": segments[-1].end, "segments": segments, "assignments": assignments}
+
+
+def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, planned_operator,
+                staffing, masters, config):
+    """Lay a frozen (in-progress) op onto its PINNED machine from ``earliest``.
+    Prefer the planned operator each shift; if they are absent/busy, staff a
+    substitute (candidate_operator). Same window-walking as _lay_on_machine, but the
+    machine is fixed and no setup is charged (already set up mid-run)."""
+    cursor = earliest
+    remaining = dur_min
+    segments: list[Segment] = []
+    assignments: list[tuple] = []
+    first_start = None
+    for win in iter_windows(machine, earliest, masters.calendar, config):
+        if remaining <= _EPS_MIN:
+            break
+        seg_start = max(cursor, win.start)
+        avail = (win.end - seg_start).total_seconds() / 60.0
+        if avail <= 0:
+            cursor = win.end
+            continue
+        take = min(avail, remaining)
+        seg_end = seg_start + timedelta(minutes=take)
+        name = None
+        if (planned_operator
+                and masters.calendar.is_operator_available(planned_operator, win.shift_date)
+                and staffing.free_during(planned_operator, seg_start, seg_end)):
+            name = planned_operator
+        else:
+            name = staffing.candidate_operator(machine, win.shift_date, win.shift,
+                                               seg_start, seg_end, masters, config)
+        if name is None:
+            cursor = win.end
+            continue
+        assignments.append((machine.id, win.shift_date, win.shift, name, seg_start, seg_end))
+        segments.append(Segment(order.key, op.seq, op.name, op.kind, machine.id, name,
+                                seg_start, seg_end, op_qty))
+        if first_start is None:
+            first_start = seg_start
+        remaining -= take
+        cursor = seg_end
+    if remaining > _EPS_MIN or first_start is None:
+        return None
+    return {"start": first_start, "end": segments[-1].end,
+            "segments": segments, "assignments": assignments}
+
+
+def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of,
+                     machine_free, staffing, completion, masters, config):
+    """Pin every in-progress op onto its machine+operator BEFORE the main loop.
+    Per machine, frozen ops resume in previous-plan (prev_start) order; the machine's
+    free time is advanced past them so new work queues after. The owning order's index
+    is advanced past the frozen op and its ready/prev_end set to the frozen end, so
+    downstream steps wait for it. Returns the frozen segments."""
+    from collections import defaultdict
+    seq_index = {k: {op.seq: i for i, op in enumerate(ops_of[k])} for k in ops_of}
+    by_machine = defaultdict(list)
+    for fo in frozen:
+        by_machine[fo.machine_id].append(fo)
+    out: list[Segment] = []
+    for mid, fos in by_machine.items():
+        if mid not in masters.machines:
+            continue  # machine gone from masters — not frozen (schedule normally)
+        fos.sort(key=lambda f: (f.prev_start, f.order_key, f.op_seq))
+        for fo in fos:
+            order = order_by_key.get(fo.order_key)
+            if order is None:
+                continue
+            oi = seq_index[fo.order_key].get(fo.op_seq)
+            if oi is None:
+                continue
+            op = ops_of[fo.order_key][oi]
+            dur = fo.remaining_qty * op.cycle_min      # no setup on resume
+            if dur <= 0:
+                continue
+            earliest = machine_free.get(mid, config.plan_start)
+            laid = _lay_frozen(masters.machines[mid], earliest, dur, order, op,
+                               int(fo.remaining_qty), fo.operator, staffing, masters, config)
+            if laid is None:
+                continue  # unstaffable — leave to the main loop
+            for a in laid["assignments"]:
+                staffing.commit(*a)
+            machine_free[mid] = laid["end"]
+            for seg in laid["segments"]:
+                if seg.operator is not None:
+                    staffing.add_load(seg.operator,
+                                      (seg.end - seg.start).total_seconds() / 60.0)
+            out.extend(laid["segments"])
+            end = laid["end"]
+            idx_of[fo.order_key] = max(idx_of[fo.order_key], oi + 1)
+            ready_of[fo.order_key] = max(ready_of[fo.order_key], end)
+            prev_end_of[fo.order_key] = max(prev_end_of[fo.order_key], end)
+            if idx_of[fo.order_key] >= len(ops_of[fo.order_key]):
+                completion[fo.order_key] = prev_end_of[fo.order_key]
+    return out
