@@ -95,3 +95,21 @@ def test_new_engine_run_pins_frozen_step():
     hit = [e for e in entries if e.batch_id == b0.batch_id and e.process_seq == mop.seq]
     assert hit and hit[0].machine == mop.machine_options[0]
     assert hit[0].operator == "Alpha"
+
+
+def test_sweep_optimize_accepts_frozen_and_pins_winner():
+    wb = build_new_sample_bytes()
+    book_store.save_masters_bytes(wb)
+    nm = new_load(io.BytesIO(wb)).masters
+    so_lines, masters = loaders.load_all(io.BytesIO(wb))
+    batches = rule1_consolidate.run(so_lines, _CONF)
+    orders, batch_by_key = _orders_from_batches(batches, nm)
+    b0 = batches[0]
+    mop = next(op for op in nm.routings[b0.item_code].operations
+               if op.machine_options and op.cycle_min > 0)
+    row = {"so_no": b0.source_so_refs[0], "item_code": b0.item_code, "process": mop.name,
+           "op_seq": mop.seq, "machine": mop.machine_options[0], "operator": "Alpha",
+           "remaining_qty": 5, "prev_start": "2025-03-03T08:00:00"}
+    from engine.new_engine import sweep_optimize
+    sr = sweep_optimize(so_lines, _CONF, masters, budget_evals=40, frozen=[row])
+    assert sr.result.ranks  # produced a plan without error

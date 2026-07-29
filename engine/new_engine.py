@@ -399,7 +399,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
 
 
 def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=150,
-                      seed=42, on_progress=None, should_cancel=None):
+                      seed=42, on_progress=None, should_cancel=None, frozen=None):
     """Sequence-only search for the NEW engine at the config's overlap. The cloud contest
     sweeps overlaps EXTERNALLY (one candidate per overlap) and calls this per candidate, so
     across candidates it becomes the full overlap × sequence contest — just distributed and
@@ -418,16 +418,17 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     if not batches:
         return OptimizeResult()
     orders, batch_by_key = _orders_from_batches(batches, nm)
+    ppc_frozen = _ppc_frozen(frozen, orders, batch_by_key, nm) if frozen else None
     # Report EVERY plan (on_eval), not just improvements, so the live counter climbs steadily.
     prog = (lambda evals, _sc: on_progress(evals, None)) if on_progress else None
-    res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_eval=prog)
+    res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_eval=prog, frozen=ppc_frozen)
     best_batches = [batch_by_key[k] for k in res.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
     # Measure the winner against the SAME crew + reservations the plan actually runs.
     # (masters/reserved MUST be keyword args — run()'s 3rd positional is `notes`, so
     # `run(best_batches, config, masters)` silently scored the winner with masters=None
     # → the workbook's full operator sheet, promising a plan the app crew can't match.)
-    winner_sched = run(best_batches, config=config, masters=masters, reserved=reserved)
+    winner_sched = run(best_batches, config=config, masters=masters, reserved=reserved, frozen=frozen)
     winner_metrics = plan_metrics(winner_sched, so_lines, plan_start,
                                   ceiling_days=getattr(config, "worst_ceiling_days", None),
                                   with_distribution=True)
@@ -435,7 +436,7 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
                           improved=True, cancelled=False)
 
 
-def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=None, reserved=None):
+def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=None, reserved=None, frozen=None):
     """The CONTINUOUS overlap optimizer + sequence search (the 'atom optimizer').
 
     Golden-section search over the overlap value: it treats "best plan score achievable at
@@ -463,9 +464,10 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     if not batches:
         return {}, int(round(base.overlap * 100)), {}, 0
     orders, batch_by_key = _orders_from_batches(batches, new_masters)
+    ppc_frozen = _ppc_frozen(frozen, orders, batch_by_key, new_masters) if frozen else None
 
     tr = tune_overlap(orders, new_masters, base, lo=0.5, hi=0.95, seeds=(int(seed),),
-                      budget_per_eval=int(budget_per_eval), tol=0.01, coarse=5, on_step=on_step)
+                      budget_per_eval=int(budget_per_eval), tol=0.01, coarse=5, on_step=on_step, frozen=ppc_frozen)
 
     best_batches = [batch_by_key[k] for k in tr.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
@@ -474,14 +476,14 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     overlap_pct = int(round(tr.best_overlap * 100))
     won_cfg = replace(base, overlap=overlap_pct / 100.0)
     winner_metrics = plan_metrics(
-        _entries_from_schedule(decode(orders, tr.best_sequence, new_masters, won_cfg), batch_by_key),
+        _entries_from_schedule(decode(orders, tr.best_sequence, new_masters, won_cfg, frozen=ppc_frozen), batch_by_key),
         so_lines, plan_start, ceiling_days=getattr(config, "worst_ceiling_days", None),
         with_distribution=True)
     return ranks, overlap_pct, winner_metrics, tr.evaluations
 
 
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
-                   on_progress=None, should_cancel=None, base_reserved=None, **kw):
+                   on_progress=None, should_cancel=None, base_reserved=None, frozen=None, **kw):
     """Local (in-process) fallback for 'Start deep search': the same continuous golden-section
     tune as the cloud, at a smaller budget so it finishes on the free instance. Returns the old
     ``SweepResult`` shape so the optimize/apply/replay machinery is unchanged. ``on_progress``
@@ -498,7 +500,7 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
     per = max(15, int(budget_evals) // 10)
     ranks, overlap_pct, metrics, plans = tune(so_lines, config, masters,
                                               budget_per_eval=per, seed=seed, on_step=_step,
-                                              reserved=base_reserved)
+                                              reserved=base_reserved, frozen=frozen)
     state["best"] = metrics or {}
     if not ranks:
         return SweepResult(overlap_percent=overlap_pct, knob="overlap",
