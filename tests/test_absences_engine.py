@@ -64,8 +64,8 @@ def test_payload_round_trips_absences():
                                 absences=absences)
     payload = json.loads(json.dumps(payload))
     result = svc.parse_payload(payload)
-    assert len(result) == 6
-    _, _, _, _, absences2, _ = result
+    assert len(result) == 7
+    _, _, _, _, absences2, _, _ = result
     assert absences2 == absences
 
 

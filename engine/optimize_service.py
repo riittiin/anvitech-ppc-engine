@@ -110,21 +110,30 @@ def reservations_from_schedule(schedule):
     return res
 
 
-def book_signature(so_lines, absences=None):
+def book_signature(so_lines, absences=None, frozen=None):
     """Fingerprint of the BOOK state an optimization was computed on: which
     orders, how much work each still needs (headline + per-process), their
-    lanes/promises, and the operator absences. When production moves any of
-    these, an applied optimization is stale — the auto trigger compares this
-    signature. (Masters + settings are covered by api._inputs_signature.)"""
+    lanes/promises, the operator absences, and any frozen (in-progress)
+    operations. When production moves any of these, an applied optimization
+    is stale — the auto trigger compares this signature. (Masters + settings
+    are covered by api._inputs_signature.) ``frozen=None``/``[]`` produces the
+    SAME signature as before frozen existed — the third element is only
+    added to the blob when frozen is non-empty, so every pre-existing caller
+    is byte-identical."""
     rows = sorted(
         (l.so_no, l.item_code, round(float(l.qty), 3),
          json.dumps(l.process_qty or {}, sort_keys=True, default=str),
          getattr(l, "commitment", "open") or "open",
          str(getattr(l, "promised_date", None)))
         for l in so_lines)
-    blob = json.dumps([rows, sorted((a.get("operator", ""), a.get("from_date", ""),
-                                     a.get("to_date", "")) for a in (absences or []))],
-                      default=str)
+    parts = [rows, sorted((a.get("operator", ""), a.get("from_date", ""),
+                          a.get("to_date", "")) for a in (absences or []))]
+    if frozen:
+        parts.append(sorted(
+            (f.get("so_no", ""), f.get("item_code", ""), f.get("op_seq"),
+             f.get("machine", ""), round(float(f.get("remaining_qty", 0) or 0), 3))
+            for f in frozen))
+    blob = json.dumps(parts, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -134,11 +143,13 @@ def book_signature(so_lines, absences=None):
 def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
                   seed: int, candidates=CLOUD_OVERLAP_CANDIDATES,
                   budget_per_candidate=CLOUD_BUDGET_PER_CANDIDATE,
-                  absences=None, operator_table=None) -> dict:
+                  absences=None, operator_table=None, frozen=None) -> dict:
     """Snapshot everything one contest depends on. JSON-safe. ``operator_table``
     (the app-owned {week_anchor, operators} dict) is carried verbatim — the
     worker applies the SAME as-of-effective-start rotation the API does, so a
-    cloud run is byte-identical to a local one."""
+    cloud run is byte-identical to a local one. ``frozen`` (a plain list of
+    dict rows, same JSON-safe shape as ``absences``) carries the in-progress
+    operations that must not be rescheduled."""
     return {
         "orders": [o.to_json() for o in orders.values()],
         "actuals": [a.to_json() for a in actuals],
@@ -150,14 +161,16 @@ def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
         "budget_per_candidate": budget_per_candidate,
         "absences": list(absences or []),
         "operator_table": operator_table,
+        "frozen": list(frozen or []),
     }
 
 
 def parse_payload(payload: dict):
-    """Rebuild (orders, actuals, masters, config, absences, operator_table) —
-    the exact objects the API planned with, via the models' own from_json and
-    the normal loader. ``operator_table`` is the raw stored dict (or None); the
-    contest applies the as-of-effective-start rotation onto masters.operators."""
+    """Rebuild (orders, actuals, masters, config, absences, operator_table,
+    frozen) — the exact objects the API planned with, via the models' own
+    from_json and the normal loader. ``operator_table`` is the raw stored
+    dict (or None); the contest applies the as-of-effective-start rotation
+    onto masters.operators. ``frozen`` is the last element."""
     orders = {}
     for d in payload["orders"]:
         o = Order.from_json(d)
@@ -172,7 +185,8 @@ def parse_payload(payload: dict):
     config.validate()
     absences = list(payload.get("absences") or [])
     operator_table = payload.get("operator_table")
-    return orders, actuals, masters, config, absences, operator_table
+    frozen = list(payload.get("frozen") or [])
+    return orders, actuals, masters, config, absences, operator_table, frozen
 
 
 # --------------------------------------------------------------------------- #
@@ -193,10 +207,13 @@ class ContestSetup:
     # copy carrying the as-of-effective-start rotated operators (the cached
     # masters object is never mutated). ALL callers plan against ``setup.masters``.
     masters: object = None
+    # In-progress operations that must not be rescheduled (a plain list of
+    # dict rows, same JSON-safe shape as ``absences``).
+    frozen: list = field(default_factory=list)
 
 
 def prepare_contest(orders: dict, actuals, masters, config: Config,
-                    absences=None, operator_table=None) -> ContestSetup:
+                    absences=None, operator_table=None, frozen=None) -> ContestSetup:
     """Everything the sweep needs, from the raw book. Every active line competes
     in ONE pool — lanes (open/committed/urgent) have no scheduling effect. Only
     operator absences reserve time. Raises ValueError when there is nothing to
@@ -227,7 +244,7 @@ def prepare_contest(orders: dict, actuals, masters, config: Config,
 
     return ContestSetup(target=target, config=config, search_config=search_config,
                         absences=list(absences or []), absence_reserved=(ab or None),
-                        masters=masters)
+                        masters=masters, frozen=list(frozen or []))
 
 
 # --------------------------------------------------------------------------- #
@@ -255,7 +272,7 @@ def run_candidate(payload: dict, overlap: int, *, on_progress=None,
     pool (lanes have no scheduling effect). ``reserved=`` is only the operator
     absences (physical unavailability). Returns a sweep-table row (+ ranks for
     the winner)."""
-    orders, actuals, masters, config, absences, operator_table = parse_payload(payload)
+    orders, actuals, masters, config, absences, operator_table, frozen = parse_payload(payload)
     # The new engine loads its masters from the workbook; the cloud worker has no store, so
     # feed it the payload's workbook bytes directly (harmless for classic/flow).
     if getattr(config, "scheduler", "classic") == "new":
@@ -263,11 +280,12 @@ def run_candidate(payload: dict, overlap: int, *, on_progress=None,
         _raw = payload.get("masters_xlsx_b64")
         new_engine.set_masters_bytes(base64.b64decode(_raw) if _raw else None)
     setup = prepare_contest(orders, actuals, masters, config, absences=absences,
-                            operator_table=operator_table)
+                            operator_table=operator_table, frozen=frozen)
     knob, _cands = optimizer.knob_for(setup.search_config)
     cfg = replace(setup.search_config, **{knob: int(overlap)})
     res = optimizer.optimize(setup.target, cfg, setup.masters,
                              reserved=setup.absence_reserved,
+                             frozen=setup.frozen,
                              budget_evals=int(payload["budget_per_candidate"]),
                              seed=int(payload["seed"]),
                              on_progress=on_progress, should_cancel=should_cancel)

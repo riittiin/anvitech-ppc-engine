@@ -41,7 +41,7 @@ def test_payload_round_trip_reconstructs_the_same_plan():
     payload, masters, cfg = _payload()
     # Simulate the network hop: the worker sees only JSON.
     payload = json.loads(json.dumps(payload))
-    orders2, actuals2, masters2, cfg2, absences2, optable2 = svc.parse_payload(payload)
+    orders2, actuals2, masters2, cfg2, absences2, optable2, frozen2 = svc.parse_payload(payload)
 
     setup = svc.prepare_contest(orders2, actuals2, masters2, cfg2)
     pr = PlanRun(so_lines=list(setup.target))

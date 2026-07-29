@@ -197,7 +197,7 @@ def test_payload_carries_operator_table_verbatim():
                                 operator_table=table)
     payload = json.loads(json.dumps(payload))
     parsed = svc.parse_payload(payload)
-    assert len(parsed) == 6
+    assert len(parsed) == 7
     assert parsed[5] == table
 
 
