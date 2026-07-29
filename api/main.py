@@ -727,6 +727,7 @@ def _plan(config: Config):
     # optimization -> plans are byte-identical to the pre-optimize plan.
     prio = book_store.load_plan_priority()
     ranks = prio["ranks"] if prio else None
+    frozen = book_store.load_frozen_ops()
 
     # The optimized ranks ARE the prioritization. The Expedite window dynamically
     # re-sorts ops by slack at schedule time, which would OVERRIDE the ranks and cancel
@@ -741,7 +742,7 @@ def _plan(config: Config):
     # times (downtime, actual setup) are stored for the record, never scheduled.
     plan_run = PlanRun(so_lines=so_lines)
     trace = run_forward(plan_run, ranked_config, masters, reserved=ab or None,
-                        priority_rank=ranks)
+                        priority_rank=ranks, frozen=frozen or None)
 
     _augment_helpers(trace, plan_run, config, masters, actuals=actuals)
 
@@ -1070,6 +1071,10 @@ def _plan_fingerprint(config: Config) -> str:
         "operators": book_store.load_operator_table(),
         "config": _resolve_config(config).to_dict(),
         "ranks": (book_store.load_plan_priority() or {}).get("ranks"),
+        # The frozen (in-progress) set pins certain ops to their already-started
+        # machine/operator — a freeze change must bust the cache, or a stale plan
+        # (computed before the freeze) would keep being served.
+        "frozen": book_store.load_frozen_ops(),
         # The plan response also carries the scheduled-optimize note; fold it in so a
         # new note is never served stale from the cache (a note change is rare).
         "note": book_store.load_auto_note(),
@@ -1458,7 +1463,7 @@ def _all_lines_schedule(setup, masters, ranks):
     ranked_config = replace(setup.config, expedite_window_min=0) if ranks else setup.config
     pr = PlanRun(so_lines=list(all_lines))
     run_forward(pr, ranked_config, masters, reserved=setup.absence_reserved,
-                priority_rank=ranks)
+                priority_rank=ranks, frozen=getattr(setup, "frozen", None) or None)
     return pr.schedule, all_lines
 
 
@@ -1513,7 +1518,8 @@ def _movement_note(new_ranks):
     setup = optimize_service.prepare_contest(
         book_store.load_active_orders(), book_store.load_actuals(), masters, config,
         absences=book_store.load_absences(),
-        operator_table=book_store.load_operator_table())
+        operator_table=book_store.load_operator_table(),
+        frozen=book_store.load_frozen_ops())
     prio = book_store.load_plan_priority()
     old_ranks = (prio or {}).get("ranks") or None
     old_sched, _ = _all_lines_schedule(setup, setup.masters, old_ranks)
@@ -1563,7 +1569,8 @@ def _incumbent_metrics():
     absences = book_store.load_absences()
     setup = optimize_service.prepare_contest(orders, actuals, masters, config,
                                              absences=absences,
-                                             operator_table=book_store.load_operator_table())
+                                             operator_table=book_store.load_operator_table(),
+                                             frozen=book_store.load_frozen_ops())
     prio = book_store.load_plan_priority()
     ranks = (prio or {}).get("ranks") or None
     schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks)
@@ -1636,7 +1643,8 @@ def _optimize_apply():
                 book_store.load_active_orders(), book_store.load_actuals(),
                 _current_masters(), _resolve_config(_load_plan_config()),
                 absences=book_store.load_absences(),
-                operator_table=book_store.load_operator_table())
+                operator_table=book_store.load_operator_table(),
+                frozen=book_store.load_frozen_ops())
             sched, _ = _all_lines_schedule(setup, setup.masters, res["ranks"])
             book_store.save_last_applied_schedule(freeze.schedule_projection(sched))
         except Exception:
@@ -2130,9 +2138,11 @@ def _plan_run_for_report(config: Config):
         masters = replace(masters, operators=operator_master.operators_as_of(op_table, eff_start))
     prio = book_store.load_plan_priority()
     ranks = prio["ranks"] if prio else None
+    frozen = book_store.load_frozen_ops()
     ranked_config = replace(config, expedite_window_min=0) if ranks else config
     plan_run = PlanRun(so_lines=so_lines)
-    run_forward(plan_run, ranked_config, masters, reserved=ab or None, priority_rank=ranks)
+    run_forward(plan_run, ranked_config, masters, reserved=ab or None, priority_rank=ranks,
+                frozen=frozen or None)
     return plan_run, so_lines, masters, config
 
 

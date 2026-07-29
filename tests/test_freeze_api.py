@@ -170,11 +170,15 @@ def test_manual_optimize_unrestricted_auto_path_frozen(admin_client_with_book, m
     assert stored_frozen, "expected a non-empty frozen set from the partial punch"
 
     # Wrap prepare_contest to record the frozen= kwarg each call receives,
-    # then call through to the real implementation. Several OTHER call sites
-    # in api/main.py invoke prepare_contest too (incumbent/movement metrics)
-    # but never pass frozen= at all — only _start_optimize's call site does,
-    # explicitly, every time. Only record calls that explicitly pass it, so
-    # the assertions below are about _start_optimize specifically.
+    # then call through to the real implementation. As of Task 19,
+    # _incumbent_metrics() ALSO explicitly passes frozen= (so the incumbent is
+    # scored under the same freeze as the contest winner) — and
+    # _start_optimize calls _incumbent_metrics() once (for the worst-order
+    # ceiling) BEFORE building its own contest setup. So each /optimize click
+    # records TWO frozen= calls in order: the ceiling call's (always the
+    # currently-stored frozen set, regardless of auto), then _start_optimize's
+    # OWN contest-setup call (frozen=[] for manual, the stored set for auto)
+    # — the one this test is actually about. Assert on the LAST call per click.
     recorded = []
     real_prepare_contest = m.optimize_service.prepare_contest
 
@@ -186,12 +190,21 @@ def test_manual_optimize_unrestricted_auto_path_frozen(admin_client_with_book, m
     monkeypatch.setattr(m.optimize_service, "prepare_contest", _recording_prepare_contest)
 
     # 1) Manual "Start deep search" (auto=False by default) — must be
-    #    unrestricted: frozen=[] reaches prepare_contest.
+    #    unrestricted: frozen=[] reaches prepare_contest. _start_optimize makes
+    #    exactly two explicit-frozen= calls synchronously, in order, before it
+    #    ever spawns the background search thread: the incumbent-ceiling call
+    #    (always the currently-stored, non-empty frozen set) then its OWN
+    #    contest-setup call (frozen=[] for manual, the stored set for auto) —
+    #    the one this test is actually about, always the second of the pair.
     r = client.post("/optimize", json={"budget": "quick"})
     assert r.status_code == 200, r.text
     _wait_optimize_done(client)
-    assert len(recorded) == 1
-    assert not recorded[0], f"manual optimize must pass empty frozen, got {recorded[0]!r}"
+    assert len(recorded) == 2
+    assert not recorded[-1], f"manual optimize must pass empty frozen, got {recorded[-1]!r}"
+    # Checkpoint: everything from here on (finalize, possible auto-apply
+    # bookkeeping) records additional frozen= calls whose COUNT depends on
+    # whether the contest happened to beat the incumbent — not asserted on.
+    checkpoint = len(recorded)
 
     # 2) Auto (Done-button) path — must be restricted: the stored frozen set
     #    reaches prepare_contest. The manual run above wrote a last_searched
@@ -208,6 +221,57 @@ def test_manual_optimize_unrestricted_auto_path_frozen(admin_client_with_book, m
     started = m._try_start_auto()
     assert started, "expected _try_start_auto to start a contest (book changed since the applied/searched snapshot)"
     _wait_optimize_done(client)
-    assert len(recorded) == 2
-    assert recorded[1] == expected_frozen
-    assert recorded[1], "auto path must pass the non-empty frozen set"
+    # The same synchronous pair repeats for this call: [checkpoint] is the
+    # incumbent-ceiling call (non-empty, unconditionally), [checkpoint + 1] is
+    # _start_optimize's own contest-setup call — must equal the stored,
+    # non-empty frozen set (auto=True). Any further calls from finalize/apply
+    # bookkeeping land after this pair and aren't asserted on here.
+    assert len(recorded) >= checkpoint + 2
+    assert recorded[checkpoint + 1] == expected_frozen
+    assert recorded[checkpoint + 1], "auto path must pass the non-empty frozen set"
+
+
+def test_plan_passes_stored_frozen_to_run_forward(admin_client_with_book, monkeypatch):
+    """Task 19 integration keystone: the DISPLAYED plan (`_plan`, exercised here
+    via GET /gantt) must pin the stored frozen (in-progress) set — so what
+    everyone sees matches the frozen, contest-applied plan, not a fresh
+    re-assignment of an already-started op."""
+    client = admin_client_with_book
+    import api.main as m
+
+    # Apply an initial plan, then punch a partial quantity and compute+store a
+    # frozen set (mirrors the "Done" flow's _compute_and_store_frozen step).
+    r = client.post("/optimize", json={"budget": "quick"})
+    assert r.status_code == 200, r.text
+    _wait_optimize_done(client)
+    r = client.post("/optimize/apply")
+    assert r.status_code == 200, r.text
+    _punch_partial(client)
+    m._compute_and_store_frozen()
+
+    stored_frozen = book_store.load_frozen_ops()
+    assert stored_frozen, "expected a non-empty frozen set from the partial punch"
+
+    # Wrap run_forward to record the `frozen=` kwarg each call receives, then
+    # delegate to the real implementation (captured before patching).
+    real_run_forward = m.run_forward
+    recorded = []
+
+    def _recording_run_forward(*args, **kwargs):
+        recorded.append(kwargs.get("frozen"))
+        return real_run_forward(*args, **kwargs)
+
+    monkeypatch.setattr(m, "run_forward", _recording_run_forward)
+
+    # _plan caches by fingerprint (which now folds in the frozen set — see
+    # _plan_fingerprint) — clear it directly so this request is guaranteed to
+    # recompute rather than serve a result cached before the freeze existed.
+    m._PLAN_CACHE.clear()
+
+    resp = client.get("/gantt")
+    assert resp.status_code == 200, resp.text
+
+    assert recorded, "run_forward was not called by GET /gantt (_plan)"
+    assert recorded[-1] == stored_frozen, (
+        "_plan did not pass the stored frozen set through to run_forward: "
+        f"{recorded[-1]!r} != {stored_frozen!r}")
