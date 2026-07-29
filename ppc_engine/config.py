@@ -115,3 +115,13 @@ class PlanConfig:
     # still applies. Re-measure before moving.
     ceiling_days: float | None = None
     ceiling_weight: float = 100.0
+
+    # Committed-promise breach term (mirrors the worst-order ceiling above, but
+    # per-order against each order's own Order.promise_date rather than a single
+    # plan-wide ceiling). committed_promise_slack_days: promise slips up to this
+    # many days cost nothing extra. committed_promise_weight: strength of the
+    # squared overage beyond the slack. 0 contribution when no order carries a
+    # promise date (PlanMetrics.promise_slip_by_order is empty) — additive,
+    # byte-identical otherwise.
+    committed_promise_slack_days: float = 3.0
+    committed_promise_weight: float = 100.0

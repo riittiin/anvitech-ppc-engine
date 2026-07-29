@@ -53,12 +53,25 @@ def _ceiling_breach(metrics: PlanMetrics, config: PlanConfig) -> float:
     return total
 
 
+def _committed_promise_breach(metrics: PlanMetrics, config: PlanConfig) -> float:
+    """Sum of squared committed-order lateness beyond (promised_date + slack). 0 when no
+    committed order breaches its promise. Per-order mirror of _ceiling_breach."""
+    slack = config.committed_promise_slack_days
+    total = 0.0
+    for slip in metrics.promise_slip_by_order.values():
+        over = slip - slack
+        if over > 0:
+            total += over * over
+    return total
+
+
 def score(metrics: PlanMetrics, config: PlanConfig) -> float:
     """Score a plan from its metrics. Lower is better."""
     return (
         metrics.total_tardiness_days
         + config.severity_weight * _severity(metrics, config)
         + config.ceiling_weight * _ceiling_breach(metrics, config)
+        + config.committed_promise_weight * _committed_promise_breach(metrics, config)
         + config.fairness_weight * metrics.max_tardiness_days
         + config.makespan_weight * metrics.makespan_days
     )
