@@ -60,13 +60,12 @@ def test_payload_round_trip_reconstructs_the_same_plan():
 
 def test_run_contest_matches_the_local_sweep_byte_for_byte():
     """Cloud (run_contest from a payload) == local (sweep_optimize on live
-    objects) for the same contenders, per-candidate depth, and seed. The cloud
-    contest also hardcodes an outer (False, True) machine-set loop (see
-    docs/superpowers/specs/2026-07-29-machine-set-optimize-dimension-design.md)
-    — the classic scheduler ignores ``flexible_machines`` entirely, so both
-    passes produce byte-identical per-overlap results and the winner is the
-    same as the classic (single-machine-set) local sweep; only the total eval
-    count doubles (both passes actually run)."""
+    objects) for the same contenders, per-candidate depth, and seed. The
+    machine-set outer loop in run_contest is gated to scheduler=="new" (the
+    only scheduler flexible_machines affects — see engine/new_engine._new_masters
+    and Task 3's identical gate in optimizer.sweep_optimize), so a classic-mode
+    cloud contest stays single-pass and byte-identical to the local sweep,
+    exactly as before this feature."""
     payload, masters, cfg = _payload(per_candidate=10)
     payload = json.loads(json.dumps(payload))
     payload["candidates"] = list(optimizer.OVERLAP_CANDIDATES)
@@ -82,7 +81,7 @@ def test_run_contest_matches_the_local_sweep_byte_for_byte():
     assert cloud["winner_flexible"] is False   # classic ignores the flag; tie keeps current
     assert cloud["best"] == local.result.best
     assert cloud["ranks"] == local.result.ranks
-    assert cloud["evals"] == 2 * local.evals
+    assert cloud["evals"] == local.evals
 
 
 def test_run_contest_parallel_equals_sequential():

@@ -329,7 +329,12 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
     cur_value = getattr(config, knob)
     cur_flex = bool(getattr(config, "flexible_machines", False))
     contenders = optimizer.sweep_contenders(cur_value, payload["candidates"])
-    machine_sets = (False, True)
+    # The machine-set dimension only affects the new engine (flexible_machines is
+    # inert for classic/flow — see engine/new_engine._new_masters). Gate the outer
+    # loop on scheduler so classic/flow cloud contests stay single-pass and byte-
+    # identical to their local counterpart (Task 3 established this same gate in
+    # engine/optimizer.sweep_optimize / engine/new_engine.sweep_optimize).
+    machine_sets = (False, True) if getattr(config, "scheduler", "classic") == "new" else (False,)
     rows, done_evals, cancelled = [], 0, False
 
     if processes <= 1:
