@@ -69,3 +69,19 @@ def test_empty_and_missing_plan_start_date_become_none():
 
 def test_validate_passes_with_none_plan_start_date():
     Config().validate()  # must not raise
+
+
+def test_flexible_machines_defaults_false_and_round_trips():
+    import pytest
+    assert Config().flexible_machines is False
+    d = Config(flexible_machines=True).to_dict()
+    assert d["flexible_machines"] is True
+    assert Config.from_dict(d).flexible_machines is True
+
+
+def test_flexible_machines_must_be_bool():
+    import pytest
+    c = Config()
+    c.flexible_machines = "yes"
+    with pytest.raises(ValueError):
+        c.validate()

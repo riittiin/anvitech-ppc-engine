@@ -99,6 +99,14 @@ class Config:
     split_parallel: bool = False
     split_min_qty: int = 401
 
+    # Machine set the OPTIMIZER may use for each in-house machining/manual/inspection
+    # step (2026-07-29). False = the Allotted machine only (Suggested used only as a
+    # blank-Allotted fallback) — today's behaviour, byte-identical. True = the deduped
+    # union of Allotted + Suggested, letting the scheduler load-balance onto Suggested
+    # machines. Owned by the Optimize contest (swept, applied, persisted) exactly like
+    # overlap_percent — NOT a user knob. New engine only; classic/flow ignore it.
+    flexible_machines: bool = False
+
     # Rule 6 — balance operator workload (default off). A schedule-neutral POST-PROCESS:
     # after the plan is built, each already-scheduled operation is reassigned to the
     # qualified, same-shift operator who is free at that moment and has the least work
@@ -177,6 +185,8 @@ class Config:
             errs.append("split_parallel must be true or false")
         if not isinstance(self.balance_operator_load, bool):
             errs.append("balance_operator_load must be true or false")
+        if not isinstance(self.flexible_machines, bool):
+            errs.append("flexible_machines must be true or false")
         if self.split_min_qty < 1:
             errs.append("split_min_qty must be >= 1")
         if self.expedite_window_min < 0:
