@@ -16,6 +16,7 @@ from engine.loaders import load_all
 from engine.models import Order, PlanRun
 from engine.pipeline import run_forward
 from tests.sample_workbook import build_sample_bytes, ITEM_A, ITEM_B
+from tests.new_sample_workbook import build_new_sample_bytes
 
 
 def _book(overlap=80):
@@ -59,7 +60,13 @@ def test_payload_round_trip_reconstructs_the_same_plan():
 
 def test_run_contest_matches_the_local_sweep_byte_for_byte():
     """Cloud (run_contest from a payload) == local (sweep_optimize on live
-    objects) for the same contenders, per-candidate depth, and seed."""
+    objects) for the same contenders, per-candidate depth, and seed. The cloud
+    contest also hardcodes an outer (False, True) machine-set loop (see
+    docs/superpowers/specs/2026-07-29-machine-set-optimize-dimension-design.md)
+    — the classic scheduler ignores ``flexible_machines`` entirely, so both
+    passes produce byte-identical per-overlap results and the winner is the
+    same as the classic (single-machine-set) local sweep; only the total eval
+    count doubles (both passes actually run)."""
     payload, masters, cfg = _payload(per_candidate=10)
     payload = json.loads(json.dumps(payload))
     payload["candidates"] = list(optimizer.OVERLAP_CANDIDATES)
@@ -72,9 +79,10 @@ def test_run_contest_matches_the_local_sweep_byte_for_byte():
     local = optimizer.sweep_optimize(setup.target, setup.search_config, masters,
                                      budget_evals=10 * n, seed=42)
     assert cloud["winner_overlap"] == local.overlap_percent
+    assert cloud["winner_flexible"] is False   # classic ignores the flag; tie keeps current
     assert cloud["best"] == local.result.best
     assert cloud["ranks"] == local.result.ranks
-    assert cloud["evals"] == local.evals
+    assert cloud["evals"] == 2 * local.evals
 
 
 def test_run_contest_parallel_equals_sequential():
@@ -89,13 +97,23 @@ def test_run_contest_parallel_equals_sequential():
 def test_pick_winner_tie_keeps_the_current_setting():
     best = {"makespan_days": 1.0, "late_orders": 0, "total_late_days": 0,
             "max_late_days": 0, "orders": 1}
-    rows = [{"overlap": 50, "eligible": True, "best": dict(best)},
-            {"overlap": 80, "eligible": True, "best": dict(best)}]
-    assert svc.pick_winner(80, rows)["overlap"] == 80
-    assert svc.pick_winner(50, rows)["overlap"] == 50
+    rows = [{"overlap": 50, "flexible": False, "eligible": True, "best": dict(best)},
+            {"overlap": 80, "flexible": False, "eligible": True, "best": dict(best)}]
+    assert svc.pick_winner(80, False, rows)["overlap"] == 80
+    assert svc.pick_winner(50, False, rows)["overlap"] == 50
     # Ineligible/failed rows never win.
     rows[1]["eligible"] = False
-    assert svc.pick_winner(80, rows)["overlap"] == 50
+    assert svc.pick_winner(80, False, rows)["overlap"] == 50
+
+
+def test_pick_winner_tie_also_prefers_current_machine_set():
+    best = {"makespan_days": 1.0, "late_orders": 0, "total_late_days": 0,
+            "max_late_days": 0, "orders": 1}
+    rows = [{"overlap": 80, "flexible": False, "eligible": True, "best": dict(best)},
+            {"overlap": 80, "flexible": True, "eligible": True, "best": dict(best)}]
+    # Same score, same overlap — the current machine-set wins the tie.
+    assert svc.pick_winner(80, False, rows)["flexible"] is False
+    assert svc.pick_winner(80, True, rows)["flexible"] is True
 
 
 def test_prepare_contest_raises_when_nothing_to_optimize():
@@ -159,6 +177,36 @@ def test_book_signature_tracks_material_changes():
     assert svc.book_signature(lines) == s0                   # restored ⇒ same sig
     assert svc.book_signature(lines, absences=[{"operator": "X",
         "from_date": "2025-03-02", "to_date": "2025-03-03"}]) != s0
+
+
+def _new_engine_payload(candidates=(70, 80), budget_per_candidate=20, seed=42):
+    """A cloud-contest payload for the NEW (ppc_engine-backed) scheduler — mirrors
+    ``_payload()`` above but on the fully-staffed new-engine sample workbook, so
+    ``run_contest`` actually exercises the flexible_machines (machine-set) dimension
+    end to end."""
+    raw = build_new_sample_bytes()
+    so_lines, masters = load_all(io.BytesIO(raw))
+    orders = {}
+    for so in so_lines:
+        o = Order(so.so_no, so.item_code, so.item_name, so.qty, so.delivery_date)
+        orders[o.key] = o
+    cfg = Config(scheduler="new", plan_start_date=date(2025, 3, 3),
+                apply_operator_logic=True)
+    cfg.validate()
+    return svc.build_payload(orders, [], raw, cfg, seed=seed,
+                             candidates=list(candidates),
+                             budget_per_candidate=budget_per_candidate)
+
+
+def test_run_contest_returns_winner_flexible(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEFAULT_SCHEDULER", "new")
+    monkeypatch.setenv("STORE_DIR", str(tmp_path / "store"))
+    payload = _new_engine_payload(candidates=[70, 80], budget_per_candidate=20)
+    out = svc.run_contest(payload, processes=1)
+    assert "winner_flexible" in out
+    assert isinstance(out["winner_flexible"], bool)
+    # Both machine-sets were actually tried (rows carry the "flexible" field).
+    assert {row["flexible"] for row in out["rows"]} == {False, True}
 
 
 def test_flow_mode_cloud_contest_uses_chunk_candidates():

@@ -250,12 +250,11 @@ def prepare_contest(orders: dict, actuals, masters, config: Config,
 # --------------------------------------------------------------------------- #
 # The contest itself — per-candidate runs + the shared winner rule.
 # --------------------------------------------------------------------------- #
-def pick_winner(current_overlap, rows):
-    """The ONE winner rule (shared by sweep_optimize's sequential loop and the
-    cloud worker's parallel rows): best score wins; an exact tie keeps the
-    current setting (it is considered first)."""
-    ordered = sorted(rows, key=lambda r: (r.get("overlap") != current_overlap,
-                                          r.get("overlap")))
+def pick_winner(current_overlap, current_flexible, rows):
+    """Best score wins; an exact tie keeps the current (overlap, machine-set)."""
+    def _is_current(r):
+        return r.get("overlap") == current_overlap and bool(r.get("flexible")) == bool(current_flexible)
+    ordered = sorted(rows, key=lambda r: (not _is_current(r), r.get("overlap")))
     best = None
     for r in ordered:
         if not r.get("eligible") or r.get("best") is None:
@@ -265,13 +264,14 @@ def pick_winner(current_overlap, rows):
     return best
 
 
-def run_candidate(payload: dict, overlap: int, *, on_progress=None,
+def run_candidate(payload: dict, overlap: int, flexible: bool = False, *, on_progress=None,
                   should_cancel=None) -> dict:
     """One contender, fully self-contained (safe to run in a subprocess): it
     rebuilds the book from the payload and searches every active line as one
     pool (lanes have no scheduling effect). ``reserved=`` is only the operator
-    absences (physical unavailability). Returns a sweep-table row (+ ranks for
-    the winner)."""
+    absences (physical unavailability). ``flexible`` selects the machine set
+    (Allotted-only vs Allotted+Suggested — see ``Config.flexible_machines``).
+    Returns a sweep-table row (+ ranks for the winner)."""
     orders, actuals, masters, config, absences, operator_table, frozen = parse_payload(payload)
     # The new engine loads its masters from the workbook; the cloud worker has no store, so
     # feed it the payload's workbook bytes directly (harmless for classic/flow).
@@ -282,15 +282,15 @@ def run_candidate(payload: dict, overlap: int, *, on_progress=None,
     setup = prepare_contest(orders, actuals, masters, config, absences=absences,
                             operator_table=operator_table, frozen=frozen)
     knob, _cands = optimizer.knob_for(setup.search_config)
-    cfg = replace(setup.search_config, **{knob: int(overlap)})
+    cfg = replace(setup.search_config, flexible_machines=bool(flexible), **{knob: int(overlap)})
     res = optimizer.optimize(setup.target, cfg, setup.masters,
                              reserved=setup.absence_reserved,
                              frozen=setup.frozen,
                              budget_evals=int(payload["budget_per_candidate"]),
                              seed=int(payload["seed"]),
                              on_progress=on_progress, should_cancel=should_cancel)
-    return {"overlap": int(overlap), "eligible": True, "best": res.best,
-            "evals": res.evals, "ranks": res.ranks, "cancelled": res.cancelled}
+    return {"overlap": int(overlap), "flexible": bool(flexible), "eligible": True,
+            "best": res.best, "evals": res.evals, "ranks": res.ranks, "cancelled": res.cancelled}
 
 
 # Subprocess plumbing: a plain module-level initializer + runner so the pool
@@ -303,7 +303,7 @@ def _pool_init(counter, stop):
 
 
 def _pool_run(args):
-    payload, overlap = args
+    payload, overlap, flexible = args
     last = {"evals": 0}
 
     def cb(evals, _best):
@@ -314,7 +314,7 @@ def _pool_run(args):
                 c.value += delta
 
     stop = _POOL["stop"]
-    return run_candidate(payload, overlap, on_progress=cb,
+    return run_candidate(payload, overlap, flexible, on_progress=cb,
                          should_cancel=(lambda: bool(stop.value)) if stop else None)
 
 
@@ -327,34 +327,39 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
     config = Config.from_dict(payload["config"])
     knob, _default_cands = optimizer.knob_for(config)
     cur_value = getattr(config, knob)
+    cur_flex = bool(getattr(config, "flexible_machines", False))
     contenders = optimizer.sweep_contenders(cur_value, payload["candidates"])
+    machine_sets = (False, True)
     rows, done_evals, cancelled = [], 0, False
 
     if processes <= 1:
-        for ov in contenders:
-            if should_cancel and should_cancel():
-                cancelled = True
+        for flex in machine_sets:
+            for ov in contenders:
+                if should_cancel and should_cancel():
+                    cancelled = True
+                    break
+                base = done_evals
+
+                def cb(evals, best, _base=base):
+                    if on_progress:
+                        on_progress(_base + evals, best)
+
+                row = run_candidate(payload, ov, flex, on_progress=cb,
+                                    should_cancel=should_cancel)
+                rows.append(row)
+                done_evals += row.get("evals", 0)
+                cancelled = cancelled or bool(row.get("cancelled"))
+            if cancelled:
                 break
-            base = done_evals
-
-            def cb(evals, best, _base=base):
-                if on_progress:
-                    on_progress(_base + evals, best)
-
-            row = run_candidate(payload, ov, on_progress=cb,
-                                should_cancel=should_cancel)
-            rows.append(row)
-            done_evals += row.get("evals", 0)
-            cancelled = cancelled or bool(row.get("cancelled"))
     else:
         import multiprocessing as mp
         ctx = mp.get_context()
         counter = ctx.Value("i", 0)
         stop = ctx.Value("b", 0)
+        jobs = [(payload, ov, flex) for flex in machine_sets for ov in contenders]
         with ctx.Pool(processes=processes, initializer=_pool_init,
                       initargs=(counter, stop)) as pool:
-            async_res = pool.map_async(_pool_run,
-                                       [(payload, ov) for ov in contenders])
+            async_res = pool.map_async(_pool_run, jobs)
             while not async_res.ready():
                 async_res.wait(poll_seconds)
                 if on_progress:
@@ -367,13 +372,13 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
 
     if on_progress:
         on_progress(done_evals, None)
-    winner = pick_winner(cur_value, rows)
-    table = [{k: r[k] for k in ("overlap", "eligible", "best", "evals")
+    winner = pick_winner(cur_value, cur_flex, rows)
+    table = [{k: r[k] for k in ("overlap", "flexible", "eligible", "best", "evals")
               if k in r} for r in rows]
     if winner is None:
-        return {"winner_overlap": cur_value, "rows": table, "knob": knob,
-                "best": None, "ranks": {}, "evals": done_evals,
+        return {"winner_overlap": cur_value, "winner_flexible": cur_flex, "rows": table,
+                "knob": knob, "best": None, "ranks": {}, "evals": done_evals,
                 "cancelled": cancelled}
-    return {"winner_overlap": winner["overlap"], "rows": table, "knob": knob,
-            "best": winner["best"], "ranks": winner.get("ranks", {}),
+    return {"winner_overlap": winner["overlap"], "winner_flexible": bool(winner["flexible"]),
+            "rows": table, "knob": knob, "best": winner["best"], "ranks": winner.get("ranks", {}),
             "evals": done_evals, "cancelled": cancelled}
