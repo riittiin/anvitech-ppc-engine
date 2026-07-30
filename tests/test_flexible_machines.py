@@ -8,6 +8,7 @@ import pytest
 from dataclasses import replace
 
 from engine import book_store, new_engine
+from engine.optimizer import SweepResult, score
 from engine.rules import rule1_consolidate
 from tests.new_sample_workbook import build_new_sample_bytes
 from tests.test_new_engine import _CONF, _old_book
@@ -97,3 +98,17 @@ def test_frozen_op_on_suggested_machine_pins_in_allotted_only_pass():
                            masters=masters, frozen=frozen)
     e = next(x for x in sched if x.item_code == "NEW-A-01" and x.process_seq == 1)
     assert e.machine == "CNC2"        # pinned despite CNC2 not being an Allotted-only option
+
+
+def test_sweepresult_has_flexible_machines_field():
+    assert SweepResult().flexible_machines is False
+
+
+def test_local_sweep_reports_winning_machine_set_and_counts_both_passes():
+    so_lines, masters = _old_book()
+    seen = []
+    sw = new_engine.sweep_optimize(so_lines, _CONF, masters, budget_evals=40, seed=1,
+                                   on_progress=lambda n, b: seen.append(n))
+    assert isinstance(sw.flexible_machines, bool)
+    assert sw.result.ranks                       # a real winner
+    assert max(seen) > 0                          # progress advanced across both passes

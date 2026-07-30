@@ -412,6 +412,7 @@ class SweepResult:
 
     overlap_percent: int = 0            # the winning knob value (see docstring)
     knob: str = "overlap_percent"       # which config field the value belongs to
+    flexible_machines: bool = False     # the winning machine-set (new engine)
     result: OptimizeResult = field(default_factory=OptimizeResult)
     table: list = field(default_factory=list)   # per-candidate probe outcomes
     evals: int = 0

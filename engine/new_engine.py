@@ -499,27 +499,34 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
 
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None, base_reserved=None, frozen=None, **kw):
-    """Local (in-process) fallback for 'Start deep search': the same continuous golden-section
-    tune as the cloud, at a smaller budget so it finishes on the free instance. Returns the old
-    ``SweepResult`` shape so the optimize/apply/replay machinery is unchanged. ``on_progress``
-    is fed EVERY plan (with the best-so-far metrics) so the app's counter tracks real work."""
-    from engine.optimizer import OptimizeResult, SweepResult
+    """Local fallback for 'Start deep search'. Runs the golden-section tune once per
+    machine-set (Allotted-only, then Allotted+Suggested) and keeps the better plan by
+    score — the third Optimize dimension. Returns the old SweepResult shape."""
+    from dataclasses import replace
+    from engine.optimizer import OptimizeResult, SweepResult, score
 
-    state = {"best": {}}
-
-    def _step(plans, best_score):
-        if on_progress:
-            on_progress(plans, state["best"])
-
-    # Split the (capped) budget across ~12 golden-section probes.
     per = max(15, int(budget_evals) // 10)
-    ranks, overlap_pct, metrics, plans = tune(so_lines, config, masters,
-                                              budget_per_eval=per, seed=seed, on_step=_step,
-                                              reserved=base_reserved, frozen=frozen)
-    state["best"] = metrics or {}
-    if not ranks:
-        return SweepResult(overlap_percent=overlap_pct, knob="overlap",
-                           result=OptimizeResult(evals=0, best=None), table=[], evals=0, cancelled=False)
-    result = OptimizeResult(ranks=ranks, best=metrics, evals=plans, improved=True, cancelled=False)
-    return SweepResult(overlap_percent=overlap_pct, knob="overlap",
-                       result=result, table=[], evals=plans, cancelled=False)
+    best = None                       # (ranks, overlap_pct, metrics, plans, flexible)
+    offset = {"n": 0}
+
+    for flex in (False, True):
+        def _step(plans, _best, _flex=flex):
+            if on_progress:
+                on_progress(offset["n"] + plans, (best or (None,) * 3)[2] if best else {})
+        cfg = replace(config, flexible_machines=flex)
+        ranks, overlap_pct, metrics, plans = tune(so_lines, cfg, masters,
+                                                  budget_per_eval=per, seed=seed, on_step=_step,
+                                                  reserved=base_reserved, frozen=frozen)
+        offset["n"] += plans
+        if ranks and (best is None or score(metrics) < score(best[2])):
+            best = (ranks, overlap_pct, metrics, plans, flex)
+
+    if best is None:
+        return SweepResult(overlap_percent=int(round(_plan_config(config).overlap * 100)),
+                           knob="overlap", flexible_machines=False,
+                           result=OptimizeResult(evals=0, best=None), table=[], evals=offset["n"],
+                           cancelled=False)
+    ranks, overlap_pct, metrics, plans, flex = best
+    result = OptimizeResult(ranks=ranks, best=metrics, evals=offset["n"], improved=True, cancelled=False)
+    return SweepResult(overlap_percent=overlap_pct, knob="overlap", flexible_machines=flex,
+                       result=result, table=[], evals=offset["n"], cancelled=False)
