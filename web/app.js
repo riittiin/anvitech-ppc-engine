@@ -222,6 +222,8 @@ function applyConfig(cfg, resolvedStart) {
   // info line rather than an editable input.
   const ov = $("cfg-overlap-info");
   if (ov && cfg.overlap_percent != null) ov.textContent = cfg.overlap_percent;
+  const ms = $("cfg-machineset-info");
+  if (ms) ms.textContent = cfg.flexible_machines ? "Allotted + Suggested" : "Allotted only";
   const ol = $("cfg-operator-logic");
   if (ol) ol.checked = !!cfg.apply_operator_logic;
   const sp = $("cfg-split-parallel");
