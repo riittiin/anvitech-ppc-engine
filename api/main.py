@@ -1293,7 +1293,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                                           frozen=setup.frozen)
             res = sw.result
             _finalize_optimize(job_id, base_config, real_baseline, label,
-                               winner_overlap=sw.overlap_percent, ranks=res.ranks,
+                               winner_overlap=sw.overlap_percent,
+                               winner_flexible=sw.flexible_machines, ranks=res.ranks,
                                best=res.best, evals=sw.evals, table=sw.table,
                                cancelled=sw.cancelled)
         except Exception as e:  # noqa: BLE001 — a failed search must report, not hang
@@ -1364,7 +1365,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
 
 
 def _finalize_optimize(job_id, base_config, real_baseline, label, *,
-                       winner_overlap, ranks, best, evals, table, cancelled):
+                       winner_overlap, winner_flexible=False, ranks, best, evals,
+                       table, cancelled):
     """Store a finished contest (local sweep OR cloud worker result) as the
     Optimize outcome — one place computes improved/inputs_sig for both paths."""
     # RECOMPUTE the winner's metrics locally, by replaying its ranks through the same
@@ -1375,7 +1377,7 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
     # Both `best` and `real_baseline` (already local) are then on the same footing, so
     # `improved` is judged honestly. Keep the contest's number only if the replay fails.
     if ranks:
-        _local_best = _metrics_for_ranks(ranks, winner_overlap)
+        _local_best = _metrics_for_ranks(ranks, winner_overlap, winner_flexible)
         if _local_best is not None:
             best = _local_best
     improved = (best is not None and real_baseline is not None
@@ -1385,6 +1387,7 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
     # compare future plans against exactly that config.
     _knob, _ = optimizer.knob_for(base_config)
     inputs_sig = _inputs_signature(replace(base_config,
+                                           flexible_machines=bool(winner_flexible),
                                            **{_knob: winner_overlap}))
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["job_id"] != job_id:
@@ -1401,6 +1404,8 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                     "best_overlap": winner_overlap,
                     "current_overlap": getattr(base_config, _knob),
                     "knob": _knob,
+                    "flexible_machines": bool(winner_flexible),
+                    "current_flexible": bool(getattr(base_config, "flexible_machines", False)),
                     "sweep_table": table})
         # Record a "last searched" marker for EVERY completed contest — not
         # just an applied one — so a redundant Done click (no improvement
@@ -1429,6 +1434,8 @@ def _optimize_status():
                 "improved": res.get("improved"), "cancelled": res.get("cancelled", False),
                 "best_overlap": res.get("best_overlap"),
                 "current_overlap": res.get("current_overlap"),
+                "flexible_machines": res.get("flexible_machines"),
+                "current_flexible": res.get("current_flexible"),
                 # which config field the value tunes: overlap_percent (classic)
                 # or flow_chunks (flow) — the UI labels the result with this
                 "knob": res.get("knob"),
@@ -1528,7 +1535,7 @@ def _movement_note(new_ranks):
     return _format_movers(movers)
 
 
-def _metrics_for_ranks(ranks, overlap=None, *, with_distribution=True):
+def _metrics_for_ranks(ranks, overlap=None, flexible=None, *, with_distribution=True):
     """Metrics of the plan that replays ``ranks`` through the SAME local path ``_plan``
     uses (optionally at a given overlap). This is the ONE source of truth for "what
     this optimized plan achieves": the contest (cloud worker OR local sweep) can report
@@ -1541,6 +1548,8 @@ def _metrics_for_ranks(ranks, overlap=None, *, with_distribution=True):
         if overlap is not None:
             knob = optimizer.knob_for(config)[0]
             config = replace(config, **{knob: overlap})
+        if flexible is not None:
+            config = replace(config, flexible_machines=bool(flexible))
         masters = _current_masters()
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()
