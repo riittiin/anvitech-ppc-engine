@@ -664,7 +664,7 @@ keeps the best.
   every subsequent Plan reproduces it (`_new_masters` loads masters at that flexibility).
   Because it doubles the work (both machine-sets swept in full), the contest is roughly
   **2× the cost** of the sequence×overlap search above (cloud ~15→~30 min; local
-  ~1,000→~2,000 plans) — the progress bar sizes itself accordingly on the new engine only.
+  ~200→~400 plans) — the progress bar sizes itself accordingly on the new engine only.
   Classic/flow ignore this flag entirely (single-pass, their own machine selection via
   `rule6_allocate._resolve_candidates`/`split_parallel`). Spec:
   `docs/superpowers/specs/2026-07-29-machine-set-optimize-dimension-design.md`.

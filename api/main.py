@@ -1250,7 +1250,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         else:
             payload = None
             _knob, _kcands = optimizer.knob_for(setup.search_config)
-            denom = optimizer.sweep_total_evals(
+            _mult = 2 if getattr(setup.search_config, "scheduler", "classic") == "new" else 1
+            denom = _mult * optimizer.sweep_total_evals(
                 budget_evals, getattr(setup.search_config, _knob), _kcands)
 
         # Snapshot the book/inputs fingerprints AT START — a punch that lands

@@ -528,9 +528,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (`new_engine.sweep_optimize`) runs the golden-section `tune` once per
   machine-set and keeps the better; the cloud contest wraps its overlap×
   sequence loop in the same outer `(False, True)` loop. Cost: roughly **2×**
-  the sequence×overlap search (cloud ~15→~30 min, local ~1,000→~2,000 plans) —
+  the sequence×overlap search (cloud ~15→~30 min, local ~200→~400 plans) —
   the progress-bar budget display doubles for `scheduler=="new"` only
-  (`api/main.py`'s two cloud-fallback `sweep_total_evals` sites). Classic/flow
+  (`api/main.py`'s three `sweep_total_evals` sites: the initial local-mode
+  estimate in `_start_optimize` plus its two cloud-dispatch-failure/timeout
+  fallbacks). Classic/flow
   ignore the flag entirely (single-pass, their own `rule6_allocate.
   _resolve_candidates`/`split_parallel` machine selection).
 - **Feedback-triggered optimize, THURSDAY-gated (2026-07-22,
