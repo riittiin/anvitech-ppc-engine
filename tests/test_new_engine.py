@@ -46,10 +46,17 @@ def new_masters(wb_bytes):
     return new_load(io.BytesIO(wb_bytes)).masters
 
 
+def _old_book(wb_bytes=None):
+    """(so_lines, masters) via the OLD loaders — what the pipeline/optimizer consume.
+    Module-level so other test files can call it directly (no fixture wiring needed);
+    the ``old_book`` fixture below just wraps it over the shared ``wb_bytes`` fixture."""
+    return loaders.load_all(io.BytesIO(wb_bytes if wb_bytes is not None else build_new_sample_bytes()))
+
+
 @pytest.fixture()
 def old_book(wb_bytes):
     """(so_lines, masters) via the OLD loaders — what the pipeline/optimizer consume."""
-    return loaders.load_all(io.BytesIO(wb_bytes))
+    return _old_book(wb_bytes)
 
 
 def _shift_of(dt):

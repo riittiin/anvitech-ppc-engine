@@ -84,8 +84,11 @@ def build_workbook():
         hdr[base + 4] = f"Process {p+1} Allotted M/c"
     _set(ws, 2, hdr)
     # Item A: CNC -> VMC -> INSPECTION -> DISPATCH  (two machining ops)
+    # Process 1 Allotted M/c (col 16) is deliberately narrower than Suggested (CNC1/CNC2)
+    # so flexible_machines=False (Allotted only) vs True (Allotted+Suggested union) differ
+    # (tests/test_flexible_machines.py: 1 option vs 2).
     _set(ws, 3, {0: 1, 1: "ACME", 2: "NEW RING A", 3: ITEM_A, 6: "Dia 20 SS", 10: 50,
-                 12: "CNC FIRST SIDE", 13: 3, 14: 3, 15: "CNC1/CNC2",
+                 12: "CNC FIRST SIDE", 13: 3, 14: 3, 15: "CNC1/CNC2", 16: "CNC1",
                  17: "VMC FIRST SIDE", 18: 4, 19: 4, 20: "VMC1",
                  22: "INSPECTION", 23: 2, 24: 2, 25: "MI1",
                  27: "DISPATCH", 28: 0, 29: 0})

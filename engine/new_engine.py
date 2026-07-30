@@ -68,17 +68,22 @@ def set_masters_bytes(raw: bytes | None) -> None:
     _OVERRIDE_BYTES = raw
 
 
-def _new_masters():
-    """Load the new-engine Masters from the injected bytes or the stored workbook, cached."""
+def _new_masters(flexible: bool = False):
+    """Load the new-engine Masters at the given machine flexibility from the injected
+    bytes or the stored workbook. flexible=False -> Allotted-only options (today);
+    True -> the Allotted+Suggested union. Cached by (workbook sha, flexible)."""
     raw = _OVERRIDE_BYTES if _OVERRIDE_BYTES is not None else book_store.load_masters_bytes()
     if not raw:
         raise RuntimeError("new_engine: no masters workbook available (store empty and none injected)")
     h = hashlib.sha256(raw).hexdigest()
-    cached = _MASTERS_CACHE.get(h)
+    key = (h, bool(flexible))
+    cached = _MASTERS_CACHE.get(key)
     if cached is None:
-        _MASTERS_CACHE.clear()
-        cached = load_all(io.BytesIO(raw)).masters
-        _MASTERS_CACHE[h] = cached
+        # Keep both flexibilities of the CURRENT workbook; evict any other workbook.
+        for k in [k for k in _MASTERS_CACHE if k[0] != h]:
+            del _MASTERS_CACHE[k]
+        cached = load_all(io.BytesIO(raw), flexible_machines=bool(flexible)).masters
+        _MASTERS_CACHE[key] = cached
     return cached
 
 
@@ -391,7 +396,8 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
         return []
     # Operators are APP-OWNED — overlay them onto the workbook masters (the sheet is a
     # fossil), so a delete/edit/rotation in Settings is what actually schedules.
-    new_masters = _with_absences(_apply_app_operators(_new_masters(), masters), reserved)
+    new_masters = _with_absences(_apply_app_operators(
+        _new_masters(bool(getattr(config, "flexible_machines", False))), masters), reserved)
     orders, batch_by_key = _orders_from_batches(batches, new_masters)
     if not orders:
         return []
@@ -416,7 +422,8 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     from ppc_engine.optimize import optimize as new_optimize
 
     # App-owned operators (the search must optimize against the SAME crew the plan runs).
-    nm = _with_absences(_apply_app_operators(_new_masters(), masters), reserved)
+    nm = _with_absences(_apply_app_operators(
+        _new_masters(bool(getattr(config, "flexible_machines", False))), masters), reserved)
     cfg = _plan_config(config)
     plan_start = getattr(config, "plan_start_date", None) or date.today()
     batches = rule1_consolidate.run(so_lines, config)
@@ -462,7 +469,8 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     from ppc_engine.scheduler import decode
 
     # App-owned operators — same overlay as run()/optimize_sequence().
-    new_masters = _with_absences(_apply_app_operators(_new_masters(), masters), reserved)
+    new_masters = _with_absences(_apply_app_operators(
+        _new_masters(bool(getattr(config, "flexible_machines", False))), masters), reserved)
     base = _plan_config(config)
     plan_start = getattr(config, "plan_start_date", None) or date.today()
 
