@@ -2242,6 +2242,7 @@ class WorkerProgress(BaseModel):
 class WorkerResult(BaseModel):
     job_id: str
     winner_overlap: Optional[int] = None
+    winner_flexible: Optional[bool] = None
     ranks: dict = Field(default_factory=dict)
     best: Optional[dict] = None
     rows: list = Field(default_factory=list)
@@ -2295,6 +2296,7 @@ def optimize_result_ep(req: WorkerResult, request: Request):
         raise HTTPException(status_code=404, detail="no such running job")
     stored = _finalize_optimize(req.job_id, base_config, baseline, label,
                                 winner_overlap=req.winner_overlap,
+                                winner_flexible=bool(req.winner_flexible),
                                 ranks=req.ranks, best=req.best, evals=req.evals,
                                 table=req.rows, cancelled=req.cancelled)
     if not stored:

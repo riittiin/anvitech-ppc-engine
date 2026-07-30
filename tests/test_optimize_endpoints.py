@@ -81,3 +81,48 @@ def test_finalize_recomputes_winner_at_its_machine_set(new_engine_client_with_bo
     assert "current_flexible" in st
     assert isinstance(st["flexible_machines"], bool)
     assert isinstance(st["current_flexible"], bool)
+
+
+WORKER_SECRET = "test-worker-secret"
+
+
+def test_result_endpoint_stores_winner_flexible(monkeypatch):
+    """A cloud worker's winning machine-set (`winner_flexible`) must round-trip
+    through POST /optimize/result -> _finalize_optimize -> GET /optimize/status,
+    exactly like `winner_overlap` already does. Mirrors
+    tests/test_optimize_cloud.py::test_cloud_round_trip_via_the_worker_endpoints
+    but only drives the worker-facing /optimize/result leg directly (no need to
+    actually run a contest) against the new-engine harness."""
+    m = _api_with_new_engine(monkeypatch)
+    _seed_new_book()
+    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "fake-token")
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", WORKER_SECRET)
+    m._OPT_BUDGETS = {"quick": 20, "deep": 20}
+
+    dispatched = {}
+    monkeypatch.setattr(
+        m, "_dispatch_workflow",
+        lambda cloud, job_id: dispatched.setdefault("job_id", job_id) or True)
+
+    client = TestClient(m.app)
+    client.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    client.get("/operators")   # trigger the one-time operator seed
+
+    st = m._start_optimize(budget_evals=15, label="deep", background=True)
+    assert st["mode"] == "cloud", st
+    deadline = time.monotonic() + 10
+    while "job_id" not in dispatched and time.monotonic() < deadline:
+        time.sleep(0.02)
+    job_id = dispatched.get("job_id")
+    assert job_id, "worker was never dispatched"
+
+    r = client.post(
+        "/optimize/result",
+        headers={"X-Worker-Secret": WORKER_SECRET},
+        json={"job_id": job_id, "winner_overlap": 80, "winner_flexible": True,
+              "ranks": {}, "best": {"total_late_days": 1, "makespan_days": 1},
+              "rows": [], "evals": 10, "cancelled": False})
+    assert r.status_code == 200, r.text
+
+    body = _wait_done(client)
+    assert body.get("flexible_machines") is True
