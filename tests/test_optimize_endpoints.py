@@ -9,6 +9,7 @@ module (not tests/conftest.py) so they don't change behaviour for the rest of
 the suite, which validates the classic engine by default.
 """
 import importlib
+import json
 import time
 from datetime import date
 
@@ -18,6 +19,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from engine import book_store
+from engine.config import Config
 from engine.models import Order
 from tests.new_sample_workbook import build_new_sample_bytes, ITEM_A, ITEM_B, SO1, SO2
 
@@ -126,3 +128,66 @@ def test_result_endpoint_stores_winner_flexible(monkeypatch):
 
     body = _wait_done(client)
     assert body.get("flexible_machines") is True
+
+
+def test_apply_persists_machine_set_and_plan_reproduces(new_engine_client_with_book):
+    """Task 7: 'Apply this plan' must persist the winning machine-set
+    (Config.flexible_machines) into the saved plan config alongside the
+    winning overlap, so `_plan` (the everyday '/run') reproduces the same
+    machine choices the applied winner used — a machining op that only
+    the Allotted+Suggested UNION could reach (CNC2 here) must land there
+    after Apply, not just under a one-off Optimize search.
+
+    Deterministic union-win setup, mirroring
+    tests/test_flexible_machines.py::test_run_places_op_on_suggested_machine_only_when_flexible:
+    Item A's 'CNC FIRST SIDE' step has Allotted=CNC1 only, Suggested=CNC1/CNC2
+    (tests/new_sample_workbook.py). A single Item-A order never contends for
+    CNC1, so CNC2 goes unused regardless of the flag; a SECOND Item-A order far
+    enough from the first's delivery date to stay a separate Rule-1 batch
+    (>10-day consolidation window), plus a second CNC1/CNC2-qualified
+    first-shift operator ('Echo', alongside the fixture's 'Alpha'), creates
+    real contention two operators can actually exploit in parallel.
+
+    The finished job's result is stubbed directly (state='done'), mirroring
+    tests/test_manual_apply_backstop.py's `_stage` pattern, so the win is
+    forced deterministically rather than depending on a real search finding
+    it within the test's shrunk budget.
+    """
+    client = new_engine_client_with_book
+    import api.main as m
+    from engine.models import Order
+
+    # A second Item-A order, 26 days after SO1's 2025-03-20 delivery (well past
+    # the default 10-day consolidation window) -> stays a separate Rule-1 batch.
+    book_store.add_orders([Order("NSO-003", ITEM_A, ITEM_A, 50, date(2025, 4, 15))])
+    # A second CNC1/CNC2-qualified first-shift operator so the extra capacity
+    # the Suggested machine (CNC2) unlocks can actually be used in parallel.
+    r = client.post("/operators", json={"name": "Echo", "machines_raw": "CNC1, CNC2",
+                                        "shift": "First shift"})
+    assert r.status_code == 200, r.text
+
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["state"] = "done"
+        m._OPTIMIZE["result"] = {
+            "best": {"total_late_days": 1, "makespan_days": 1.0,
+                     "max_late_days": 1, "max_committed_slip": 0},
+            "ranks": {}, "budget": 20, "seed": 1, "baseline": {},
+            "best_overlap": 80, "current_overlap": 70,
+            "knob": "overlap_percent", "flexible_machines": True,
+        }
+
+    r = client.post("/optimize/apply")
+    assert r.status_code == 200, r.text
+
+    cfg = Config.from_dict(json.loads(book_store.load_plan_config()))
+    assert cfg.flexible_machines is True         # persisted
+    assert cfg.overlap_percent == 80             # unchanged behaviour: overlap still persists too
+
+    # _plan now uses the union (Allotted + Suggested) — a machining op lands
+    # on a Suggested-only machine (CNC2), the same one the applied winner used.
+    resp = client.post("/run", json={})
+    assert resp.status_code == 200, resp.text
+    table = resp.json()["trace"]["rule6"]["output"]
+    m_idx = table["columns"].index("Machine")
+    machines = {row[m_idx] for row in table["rows"]}
+    assert "CNC2" in machines

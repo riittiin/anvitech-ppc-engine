@@ -1681,16 +1681,20 @@ def _optimize_apply():
             book_store.save_last_applied_schedule(freeze.schedule_projection(sched))
         except Exception:
             pass  # never let schedule-snapshotting break an apply
-        # Settings sweep: the winning overlap becomes THE saved plan setting (the
-        # single config every Plan loads and the Settings panel shows). Unchanged
+        # Settings sweep: the winning overlap AND machine-set become THE saved plan
+        # settings (the single config every Plan loads and Settings shows). Unchanged
         # winner -> no write, no churn.
         best_ov = res.get("best_overlap")
+        best_flex = res.get("flexible_machines")
+        cfg = _load_plan_config()
+        knob = res.get("knob") or optimizer.knob_for(cfg)[0]
+        target = cfg
         if best_ov is not None:
-            cfg = _load_plan_config()
-            knob = res.get("knob") or optimizer.knob_for(cfg)[0]
-            if getattr(cfg, knob) != best_ov:
-                book_store.save_plan_config(json.dumps(
-                    replace(cfg, **{knob: best_ov}).to_dict()))
+            target = replace(target, **{knob: best_ov})
+        if best_flex is not None:
+            target = replace(target, flexible_machines=bool(best_flex))
+        if target.to_dict() != cfg.to_dict():
+            book_store.save_plan_config(json.dumps(target.to_dict()))
         # Clear the in-memory job so a later page refresh doesn't re-show the
         # "Apply" panel for a plan that's already applied.
         _OPTIMIZE.update(state="idle", result=None, best=None, baseline=None)
