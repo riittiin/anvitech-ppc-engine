@@ -1320,7 +1320,9 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                     if still_mine:
                         _OPTIMIZE["mode"] = "local"
                         _k, _kc = optimizer.knob_for(setup.search_config)
-                        _OPTIMIZE["budget_evals"] = optimizer.sweep_total_evals(
+                        _mult = 2 if getattr(setup.search_config, "scheduler",
+                                              "classic") == "new" else 1
+                        _OPTIMIZE["budget_evals"] = _mult * optimizer.sweep_total_evals(
                             budget_evals, getattr(setup.search_config, _k), _kc)
                 if still_mine:
                     local_job()
@@ -1346,7 +1348,9 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                             return
                         _OPTIMIZE["mode"] = "local"
                         _k, _kc = optimizer.knob_for(setup.search_config)
-                        _OPTIMIZE["budget_evals"] = optimizer.sweep_total_evals(
+                        _mult = 2 if getattr(setup.search_config, "scheduler",
+                                              "classic") == "new" else 1
+                        _OPTIMIZE["budget_evals"] = _mult * optimizer.sweep_total_evals(
                             budget_evals, getattr(setup.search_config, _k), _kc)
                         _OPTIMIZE["evals"] = 0
                 if timed_out:

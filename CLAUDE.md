@@ -513,6 +513,26 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   failure / worker error / `OPTIMIZE_CLOUD_TIMEOUT_MIN` (20) exceeded → compute
   locally (1,000-total split), so the button always works; env unset → pure local.
   `GITHUB_DISPATCH_TOKEN=manual` skips the GitHub call (run the worker by hand).
+- **Machine-set as a third Optimize dimension (2026-07-29, new engine only,
+  `docs/superpowers/specs/2026-07-29-machine-set-optimize-dimension-design.md`).**
+  The contest now searches **sequence × overlap % × machine-set** — for every
+  plan it also tries **Allotted-only** vs **Allotted + Suggested** (deduped
+  union, Allotted first) as the option set for in-house machining/manual/
+  inspection ops, keeping the single global best by the unchanged score.
+  `PlanConfig.flexible_machines` (default `False` = today's Allotted-only,
+  byte-identical; folded into `_inputs_signature` like `overlap_percent`) is
+  **optimizer-owned** — never hand-edited in Settings (read-only, like
+  overlap), set only when Optimize applies a winning result, and replayed by
+  every subsequent Plan the same way the tuned overlap is (`_new_masters`
+  loads masters at the applied flexibility). Local fallback
+  (`new_engine.sweep_optimize`) runs the golden-section `tune` once per
+  machine-set and keeps the better; the cloud contest wraps its overlap×
+  sequence loop in the same outer `(False, True)` loop. Cost: roughly **2×**
+  the sequence×overlap search (cloud ~15→~30 min, local ~1,000→~2,000 plans) —
+  the progress-bar budget display doubles for `scheduler=="new"` only
+  (`api/main.py`'s two cloud-fallback `sweep_total_evals` sites). Classic/flow
+  ignore the flag entirely (single-pass, their own `rule6_allocate.
+  _resolve_candidates`/`split_parallel` machine selection).
 - **Feedback-triggered optimize, THURSDAY-gated (2026-07-22,
   `docs/superpowers/specs/2026-07-22-feedback-triggered-optimize-design.md`,
   supersedes the twice-weekly cron below — itself **SUPERSEDED 2026-07-29** by the

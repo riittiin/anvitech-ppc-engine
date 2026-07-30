@@ -653,10 +653,26 @@ keeps the best.
   competes in the same one pool (see "Order commitment (lanes)" above) — no lane gets
   a promise guard or reserved capacity in the search; only operator absences (below)
   reserve time.
+- **Machine-set sweep (2026-07-29, third dimension, new engine only).** Optimize now
+  searches **sequence × overlap % × machine-set**: for each plan it also tries
+  **Allotted-only** vs **Allotted + Suggested (deduped union)** as the option set every
+  in-house machining/manual/inspection op can be placed on, keeping the single best
+  `(machine-set, overlap, sequence)` combination by the same score. `flexible_machines`
+  (config field, default `False` = today's Allotted-only behavior, byte-identical) is
+  **optimizer-owned** — never hand-edited, set only by applying a winning contest result,
+  exactly like the tuned overlap %. The winner persists into the saved plan config and
+  every subsequent Plan reproduces it (`_new_masters` loads masters at that flexibility).
+  Because it doubles the work (both machine-sets swept in full), the contest is roughly
+  **2× the cost** of the sequence×overlap search above (cloud ~15→~30 min; local
+  ~1,000→~2,000 plans) — the progress bar sizes itself accordingly on the new engine only.
+  Classic/flow ignore this flag entirely (single-pass, their own machine selection via
+  `rule6_allocate._resolve_candidates`/`split_parallel`). Spec:
+  `docs/superpowers/specs/2026-07-29-machine-set-optimize-dimension-design.md`.
 - **Cloud compute (2026-07-15).** When configured, clicking Optimize runs the full fair
   contest on a free GitHub Actions runner instead of the reduced local fallback — same
   code, byte-identical results either way. On the production (new) engine that is
-  **~1,800 plans** (12 overlap candidates × 150, ~15 min) in the cloud vs **~200** local.
+  **~1,800 plans** (12 overlap candidates × 150, ~15 min) in the cloud vs **~200** local
+  **per machine-set** (now doubled by the machine-set sweep above).
   (The retired classic engine used 6 candidates × 400 = 2,400 cloud / 1,000 local.) Falls
   back to local automatically if the cloud is unavailable or times out.
 - The admin sees a before/after table and chooses **Apply** or Discard. Apply persists
