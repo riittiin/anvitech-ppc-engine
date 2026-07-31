@@ -423,3 +423,18 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
     if on_progress:
         on_progress(done_evals, None)
     return merge_shard_rows(payload, rows, done_evals, cancelled)
+
+
+def run_contest_slice(payload: dict, shard_index: int, shard_total: int, *,
+                      processes=1, on_progress=None, should_cancel=None,
+                      poll_seconds=5.0) -> dict:
+    """One shard of the contest: run the round-robin slice
+    contest_jobs(payload)[shard_index::shard_total] and return its RAW rows
+    (with ranks) for the app to merge. shard_total<=1 runs every candidate."""
+    pairs = contest_jobs(payload)
+    if shard_total and shard_total > 1:
+        pairs = pairs[shard_index::shard_total]
+    rows, done_evals, cancelled = _run_jobs(
+        payload, pairs, processes=processes, on_progress=on_progress,
+        should_cancel=should_cancel, poll_seconds=poll_seconds)
+    return {"rows": rows, "evals": done_evals, "cancelled": cancelled}
