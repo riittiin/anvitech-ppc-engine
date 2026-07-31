@@ -2493,12 +2493,21 @@ def optimize_shard_result_ep(req: WorkerShardResult, request: Request):
     still running (finalize does slow work outside the lock) and see the
     threshold true again — `shards_finalizing` is claimed exactly once, under
     the lock, so only the one POST that flips it ever calls
-    `_finalize_from_shards`."""
+    `_finalize_from_shards`. Recording also requires `not shards_finalizing`:
+    once a finalize is claimed (including the no-winner path, which clears
+    `shards` back to `{}` so the watchdog can fall to local), a further
+    duplicate/late POST must not repopulate `shards` — that would fool the
+    watchdog's `have_shards` check into thinking there's still something to
+    salvage, re-wedging the job. The shard that itself triggers the claim
+    still records fine: it writes into `shards` and only THEN checks/claims
+    `shards_finalizing` in the same locked block, so the guard never blocks
+    the triggering POST — only ones arriving after the claim."""
     _require_worker(request)
     ready = False
     with _OPTIMIZE_LOCK:
         if (_OPTIMIZE["state"] == "running" and _OPTIMIZE.get("job_id") == req.job_id
-                and 0 <= req.shard_index < req.shard_total):
+                and 0 <= req.shard_index < req.shard_total
+                and not _OPTIMIZE.get("shards_finalizing")):
             _OPTIMIZE["shard_total"] = req.shard_total
             _OPTIMIZE["shards"][req.shard_index] = {
                 "rows": req.rows, "evals": req.evals, "cancelled": req.cancelled}

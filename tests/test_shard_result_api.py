@@ -258,6 +258,45 @@ def test_no_winner_finalize_clears_shards_so_watchdog_goes_local(monkeypatch):
     assert m._OPTIMIZE["state"] == "running"    # still running; watchdog will go local next tick
 
 
+def test_duplicate_shard_after_no_winner_finalize_does_not_repopulate_shards(monkeypatch):
+    """Residual close on Finding 1: the worker retries a POST up to 5x
+    (at-least-once delivery), so a duplicate/late shard-result can arrive
+    AFTER a no-winner finalize has already cleared _OPTIMIZE["shards"]={}
+    and set cloud_failed=True, while state is still "running" (the watchdog
+    hasn't ticked yet). Without the `not shards_finalizing` recording guard,
+    that duplicate POST would re-enter the `state=="running" and job matches`
+    check, pass, and re-write _OPTIMIZE["shards"][idx] — repopulating the
+    dict the fix just emptied. Since shards_finalizing is already latched
+    True, the watchdog's next tick would then see have_shards=True,
+    claim_shard_finalize=False (already claimed), go_local=False — wedged
+    again, same bug via a different door. The guard must reject the
+    duplicate as a no-op instead."""
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
+    import importlib, api.main as m
+    importlib.reload(m)
+    payload = _payload()
+    _seed_running(m, payload, job_id="job-1")
+    c = TestClient(m.app)
+    hdr = {"X-Worker-Secret": "s3cr3t"}
+    SHARD_TOTAL = 2
+    for idx in range(SHARD_TOTAL):
+        r = c.post("/optimize/shard-result", headers=hdr, json={
+            "job_id": "job-1", "shard_index": idx, "shard_total": SHARD_TOTAL,
+            "rows": [], "evals": 0, "cancelled": False})
+        assert r.status_code == 200
+    assert m._OPTIMIZE["cloud_failed"] is True
+    assert m._OPTIMIZE["shards"] == {}
+    assert m._OPTIMIZE["state"] == "running"
+
+    # A duplicate/late POST of shard 0 arrives after the claim.
+    r = c.post("/optimize/shard-result", headers=hdr, json={
+        "job_id": "job-1", "shard_index": 0, "shard_total": SHARD_TOTAL,
+        "rows": [], "evals": 0, "cancelled": False})
+    assert r.status_code == 200                # still a 200 no-op
+    assert m._OPTIMIZE["shards"] == {}          # NOT repopulated
+    assert m._OPTIMIZE["shards_finalizing"] is True
+
+
 def test_progress_sums_across_shards(monkeypatch):
     monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
     import importlib, api.main as m
