@@ -119,7 +119,8 @@ async def gatekeeper(request: Request, call_next):
     if ((method == "GET" and path.startswith("/optimize/job/"))
             or (method == "GET" and path == "/optimize/pending")
             or (method == "POST" and path in ("/optimize/progress",
-                                              "/optimize/result"))):
+                                              "/optimize/result",
+                                              "/optimize/shard-result"))):
         if _worker_secret_ok(request):
             request.state.user = "cloud-worker"
             request.state.role = "worker"
@@ -934,7 +935,7 @@ _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              "started_mono": None, "result": None, "cancel": False,
              "mode": "local", "job_id": None, "cloud_payload": None,
              "cloud_failed": False, "base_config": None, "auto": False,
-             "claimed": False}
+             "claimed": False, "shards": {}, "shard_total": None}
 _OPTIMIZE_LOCK = threading.Lock()
 
 
@@ -1268,7 +1269,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                          cloud_payload=payload, cloud_failed=False, claimed=False,
                          base_config=base_config, auto=bool(auto),
                          searched_book_sig=searched_book_sig,
-                         searched_inputs_sig=searched_inputs_sig)
+                         searched_inputs_sig=searched_inputs_sig,
+                         shards={}, shard_total=None)
 
     def local_job():
         try:
@@ -2374,6 +2376,64 @@ def optimize_result_ep(req: WorkerResult, request: Request):
                                 table=req.rows, cancelled=req.cancelled)
     if not stored:
         raise HTTPException(status_code=409, detail="job superseded")
+    return {"ok": True}
+
+
+class WorkerShardResult(BaseModel):
+    job_id: str
+    shard_index: int = 0
+    shard_total: int = 1
+    rows: list = Field(default_factory=list)
+    evals: int = 0
+    cancelled: bool = False
+    error: Optional[str] = None
+
+
+def _finalize_from_shards(job_id):
+    """Merge every accumulated shard's rows and finalize the job — or set
+    cloud_failed when the merged set has no eligible winner. Caller holds no
+    lock; this takes it. Safe to call from the collector (all-arrived) and the
+    watchdog (partial)."""
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] != "running" or _OPTIMIZE["job_id"] != job_id:
+            return
+        payload = _OPTIMIZE.get("cloud_payload")
+        shards = list(_OPTIMIZE.get("shards", {}).values())
+        base_config = _OPTIMIZE.get("base_config")
+        baseline = _OPTIMIZE.get("baseline")
+        label = _OPTIMIZE.get("label")
+    all_rows = [r for s in shards for r in s.get("rows", [])]
+    total_evals = sum(int(s.get("evals", 0)) for s in shards)
+    any_cancel = any(bool(s.get("cancelled")) for s in shards)
+    merged = optimize_service.merge_shard_rows(payload, all_rows, total_evals, any_cancel)
+    if merged["best"] is None:
+        with _OPTIMIZE_LOCK:
+            if _OPTIMIZE["state"] == "running" and _OPTIMIZE["job_id"] == job_id:
+                _OPTIMIZE["cloud_failed"] = True   # watchdog → local fallback
+                _OPTIMIZE["error"] = "no eligible plan from any shard"
+        return
+    _finalize_optimize(job_id, base_config, baseline, label,
+                       winner_overlap=merged["winner_overlap"],
+                       winner_flexible=bool(merged["winner_flexible"]),
+                       ranks=merged["ranks"], best=merged["best"],
+                       evals=merged["evals"], table=merged["rows"],
+                       cancelled=merged["cancelled"])
+
+
+@app.post("/optimize/shard-result")
+def optimize_shard_result_ep(req: WorkerShardResult, request: Request):
+    """One matrix shard's rows. Accumulate; when all shards for this job have
+    reported, merge and finalize. A stale/late/duplicate shard is a 200 no-op."""
+    _require_worker(request)
+    ready = False
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] == "running" and _OPTIMIZE.get("job_id") == req.job_id:
+            _OPTIMIZE["shard_total"] = req.shard_total
+            _OPTIMIZE["shards"][req.shard_index] = {
+                "rows": req.rows, "evals": req.evals, "cancelled": req.cancelled}
+            ready = len(_OPTIMIZE["shards"]) >= req.shard_total
+    if ready:
+        _finalize_from_shards(req.job_id)
     return {"ok": True}
 
 
