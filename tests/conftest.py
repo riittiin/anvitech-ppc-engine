@@ -3,8 +3,17 @@ format — there is no bundled real workbook), and isolate the durable store to 
 fresh temp dir per test (so the order book / actuals don't leak between tests or
 touch the real ./data/store)."""
 import io
+import os
 
 import pytest
+
+# The repo is public → api/auth ships NO baked default password. Test modules
+# that read auth._accounts() at import time (e.g. test_auth_api, test_rollback)
+# need a known password present before collection, so set the fixture creds at
+# conftest load. setdefault lets a real CI env override win; the per-test
+# _isolate_store fixture also sets them so they survive any monkeypatch teardown.
+os.environ.setdefault("ADMIN_PASSWORD", "1930rail")
+os.environ.setdefault("USER_PASSWORD", "anvitech12345678")
 
 from engine.loaders import load_all
 from engine.config import Config
@@ -17,6 +26,11 @@ def _isolate_store(tmp_path, monkeypatch):
     monkeypatch.delenv("UPSTASH_REDIS_REST_URL", raising=False)
     monkeypatch.delenv("UPSTASH_REDIS_REST_TOKEN", raising=False)
     monkeypatch.delenv("MONGODB_URI", raising=False)
+    # Login credentials for the test client. Production ships NO baked default
+    # password (the repo is public — see api/auth._accounts), so the API-level
+    # suites supply the fixture creds they log in with via env vars here.
+    monkeypatch.setenv("ADMIN_PASSWORD", "1930rail")
+    monkeypatch.setenv("USER_PASSWORD", "anvitech12345678")
     # Clear in-process auth state (rate limiter + cached session secret) so each
     # test starts clean and resolves its secret from its own isolated store.
     try:

@@ -4,8 +4,8 @@ The single place that knows about accounts and sessions. Design goals (see
 docs/superpowers/specs/2026-06-25-two-role-login-design.md):
 
 * Two roles — ``admin`` (full control) and ``user`` (read-only + download +
-  capture actuals). Credentials are baked in (owner's choice) and may be
-  overridden by env vars without a code change.
+  capture actuals). Usernames have readable defaults; PASSWORDS come only from
+  env vars — the repo is public, so no password is baked into the source.
 * Stateless **signed session cookie** — HMAC-SHA256 over a small payload, using
   only the Python standard library (no extra dependency = smaller supply chain).
 * Constant-time comparisons everywhere; no timing oracle on unknown usernames.
@@ -57,8 +57,20 @@ _DUMMY_DIGEST = hashlib.sha256(b"anvitech-nonexistent-account").digest()
 # --------------------------------------------------------------------------- #
 # Accounts
 # --------------------------------------------------------------------------- #
+# The repo is PUBLIC — a hardcoded password here would be a live credential for
+# anyone who reads this file. So there is NO baked default password. When a
+# password env var is unset, the account falls back to a fresh random secret
+# generated once at import: unknowable, and different on every boot, so an
+# unconfigured deployment simply has no working login rather than a public
+# default. Real deployments MUST set ADMIN_PASSWORD / USER_PASSWORD (render.yaml
+# documents these). Usernames are not secret and keep readable defaults.
+_ADMIN_NO_DEFAULT_PWD = secrets.token_hex(32)
+_USER_NO_DEFAULT_PWD = secrets.token_hex(32)
+
+
 def _accounts() -> dict:
-    """username -> {password, role}. Baked defaults, overridable by env vars.
+    """username -> {password, role}. Usernames have readable defaults; passwords
+    come only from env vars (no baked default — see the note above).
 
     Legacy ``APP_USERNAME`` / ``APP_PASSWORD`` still override the admin account so
     an existing deployment keeps working through the transition.
@@ -66,9 +78,9 @@ def _accounts() -> dict:
     admin_user = (os.environ.get("APP_USERNAME")
                   or os.environ.get("ADMIN_USERNAME") or "anvitech")
     admin_pwd = (os.environ.get("APP_PASSWORD")
-                 or os.environ.get("ADMIN_PASSWORD") or "1930rail")
+                 or os.environ.get("ADMIN_PASSWORD") or _ADMIN_NO_DEFAULT_PWD)
     user_user = os.environ.get("USER_USERNAME") or "anvitech_user"
-    user_pwd = os.environ.get("USER_PASSWORD") or "anvitech12345678"
+    user_pwd = os.environ.get("USER_PASSWORD") or _USER_NO_DEFAULT_PWD
     return {
         admin_user: {"password": admin_pwd, "role": ADMIN},
         user_user: {"password": user_pwd, "role": USER},
