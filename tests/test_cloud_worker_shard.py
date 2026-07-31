@@ -4,8 +4,6 @@ drive main() with a fake _call so no network/app is needed."""
 import importlib
 import sys
 
-import pytest
-
 
 def _load_worker(monkeypatch, tmp_path, shard_index=None, shard_total=None):
     monkeypatch.setenv("APP_URL", "http://app.test")

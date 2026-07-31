@@ -129,7 +129,7 @@ def main() -> int:
             "ranks": out["ranks"], "best": out["best"], "rows": out["rows"],
             "evals": out["evals"], "cancelled": out["cancelled"]})
         print(f"worker: done — winner overlap {out['winner_overlap']}, "
-              f"{out['evals']} plans, best {out['best']}", flush=True)
+              f"{out['evals']} plans", flush=True)
         return 0
     except Exception as e:  # noqa: BLE001 — tell the app so it can finalize/fall back
         state["done"] = True
