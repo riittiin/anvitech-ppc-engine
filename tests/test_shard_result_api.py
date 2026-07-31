@@ -158,3 +158,22 @@ def test_out_of_range_shard_index_is_noop(monkeypatch):
     assert calls == []                            # finalize never triggered
     assert 999 not in m._OPTIMIZE["shards"]
     assert len(m._OPTIMIZE["shards"]) == 0
+
+
+def test_progress_sums_across_shards(monkeypatch):
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
+    import importlib, api.main as m
+    importlib.reload(m)
+    payload = _payload()
+    _seed_running(m, payload, job_id="job-1")
+    c = TestClient(m.app)
+    hdr = {"X-Worker-Secret": "s3cr3t"}
+    c.post("/optimize/progress", headers=hdr,
+           json={"job_id": "job-1", "evals": 10, "shard_index": 0})
+    c.post("/optimize/progress", headers=hdr,
+           json={"job_id": "job-1", "evals": 7, "shard_index": 1})
+    assert m._OPTIMIZE["evals"] == 17          # summed, not max
+    # a shard's own count going up replaces only its bucket
+    c.post("/optimize/progress", headers=hdr,
+           json={"job_id": "job-1", "evals": 25, "shard_index": 0})
+    assert m._OPTIMIZE["evals"] == 32

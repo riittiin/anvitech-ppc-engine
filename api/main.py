@@ -936,7 +936,7 @@ _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              "mode": "local", "job_id": None, "cloud_payload": None,
              "cloud_failed": False, "base_config": None, "auto": False,
              "claimed": False, "shards": {}, "shard_total": None,
-             "shards_finalizing": False}
+             "shards_finalizing": False, "shard_evals": {}}
 _OPTIMIZE_LOCK = threading.Lock()
 
 
@@ -1271,7 +1271,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                          base_config=base_config, auto=bool(auto),
                          searched_book_sig=searched_book_sig,
                          searched_inputs_sig=searched_inputs_sig,
-                         shards={}, shard_total=None, shards_finalizing=False)
+                         shards={}, shard_total=None, shards_finalizing=False,
+                         shard_evals={})
 
     def local_job():
         try:
@@ -2299,6 +2300,7 @@ class WorkerProgress(BaseModel):
     job_id: str
     evals: int = 0
     best: Optional[dict] = None
+    shard_index: Optional[int] = None
 
 
 class WorkerResult(BaseModel):
@@ -2346,7 +2348,11 @@ def optimize_progress_ep(req: WorkerProgress, request: Request):
     _require_worker(request)
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["state"] == "running" and _OPTIMIZE.get("job_id") == req.job_id:
-            _OPTIMIZE["evals"] = max(int(req.evals), _OPTIMIZE["evals"])
+            if req.shard_index is None:
+                _OPTIMIZE["evals"] = max(int(req.evals), _OPTIMIZE["evals"])
+            else:
+                _OPTIMIZE["shard_evals"][req.shard_index] = int(req.evals)
+                _OPTIMIZE["evals"] = sum(_OPTIMIZE["shard_evals"].values())
             if req.best:
                 _OPTIMIZE["best"] = req.best
             return {"cancel": bool(_OPTIMIZE["cancel"])}
