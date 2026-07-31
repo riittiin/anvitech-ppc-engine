@@ -60,7 +60,20 @@ CLOUD_NEW_BUDGET_PER_CANDIDATE = 150
 
 
 def cloud_budget(config) -> int:
-    """Plans per candidate for the cloud contest, per scheduler mode."""
+    """Plans per candidate for the cloud contest, per scheduler mode.
+
+    OPTIMIZE_CLOUD_BUDGET_PER_CANDIDATE (env, positive int) overrides both modes —
+    the deep-compute knob (2026-08-01 Oracle-worker spec: 300 ≈ the measured −4.4%
+    class on a 4-core box). Unset/invalid/≤0 → the mode defaults below.
+    """
+    import os
+    raw = os.environ.get("OPTIMIZE_CLOUD_BUDGET_PER_CANDIDATE", "").strip()
+    try:
+        v = int(raw)
+        if v > 0:
+            return v
+    except ValueError:
+        pass
     return (CLOUD_NEW_BUDGET_PER_CANDIDATE
             if getattr(config, "scheduler", "classic") == "new"
             else CLOUD_BUDGET_PER_CANDIDATE)

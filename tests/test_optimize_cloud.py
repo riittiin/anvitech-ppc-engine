@@ -12,6 +12,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient
 
 from engine import book_store, optimize_service
+from engine.config import Config
 from engine.models import Order
 from tests.sample_workbook import build_sample_bytes, ITEM_A, ITEM_B
 
@@ -166,3 +167,18 @@ def test_no_cloud_env_means_pure_local_as_before(monkeypatch):
     _seed_book()
     st = m._start_optimize(budget_evals=15, label="deep", background=False)
     assert st["state"] == "done" and st["mode"] == "local"
+
+
+def test_cloud_budget_env_override(monkeypatch):
+    new_cfg = Config(scheduler="new")
+    classic_cfg = Config(scheduler="classic")
+    monkeypatch.delenv("OPTIMIZE_CLOUD_BUDGET_PER_CANDIDATE", raising=False)
+    assert optimize_service.cloud_budget(new_cfg) == 150       # current defaults hold
+    assert optimize_service.cloud_budget(classic_cfg) == 400
+    monkeypatch.setenv("OPTIMIZE_CLOUD_BUDGET_PER_CANDIDATE", "300")
+    assert optimize_service.cloud_budget(new_cfg) == 300       # override, both modes
+    assert optimize_service.cloud_budget(classic_cfg) == 300
+    monkeypatch.setenv("OPTIMIZE_CLOUD_BUDGET_PER_CANDIDATE", "garbage")
+    assert optimize_service.cloud_budget(new_cfg) == 150       # invalid -> default
+    monkeypatch.setenv("OPTIMIZE_CLOUD_BUDGET_PER_CANDIDATE", "0")
+    assert optimize_service.cloud_budget(new_cfg) == 150       # non-positive -> default
