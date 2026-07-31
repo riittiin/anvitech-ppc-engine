@@ -331,16 +331,13 @@ def _pool_run(args):
                          should_cancel=(lambda: bool(stop.value)) if stop else None)
 
 
-def run_contest(payload: dict, *, processes=1, on_progress=None,
-                should_cancel=None, poll_seconds=5.0) -> dict:
-    """The full fair contest from a payload. ``processes > 1`` fans the
-    contenders out to subprocesses (per-eval progress via a shared counter);
-    ``processes == 1`` runs them sequentially in-process. Returns
-    {winner_overlap, rows, best, ranks, evals, cancelled}."""
+def contest_jobs(payload: dict) -> list:
+    """The ordered (overlap, flexible) candidate list a contest evaluates — the
+    SINGLE source of truth for run_contest AND the sharded worker, so they can
+    never drift. Order: machine-set outer, overlap inner (matches run_contest)."""
     config = Config.from_dict(payload["config"])
-    knob, _default_cands = optimizer.knob_for(config)
+    knob, _ = optimizer.knob_for(config)
     cur_value = getattr(config, knob)
-    cur_flex = bool(getattr(config, "flexible_machines", False))
     contenders = optimizer.sweep_contenders(cur_value, payload["candidates"])
     # The machine-set dimension only affects the new engine (flexible_machines is
     # inert for classic/flow — see engine/new_engine._new_masters). Gate the outer
@@ -348,33 +345,36 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
     # identical to their local counterpart (Task 3 established this same gate in
     # engine/optimizer.sweep_optimize / engine/new_engine.sweep_optimize).
     machine_sets = (False, True) if getattr(config, "scheduler", "classic") == "new" else (False,)
+    return [(ov, flex) for flex in machine_sets for ov in contenders]
+
+
+def _run_jobs(payload: dict, pairs: list, *, processes=1, on_progress=None,
+             should_cancel=None, poll_seconds=5.0):
+    """Run a list of (overlap, flexible) candidates. Returns (rows, done_evals,
+    cancelled). processes>1 fans them across subprocesses (shared progress
+    counter); processes<=1 runs them sequentially in-process."""
     rows, done_evals, cancelled = [], 0, False
-
     if processes <= 1:
-        for flex in machine_sets:
-            for ov in contenders:
-                if should_cancel and should_cancel():
-                    cancelled = True
-                    break
-                base = done_evals
-
-                def cb(evals, best, _base=base):
-                    if on_progress:
-                        on_progress(_base + evals, best)
-
-                row = run_candidate(payload, ov, flex, on_progress=cb,
-                                    should_cancel=should_cancel)
-                rows.append(row)
-                done_evals += row.get("evals", 0)
-                cancelled = cancelled or bool(row.get("cancelled"))
-            if cancelled:
+        for ov, flex in pairs:
+            if should_cancel and should_cancel():
+                cancelled = True
                 break
+            base = done_evals
+
+            def cb(evals, best, _base=base):
+                if on_progress:
+                    on_progress(_base + evals, best)
+
+            row = run_candidate(payload, ov, flex, on_progress=cb, should_cancel=should_cancel)
+            rows.append(row)
+            done_evals += row.get("evals", 0)
+            cancelled = cancelled or bool(row.get("cancelled"))
     else:
         import multiprocessing as mp
         ctx = mp.get_context()
         counter = ctx.Value("i", 0)
         stop = ctx.Value("b", 0)
-        jobs = [(payload, ov, flex) for flex in machine_sets for ov in contenders]
+        jobs = [(payload, ov, flex) for ov, flex in pairs]
         with ctx.Pool(processes=processes, initializer=_pool_init,
                       initargs=(counter, stop)) as pool:
             async_res = pool.map_async(_pool_run, jobs)
@@ -387,16 +387,39 @@ def run_contest(payload: dict, *, processes=1, on_progress=None,
             rows = async_res.get()
         done_evals = sum(r.get("evals", 0) for r in rows)
         cancelled = bool(stop.value) or any(r.get("cancelled") for r in rows)
+    return rows, done_evals, cancelled
 
-    if on_progress:
-        on_progress(done_evals, None)
+
+def merge_shard_rows(payload: dict, rows: list, evals: int, cancelled: bool) -> dict:
+    """Reduce a set of run_candidate rows (any set of shards, or a whole
+    contest) into the single result dict the app finalizes. pick_winner runs
+    ONCE over the global row set. Same shape run_contest returns."""
+    config = Config.from_dict(payload["config"])
+    knob, _ = optimizer.knob_for(config)
+    cur_value = getattr(config, knob)
+    cur_flex = bool(getattr(config, "flexible_machines", False))
     winner = pick_winner(cur_value, cur_flex, rows)
     table = [{k: r[k] for k in ("overlap", "flexible", "eligible", "best", "evals")
               if k in r} for r in rows]
     if winner is None:
         return {"winner_overlap": cur_value, "winner_flexible": cur_flex, "rows": table,
-                "knob": knob, "best": None, "ranks": {}, "evals": done_evals,
+                "knob": knob, "best": None, "ranks": {}, "evals": evals,
                 "cancelled": cancelled}
     return {"winner_overlap": winner["overlap"], "winner_flexible": bool(winner["flexible"]),
-            "rows": table, "knob": knob, "best": winner["best"], "ranks": winner.get("ranks", {}),
-            "evals": done_evals, "cancelled": cancelled}
+            "rows": table, "knob": knob, "best": winner["best"],
+            "ranks": winner.get("ranks", {}), "evals": evals, "cancelled": cancelled}
+
+
+def run_contest(payload: dict, *, processes=1, on_progress=None,
+                should_cancel=None, poll_seconds=5.0) -> dict:
+    """The full fair contest from a payload. ``processes > 1`` fans the
+    contenders out to subprocesses (per-eval progress via a shared counter);
+    ``processes == 1`` runs them sequentially in-process. Returns
+    {winner_overlap, rows, best, ranks, evals, cancelled}."""
+    pairs = contest_jobs(payload)
+    rows, done_evals, cancelled = _run_jobs(
+        payload, pairs, processes=processes, on_progress=on_progress,
+        should_cancel=should_cancel, poll_seconds=poll_seconds)
+    if on_progress:
+        on_progress(done_evals, None)
+    return merge_shard_rows(payload, rows, done_evals, cancelled)
