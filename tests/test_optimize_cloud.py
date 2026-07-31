@@ -302,3 +302,59 @@ def test_zero_window_dispatches_immediately(monkeypatch):
         with m._OPTIMIZE_LOCK:
             m._OPTIMIZE["state"] = "done"
         time.sleep(2.2)
+
+
+def test_stop_during_claim_window_never_dispatches(monkeypatch):
+    """A Stop pressed WHILE waiting for the Oracle poller to claim the job
+    must be honoured promptly — not ignored for the rest of the window and
+    then dispatched to GitHub anyway (the race the claim window introduced:
+    pre-Oracle, dispatch was immediate so this was unreachable)."""
+    _cloud_env(monkeypatch, oracle_claim_min="0.05")   # ~3s window
+    m = _api()
+    _seed_book()
+    calls = []
+    monkeypatch.setattr(m, "_dispatch_workflow",
+                        lambda c, j: calls.append(j) or True)
+    st = m._start_optimize(budget_evals=15, label="deep", background=True)
+    assert st["state"] == "running" and st["mode"] == "cloud"
+    time.sleep(0.5)
+    m._optimize_cancel()                                 # Stop, ~0.5s into the window
+
+    t0 = time.time()
+    st = m._optimize_status()
+    while st["state"] == "running" and time.time() - t0 < 5:
+        time.sleep(0.05)
+        st = m._optimize_status()
+    assert st["state"] != "running"                      # reached a terminal state promptly
+    assert calls == []                                   # GitHub never dispatched
+    assert st["state"] == "failed" and "stopped" in (st["error"] or "").lower()
+
+
+def test_last_moment_claim_during_final_sleep_skips_dispatch(monkeypatch):
+    """A claim landing during the claim loop's LAST 2s sleep must still be
+    honoured by a pre-dispatch re-check — not missed by a stale local
+    `claimed=False` captured before the claim actually happened."""
+    _cloud_env(monkeypatch, oracle_claim_min="0.05")   # ~3s window
+    m = _api()
+    _seed_book()
+    calls = []
+    monkeypatch.setattr(m, "_dispatch_workflow",
+                        lambda c, j: calls.append(j) or True)
+    try:
+        st = m._start_optimize(budget_evals=15, label="deep", background=True)
+        assert st["state"] == "running" and st["mode"] == "cloud"
+        with m._OPTIMIZE_LOCK:
+            jid = m._OPTIMIZE["job_id"]
+        time.sleep(2.5)                                  # deep into the ~3s window
+        client = TestClient(m.app)
+        r = client.get(f"/optimize/job/{jid}", headers={"X-Worker-Secret": SECRET})
+        assert r.status_code == 200                      # claim recorded, last-moment
+        time.sleep(2)                                     # window elapses + a margin
+        assert calls == []                                # GitHub never dispatched
+    finally:
+        # Claimed → cloud_job falls straight into the watchdog loop, parked
+        # with no worker ever posting a result. Same cleanup as the other
+        # claim tests above.
+        with m._OPTIMIZE_LOCK:
+            m._OPTIMIZE["state"] = "done"
+        time.sleep(2.2)

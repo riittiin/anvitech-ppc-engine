@@ -1325,14 +1325,43 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                 _claim_min = 3.0
             claim_deadline = time.monotonic() + max(0.0, _claim_min) * 60
             claimed = False
+            cancelled = False
             while time.monotonic() < claim_deadline:
                 with _OPTIMIZE_LOCK:
                     if _OPTIMIZE["state"] != "running" or _OPTIMIZE["job_id"] != job_id:
                         return                    # superseded / already finished
                     claimed = bool(_OPTIMIZE.get("claimed"))
-                if claimed:
+                    cancelled = bool(_OPTIMIZE.get("cancel"))
+                if claimed or cancelled:
                     break
                 time.sleep(2)
+
+            # Re-check right before acting: a claim OR a Stop landing during the
+            # loop's final 2s sleep must still be honoured, not overridden by a
+            # stale local flag from the last locked read above (the last-sleep
+            # race — a claim or cancel here would otherwise be missed and
+            # GitHub dispatched anyway).
+            with _OPTIMIZE_LOCK:
+                if _OPTIMIZE["state"] != "running" or _OPTIMIZE["job_id"] != job_id:
+                    return
+                claimed = bool(_OPTIMIZE.get("claimed"))
+                cancelled = bool(_OPTIMIZE.get("cancel"))
+
+            if not claimed and cancelled:
+                # Stopped before anyone claimed the job and before GitHub was
+                # ever dispatched. Pre-Oracle this race was unreachable
+                # (dispatch was immediate); the claim window makes it common,
+                # so it must be handled here rather than left to the 40-min
+                # watchdog. Mirrors the watchdog's own cloud-never-answered
+                # cancelled branch below (same terminal state, same message)
+                # so a Stop pressed during the window ends the run promptly
+                # with the same UX — no dispatch, no local fallback.
+                with _OPTIMIZE_LOCK:
+                    if _OPTIMIZE["state"] == "running" and _OPTIMIZE["job_id"] == job_id:
+                        _OPTIMIZE.update(state="failed", cancel=False,
+                                         error="stopped: the cloud run did not "
+                                               "answer before the timeout")
+                return
 
             if not claimed:
                 if not _dispatch_workflow(cloud, job_id):
