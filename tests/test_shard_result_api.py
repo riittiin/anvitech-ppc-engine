@@ -96,46 +96,46 @@ def test_stale_shard_is_noop(monkeypatch):
 
 def test_duplicate_final_shard_does_not_double_finalize(monkeypatch):
     """The worker's _call retries up to 5x (at-least-once delivery). A
-    duplicate POST of the already-recorded LAST shard_index must not fire a
-    second _finalize_from_shards — that would double-run _finalize_optimize
-    (double auto-note / double auto-apply). Spy on _finalize_from_shards to
-    count how many times it actually runs."""
+    duplicate POST of the already-recorded LAST shard_index arriving WHILE
+    the first finalize is still mid-flight (state still "running") must not
+    fire a second _finalize_from_shards — that would double-run
+    _finalize_optimize (double auto-note / double auto-apply). A re-entrant
+    spy fires the duplicate POST from inside the first (and, if the guard
+    holds, only) call to _finalize_from_shards, deterministically reproducing
+    the race window without threading."""
     monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
     import importlib, api.main as m
     importlib.reload(m)
     payload = _payload()
-    _seed_running(m, payload)
-    calls = []
-    original = m._finalize_from_shards
-
-    def spy(job_id):
-        calls.append(job_id)
-        return original(job_id)
-
-    monkeypatch.setattr(m, "_finalize_from_shards", spy)
+    _seed_running(m, payload, job_id="job-1")
     c = TestClient(m.app)
     hdr = {"X-Worker-Secret": "s3cr3t"}
     SHARD_TOTAL = 3
-    slices = [osvc.run_contest_slice(payload, idx, SHARD_TOTAL, processes=1)
-              for idx in range(SHARD_TOTAL)]
-    for idx, out in enumerate(slices):
-        r = c.post("/optimize/shard-result", headers=hdr, json={
-            "job_id": "job-1", "shard_index": idx, "shard_total": SHARD_TOTAL,
-            "rows": out["rows"], "evals": out["evals"], "cancelled": out["cancelled"]})
-        assert r.status_code == 200
-    assert m._OPTIMIZE["state"] == "done"
-    assert len(calls) == 1
-    result_before = m._OPTIMIZE["result"]
+    slices = [osvc.run_contest_slice(payload, i, SHARD_TOTAL, processes=1) for i in range(SHARD_TOTAL)]
 
-    # Re-POST the last shard (a retried duplicate) — must be a pure no-op.
-    out = slices[-1]
-    r = c.post("/optimize/shard-result", headers=hdr, json={
-        "job_id": "job-1", "shard_index": SHARD_TOTAL - 1, "shard_total": SHARD_TOTAL,
-        "rows": out["rows"], "evals": out["evals"], "cancelled": out["cancelled"]})
-    assert r.status_code == 200
-    assert len(calls) == 1                       # NOT called a second time
+    calls = []
+    orig = m._finalize_from_shards
+    def spy(job_id):
+        calls.append(job_id)
+        if len(calls) == 1:
+            # A duplicate of the FINAL shard arrives while we're still mid-finalize
+            # (state is still "running" here — orig hasn't run yet).
+            last = SHARD_TOTAL - 1
+            c.post("/optimize/shard-result", headers=hdr, json={
+                "job_id": "job-1", "shard_index": last, "shard_total": SHARD_TOTAL,
+                "rows": slices[last]["rows"], "evals": slices[last]["evals"],
+                "cancelled": slices[last]["cancelled"]})
+        orig(job_id)
+    monkeypatch.setattr(m, "_finalize_from_shards", spy)
+
+    for i in range(SHARD_TOTAL):
+        c.post("/optimize/shard-result", headers=hdr, json={
+            "job_id": "job-1", "shard_index": i, "shard_total": SHARD_TOTAL,
+            "rows": slices[i]["rows"], "evals": slices[i]["evals"],
+            "cancelled": slices[i]["cancelled"]})
+
+    assert calls == ["job-1"]                 # finalize claimed exactly ONCE
     assert m._OPTIMIZE["state"] == "done"
-    assert m._OPTIMIZE["result"] is result_before  # unchanged (same object)
 
 
 def test_out_of_range_shard_index_is_noop(monkeypatch):
