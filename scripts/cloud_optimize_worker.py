@@ -32,6 +32,19 @@ JOB_ID = os.environ["JOB_ID"]
 PROGRESS_EVERY_S = 5.0
 
 
+def _shard_env():
+    """(shard_index, shard_total) from the matrix; (0, 1) = whole contest."""
+    try:
+        idx = int(os.environ.get("SHARD_INDEX", "0"))
+    except ValueError:
+        idx = 0
+    try:
+        total = int(os.environ.get("SHARD_TOTAL", "1"))
+    except ValueError:
+        total = 1
+    return idx, max(1, total)
+
+
 def _call(method, path, body=None, *, tries=5, timeout=120):
     """One authenticated JSON call to the app, with wake-up-tolerant retries."""
     url = f"{APP_URL}{path}"
@@ -75,7 +88,8 @@ def main() -> int:
             if state["done"]:
                 return
             try:
-                body = {"job_id": JOB_ID, "evals": state["evals"]}
+                body = {"job_id": JOB_ID, "evals": state["evals"],
+                        "shard_index": _shard_env()[0]}
                 b = state["best"]
                 if b is not None:
                     body["best"] = {"score": round(b)} if isinstance(b, (int, float)) else b
@@ -90,8 +104,21 @@ def main() -> int:
         if best is not None:
             state["best"] = best
 
+    shard_index, shard_total = _shard_env()
     threading.Thread(target=poster, daemon=True).start()
     try:
+        if shard_total > 1:
+            out = optimize_service.run_contest_slice(
+                payload, shard_index, shard_total, processes=n_procs,
+                on_progress=_on_prog, should_cancel=lambda: state["cancel"])
+            state["done"] = True
+            _call("POST", "/optimize/shard-result", {
+                "job_id": JOB_ID, "shard_index": shard_index,
+                "shard_total": shard_total, "rows": out["rows"],
+                "evals": out["evals"], "cancelled": out["cancelled"]})
+            print(f"worker: shard {shard_index}/{shard_total} done — "
+                  f"{len(out['rows'])} candidates, {out['evals']} plans", flush=True)
+            return 0
         out = optimize_service.run_contest(
             payload, processes=n_procs, on_progress=_on_prog,
             should_cancel=lambda: state["cancel"])
@@ -104,12 +131,19 @@ def main() -> int:
         print(f"worker: done — winner overlap {out['winner_overlap']}, "
               f"{out['evals']} plans, best {out['best']}", flush=True)
         return 0
-    except Exception as e:  # noqa: BLE001 — tell the app so it falls back NOW
+    except Exception as e:  # noqa: BLE001 — tell the app so it can finalize/fall back
         state["done"] = True
-        print(f"worker: FAILED: {e}", flush=True)
+        print(f"worker: FAILED: {e}", flush=True)  # never prints order data
         try:
-            _call("POST", "/optimize/result",
-                  {"job_id": JOB_ID, "error": str(e)[:500]}, tries=2, timeout=30)
+            if shard_total > 1:
+                _call("POST", "/optimize/shard-result",
+                      {"job_id": JOB_ID, "shard_index": shard_index,
+                       "shard_total": shard_total, "rows": [], "evals": 0,
+                       "cancelled": False, "error": str(e)[:500]},
+                      tries=2, timeout=30)
+            else:
+                _call("POST", "/optimize/result",
+                      {"job_id": JOB_ID, "error": str(e)[:500]}, tries=2, timeout=30)
         except Exception:
             pass                          # the app's watchdog still covers us
         return 1
