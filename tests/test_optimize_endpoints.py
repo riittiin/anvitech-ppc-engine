@@ -99,6 +99,9 @@ def test_result_endpoint_stores_winner_flexible(monkeypatch):
     _seed_new_book()
     monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "fake-token")
     monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", WORKER_SECRET)
+    # Oracle claim window (2026-08-01): 0 = dispatch immediately, preserving
+    # this test's existing timing (it waits on the dispatch stub, not a claim).
+    monkeypatch.setenv("ORACLE_CLAIM_TIMEOUT_MIN", "0")
     m._OPT_BUDGETS = {"quick": 20, "deep": 20}
 
     dispatched = {}

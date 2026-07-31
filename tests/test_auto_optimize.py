@@ -36,6 +36,9 @@ def _auto_env(monkeypatch):
     monkeypatch.setenv("AUTO_OPTIMIZE", "1")
     monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "manual")
     monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3")
+    # Oracle claim window (2026-08-01): 0 = dispatch immediately, preserving
+    # this file's existing fast-fallback-to-local timing.
+    monkeypatch.setenv("ORACLE_CLAIM_TIMEOUT_MIN", "0")
 
 
 # --------------------------------------------------------------------------- #

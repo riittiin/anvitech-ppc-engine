@@ -1316,20 +1316,39 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE["baseline"] = real_baseline
 
-            if not _dispatch_workflow(cloud, job_id):
+            # Oracle tier (2026-08-01): give the always-on poller a window to claim
+            # the job before falling back to the GitHub dispatch. 0/negative = no
+            # window (today's immediate-GitHub behavior).
+            try:
+                _claim_min = float(os.environ.get("ORACLE_CLAIM_TIMEOUT_MIN", "3"))
+            except ValueError:
+                _claim_min = 3.0
+            claim_deadline = time.monotonic() + max(0.0, _claim_min) * 60
+            claimed = False
+            while time.monotonic() < claim_deadline:
                 with _OPTIMIZE_LOCK:
-                    still_mine = (_OPTIMIZE["state"] == "running"
-                                  and _OPTIMIZE["job_id"] == job_id)
+                    if _OPTIMIZE["state"] != "running" or _OPTIMIZE["job_id"] != job_id:
+                        return                    # superseded / already finished
+                    claimed = bool(_OPTIMIZE.get("claimed"))
+                if claimed:
+                    break
+                time.sleep(2)
+
+            if not claimed:
+                if not _dispatch_workflow(cloud, job_id):
+                    with _OPTIMIZE_LOCK:
+                        still_mine = (_OPTIMIZE["state"] == "running"
+                                      and _OPTIMIZE["job_id"] == job_id)
+                        if still_mine:
+                            _OPTIMIZE["mode"] = "local"
+                            _k, _kc = optimizer.knob_for(setup.search_config)
+                            _mult = 2 if getattr(setup.search_config, "scheduler",
+                                                  "classic") == "new" else 1
+                            _OPTIMIZE["budget_evals"] = _mult * optimizer.sweep_total_evals(
+                                budget_evals, getattr(setup.search_config, _k), _kc)
                     if still_mine:
-                        _OPTIMIZE["mode"] = "local"
-                        _k, _kc = optimizer.knob_for(setup.search_config)
-                        _mult = 2 if getattr(setup.search_config, "scheduler",
-                                              "classic") == "new" else 1
-                        _OPTIMIZE["budget_evals"] = _mult * optimizer.sweep_total_evals(
-                            budget_evals, getattr(setup.search_config, _k), _kc)
-                if still_mine:
-                    local_job()
-                return
+                        local_job()
+                    return
 
             deadline = time.monotonic() + cloud["timeout_min"] * 60
             while True:

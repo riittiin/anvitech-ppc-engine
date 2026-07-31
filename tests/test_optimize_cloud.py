@@ -34,10 +34,14 @@ def _seed_book():
     ])
 
 
-def _cloud_env(monkeypatch, timeout_min="5"):
+def _cloud_env(monkeypatch, timeout_min="5", oracle_claim_min="0"):
     monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "fake-token")
     monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", SECRET)
     monkeypatch.setenv("OPTIMIZE_CLOUD_TIMEOUT_MIN", timeout_min)
+    # Oracle claim window (2026-08-01): default 0 so every pre-existing test in
+    # this file keeps today's immediate-GitHub-dispatch timing. Tests that
+    # exercise the claim window itself override this explicitly.
+    monkeypatch.setenv("ORACLE_CLAIM_TIMEOUT_MIN", oracle_claim_min)
 
 
 def _wait(m, state, timeout=15.0):
@@ -225,6 +229,76 @@ def test_pending_requires_secret_and_reports_unclaimed_job(monkeypatch):
         # thread has actually exited before the next test's _api() reload
         # rebinds _OPTIMIZE/_OPTIMIZE_LOCK out from under it (the thread looks
         # those names up fresh on the module each iteration).
+        with m._OPTIMIZE_LOCK:
+            m._OPTIMIZE["state"] = "done"
+        time.sleep(2.2)
+
+
+def test_claimed_in_window_skips_github_dispatch(monkeypatch):
+    """An always-on (Oracle) worker fetches the payload inside the claim
+    window: cloud_job must never fall through to the GitHub dispatch."""
+    _cloud_env(monkeypatch, oracle_claim_min="0.05")   # ~3s window
+    m = _api()
+    _seed_book()
+    calls = []
+    monkeypatch.setattr(m, "_dispatch_workflow",
+                        lambda c, j: calls.append(j) or True)
+    try:
+        st = m._start_optimize(budget_evals=15, label="deep", background=True)
+        assert st["state"] == "running" and st["mode"] == "cloud"
+        with m._OPTIMIZE_LOCK:
+            jid = m._OPTIMIZE["job_id"]
+        client = TestClient(m.app)
+        r = client.get(f"/optimize/job/{jid}", headers={"X-Worker-Secret": SECRET})
+        assert r.status_code == 200                     # claim recorded
+        time.sleep(4)                                    # let the window elapse
+        assert calls == []                               # GitHub never dispatched
+    finally:
+        # Claimed → cloud_job falls straight into the watchdog loop, parked
+        # with no worker ever posting a result. Same cleanup as the /pending
+        # test above: stop it directly and wait out its 2s poll interval.
+        with m._OPTIMIZE_LOCK:
+            m._OPTIMIZE["state"] = "done"
+        time.sleep(2.2)
+
+
+def test_unclaimed_window_falls_through_to_github(monkeypatch):
+    """Nobody claims the job inside the window: cloud_job falls through to
+    the existing GitHub dispatch, exactly as before the Oracle tier existed."""
+    _cloud_env(monkeypatch, oracle_claim_min="0.02")   # ~1s window
+    m = _api()
+    _seed_book()
+    calls = []
+    monkeypatch.setattr(m, "_dispatch_workflow",
+                        lambda c, j: calls.append(j) or True)
+    try:
+        m._start_optimize(budget_evals=15, label="deep", background=True)
+        t0 = time.time()
+        while not calls and time.time() - t0 < 10:
+            time.sleep(0.05)
+        assert len(calls) == 1                           # dispatched after the window
+    finally:
+        with m._OPTIMIZE_LOCK:
+            m._OPTIMIZE["state"] = "done"
+        time.sleep(2.2)
+
+
+def test_zero_window_dispatches_immediately(monkeypatch):
+    """ORACLE_CLAIM_TIMEOUT_MIN<=0 skips the wait entirely — today's
+    immediate-dispatch behavior, unchanged."""
+    _cloud_env(monkeypatch, oracle_claim_min="0")
+    m = _api()
+    _seed_book()
+    calls = []
+    monkeypatch.setattr(m, "_dispatch_workflow",
+                        lambda c, j: calls.append(j) or True)
+    try:
+        m._start_optimize(budget_evals=15, label="deep", background=True)
+        t0 = time.time()
+        while not calls and time.time() - t0 < 10:
+            time.sleep(0.05)
+        assert len(calls) == 1                           # dispatched immediately
+    finally:
         with m._OPTIMIZE_LOCK:
             m._OPTIMIZE["state"] = "done"
         time.sleep(2.2)
