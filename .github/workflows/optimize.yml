@@ -20,7 +20,12 @@ concurrency: optimize   # one contest at a time — matches the app's own lock
 jobs:
   optimize:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false   # one shard dying must not cancel the others
+      max-parallel: 20
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,9 +33,11 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: Run the contest and post the result back
+      - name: Run the contest shard and post the result back
         env:
           APP_URL: ${{ secrets.APP_URL }}
           OPTIMIZE_WORKER_SECRET: ${{ secrets.OPTIMIZE_WORKER_SECRET }}
           JOB_ID: ${{ inputs.job_id }}
+          SHARD_INDEX: ${{ strategy.job-index }}
+          SHARD_TOTAL: ${{ strategy.job-total }}
         run: python scripts/cloud_optimize_worker.py
