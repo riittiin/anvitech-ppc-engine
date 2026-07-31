@@ -182,3 +182,49 @@ def test_cloud_budget_env_override(monkeypatch):
     assert optimize_service.cloud_budget(new_cfg) == 150       # invalid -> default
     monkeypatch.setenv("OPTIMIZE_CLOUD_BUDGET_PER_CANDIDATE", "0")
     assert optimize_service.cloud_budget(new_cfg) == 150       # non-positive -> default
+
+
+def test_pending_requires_secret_and_reports_unclaimed_job(monkeypatch):
+    """GET /optimize/pending is the poll point for an always-on (Oracle) worker:
+    it reports a running cloud job's id only while its payload is UNCLAIMED —
+    once ANY worker fetches GET /optimize/job/{id} (the existing payload
+    endpoint), /optimize/pending goes back to null even though the job is
+    still running, so a second poller doesn't double-pick the same job."""
+    _cloud_env(monkeypatch)
+    m = _api()
+    _seed_book()
+    monkeypatch.setattr(m, "_dispatch_workflow", lambda cloud, job_id: True)
+
+    client = TestClient(m.app)
+    H = {"X-Worker-Secret": SECRET}
+
+    assert client.get("/optimize/pending").status_code == 401          # no secret -> session gate
+    r = client.get("/optimize/pending", headers=H)
+    assert r.status_code == 200 and r.json()["job_id"] is None         # idle -> null
+
+    try:
+        st = m._start_optimize(budget_evals=15, label="quick", background=True)
+        assert st["state"] == "running" and st["mode"] == "cloud"
+
+        jid = None
+        t0 = time.time()
+        while time.time() - t0 < 10:
+            jid = client.get("/optimize/pending", headers=H).json()["job_id"]
+            if jid:
+                break
+            time.sleep(0.02)
+        assert jid                                                      # waiting + unclaimed
+
+        job = client.get(f"/optimize/job/{jid}", headers=H)             # fetch = claim
+        assert job.status_code == 200
+        assert client.get("/optimize/pending", headers=H).json()["job_id"] is None  # claimed
+    finally:
+        # This test deliberately never posts a worker result, so cloud_job is
+        # left parked waiting (its poll loop sleeps 2s between checks). Stop
+        # it directly and wait out that poll interval so the background
+        # thread has actually exited before the next test's _api() reload
+        # rebinds _OPTIMIZE/_OPTIMIZE_LOCK out from under it (the thread looks
+        # those names up fresh on the module each iteration).
+        with m._OPTIMIZE_LOCK:
+            m._OPTIMIZE["state"] = "done"
+        time.sleep(2.2)

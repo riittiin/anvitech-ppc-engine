@@ -117,6 +117,7 @@ async def gatekeeper(request: Request, call_next):
     # Constant-time compare; with no OPTIMIZE_WORKER_SECRET configured these
     # paths simply fall through to the normal session gate (→ 401).
     if ((method == "GET" and path.startswith("/optimize/job/"))
+            or (method == "GET" and path == "/optimize/pending")
             or (method == "POST" and path in ("/optimize/progress",
                                               "/optimize/result"))):
         if _worker_secret_ok(request):
@@ -932,7 +933,8 @@ _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              "baseline": None, "best": None, "error": None, "elapsed_s": 0.0,
              "started_mono": None, "result": None, "cancel": False,
              "mode": "local", "job_id": None, "cloud_payload": None,
-             "cloud_failed": False, "base_config": None, "auto": False}
+             "cloud_failed": False, "base_config": None, "auto": False,
+             "claimed": False}
 _OPTIMIZE_LOCK = threading.Lock()
 
 
@@ -1263,7 +1265,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                          evals=0, baseline=None, best=None, error=None, result=None,
                          elapsed_s=0.0, started_mono=time.monotonic(), cancel=False,
                          mode=("cloud" if cloud else "local"), job_id=job_id,
-                         cloud_payload=payload, cloud_failed=False,
+                         cloud_payload=payload, cloud_failed=False, claimed=False,
                          base_config=base_config, auto=bool(auto),
                          searched_book_sig=searched_book_sig,
                          searched_inputs_sig=searched_inputs_sig)
@@ -2267,9 +2269,23 @@ def optimize_job_ep(job_id: str, request: Request):
     with _OPTIMIZE_LOCK:
         if (_OPTIMIZE["state"] == "running" and _OPTIMIZE.get("job_id") == job_id
                 and _OPTIMIZE.get("cloud_payload")):
+            _OPTIMIZE["claimed"] = True
             return {"payload": _OPTIMIZE["cloud_payload"],
                     "cancel": bool(_OPTIMIZE["cancel"])}
     raise HTTPException(status_code=404, detail="no such running job")
+
+
+@app.get("/optimize/pending")
+def optimize_pending_ep(request: Request):
+    """Poll point for the always-on (Oracle) worker: the waiting cloud job's id, or
+    null. A job is 'pending' only while running, payload stored, and UNCLAIMED —
+    a claimed job (any worker fetched its payload) is no longer offered."""
+    _require_worker(request)
+    with _OPTIMIZE_LOCK:
+        if (_OPTIMIZE["state"] == "running" and _OPTIMIZE.get("cloud_payload")
+                and not _OPTIMIZE.get("claimed")):
+            return {"job_id": _OPTIMIZE.get("job_id")}
+    return {"job_id": None}
 
 
 @app.post("/optimize/progress")
