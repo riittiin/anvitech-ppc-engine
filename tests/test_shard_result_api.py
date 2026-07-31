@@ -160,6 +160,77 @@ def test_out_of_range_shard_index_is_noop(monkeypatch):
     assert len(m._OPTIMIZE["shards"]) == 0
 
 
+def test_shards_available_predicate(monkeypatch):
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
+    import importlib, api.main as m
+    importlib.reload(m)
+    payload = _payload()
+    _seed_running(m, payload, job_id="job-1")
+    # No shards yet.
+    assert m._shards_available("job-1") is False
+    out0 = osvc.run_contest_slice(payload, 0, 3, processes=1)
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["shard_total"] = 3
+        m._OPTIMIZE["shards"][0] = {"rows": out0["rows"], "evals": out0["evals"],
+                                     "cancelled": out0["cancelled"]}
+    # A running job matching job_id, with >=1 shard, is available.
+    assert m._shards_available("job-1") is True
+    # A different/unknown job_id is not.
+    assert m._shards_available("job-OTHER") is False
+    # Not running (e.g. already finished) → not available.
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["state"] = "done"
+    assert m._shards_available("job-1") is False
+
+
+def test_partial_finalize_uses_arrived_shards(monkeypatch):
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
+    import importlib, api.main as m
+    importlib.reload(m)
+    payload = _payload()
+    _seed_running(m, payload, job_id="job-1")
+    # Only shard 0 of 3 arrives (shards 1,2 never posted):
+    out0 = osvc.run_contest_slice(payload, 0, 3, processes=1)
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["shard_total"] = 3
+        m._OPTIMIZE["shards"][0] = {"rows": out0["rows"], "evals": out0["evals"],
+                                     "cancelled": out0["cancelled"]}
+    # Watchdog partial finalize over the one arrived shard:
+    m._finalize_from_shards("job-1")
+    assert m._OPTIMIZE["state"] == "done"      # a valid winner from shard 0 alone
+    # the winner is one of shard 0's candidates
+    shard0_overlaps = {r["overlap"] for r in out0["rows"]}
+    assert m._OPTIMIZE["result"]["best_overlap"] in shard0_overlaps
+
+
+def test_second_finalize_after_done_is_noop(monkeypatch):
+    """After a (partial) finalize has already moved the job to 'done', a
+    second call to _finalize_from_shards for the same job_id must be a no-op
+    — its entry guard sees state != 'running' and returns immediately,
+    leaving the stored result untouched. This is the invariant that keeps the
+    watchdog's shard-salvage claim and the /optimize/shard-result collector's
+    claim mutually exclusive: once either has finalized, the flag-holder
+    check on the OTHER path finds `_OPTIMIZE["state"]` no longer "running"."""
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
+    import importlib, api.main as m
+    importlib.reload(m)
+    payload = _payload()
+    _seed_running(m, payload, job_id="job-1")
+    out0 = osvc.run_contest_slice(payload, 0, 3, processes=1)
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["shard_total"] = 3
+        m._OPTIMIZE["shards"][0] = {"rows": out0["rows"], "evals": out0["evals"],
+                                     "cancelled": out0["cancelled"]}
+    m._finalize_from_shards("job-1")
+    assert m._OPTIMIZE["state"] == "done"
+    result_after_first = m._OPTIMIZE["result"]
+
+    # A second finalize call (e.g. a stray watchdog tick) must not re-run.
+    m._finalize_from_shards("job-1")
+    assert m._OPTIMIZE["state"] == "done"
+    assert m._OPTIMIZE["result"] == result_after_first
+
+
 def test_progress_sums_across_shards(monkeypatch):
     monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
     import importlib, api.main as m

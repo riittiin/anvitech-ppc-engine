@@ -1401,15 +1401,49 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                                              error="stopped: the cloud run did not "
                                                    "answer before the timeout")
                             return
-                        _OPTIMIZE["mode"] = "local"
-                        _k, _kc = optimizer.knob_for(setup.search_config)
-                        _mult = 2 if getattr(setup.search_config, "scheduler",
-                                              "classic") == "new" else 1
-                        _OPTIMIZE["budget_evals"] = _mult * optimizer.sweep_total_evals(
-                            budget_evals, getattr(setup.search_config, _k), _kc)
-                        _OPTIMIZE["evals"] = 0
+                        # Prefer salvaging arrived shards over a full local
+                        # recompute. `claim_shard_finalize` is an ATOMIC claim
+                        # of `shards_finalizing` — mutually exclusive with the
+                        # /optimize/shard-result collector's own claim of the
+                        # same flag, so the two can never both finalize.
+                        have_shards = bool(_OPTIMIZE.get("shards"))
+                        claim_shard_finalize = (have_shards
+                                                 and not _OPTIMIZE.get("shards_finalizing"))
+                        if claim_shard_finalize:
+                            _OPTIMIZE["shards_finalizing"] = True
+                        go_local = not have_shards
+                        if go_local:
+                            _OPTIMIZE["mode"] = "local"
+                            _k, _kc = optimizer.knob_for(setup.search_config)
+                            _mult = 2 if getattr(setup.search_config, "scheduler",
+                                                  "classic") == "new" else 1
+                            _OPTIMIZE["budget_evals"] = _mult * optimizer.sweep_total_evals(
+                                budget_evals, getattr(setup.search_config, _k), _kc)
+                            _OPTIMIZE["evals"] = 0
+                        # else: shards present but another finalize already
+                        # claimed (the collector, e.g. the very last shard
+                        # landing at the same moment) — do nothing, let it
+                        # finish; falls through to the plain `return` below.
                 if timed_out:
-                    local_job()          # cloud never answered → compute here
+                    if claim_shard_finalize:
+                        _finalize_from_shards(job_id)   # salvage what arrived
+                        with _OPTIMIZE_LOCK:
+                            still_running = (_OPTIMIZE["state"] == "running"
+                                              and _OPTIMIZE["job_id"] == job_id)
+                            needs_local = still_running and bool(_OPTIMIZE.get("cloud_failed"))
+                            if needs_local:
+                                _OPTIMIZE["mode"] = "local"
+                                _k, _kc = optimizer.knob_for(setup.search_config)
+                                _mult = 2 if getattr(setup.search_config, "scheduler",
+                                                      "classic") == "new" else 1
+                                _OPTIMIZE["budget_evals"] = _mult * optimizer.sweep_total_evals(
+                                    budget_evals, getattr(setup.search_config, _k), _kc)
+                                _OPTIMIZE["evals"] = 0
+                        if needs_local:
+                            local_job()   # salvaged shards had no eligible winner
+                        return
+                    if go_local:
+                        local_job()          # cloud never answered → compute here
                     return
         except Exception as e:  # noqa: BLE001
             with _OPTIMIZE_LOCK:
@@ -2394,6 +2428,15 @@ class WorkerShardResult(BaseModel):
     evals: int = 0
     cancelled: bool = False
     error: Optional[str] = None
+
+
+def _shards_available(job_id) -> bool:
+    """True when a running job for `job_id` has at least one accumulated
+    shard worth salvaging. Used by the watchdog to prefer a partial finalize
+    over burning a full local recompute."""
+    with _OPTIMIZE_LOCK:
+        return (_OPTIMIZE["state"] == "running" and _OPTIMIZE["job_id"] == job_id
+                and bool(_OPTIMIZE.get("shards")))
 
 
 def _finalize_from_shards(job_id):
