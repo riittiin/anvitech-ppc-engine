@@ -39,7 +39,7 @@ def refresh_code(repo_dir, run):
         if before and after and before != after:
             diff = git("diff", "--name-only", before, after).stdout.decode()
             if "requirements.txt" in diff:
-                run([sys.executable, "-m", "pip", "install", "-r",
+                run([sys.executable, "-m", "pip", "install", "--user", "-r",
                      os.path.join(repo_dir, "requirements.txt")], capture_output=True)
     except Exception as e:  # noqa: BLE001
         print(f"poller: code refresh failed (running current code): {e}", flush=True)

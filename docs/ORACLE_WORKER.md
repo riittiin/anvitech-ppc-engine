@@ -68,7 +68,7 @@ runs the latest version.
    curl -O https://raw.githubusercontent.com/riittiin/anvitech-ppc-engine/main/scripts/oracle_worker_setup.sh
    bash oracle_worker_setup.sh
    ```
-3. The script will ask you three questions — paste these three values when
+3. The script will ask you four questions — paste these values when
    prompted:
    - **App URL** — the live app's web address, e.g.
      `https://anvitech-ppc.onrender.com`
@@ -106,6 +106,11 @@ runs the latest version.
 
 On the Render dashboard, under the app's Environment tab, make sure these are
 set:
+
+**Prerequisite:** the Oracle claim window only engages when both `GITHUB_DISPATCH_TOKEN`
+and `OPTIMIZE_WORKER_SECRET` are already set on Render. They are set on the live
+deployment, so you should not need to add them — but if the worker never picks up jobs,
+confirm both are present.
 
 - `ORACLE_CLAIM_TIMEOUT_MIN=3` — this is already the default even if you don't
   set it. It's how long the app waits for your Oracle box to pick up a job

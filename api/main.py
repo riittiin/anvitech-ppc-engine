@@ -1196,8 +1196,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         # sizes itself via cloud_candidates); classic keeps its full budget.
         if getattr(base_config, "scheduler", "classic") == "flow":
             budget_evals = min(budget_evals, optimizer.FLOW_LOCAL_BUDGET)
-        # The new engine runs its own search in-process (its cloud worker is not wired yet);
-        # cap the budget so a click finishes on the free tier (the Stop button also applies).
+        # The new engine's local fallback is budget-capped so it finishes on the free tier
+        # (the Stop button also applies); the cloud path runs via the worker when available.
         new_engine_run = getattr(base_config, "scheduler", "classic") == "new"
         if new_engine_run:
             budget_evals = min(budget_evals, 200)
