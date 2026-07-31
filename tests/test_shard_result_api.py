@@ -92,3 +92,69 @@ def test_stale_shard_is_noop(monkeypatch):
                json={"job_id": "OTHER", "shard_index": 0, "shard_total": 2, "rows": []})
     assert r.status_code == 200        # ignored, never crashes
     assert m._OPTIMIZE["state"] == "running"
+
+
+def test_duplicate_final_shard_does_not_double_finalize(monkeypatch):
+    """The worker's _call retries up to 5x (at-least-once delivery). A
+    duplicate POST of the already-recorded LAST shard_index must not fire a
+    second _finalize_from_shards — that would double-run _finalize_optimize
+    (double auto-note / double auto-apply). Spy on _finalize_from_shards to
+    count how many times it actually runs."""
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
+    import importlib, api.main as m
+    importlib.reload(m)
+    payload = _payload()
+    _seed_running(m, payload)
+    calls = []
+    original = m._finalize_from_shards
+
+    def spy(job_id):
+        calls.append(job_id)
+        return original(job_id)
+
+    monkeypatch.setattr(m, "_finalize_from_shards", spy)
+    c = TestClient(m.app)
+    hdr = {"X-Worker-Secret": "s3cr3t"}
+    SHARD_TOTAL = 3
+    slices = [osvc.run_contest_slice(payload, idx, SHARD_TOTAL, processes=1)
+              for idx in range(SHARD_TOTAL)]
+    for idx, out in enumerate(slices):
+        r = c.post("/optimize/shard-result", headers=hdr, json={
+            "job_id": "job-1", "shard_index": idx, "shard_total": SHARD_TOTAL,
+            "rows": out["rows"], "evals": out["evals"], "cancelled": out["cancelled"]})
+        assert r.status_code == 200
+    assert m._OPTIMIZE["state"] == "done"
+    assert len(calls) == 1
+    result_before = m._OPTIMIZE["result"]
+
+    # Re-POST the last shard (a retried duplicate) — must be a pure no-op.
+    out = slices[-1]
+    r = c.post("/optimize/shard-result", headers=hdr, json={
+        "job_id": "job-1", "shard_index": SHARD_TOTAL - 1, "shard_total": SHARD_TOTAL,
+        "rows": out["rows"], "evals": out["evals"], "cancelled": out["cancelled"]})
+    assert r.status_code == 200
+    assert len(calls) == 1                       # NOT called a second time
+    assert m._OPTIMIZE["state"] == "done"
+    assert m._OPTIMIZE["result"] is result_before  # unchanged (same object)
+
+
+def test_out_of_range_shard_index_is_noop(monkeypatch):
+    """An out-of-range shard_index must never pad the accumulated count toward
+    a premature finalize."""
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
+    import importlib, api.main as m
+    importlib.reload(m)
+    payload = _payload()
+    _seed_running(m, payload)
+    calls = []
+    monkeypatch.setattr(m, "_finalize_from_shards", lambda job_id: calls.append(job_id))
+    c = TestClient(m.app)
+    hdr = {"X-Worker-Secret": "s3cr3t"}
+    r = c.post("/optimize/shard-result", headers=hdr, json={
+        "job_id": "job-1", "shard_index": 999, "shard_total": 2,
+        "rows": [], "evals": 0, "cancelled": False})
+    assert r.status_code == 200                  # 200 no-op, never crashes
+    assert m._OPTIMIZE["state"] == "running"      # still running, not finalized
+    assert calls == []                            # finalize never triggered
+    assert 999 not in m._OPTIMIZE["shards"]
+    assert len(m._OPTIMIZE["shards"]) == 0

@@ -935,7 +935,8 @@ _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              "started_mono": None, "result": None, "cancel": False,
              "mode": "local", "job_id": None, "cloud_payload": None,
              "cloud_failed": False, "base_config": None, "auto": False,
-             "claimed": False, "shards": {}, "shard_total": None}
+             "claimed": False, "shards": {}, "shard_total": None,
+             "shards_finalizing": False}
 _OPTIMIZE_LOCK = threading.Lock()
 
 
@@ -1270,7 +1271,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                          base_config=base_config, auto=bool(auto),
                          searched_book_sig=searched_book_sig,
                          searched_inputs_sig=searched_inputs_sig,
-                         shards={}, shard_total=None)
+                         shards={}, shard_total=None, shards_finalizing=False)
 
     def local_job():
         try:
@@ -2423,15 +2424,27 @@ def _finalize_from_shards(job_id):
 @app.post("/optimize/shard-result")
 def optimize_shard_result_ep(req: WorkerShardResult, request: Request):
     """One matrix shard's rows. Accumulate; when all shards for this job have
-    reported, merge and finalize. A stale/late/duplicate shard is a 200 no-op."""
+    reported, merge and finalize. A stale/late/duplicate shard is a 200 no-op.
+    An out-of-range shard_index (bad data) is also a no-op — it must never pad
+    the count toward a premature finalize. The worker retries a POST up to 5x
+    (at-least-once delivery), so a duplicate of the already-recorded LAST
+    shard could otherwise re-enter this handler while the first finalize is
+    still running (finalize does slow work outside the lock) and see the
+    threshold true again — `shards_finalizing` is claimed exactly once, under
+    the lock, so only the one POST that flips it ever calls
+    `_finalize_from_shards`."""
     _require_worker(request)
     ready = False
     with _OPTIMIZE_LOCK:
-        if _OPTIMIZE["state"] == "running" and _OPTIMIZE.get("job_id") == req.job_id:
+        if (_OPTIMIZE["state"] == "running" and _OPTIMIZE.get("job_id") == req.job_id
+                and 0 <= req.shard_index < req.shard_total):
             _OPTIMIZE["shard_total"] = req.shard_total
             _OPTIMIZE["shards"][req.shard_index] = {
                 "rows": req.rows, "evals": req.evals, "cancelled": req.cancelled}
-            ready = len(_OPTIMIZE["shards"]) >= req.shard_total
+            if (not _OPTIMIZE["shards_finalizing"]
+                    and len(_OPTIMIZE["shards"]) >= req.shard_total):
+                _OPTIMIZE["shards_finalizing"] = True
+                ready = True
     if ready:
         _finalize_from_shards(req.job_id)
     return {"ok": True}
