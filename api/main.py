@@ -1248,9 +1248,12 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                 orders, actuals, book_store.load_masters_bytes(), config,
                 seed=_OPT_SEED, candidates=_cands, budget_per_candidate=_bpc,
                 absences=absences, operator_table=operator_table, frozen=frozen)
-            _knob, _ = optimizer.knob_for(setup.search_config)
-            denom = _bpc * len(optimizer.sweep_contenders(
-                getattr(setup.search_config, _knob), _cands))
+            # Use contest_jobs (not sweep_contenders) for the true candidate
+            # count: under the new engine the contest also sweeps the
+            # machine-set dimension (Allotted-only vs Allotted+Suggested), so
+            # the sharded workers report 2x the (overlap-only) contender
+            # count — sweep_contenders alone made the bar overshoot to ~200%.
+            denom = _bpc * len(optimize_service.contest_jobs(payload))
         else:
             payload = None
             _knob, _kcands = optimizer.knob_for(setup.search_config)
@@ -2461,6 +2464,15 @@ def _finalize_from_shards(job_id):
             if _OPTIMIZE["state"] == "running" and _OPTIMIZE["job_id"] == job_id:
                 _OPTIMIZE["cloud_failed"] = True   # watchdog → local fallback
                 _OPTIMIZE["error"] = "no eligible plan from any shard"
+                # Clear the accumulated shards too: the watchdog's `have_shards`
+                # check would otherwise still see them as present (even though
+                # they yielded no winner) and neither claim a shard-finalize
+                # (already claimed by this call) nor fall to `go_local` — the
+                # job would wedge in state="running" forever. An empty shards
+                # dict makes the next watchdog tick see have_shards=False and
+                # go local. Do NOT reset shards_finalizing here — that would
+                # reopen a claim window for a concurrent finalize.
+                _OPTIMIZE["shards"] = {}
         return
     _finalize_optimize(job_id, base_config, baseline, label,
                        winner_overlap=merged["winner_overlap"],

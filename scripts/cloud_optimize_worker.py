@@ -133,7 +133,12 @@ def main() -> int:
         return 0
     except Exception as e:  # noqa: BLE001 — tell the app so it can finalize/fall back
         state["done"] = True
-        print(f"worker: FAILED: {e}", flush=True)  # never prints order data
+        # Print only the exception TYPE, never its message: a scheduler
+        # RuleError carries a record_id (an SO#/item code) in str(e), which
+        # would otherwise leak an order identifier into the public GitHub
+        # Actions log. The full message still goes to the app over the
+        # authenticated HTTPS POST below.
+        print(f"worker: FAILED: {type(e).__name__}", flush=True)
         try:
             if shard_total > 1:
                 _call("POST", "/optimize/shard-result",

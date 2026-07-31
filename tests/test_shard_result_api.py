@@ -231,6 +231,33 @@ def test_second_finalize_after_done_is_noop(monkeypatch):
     assert m._OPTIMIZE["result"] == result_after_first
 
 
+def test_no_winner_finalize_clears_shards_so_watchdog_goes_local(monkeypatch):
+    """FINAL-REVIEW fix: when every shard's rows merge to no eligible winner,
+    _finalize_from_shards must clear _OPTIMIZE["shards"] (not just set
+    cloud_failed) — otherwise the watchdog's next tick still sees
+    have_shards=True, can't claim a shard-finalize (already claimed by this
+    call), and never falls to go_local either, wedging the job in
+    state="running" forever. Two shards posting empty rows (via the real
+    /optimize/shard-result endpoint, so the all-arrived collector path fires)
+    reproduces the no-winner merge without needing a crafted payload."""
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
+    import importlib, api.main as m
+    importlib.reload(m)
+    payload = _payload()
+    _seed_running(m, payload, job_id="job-1")
+    c = TestClient(m.app)
+    hdr = {"X-Worker-Secret": "s3cr3t"}
+    SHARD_TOTAL = 2
+    for idx in range(SHARD_TOTAL):
+        r = c.post("/optimize/shard-result", headers=hdr, json={
+            "job_id": "job-1", "shard_index": idx, "shard_total": SHARD_TOTAL,
+            "rows": [], "evals": 0, "cancelled": False})
+        assert r.status_code == 200
+    assert m._OPTIMIZE["cloud_failed"] is True
+    assert m._OPTIMIZE["shards"] == {}          # cleared -> watchdog sees have_shards=False
+    assert m._OPTIMIZE["state"] == "running"    # still running; watchdog will go local next tick
+
+
 def test_progress_sums_across_shards(monkeypatch):
     monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
     import importlib, api.main as m
