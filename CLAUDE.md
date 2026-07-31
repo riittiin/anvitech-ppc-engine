@@ -269,7 +269,15 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   more Render env vars — `GITHUB_DISPATCH_TOKEN` (fine-grained PAT, Actions
   read+write on the repo) and `OPTIMIZE_WORKER_SECRET` (must equal the GitHub repo
   secret of the same name; repo secrets `APP_URL` + `OPTIMIZE_WORKER_SECRET` are
-  already set) — without them Optimize computes locally.
+  already set) — without them Optimize computes locally. **Oracle always-on
+  worker (2026-08-01, optional):** an owner-run free-tier VM polls
+  `GET /optimize/pending` and, if it claims a job within the `ORACLE_CLAIM_TIMEOUT_MIN`
+  window (default 3 min), computes it locally instead of GitHub — a third,
+  faster tier ahead of the existing GitHub→local ladder (Oracle → GitHub →
+  local; unclaimed after the window still dispatches to GitHub as before).
+  Deep-search knob when the box is up: `OPTIMIZE_CLOUD_BUDGET_PER_CANDIDATE=300`
+  on Render (unset/invalid falls back to the mode default). Setup + owner
+  runbook: `docs/ORACLE_WORKER.md`.
 
 ## Map of the code
 

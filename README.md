@@ -80,6 +80,10 @@ visit after a quiet period takes ~30–60s to wake. The data lives in your datab
 so sleeping never loses it. (`GET /trace/{id}` may miss across instances — the UI
 uses the `/run` response directly, so it doesn't matter.)
 
+Want deep searches to run faster and always-on instead of on shared GitHub compute?
+See `docs/ORACLE_WORKER.md` for the (optional, free) owner runbook to set up your
+own dedicated Oracle Cloud worker.
+
 ## How it works
 
 ```
