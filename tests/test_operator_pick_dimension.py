@@ -154,3 +154,12 @@ def test_apply_persists_the_winning_operator_pick(monkeypatch):
     m._optimize_apply()
     assert saved["cfg"]["operator_pick"] == "balanced"
     assert saved["cfg"]["flexible_machines"] is True
+
+
+def test_run_contest_result_exposes_winner_pick(monkeypatch):
+    """The single-worker path posts run_contest(...)['winner_pick']; guarantee the key
+    exists so scripts/cloud_optimize_worker.py can forward it."""
+    from engine import optimize_service
+    monkeypatch.setattr(optimize_service, "contest_jobs", lambda p: [])
+    out = optimize_service.run_contest(_payload("new"))
+    assert "winner_pick" in out

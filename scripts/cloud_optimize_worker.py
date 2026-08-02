@@ -126,6 +126,7 @@ def main() -> int:
         _call("POST", "/optimize/result", {
             "job_id": JOB_ID, "winner_overlap": out["winner_overlap"],
             "winner_flexible": out.get("winner_flexible", False),
+            "winner_pick": out.get("winner_pick", "scarce"),
             "ranks": out["ranks"], "best": out["best"], "rows": out["rows"],
             "evals": out["evals"], "cancelled": out["cancelled"]})
         print(f"worker: done — winner overlap {out['winner_overlap']}, "
