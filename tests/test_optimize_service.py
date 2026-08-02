@@ -98,11 +98,11 @@ def test_pick_winner_tie_keeps_the_current_setting():
             "max_late_days": 0, "orders": 1}
     rows = [{"overlap": 50, "flexible": False, "eligible": True, "best": dict(best)},
             {"overlap": 80, "flexible": False, "eligible": True, "best": dict(best)}]
-    assert svc.pick_winner(80, False, rows)["overlap"] == 80
-    assert svc.pick_winner(50, False, rows)["overlap"] == 50
+    assert svc.pick_winner(80, False, "scarce", rows)["overlap"] == 80
+    assert svc.pick_winner(50, False, "scarce", rows)["overlap"] == 50
     # Ineligible/failed rows never win.
     rows[1]["eligible"] = False
-    assert svc.pick_winner(80, False, rows)["overlap"] == 50
+    assert svc.pick_winner(80, False, "scarce", rows)["overlap"] == 50
 
 
 def test_pick_winner_tie_also_prefers_current_machine_set():
@@ -111,8 +111,8 @@ def test_pick_winner_tie_also_prefers_current_machine_set():
     rows = [{"overlap": 80, "flexible": False, "eligible": True, "best": dict(best)},
             {"overlap": 80, "flexible": True, "eligible": True, "best": dict(best)}]
     # Same score, same overlap — the current machine-set wins the tie.
-    assert svc.pick_winner(80, False, rows)["flexible"] is False
-    assert svc.pick_winner(80, True, rows)["flexible"] is True
+    assert svc.pick_winner(80, False, "scarce", rows)["flexible"] is False
+    assert svc.pick_winner(80, True, "scarce", rows)["flexible"] is True
 
 
 def test_prepare_contest_raises_when_nothing_to_optimize():

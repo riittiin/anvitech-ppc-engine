@@ -72,3 +72,53 @@ def test_sweep_optimize_sweeps_all_operator_picks(monkeypatch):
     assert set(calls) == {(False, "scarce"), (True, "scarce"),
                           (False, "balanced"), (True, "balanced")}
     assert res.operator_pick == "balanced"
+
+
+def _payload(scheduler="new", overlap=50):
+    from engine.config import Config
+    cfg = Config(scheduler=scheduler, overlap_percent=overlap)
+    return {"config": cfg.to_dict(), "candidates": (70, 80)}
+
+
+def test_contest_jobs_sweeps_operator_pick_for_new_engine():
+    from engine import optimize_service
+    jobs = optimize_service.contest_jobs(_payload("new"))
+    assert all(len(t) == 3 for t in jobs)
+    picks = {pick for (_ov, _flex, pick) in jobs}
+    assert picks == {"scarce", "balanced"}
+    # sequence contenders (current 50 + 70 + 80) × machine-sets(2) × picks(2)
+    assert len(jobs) == 3 * 2 * 2
+
+
+def test_contest_jobs_classic_stays_scarce_single_pass():
+    from engine import optimize_service
+    jobs = optimize_service.contest_jobs(_payload("classic"))
+    assert {pick for (_ov, _flex, pick) in jobs} == {"scarce"}
+    assert all(flex is False for (_ov, flex, _pick) in jobs)
+
+
+def test_pick_winner_tie_prefers_current_pick():
+    from engine import optimize_service
+    m = {"total_late_days": 5, "makespan_days": 0}
+    rows = [
+        {"overlap": 80, "flexible": False, "pick": "balanced", "eligible": True, "best": m},
+        {"overlap": 80, "flexible": False, "pick": "scarce", "eligible": True, "best": m},
+    ]
+    win = optimize_service.pick_winner(80, False, "scarce", rows)
+    assert win["pick"] == "scarce"
+
+
+def test_merge_shard_rows_carries_winner_pick():
+    from engine import optimize_service
+    rows = [{"overlap": 80, "flexible": True, "pick": "balanced", "eligible": True,
+             "best": {"total_late_days": 1, "makespan_days": 0}, "evals": 5, "ranks": {}}]
+    out = optimize_service.merge_shard_rows(_payload("new"), rows, 5, False)
+    assert out["winner_pick"] == "balanced"
+    assert "pick" in out["rows"][0]
+
+
+def test_local_contest_multiplier():
+    from engine import optimize_service
+    from engine.config import Config
+    assert optimize_service.local_contest_multiplier(Config(scheduler="new")) == 4
+    assert optimize_service.local_contest_multiplier(Config(scheduler="classic")) == 1

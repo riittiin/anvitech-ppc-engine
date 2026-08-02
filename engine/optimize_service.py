@@ -79,6 +79,15 @@ def cloud_budget(config) -> int:
             else CLOUD_BUDGET_PER_CANDIDATE)
 
 
+def local_contest_multiplier(config) -> int:
+    """How many (machine-set x operator-pick) passes new_engine.sweep_optimize runs
+    locally. The API multiplies sweep_total_evals (which counts overlap contenders
+    only) by this to size the progress bar. Classic/flow run a single pass."""
+    if getattr(config, "scheduler", "classic") == "new":
+        return 2 * len(optimizer.OPERATOR_PICK_CANDIDATES)
+    return 1
+
+
 def absence_reservations(absences):
     """Absence rows -> Rule 6 operator reservations: the person is 'busy'
     from 00:00 of from_date to 00:00 of the day AFTER to_date (inclusive)."""
@@ -263,10 +272,12 @@ def prepare_contest(orders: dict, actuals, masters, config: Config,
 # --------------------------------------------------------------------------- #
 # The contest itself — per-candidate runs + the shared winner rule.
 # --------------------------------------------------------------------------- #
-def pick_winner(current_overlap, current_flexible, rows):
-    """Best score wins; an exact tie keeps the current (overlap, machine-set)."""
+def pick_winner(current_overlap, current_flexible, current_pick, rows):
+    """Best score wins; an exact tie keeps the current (overlap, machine-set, pick)."""
     def _is_current(r):
-        return r.get("overlap") == current_overlap and bool(r.get("flexible")) == bool(current_flexible)
+        return (r.get("overlap") == current_overlap
+                and bool(r.get("flexible")) == bool(current_flexible)
+                and r.get("pick", "scarce") == current_pick)
     ordered = sorted(rows, key=lambda r: (not _is_current(r), r.get("overlap")))
     best = None
     for r in ordered:
@@ -277,14 +288,17 @@ def pick_winner(current_overlap, current_flexible, rows):
     return best
 
 
-def run_candidate(payload: dict, overlap: int, flexible: bool = False, *, on_progress=None,
+def run_candidate(payload: dict, overlap: int, flexible: bool = False,
+                  operator_pick: str = "scarce", *, on_progress=None,
                   should_cancel=None) -> dict:
     """One contender, fully self-contained (safe to run in a subprocess): it
     rebuilds the book from the payload and searches every active line as one
     pool (lanes have no scheduling effect). ``reserved=`` is only the operator
     absences (physical unavailability). ``flexible`` selects the machine set
     (Allotted-only vs Allotted+Suggested — see ``Config.flexible_machines``).
-    Returns a sweep-table row (+ ranks for the winner)."""
+    ``operator_pick`` selects the operator-assignment policy (new engine only —
+    see ``Config.operator_pick``). Returns a sweep-table row (+ ranks for the
+    winner)."""
     orders, actuals, masters, config, absences, operator_table, frozen = parse_payload(payload)
     # The new engine loads its masters from the workbook; the cloud worker has no store, so
     # feed it the payload's workbook bytes directly (harmless for classic/flow).
@@ -295,15 +309,18 @@ def run_candidate(payload: dict, overlap: int, flexible: bool = False, *, on_pro
     setup = prepare_contest(orders, actuals, masters, config, absences=absences,
                             operator_table=operator_table, frozen=frozen)
     knob, _cands = optimizer.knob_for(setup.search_config)
-    cfg = replace(setup.search_config, flexible_machines=bool(flexible), **{knob: int(overlap)})
+    cfg = replace(setup.search_config, flexible_machines=bool(flexible),
+                  operator_pick=str(operator_pick), **{knob: int(overlap)})
     res = optimizer.optimize(setup.target, cfg, setup.masters,
                              reserved=setup.absence_reserved,
                              frozen=setup.frozen,
                              budget_evals=int(payload["budget_per_candidate"]),
                              seed=int(payload["seed"]),
                              on_progress=on_progress, should_cancel=should_cancel)
-    return {"overlap": int(overlap), "flexible": bool(flexible), "eligible": True,
-            "best": res.best, "evals": res.evals, "ranks": res.ranks, "cancelled": res.cancelled}
+    return {"overlap": int(overlap), "flexible": bool(flexible),
+            "pick": str(operator_pick), "eligible": True,
+            "best": res.best, "evals": res.evals, "ranks": res.ranks,
+            "cancelled": res.cancelled}
 
 
 # Subprocess plumbing: a plain module-level initializer + runner so the pool
@@ -316,7 +333,7 @@ def _pool_init(counter, stop):
 
 
 def _pool_run(args):
-    payload, overlap, flexible = args
+    payload, overlap, flexible, pick = args
     last = {"evals": 0}
 
     def cb(evals, _best):
@@ -327,35 +344,40 @@ def _pool_run(args):
                 c.value += delta
 
     stop = _POOL["stop"]
-    return run_candidate(payload, overlap, flexible, on_progress=cb,
+    return run_candidate(payload, overlap, flexible, pick, on_progress=cb,
                          should_cancel=(lambda: bool(stop.value)) if stop else None)
 
 
 def contest_jobs(payload: dict) -> list:
-    """The ordered (overlap, flexible) candidate list a contest evaluates — the
-    SINGLE source of truth for run_contest AND the sharded worker, so they can
-    never drift. Order: machine-set outer, overlap inner (matches run_contest)."""
+    """The ordered (overlap, flexible, operator_pick) candidate list a contest
+    evaluates — the SINGLE source of truth for run_contest AND the sharded
+    worker, so they can never drift. Order: pick outer, machine-set middle,
+    overlap inner (matches run_contest)."""
     config = Config.from_dict(payload["config"])
     knob, _ = optimizer.knob_for(config)
     cur_value = getattr(config, knob)
     contenders = optimizer.sweep_contenders(cur_value, payload["candidates"])
-    # The machine-set dimension only affects the new engine (flexible_machines is
-    # inert for classic/flow — see engine/new_engine._new_masters). Gate the outer
-    # loop on scheduler so classic/flow cloud contests stay single-pass and byte-
-    # identical to their local counterpart (Task 3 established this same gate in
-    # engine/optimizer.sweep_optimize / engine/new_engine.sweep_optimize).
-    machine_sets = (False, True) if getattr(config, "scheduler", "classic") == "new" else (False,)
-    return [(ov, flex) for flex in machine_sets for ov in contenders]
+    # The machine-set + operator-pick dimensions only affect the new engine — gate
+    # both on scheduler so classic/flow cloud contests stay single-pass and byte-
+    # identical to their local counterpart.
+    is_new = getattr(config, "scheduler", "classic") == "new"
+    machine_sets = (False, True) if is_new else (False,)
+    picks = (optimizer.operator_pick_contenders(getattr(config, "operator_pick", "scarce"))
+             if is_new else ("scarce",))
+    return [(ov, flex, pick)
+            for pick in picks
+            for flex in machine_sets
+            for ov in contenders]
 
 
 def _run_jobs(payload: dict, pairs: list, *, processes=1, on_progress=None,
              should_cancel=None, poll_seconds=5.0):
-    """Run a list of (overlap, flexible) candidates. Returns (rows, done_evals,
-    cancelled). processes>1 fans them across subprocesses (shared progress
-    counter); processes<=1 runs them sequentially in-process."""
+    """Run a list of (overlap, flexible, operator_pick) candidates. Returns
+    (rows, done_evals, cancelled). processes>1 fans them across subprocesses
+    (shared progress counter); processes<=1 runs them sequentially in-process."""
     rows, done_evals, cancelled = [], 0, False
     if processes <= 1:
-        for ov, flex in pairs:
+        for ov, flex, pick in pairs:
             if should_cancel and should_cancel():
                 cancelled = True
                 break
@@ -365,7 +387,8 @@ def _run_jobs(payload: dict, pairs: list, *, processes=1, on_progress=None,
                 if on_progress:
                     on_progress(_base + evals, best)
 
-            row = run_candidate(payload, ov, flex, on_progress=cb, should_cancel=should_cancel)
+            row = run_candidate(payload, ov, flex, pick, on_progress=cb,
+                                should_cancel=should_cancel)
             rows.append(row)
             done_evals += row.get("evals", 0)
             cancelled = cancelled or bool(row.get("cancelled"))
@@ -374,7 +397,7 @@ def _run_jobs(payload: dict, pairs: list, *, processes=1, on_progress=None,
         ctx = mp.get_context()
         counter = ctx.Value("i", 0)
         stop = ctx.Value("b", 0)
-        jobs = [(payload, ov, flex) for ov, flex in pairs]
+        jobs = [(payload, ov, flex, pick) for ov, flex, pick in pairs]
         with ctx.Pool(processes=processes, initializer=_pool_init,
                       initargs=(counter, stop)) as pool:
             async_res = pool.map_async(_pool_run, jobs)
@@ -398,14 +421,17 @@ def merge_shard_rows(payload: dict, rows: list, evals: int, cancelled: bool) -> 
     knob, _ = optimizer.knob_for(config)
     cur_value = getattr(config, knob)
     cur_flex = bool(getattr(config, "flexible_machines", False))
-    winner = pick_winner(cur_value, cur_flex, rows)
-    table = [{k: r[k] for k in ("overlap", "flexible", "eligible", "best", "evals")
+    cur_pick = getattr(config, "operator_pick", "scarce")
+    winner = pick_winner(cur_value, cur_flex, cur_pick, rows)
+    table = [{k: r[k] for k in ("overlap", "flexible", "pick", "eligible", "best", "evals")
               if k in r} for r in rows]
     if winner is None:
-        return {"winner_overlap": cur_value, "winner_flexible": cur_flex, "rows": table,
+        return {"winner_overlap": cur_value, "winner_flexible": cur_flex,
+                "winner_pick": cur_pick, "rows": table,
                 "knob": knob, "best": None, "ranks": {}, "evals": evals,
                 "cancelled": cancelled}
     return {"winner_overlap": winner["overlap"], "winner_flexible": bool(winner["flexible"]),
+            "winner_pick": winner.get("pick", "scarce"),
             "rows": table, "knob": knob, "best": winner["best"],
             "ranks": winner.get("ranks", {}), "evals": evals, "cancelled": cancelled}
 
