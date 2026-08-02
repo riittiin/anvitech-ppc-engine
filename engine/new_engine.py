@@ -501,8 +501,8 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None, base_reserved=None, frozen=None, **kw):
     """Local fallback for 'Start deep search'. Runs the golden-section tune once per
-    machine-set (Allotted-only, then Allotted+Suggested) and keeps the better plan by
-    score — the third Optimize dimension. Returns the old SweepResult shape."""
+    (machine-set × operator-pick) combination and keeps the best plan by score — the
+    third and fourth Optimize dimensions."""
     from dataclasses import replace
     from engine.optimizer import (OptimizeResult, SweepResult, score,
                                   operator_pick_contenders)
