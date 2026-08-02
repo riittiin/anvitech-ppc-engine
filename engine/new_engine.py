@@ -185,6 +185,7 @@ def _plan_config(config) -> PlanConfig:
         setup_min=float(getattr(config, "setup_time_min", 90)),
         overlap=overlap,
         consolidation_window=0.0,
+        operator_pick=getattr(config, "operator_pick", "scarce"),
         ceiling_days=getattr(config, "worst_ceiling_days", None),
         committed_promise_slack_days=float(getattr(config, "committed_promise_slack_days", 3)),
         committed_promise_weight=COMMITTED_PROMISE_WEIGHT,

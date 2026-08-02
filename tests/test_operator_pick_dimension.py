@@ -44,3 +44,10 @@ def test_operator_pick_contenders_put_current_first():
 def test_sweepresult_defaults_operator_pick_scarce():
     from engine.optimizer import SweepResult
     assert SweepResult().operator_pick == "scarce"
+
+
+def test_plan_config_carries_operator_pick():
+    from engine.new_engine import _plan_config
+    assert _plan_config(Config()).operator_pick == "scarce"
+    assert _plan_config(Config(operator_pick="balanced")).operator_pick == "balanced"
+    assert _plan_config(Config(operator_pick="flexible")).operator_pick == "flexible"
