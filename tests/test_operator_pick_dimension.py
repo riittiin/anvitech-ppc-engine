@@ -122,3 +122,35 @@ def test_local_contest_multiplier():
     from engine.config import Config
     assert optimize_service.local_contest_multiplier(Config(scheduler="new")) == 4
     assert optimize_service.local_contest_multiplier(Config(scheduler="classic")) == 1
+
+
+def test_inputs_signature_reflects_operator_pick():
+    from api import main as m
+    from engine.config import Config
+    base = m._inputs_signature(Config())
+    assert m._inputs_signature(Config(operator_pick="balanced")) != base
+
+
+def test_apply_persists_the_winning_operator_pick(monkeypatch):
+    from api import main as m
+    from engine.config import Config
+    saved = {}
+    monkeypatch.setattr(m, "_load_plan_config", lambda: Config(scheduler="new"))
+    monkeypatch.setattr(m, "_incumbent_metrics",
+                        lambda: {"max_late_days": 100, "max_committed_slip": 0,
+                                 "total_late_days": 100})
+    monkeypatch.setattr(m, "_current_book_sig", lambda: "bs")
+    monkeypatch.setattr(m.book_store, "save_plan_priority", lambda *a, **k: None)
+    monkeypatch.setattr(m.book_store, "save_plan_config",
+                        lambda s: saved.update(cfg=json.loads(s)))
+    # The schedule-snapshot block is wrapped in try/except; force it to bail early.
+    monkeypatch.setattr(m.book_store, "load_active_orders",
+                        lambda: (_ for _ in ()).throw(RuntimeError("skip snapshot")))
+    m._OPTIMIZE.update(state="done", started_mono=0.0, result={
+        "ranks": {"b\x1fi": 0}, "best": {"total_late_days": 10, "max_committed_slip": 0},
+        "baseline": {}, "budget": "deep", "seed": 1, "inputs_sig": "x",
+        "best_overlap": 85, "current_overlap": 50, "knob": "overlap_percent",
+        "flexible_machines": True, "operator_pick": "balanced"})
+    m._optimize_apply()
+    assert saved["cfg"]["operator_pick"] == "balanced"
+    assert saved["cfg"]["flexible_machines"] is True
