@@ -504,30 +504,34 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
     machine-set (Allotted-only, then Allotted+Suggested) and keeps the better plan by
     score — the third Optimize dimension. Returns the old SweepResult shape."""
     from dataclasses import replace
-    from engine.optimizer import OptimizeResult, SweepResult, score
+    from engine.optimizer import (OptimizeResult, SweepResult, score,
+                                  operator_pick_contenders)
 
     per = max(15, int(budget_evals) // 10)
-    best = None                       # (ranks, overlap_pct, metrics, plans, flexible)
+    best = None                       # (ranks, overlap_pct, metrics, plans, flex, pick)
     offset = {"n": 0}
+    picks = operator_pick_contenders(getattr(config, "operator_pick", "scarce"))
 
-    for flex in (False, True):
-        def _step(plans, _best, _flex=flex):
-            if on_progress:
-                on_progress(offset["n"] + plans, (best or (None,) * 3)[2] if best else {})
-        cfg = replace(config, flexible_machines=flex)
-        ranks, overlap_pct, metrics, plans = tune(so_lines, cfg, masters,
-                                                  budget_per_eval=per, seed=seed, on_step=_step,
-                                                  reserved=base_reserved, frozen=frozen)
-        offset["n"] += plans
-        if ranks and (best is None or score(metrics) < score(best[2])):
-            best = (ranks, overlap_pct, metrics, plans, flex)
+    for pick in picks:
+        for flex in (False, True):
+            def _step(plans, _best, _flex=flex):
+                if on_progress:
+                    on_progress(offset["n"] + plans, (best or (None,) * 3)[2] if best else {})
+            cfg = replace(config, flexible_machines=flex, operator_pick=pick)
+            ranks, overlap_pct, metrics, plans = tune(so_lines, cfg, masters,
+                                                      budget_per_eval=per, seed=seed, on_step=_step,
+                                                      reserved=base_reserved, frozen=frozen)
+            offset["n"] += plans
+            if ranks and (best is None or score(metrics) < score(best[2])):
+                best = (ranks, overlap_pct, metrics, plans, flex, pick)
 
     if best is None:
         return SweepResult(overlap_percent=int(round(_plan_config(config).overlap * 100)),
                            knob="overlap", flexible_machines=False,
+                           operator_pick=getattr(config, "operator_pick", "scarce"),
                            result=OptimizeResult(evals=0, best=None), table=[], evals=offset["n"],
                            cancelled=False)
-    ranks, overlap_pct, metrics, plans, flex = best
+    ranks, overlap_pct, metrics, plans, flex, pick = best
     result = OptimizeResult(ranks=ranks, best=metrics, evals=offset["n"], improved=True, cancelled=False)
     return SweepResult(overlap_percent=overlap_pct, knob="overlap", flexible_machines=flex,
-                       result=result, table=[], evals=offset["n"], cancelled=False)
+                       operator_pick=pick, result=result, table=[], evals=offset["n"], cancelled=False)

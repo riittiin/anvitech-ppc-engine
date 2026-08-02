@@ -51,3 +51,24 @@ def test_plan_config_carries_operator_pick():
     assert _plan_config(Config()).operator_pick == "scarce"
     assert _plan_config(Config(operator_pick="balanced")).operator_pick == "balanced"
     assert _plan_config(Config(operator_pick="flexible")).operator_pick == "flexible"
+
+
+def test_sweep_optimize_sweeps_all_operator_picks(monkeypatch):
+    """The local fallback tries every (machine-set × operator-pick) pass and keeps
+    the best. tune() is stubbed so the test is fast and deterministic."""
+    from engine import new_engine
+
+    calls = []
+
+    def fake_tune(so_lines, config, masters, **kw):
+        calls.append((config.flexible_machines, config.operator_pick))
+        # Make "balanced" the strict winner so we can assert the returned policy.
+        late = 10 if config.operator_pick == "scarce" else 5
+        return ({("b", "i"): 0}, 80, {"total_late_days": late, "makespan_days": 0}, 5)
+
+    monkeypatch.setattr(new_engine, "tune", fake_tune)
+    res = new_engine.sweep_optimize(["x"], Config(scheduler="new"), object(),
+                                    budget_evals=40)
+    assert set(calls) == {(False, "scarce"), (True, "scarce"),
+                          (False, "balanced"), (True, "balanced")}
+    assert res.operator_pick == "balanced"
