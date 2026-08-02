@@ -224,6 +224,12 @@ function applyConfig(cfg, resolvedStart) {
   if (ov && cfg.overlap_percent != null) ov.textContent = cfg.overlap_percent;
   const ms = $("cfg-machineset-info");
   if (ms) ms.textContent = cfg.flexible_machines ? "Allotted + Suggested" : "Allotted only";
+  const opk = $("cfg-operatorpick-info");
+  if (opk) opk.textContent = ({
+    scarce: "Save flexible people",
+    balanced: "Spread work evenly",
+    flexible: "Use flexible people first",
+  })[cfg.operator_pick] || "Save flexible people";
   const ol = $("cfg-operator-logic");
   if (ol) ol.checked = !!cfg.apply_operator_logic;
   const sp = $("cfg-split-parallel");
