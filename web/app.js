@@ -629,6 +629,14 @@ const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // block on live progress until it lands and refresh the whole plan to the winner.
 // The contest auto-applies server-side if it's strictly better (both roles).
 async function doneOptimize() {
+  // Two-step guard: a stray tap on "Done entering: update plan" must not kick off a
+  // re-optimize on half-entered feedback. Ask first (same confirm style as Mark
+  // complete / Rollback); Cancel does nothing.
+  if (!window.confirm(
+    "Have you finished entering ALL of today's production updates?\n\n" +
+    "Clicking OK will re-optimize the whole plan using the feedback entered so far. " +
+    "If you still have entries to punch, click Cancel and finish first."
+  )) return;
   const st = $("optimize-done-status");
   const doneBtn = $("optimize-done");
   if (doneBtn) doneBtn.disabled = true;
