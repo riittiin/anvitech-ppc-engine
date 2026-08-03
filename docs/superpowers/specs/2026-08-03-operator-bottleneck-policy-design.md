@@ -81,24 +81,31 @@ elsewhere** person by this cost, keeping the precious ones free:
 
 ```
 cost(O) = Σ over m' in qualified_machines(O), m' != M, demand[m'] > 0:
-              demand[m'] / (1 + others_free(m', O, start, end))
+              demand[m']   IF   others_free(m', O, start, end) == 0   ELSE   0
 ```
+
+(**Threshold rule — implemented form, 2026-08-03.** An earlier draft of this spec used a
+continuous discount `demand[m'] / (1 + others_free)`; that was found to contradict the
+strand-discount test — under division a positive-demand candidate can never beat a
+zero-demand one, so a *covered* busy-machine operator could never win the flexibility
+tiebreak. The threshold rule below is the consistent version and matches the intent.)
 
 where `others_free(m', O, start, end)` = the number of operators in `self._pools[m']`, other
 than `O`, who are `free_during(start, end)` (and on-shift/available — reuse the same eligible
 filter). Interpretation:
 
 - If **no** other qualified operator is free for `m'` in this window (`others_free == 0`),
-  the term is the full `demand[m']` — assigning `O` here **strands** `m'` (the one-step
-  look-ahead), so `O` is heavily penalized as "precious right now."
-- If several others could cover `m'`, the term shrinks toward zero — `O` is not precious for
-  `m'`, so using `O` here is cheap.
+  the full `demand[m']` counts — assigning `O` here **strands** `m'` (the one-step
+  look-ahead), so `O` is penalized as "precious right now."
+- If even one other operator could cover `m'`, the term is **zero** — `O` is not precious for
+  `m'` (someone else can run it), so using `O` here is free.
 
 Pick `argmin cost(O)`; ties break by the existing scarce order `(flexibility, name)` so the
-result is fully deterministic and, when demand is flat/empty, **identical to `scarce`**.
-
-This single formula unifies both Level-1 demand-weighting (`demand[m']`) and the Level-2
-strand look-ahead (`others_free`), which is why we go straight to Level 2 (owner decision).
+result is fully deterministic and, when demand is flat/empty (or no assignment would strand
+anything), **identical to `scarce`**. Demand *magnitude* therefore acts as a tiebreaker
+**among simultaneous unavoidable strands** (protect the busiest machine's sole cover first);
+when nothing would be stranded, `bottleneck` behaves exactly like `scarce`. This is the
+Level-2 "avoid stranding a busy machine" behavior (owner decision to go straight to Level 2).
 
 ### 3. Make it a contest candidate
 
