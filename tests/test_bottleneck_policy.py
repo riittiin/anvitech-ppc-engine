@@ -109,3 +109,54 @@ def test_bottleneck_strand_discount_when_others_cover():
     ops = _GRIND_OPS + [("Chetan", {"CNC2"})]
     board, masters = _board_and_masters(ops, _GRIND_MACHINES, {"CNC2": 1000.0})
     assert _pick(board, masters, "CNC1", _cfg(operator_pick="bottleneck")) == "Bimal"
+
+
+from dataclasses import replace as _replace
+
+from engine.config import Config
+from engine.new_engine import _plan_config
+from ppc_engine.scheduler import decode
+
+
+def _routing(item, seq_machine):
+    ops = tuple(Operation(i + 1, f"OP{i+1}", OperationKind.MACHINING,
+                          machine_options=(m,), cycle_min=2.0)
+                for i, m in enumerate(seq_machine))
+    ops = ops + (Operation(len(ops) + 1, "DISPATCH", OperationKind.DISPATCH),)
+    return Routing(item, "", operations=ops)
+
+
+def _cnc(mid):
+    return Machine(id=mid, type_text="CNC lathe", kind=MachineKind.MACHINING,
+                   available_hrs_per_day=19.5)
+
+
+def test_bottleneck_changes_the_decoded_plan_end_to_end():
+    """Through _plan_config + decode (demand computed inside decode): scarce puts the
+    less-flexible specialist Bimal on the routine machine CNC1 (stranding the busy CNC2);
+    bottleneck puts Anil there and keeps Bimal for CNC2."""
+    masters = Masters(
+        machines={m: _cnc(m) for m in ("CNC1", "CNC2", "CNC3", "CNC4")},
+        operators=(
+            Operator("Anil", Role.OPERATOR, frozenset({"CNC1", "CNC3", "CNC4"}), Shift.FIRST),
+            Operator("Bimal", Role.OPERATOR, frozenset({"CNC1", "CNC2"}), Shift.FIRST),
+        ),
+        routings={
+            "ROUTINE": _routing("ROUTINE", ["CNC1"]),
+            "BUSY": _routing("BUSY", ["CNC2"]),
+        },
+    )
+    orders = [
+        Order("R", "ROUTINE", "routine", qty=10, due_date=date(2025, 4, 1)),
+        Order("B", "BUSY", "busy", qty=400, due_date=date(2025, 4, 1)),  # big -> CNC2 hot
+    ]
+    seq = [("R", "ROUTINE"), ("B", "BUSY")]
+    cfg = Config(scheduler="new", plan_start_date=date(2025, 3, 5), apply_operator_logic=True)
+
+    def cnc1_operator(pick):
+        sched = decode(orders, seq, masters, _plan_config(_replace(cfg, operator_pick=pick)))
+        segs = [s for s in sched.segments if s.machine_id == "CNC1" and s.operator]
+        return segs[0].operator
+
+    assert cnc1_operator("scarce") == "Bimal"
+    assert cnc1_operator("bottleneck") == "Anil"

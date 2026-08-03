@@ -30,7 +30,7 @@ from ppc_engine.domain.resources import Machine
 from ppc_engine.domain.routing import Operation, OperationKind
 from ppc_engine.scheduler.duration import operation_duration_min
 from ppc_engine.scheduler.schedule import Schedule, Segment
-from ppc_engine.scheduler.staffing import StaffingBoard, build_machine_pools
+from ppc_engine.scheduler.staffing import StaffingBoard, build_machine_pools, machine_demand
 from ppc_engine.worktime import effective_shift, iter_windows
 
 # Tiny tolerance so floating-point minute arithmetic doesn't loop forever.
@@ -95,7 +95,8 @@ def decode(
         prev_end_of[key] = config.plan_start
 
     machine_free: dict[str, datetime] = {mid: config.plan_start for mid in masters.machines}
-    staffing = StaffingBoard(build_machine_pools(masters))
+    staffing = StaffingBoard(build_machine_pools(masters),
+                             machine_demand(orders, masters, config))
     segments: list[Segment] = []
     completion: dict[tuple[str, str], datetime] = {}
 
