@@ -1340,7 +1340,6 @@ function actualsFormHtml() {
   return `
     <div class="entry-legend"><span class="lg lg-y">Manual entry</span><span class="lg lg-r">Auto-prompt / dropdown</span></div>
     <div class="entry-grid"><div class="entry-col">${left}</div><div class="entry-col">${right}</div></div>
-    <label class="complete-check"><input id="a-complete" type="checkbox" /> <strong>Mark this order (this SO No + item) complete</strong>: archives just this item line; the engine never auto-completes.</label>
     <button id="a-save" class="primary">Save daily entry</button>
     <button id="a-mark-complete" class="ghost-btn" title="Close out this order — needs only the SO No + Item Code, no operator or quantity">✓ Mark this SO+item complete</button>
     <div class="optimize-done-row">
@@ -1509,7 +1508,6 @@ async function wireActualsForm() {
       no_operator_min: num("a-noop"), tool_problem_min: num("a-tool"),
       machine_breakdown_min: num("a-mbd"), no_load_min: num("a-noload"),
       other_work_min: num("a-other"), remarks: $("a-remarks").value,
-      mark_complete: $("a-complete").checked,
     };
     // Outsourced (OS) steps run off-site — no in-house operator runs them — so the
     // operator is NOT required for them (owner rule, 2026-07-26). Every other step
@@ -1539,14 +1537,6 @@ async function wireActualsForm() {
         + `${body.qty_produced} produced on ${body.entry_date}). Save another?`)) {
       return;
     }
-    // Marking an order complete archives it out of active planning immediately —
-    // it sits right above Save in the same block, so confirm before it's too late.
-    if (body.mark_complete && !confirm(
-        `Mark SO ${body.so_no} / ${body.item_code} COMPLETE? This removes it from active `
-        + `planning. You can undo this later via Rollback on this saved entry, but it will `
-        + `not reappear automatically. Continue?`)) {
-      return;
-    }
     // Immediate feedback so you know the click registered.
     const label = btn.textContent;
     btn.disabled = true; btn.textContent = "Saving…";
@@ -1574,9 +1564,7 @@ async function wireActualsForm() {
         }];
       }
       const doneHint = ' Click "Done entering — update plan" when finished to refresh the schedule.';
-      setStatus((d.completed_order
-        ? `✓ Saved. Order ${body.so_no} marked complete.`
-        : "✓ Saved.") + doneHint);
+      setStatus("✓ Saved." + doneHint);
       renderTab("rule7");   // instant: fresh blank form + updated saved-entries list
     } catch (e) {
       setStatus("Save error: " + e.message, true); btn.disabled = false; btn.textContent = label;
