@@ -376,10 +376,14 @@ FLOW_CHUNK_CANDIDATES = (4, 6)
 # over classic, without hanging the free instance.
 FLOW_LOCAL_BUDGET = 100
 
-# The operator-assignment policies the contest sweeps (2026-08-02, new engine only).
-# "flexible" is a valid engine policy but is dropped from the contest for cost — it is
-# the inverse of "scarce" and rarely wins (see the operator-assignment design spec).
-OPERATOR_PICK_CANDIDATES = ("scarce", "balanced")
+# The operator-assignment policies the contest sweeps (2026-08-02, new engine only;
+# swapped 2026-08-03). "balanced" was measured no-benefit on Test8 (2026-08-03) and
+# dropped from the contest; "bottleneck" (demand-aware — keeps busy-machine operators
+# free) is the new challenger. "flexible" is also a valid engine policy but stays out
+# of the contest for cost — it is the inverse of "scarce" and rarely wins. "balanced"
+# remains a valid engine value too (just not swept) — see the operator-assignment
+# design spec.
+OPERATOR_PICK_CANDIDATES = ("scarce", "bottleneck")
 
 
 def operator_pick_contenders(current="scarce", candidates=OPERATOR_PICK_CANDIDATES):

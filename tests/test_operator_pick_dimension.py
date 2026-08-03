@@ -27,18 +27,18 @@ def test_operator_pick_invalid_is_rejected():
         Config(operator_pick="nope").validate()
 
 
-def test_operator_pick_candidates_are_scarce_and_balanced():
+def test_operator_pick_candidates_are_scarce_and_bottleneck():
     from engine.optimizer import OPERATOR_PICK_CANDIDATES
-    assert OPERATOR_PICK_CANDIDATES == ("scarce", "balanced")
+    assert OPERATOR_PICK_CANDIDATES == ("scarce", "bottleneck")
 
 
 def test_operator_pick_contenders_put_current_first():
     from engine.optimizer import operator_pick_contenders
     assert operator_pick_contenders("balanced")[0] == "balanced"
-    assert operator_pick_contenders("scarce") == ["scarce", "balanced"]
+    assert operator_pick_contenders("scarce") == ["scarce", "bottleneck"]
     # An off-list current policy still joins its own contest, first.
     assert operator_pick_contenders("flexible")[0] == "flexible"
-    assert set(operator_pick_contenders("flexible")) == {"flexible", "scarce", "balanced"}
+    assert set(operator_pick_contenders("flexible")) == {"flexible", "scarce", "bottleneck"}
 
 
 def test_sweepresult_defaults_operator_pick_scarce():
@@ -62,7 +62,7 @@ def test_sweep_optimize_sweeps_all_operator_picks(monkeypatch):
 
     def fake_tune(so_lines, config, masters, **kw):
         calls.append((config.flexible_machines, config.operator_pick))
-        # Make "balanced" the strict winner so we can assert the returned policy.
+        # Make "bottleneck" the strict winner so we can assert the returned policy.
         late = 10 if config.operator_pick == "scarce" else 5
         return ({("b", "i"): 0}, 80, {"total_late_days": late, "makespan_days": 0}, 5)
 
@@ -70,8 +70,8 @@ def test_sweep_optimize_sweeps_all_operator_picks(monkeypatch):
     res = new_engine.sweep_optimize(["x"], Config(scheduler="new"), object(),
                                     budget_evals=40)
     assert set(calls) == {(False, "scarce"), (True, "scarce"),
-                          (False, "balanced"), (True, "balanced")}
-    assert res.operator_pick == "balanced"
+                          (False, "bottleneck"), (True, "bottleneck")}
+    assert res.operator_pick == "bottleneck"
 
 
 def _payload(scheduler="new", overlap=50):
@@ -85,7 +85,7 @@ def test_contest_jobs_sweeps_operator_pick_for_new_engine():
     jobs = optimize_service.contest_jobs(_payload("new"))
     assert all(len(t) == 3 for t in jobs)
     picks = {pick for (_ov, _flex, pick) in jobs}
-    assert picks == {"scarce", "balanced"}
+    assert picks == {"scarce", "bottleneck"}
     # sequence contenders (current 50 + 70 + 80) × machine-sets(2) × picks(2)
     assert len(jobs) == 3 * 2 * 2
 
