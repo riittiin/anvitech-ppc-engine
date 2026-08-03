@@ -20,7 +20,7 @@ concurrency: optimize   # one contest at a time — matches the app's own lock
 jobs:
   optimize:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 65   # bottleneck doubled the contest (2 operator policies + heavier plans); 25 was too tight (all shards hit it). Pair with Render OPTIMIZE_CLOUD_TIMEOUT_MIN >= 60.
     strategy:
       fail-fast: false   # one shard dying must not cancel the others
       max-parallel: 20
