@@ -163,3 +163,13 @@ def test_run_contest_result_exposes_winner_pick(monkeypatch):
     monkeypatch.setattr(optimize_service, "contest_jobs", lambda p: [])
     out = optimize_service.run_contest(_payload("new"))
     assert "winner_pick" in out
+
+
+def test_operator_pick_accepts_bottleneck():
+    Config(operator_pick="bottleneck").validate()  # must not raise
+    assert Config.from_dict({"operator_pick": "bottleneck"}).operator_pick == "bottleneck"
+
+
+def test_operator_pick_still_rejects_unknown():
+    with pytest.raises(ValueError):
+        Config(operator_pick="nope").validate()

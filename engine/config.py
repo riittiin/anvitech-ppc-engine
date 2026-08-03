@@ -115,6 +115,9 @@ class Config:
     #                versatile people free for machines only they can run). Default.
     #   "balanced" : the LEAST-loaded free operator (spread work evenly), tie -> scarce.
     #   "flexible" : the MOST-flexible free operator (kept for A/B; NOT swept by the contest).
+    #   "bottleneck": demand-aware — assign whoever's OTHER machines are least busy,
+    #                 keeping free the operators needed by busy machines (with a
+    #                 one-step strand look-ahead). Falls back to scarce with no demand.
     operator_pick: str = "scarce"
 
     # Rule 6 — balance operator workload (default off). A schedule-neutral POST-PROCESS:
@@ -197,8 +200,8 @@ class Config:
             errs.append("balance_operator_load must be true or false")
         if not isinstance(self.flexible_machines, bool):
             errs.append("flexible_machines must be true or false")
-        if self.operator_pick not in ("scarce", "balanced", "flexible"):
-            errs.append("operator_pick must be 'scarce', 'balanced', or 'flexible'")
+        if self.operator_pick not in ("scarce", "balanced", "flexible", "bottleneck"):
+            errs.append("operator_pick must be 'scarce', 'balanced', 'flexible', or 'bottleneck'")
         if self.split_min_qty < 1:
             errs.append("split_min_qty must be >= 1")
         if self.expedite_window_min < 0:
