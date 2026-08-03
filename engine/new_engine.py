@@ -171,13 +171,25 @@ def _plan_config(config) -> PlanConfig:
     plan start). Consolidation is 0 — the old Rule 1 already consolidated the batches."""
     start = getattr(config, "plan_start_date", None) or date.today()
     h = int(getattr(config, "first_shift_start_hour", 8))
+    plan_start = datetime(start.year, start.month, start.day, h, 0)
+    # Auto-mode floor (2026-08-03): never start in the past — a late run rolls the start to
+    # the next full hour (set by api._resolve_config). Fixed-date/testing plans carry no
+    # floor and keep the 08:00 start. plan_start = max(08:00-of-date, floor).
+    floor_iso = getattr(config, "plan_start_floor", None)
+    if floor_iso:
+        try:
+            floor = datetime.fromisoformat(floor_iso)
+            if floor > plan_start:
+                plan_start = floor
+        except ValueError:
+            pass
     # The new engine's overlap is always a fraction (0.0 = sequential). Read it straight
     # from overlap_percent, IGNORING the old 'overlap_mode' switch (the new engine has no
     # such mode) — otherwise a tuned or saved overlap silently has no effect. Clamp 0..0.95.
     overlap = min(0.95, max(0.0, float(getattr(config, "overlap_percent", 0)) / 100.0))
     return PlanConfig(
-        plan_start=datetime(start.year, start.month, start.day, h, 0),
-        week_anchor=_friday_on_or_before(start),
+        plan_start=plan_start,
+        week_anchor=_friday_on_or_before(plan_start.date()),
         first_start=time(int(getattr(config, "first_shift_start_hour", 8)), 0),
         first_end=time(int(getattr(config, "first_shift_end_hour", 19)), 0),
         second_start=time(int(getattr(config, "first_shift_end_hour", 19)), 0),

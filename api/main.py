@@ -335,6 +335,7 @@ def _inputs_signature(config: Config) -> str:
     ranks replay, so neither can alter an optimized plan."""
     d = config.to_dict()
     d.pop("worst_ceiling_days", None)   # transient per-run ceiling, not a saved input
+    d.pop("plan_start_floor", None)     # transient per-run 'next hour' start floor
     d.pop("balance_operator_load", None)
     d["expedite_window_min"] = 0
     d["consolidation_window_days"] = 1   # engine-decided now; a stale saved value is ignored
@@ -1023,6 +1024,13 @@ def _ist_today():
     return _ist_now().date()
 
 
+def _ceil_next_hour(dt):
+    """Round ``dt`` UP to the next full hour (minutes/seconds zeroed). 23:30 -> next day
+    00:00. Used to floor an auto plan start so a run never schedules in the past."""
+    from datetime import timedelta as _td
+    return dt.replace(minute=0, second=0, microsecond=0) + _td(hours=1)
+
+
 def _resolve_config(config: Config) -> Config:
     """Resolve an 'auto' plan start (plan_start_date is None) to today (IST) so
     the pure engine NEVER sees None. Called at every planning entry; a config
@@ -1035,7 +1043,14 @@ def _resolve_config(config: Config) -> Config:
     if config.consolidation_window_days != 1:
         config = replace(config, consolidation_window_days=1)
     if config.plan_start_date is None:
-        return replace(config, plan_start_date=_ist_today())
+        # Auto: resolve to today AND floor the plan at the next full hour (IST), so a run
+        # late in the day never schedules from 08:00 that (past) morning. The engine starts
+        # at max(08:00-of-date, floor). See engine/new_engine._plan_config.
+        floor = _ceil_next_hour(_ist_now()).isoformat(timespec="minutes")
+        return replace(config, plan_start_date=_ist_today(), plan_start_floor=floor)
+    # Fixed date (testing/reproducibility): start at 08:00 of that date; clear any stale floor.
+    if config.plan_start_floor is not None:
+        config = replace(config, plan_start_floor=None)
     return config
 
 

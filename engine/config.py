@@ -59,6 +59,14 @@ class Config:
     # planning entry before any rule reads this field.
     plan_start_date: Optional[date] = None
 
+    # Auto-mode plan-start FLOOR (transient, per-run, never persisted): an ISO datetime
+    # string. When plan_start_date is auto (None -> today), the API sets this to the NEXT
+    # full hour after 'now' (IST) so the plan never starts in the past (a late run rolls to
+    # the next hour instead of 08:00 that morning). The engine starts at
+    # max(08:00-of-date, this floor). None = no floor (08:00 of the date — the fixed-date /
+    # testing behaviour, e.g. the golden trace). Excluded from _inputs_signature.
+    plan_start_floor: Optional[str] = None
+
     # Which allocation engine plans the book (2026-07-19 flow-scheduler spec):
     #   "classic" = the original Rule 6 non-delay scheduler (engine default —
     #               keeps the golden trace and every historical plan identical)
