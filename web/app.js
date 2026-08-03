@@ -614,11 +614,31 @@ function renderOptimizeResult(st) {
         </div>`;
   box.innerHTML = h;
   $("optimize-apply-btn").onclick = async () => {
-    const res = await fetch("/optimize/apply", { method: "POST" });
-    if (!res.ok) { setStatus("Apply failed: " + (await res.text())); return; }
-    box.classList.add("hidden"); box.innerHTML = "";
-    setStatus("Optimized order applied. Replanning…");
-    await runPlan(false);
+    const applyBtn = $("optimize-apply-btn");
+    const discardBtn = $("optimize-discard-btn");
+    // Immediate feedback: apply + the follow-up re-plan take a few seconds, so make the
+    // click obviously registered (disable both, show "Applying…") — matches Save/Stop.
+    const _label = applyBtn.textContent;
+    applyBtn.disabled = true;
+    if (discardBtn) discardBtn.disabled = true;
+    applyBtn.textContent = "Applying…";
+    setStatus("Applying this plan…");
+    try {
+      const res = await fetch("/optimize/apply", { method: "POST" });
+      if (!res.ok) {
+        setStatus("Apply failed: " + (await res.text()), true);
+        applyBtn.disabled = false; applyBtn.textContent = _label;
+        if (discardBtn) discardBtn.disabled = false;
+        return;
+      }
+      box.classList.add("hidden"); box.innerHTML = "";
+      setStatus("✓ Optimized order applied. Replanning…");
+      await runPlan(false);
+    } catch (e) {
+      setStatus("Apply error: " + e.message, true);
+      applyBtn.disabled = false; applyBtn.textContent = _label;
+      if (discardBtn) discardBtn.disabled = false;
+    }
   };
   $("optimize-discard-btn").onclick = () => { box.classList.add("hidden"); box.innerHTML = ""; };
 }
