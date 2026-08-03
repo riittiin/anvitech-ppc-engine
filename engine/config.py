@@ -107,19 +107,6 @@ class Config:
     # overlap_percent — NOT a user knob. New engine only; classic/flow ignore it.
     flexible_machines: bool = False
 
-    # How the OPTIMIZER matches a free operator to a machine for each shift (2026-08-02).
-    # Swept by the Optimize contest like overlap_percent / flexible_machines — NOT a user
-    # knob (read-only in Settings; set only when Optimize applies a winner). New engine
-    # only; classic/flow ignore it. Values:
-    #   "scarce"   : the LEAST-flexible free operator first (today's behaviour — keeps
-    #                versatile people free for machines only they can run). Default.
-    #   "balanced" : the LEAST-loaded free operator (spread work evenly), tie -> scarce.
-    #   "flexible" : the MOST-flexible free operator (kept for A/B; NOT swept by the contest).
-    #   "bottleneck": demand-aware — assign whoever's OTHER machines are least busy,
-    #                 keeping free the operators needed by busy machines (with a
-    #                 one-step strand look-ahead). Falls back to scarce with no demand.
-    operator_pick: str = "scarce"
-
     # Rule 6 — balance operator workload (default off). A schedule-neutral POST-PROCESS:
     # after the plan is built, each already-scheduled operation is reassigned to the
     # qualified, same-shift operator who is free at that moment and has the least work
@@ -200,8 +187,6 @@ class Config:
             errs.append("balance_operator_load must be true or false")
         if not isinstance(self.flexible_machines, bool):
             errs.append("flexible_machines must be true or false")
-        if self.operator_pick not in ("scarce", "balanced", "flexible", "bottleneck"):
-            errs.append("operator_pick must be 'scarce', 'balanced', 'flexible', or 'bottleneck'")
         if self.split_min_qty < 1:
             errs.append("split_min_qty must be >= 1")
         if self.expedite_window_min < 0:
@@ -243,9 +228,5 @@ class Config:
                     value = None
                 else:
                     value = int(value)
-            if key == "operator_pick":
-                # UI/legacy blanks -> the default policy (the optimizer owns this field).
-                if value in (None, "", "none", "null"):
-                    value = "scarce"
             setattr(cfg, key, value)
         return cfg

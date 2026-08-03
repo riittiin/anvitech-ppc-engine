@@ -376,23 +376,6 @@ FLOW_CHUNK_CANDIDATES = (4, 6)
 # over classic, without hanging the free instance.
 FLOW_LOCAL_BUDGET = 100
 
-# The operator-assignment policies the contest sweeps (2026-08-02, new engine only;
-# swapped 2026-08-03). "balanced" was measured no-benefit on Test8 (2026-08-03) and
-# dropped from the contest; "bottleneck" (demand-aware — keeps busy-machine operators
-# free) is the new challenger. "flexible" is also a valid engine policy but stays out
-# of the contest for cost — it is the inverse of "scarce" and rarely wins. "balanced"
-# remains a valid engine value too (just not swept) — see the operator-assignment
-# design spec.
-OPERATOR_PICK_CANDIDATES = ("scarce", "bottleneck")
-
-
-def operator_pick_contenders(current="scarce", candidates=OPERATOR_PICK_CANDIDATES):
-    """The operator-pick contest lineup: the CURRENT policy first (Stop-safety + tie
-    privilege), then the remaining candidates in order. An off-list current policy
-    still joins its own contest, first — mirroring sweep_contenders()."""
-    cur = current or "scarce"
-    return [cur] + [p for p in candidates if p != cur]
-
 
 def knob_for(config):
     """The ONE setting the sweep contest tunes for this scheduler mode:
@@ -430,7 +413,6 @@ class SweepResult:
     overlap_percent: int = 0            # the winning knob value (see docstring)
     knob: str = "overlap_percent"       # which config field the value belongs to
     flexible_machines: bool = False     # the winning machine-set (new engine)
-    operator_pick: str = "scarce"       # the winning operator-assignment policy (new engine)
     result: OptimizeResult = field(default_factory=OptimizeResult)
     table: list = field(default_factory=list)   # per-candidate probe outcomes
     evals: int = 0

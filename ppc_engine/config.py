@@ -62,16 +62,10 @@ class PlanConfig:
     # How to pick which free operator mans a machine for a shift (RULES.md: "ideal —
     # one operator per machine per shift", plus the owner's idea of choosing by
     # flexibility/load rather than grabbing any free one):
-    #   "scarce"     : the LEAST-flexible free operator (keeps flexible people free for
-    #                  machines only they can run — the measured old-build win). Default.
-    #   "balanced"   : the LEAST-loaded free operator (spread work evenly), tie → scarce.
-    #   "flexible"   : the MOST-flexible free operator (for contrast / A-B testing).
-    #   "bottleneck" : demand-aware — picks the free operator we can most SPARE, weighing
-    #                  each candidate's OTHER qualified machines by their remaining
-    #                  processing-minute demand (machine_demand()), with a one-step
-    #                  look-ahead strand discount when another free operator can cover
-    #                  that other machine instead; falls back to scarce when there's no
-    #                  demand signal (or all candidates tie). See scheduler/staffing.py.
+    #   "scarce"   : the LEAST-flexible free operator (keeps flexible people free for
+    #                machines only they can run — the measured old-build win). Default.
+    #   "balanced" : the LEAST-loaded free operator (spread work evenly), tie → scarce.
+    #   "flexible" : the MOST-flexible free operator (for contrast / A-B testing).
     operator_pick: str = "scarce"
 
     # Operation overlap (pipelining) — the floor-practical alternative to chunking.

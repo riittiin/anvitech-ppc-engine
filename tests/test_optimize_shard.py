@@ -52,59 +52,53 @@ def _new_engine_payload(*, budget=6, candidates=(60, 80)):
 def test_contest_jobs_order_matches_run_contest():
     payload = _new_engine_payload()
     jobs = osvc.contest_jobs(payload)
-    # new engine → picks(2) × machine-sets(2) × the contenders,
-    # pick-outer/flex-middle/overlap-inner.
+    # new engine → two machine-sets × the contenders, flex-outer/overlap-inner.
     cfg = Config.from_dict(payload["config"])
     knob, _ = optimizer.knob_for(cfg)
     contenders = optimizer.sweep_contenders(getattr(cfg, knob), payload["candidates"])
-    picks = optimizer.operator_pick_contenders(getattr(cfg, "operator_pick", "scarce"))
-    expected = [(ov, flex, pick) for pick in picks for flex in (False, True) for ov in contenders]
+    expected = [(ov, flex) for flex in (False, True) for ov in contenders]
     assert jobs == expected
 
 
 def test_contest_jobs_classic_single_machineset(loaded, config):
     payload = _classic_payload(loaded, config)  # config fixture is scheduler="classic"
     jobs = osvc.contest_jobs(payload)
-    assert all(flex is False for _ov, flex, _pick in jobs)
-    assert all(pick == "scarce" for _ov, _flex, pick in jobs)
+    assert all(flex is False for _ov, flex in jobs)
 
 
 def test_merge_shard_rows_equivalent_to_run_contest():
     payload = _new_engine_payload()
     full = osvc.run_contest(payload, processes=1)
     # Reproduce the rows the contest computed, then merge them ourselves:
-    rows = [osvc.run_candidate(payload, ov, flex, pick)
-            for ov, flex, pick in osvc.contest_jobs(payload)]
+    rows = [osvc.run_candidate(payload, ov, flex) for ov, flex in osvc.contest_jobs(payload)]
     merged = osvc.merge_shard_rows(payload, rows,
                                    sum(r["evals"] for r in rows),
                                    any(r["cancelled"] for r in rows))
     assert merged["winner_overlap"] == full["winner_overlap"]
     assert merged["winner_flexible"] == full["winner_flexible"]
-    assert merged["winner_pick"] == full["winner_pick"]
     assert merged["ranks"] == full["ranks"]
 
 
 def test_slices_union_equals_full_contest():
     # New-engine payload (via the existing _new_engine_payload helper, same
     # pattern as test_merge_shard_rows_equivalent_to_run_contest above) so
-    # the contest has multiple (overlap, flexible, pick) candidates to shard over.
+    # the contest has multiple (overlap, flexible) candidates to shard over.
     payload = _new_engine_payload()
     full = osvc.run_contest(payload, processes=1)
     SHARD_TOTAL = 5
     all_rows, all_evals, any_cancel = [], 0, False
-    seen_triples = []
+    seen_pairs = []
     for idx in range(SHARD_TOTAL):
         out = osvc.run_contest_slice(payload, idx, SHARD_TOTAL, processes=1)
         all_rows.extend(out["rows"])
         all_evals += out["evals"]
         any_cancel = any_cancel or out["cancelled"]
-        seen_triples.extend((r["overlap"], r["flexible"], r["pick"]) for r in out["rows"])
+        seen_pairs.extend((r["overlap"], r["flexible"]) for r in out["rows"])
     # every candidate covered exactly once, no overlap
-    assert sorted(seen_triples) == sorted(osvc.contest_jobs(payload))
+    assert sorted(seen_pairs) == sorted(osvc.contest_jobs(payload))
     merged = osvc.merge_shard_rows(payload, all_rows, all_evals, any_cancel)
     assert merged["winner_overlap"] == full["winner_overlap"]
     assert merged["winner_flexible"] == full["winner_flexible"]
-    assert merged["winner_pick"] == full["winner_pick"]
     assert merged["ranks"] == full["ranks"]
 
 
