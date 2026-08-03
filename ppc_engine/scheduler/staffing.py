@@ -24,6 +24,7 @@ from datetime import date, datetime
 from ppc_engine.config import PlanConfig
 from ppc_engine.domain.masters import Masters
 from ppc_engine.domain.resources import Machine, Operator, ROLE_FOR_KIND, Shift
+from ppc_engine.scheduler.duration import operation_duration_min
 from ppc_engine.worktime import effective_shift
 
 
@@ -41,6 +42,34 @@ def build_machine_pools(masters: Masters) -> dict[str, tuple[Operator, ...]]:
         eligible.sort(key=lambda o: (o.flexibility, o.name))
         pools[mid] = tuple(eligible)
     return pools
+
+
+def machine_demand(orders, masters: Masters, config: PlanConfig) -> dict[str, float]:
+    """Per-machine remaining processing minutes — the 'how busy is each machine' signal
+    for the demand-aware 'bottleneck' pick. For every in-house op of every order, take
+    the op's duration at its remaining qty (the same duration the scheduler uses) and add
+    an expected share (duration / number of machine options) to each option's total.
+    OS/DISPATCH ops (no machine_options) contribute nothing; an order whose item has no
+    routing is skipped. Static for a plan — computed once."""
+    demand: dict[str, float] = {}
+    for order in orders:
+        routing = masters.routings.get(order.item_code)
+        if routing is None:
+            continue
+        for op in routing.operations:
+            if not op.machine_options:
+                continue
+            op_qty = order.qty
+            pr = getattr(order, "process_remaining", None)
+            if pr is not None:
+                op_qty = pr.get(op.seq, order.qty)
+            dur = operation_duration_min(op, op_qty, config)
+            if dur <= 0:
+                continue
+            share = dur / len(op.machine_options)
+            for mid in op.machine_options:
+                demand[mid] = demand.get(mid, 0.0) + share
+    return demand
 
 
 class StaffingBoard:
