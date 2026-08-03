@@ -163,6 +163,7 @@ class TuneResult:
     best_sequence: Sequence
     evaluations: int
     trace: list[tuple[float, float]]
+    cancelled: bool = False
 
 
 def tune_overlap(
@@ -178,6 +179,7 @@ def tune_overlap(
     on_eval: Callable[[float, float], None] | None = None,
     on_step: Callable[[int, float], None] | None = None,
     frozen: list | None = None,
+    should_cancel=None,
 ) -> TuneResult:
     """Smart 1-D optimizer for the overlap value — homes in on the true optimum.
 
@@ -201,6 +203,9 @@ def tune_overlap(
     trace: list[tuple[float, float]] = []
     total_evals = 0
     best_ever = [float("inf")]  # best score across ALL probes so far (for the live tracker)
+    # Polled to make "Stop & keep best" prompt: passed into each probe's optimize() so a
+    # probe halts mid-search, and checked between probes so the tuner stops too.
+    _stop = should_cancel or (lambda: False)
 
     def f(x: float) -> float:
         nonlocal total_evals
@@ -218,7 +223,8 @@ def tune_overlap(
                     on_step(_off + evals_in_probe, best_ever[0])
 
             res = optimize(orders, masters, replace(config, overlap=x),
-                           budget=budget_per_eval, seed=sd, on_eval=_step, frozen=frozen)
+                           budget=budget_per_eval, seed=sd, on_eval=_step, frozen=frozen,
+                           should_cancel=should_cancel)
             total_evals += res.evaluations
             if best is None or res.best_score < best.best_score:
                 best = res
@@ -232,21 +238,25 @@ def tune_overlap(
     xs = [round(lo + (hi - lo) * i / (coarse - 1), 3) for i in range(coarse)]
     for x in xs:
         f(x)
-    bi = min(range(coarse), key=lambda i: cache[xs[i]].best_score)
-    a, b = xs[max(0, bi - 1)], xs[min(coarse - 1, bi + 1)]
+        if _stop():
+            break
 
-    # 2) Golden-section within [a, b], reusing points across iterations.
-    c, d = round(b - _GR * (b - a), 3), round(a + _GR * (b - a), 3)
-    fc, fd = f(c), f(d)
-    while (b - a) > tol:
-        if fc < fd:
-            b, d, fd = d, c, fc
-            c = round(b - _GR * (b - a), 3)
-            fc = f(c)
-        else:
-            a, c, fc = c, d, fd
-            d = round(a + _GR * (b - a), 3)
-            fd = f(d)
+    # 2) Golden-section within [a, b], reusing points across iterations. Skipped if the
+    #    caller cancelled during the coarse pass — we then return the best point probed.
+    if not _stop():
+        bi = min(range(coarse), key=lambda i: cache[xs[i]].best_score)
+        a, b = xs[max(0, bi - 1)], xs[min(coarse - 1, bi + 1)]
+        c, d = round(b - _GR * (b - a), 3), round(a + _GR * (b - a), 3)
+        fc, fd = f(c), f(d)
+        while (b - a) > tol and not _stop():
+            if fc < fd:
+                b, d, fd = d, c, fc
+                c = round(b - _GR * (b - a), 3)
+                fc = f(c)
+            else:
+                a, c, fc = c, d, fd
+                d = round(a + _GR * (b - a), 3)
+                fd = f(d)
 
     best_x = min(cache, key=lambda x: cache[x].best_score)
     br = cache[best_x]
@@ -257,4 +267,5 @@ def tune_overlap(
         best_sequence=br.best_sequence,
         evaluations=total_evals,
         trace=trace,
+        cancelled=_stop(),
     )

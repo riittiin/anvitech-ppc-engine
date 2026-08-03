@@ -49,6 +49,7 @@ class OptimizeResult:
     best_metrics: PlanMetrics
     evaluations: int
     baseline_score: float
+    cancelled: bool = False
 
 
 class _Evaluator:
@@ -94,26 +95,28 @@ def _earlier_positions(i: int, n: int, rng: random.Random) -> list[int]:
 
 
 def _local_search(
-    seq: Sequence, ev: _Evaluator, budget: int, rng: random.Random
+    seq: Sequence, ev: _Evaluator, budget: int, rng: random.Random, should_cancel=None
 ) -> tuple[Sequence, float, PlanMetrics]:
     """Hill-climb from ``seq`` by pulling the most-tardy orders earlier.
 
     First-improvement: as soon as a move helps, take it and re-focus on the new worst
-    orders. Stops when no guided move improves or the evaluation budget is spent.
+    orders. Stops when no guided move improves, the evaluation budget is spent, or the
+    caller cancels (``should_cancel`` polled per evaluation for a prompt Stop).
     """
+    _stop = should_cancel or (lambda: False)
     seq = list(seq)
     cur_score, cur_m = ev.evaluate(seq)
     improved = True
-    while improved and ev.evals < budget:
+    while improved and ev.evals < budget and not _stop():
         improved = False
         # Focus effort on the orders contributing most lateness.
         tard = cur_m.lateness_by_order
         worst = sorted(range(len(seq)), key=lambda i: tard.get(seq[i], 0.0), reverse=True)
         for i in worst[:15]:
-            if ev.evals >= budget:
+            if ev.evals >= budget or _stop():
                 break
             for j in _earlier_positions(i, len(seq), rng):
-                if ev.evals >= budget:
+                if ev.evals >= budget or _stop():
                     break
                 cand = seq[:]
                 cand.insert(j, cand.pop(i))  # move order at i earlier to j
@@ -147,6 +150,7 @@ def optimize(
     on_progress=None,
     on_eval=None,
     frozen=None,
+    should_cancel=None,
 ) -> OptimizeResult:
     """Search for the order sequence that minimises the objective.
 
@@ -164,6 +168,9 @@ def optimize(
     """
     ev = _Evaluator(orders, masters, config, on_eval=on_eval, frozen=frozen)
     rng = random.Random(seed)
+    # Polled per evaluation so "Stop & keep best" halts the search promptly (a lambda
+    # reading the cancel flag). None = never cancel (byte-identical to before).
+    _stop = should_cancel or (lambda: False)
 
     # Seed with the dispatch rules; the best of them is our starting incumbent.
     seeds: list[Sequence] = [
@@ -179,6 +186,8 @@ def optimize(
             best_seq, best_score, best_m = s, sc, m
             if on_progress:
                 on_progress(ev.evals, best_score)
+        if _stop():
+            break
     baseline_score = best_score  # best pure dispatch-rule score, before any search
 
     # Iterated local search: climb, record the best, kick, repeat until budget spent.
@@ -186,14 +195,14 @@ def optimize(
     # is already cached — e.g. a tiny order set whose permutations are exhausted), the
     # search has converged, so stop instead of spinning forever below the budget.
     incumbent = best_seq
-    while ev.evals < budget:
+    while ev.evals < budget and not _stop():
         before = ev.evals
-        cand, sc, m = _local_search(incumbent, ev, budget, rng)
+        cand, sc, m = _local_search(incumbent, ev, budget, rng, should_cancel=should_cancel)
         if sc < best_score:
             best_seq, best_score, best_m = cand, sc, m
             if on_progress:
                 on_progress(ev.evals, best_score)
-        if ev.evals >= budget or ev.evals == before:
+        if ev.evals >= budget or ev.evals == before or _stop():
             break
         incumbent = _perturb(best_seq, rng)  # kick from the current best
 
@@ -203,4 +212,5 @@ def optimize(
         best_metrics=best_m,
         evaluations=ev.evals,
         baseline_score=baseline_score,
+        cancelled=_stop(),
     )

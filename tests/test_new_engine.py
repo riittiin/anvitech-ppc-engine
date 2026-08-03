@@ -385,3 +385,23 @@ def test_op_work_never_finishes_before_its_predecessor(old_book, new_masters):
             if es[i][1] < es[i - 1][1]:
                 bad.append((es[i - 1], es[i]))
     assert not bad, f"downstream WORK finishes before predecessor: {bad[:3]}"
+
+
+def test_optimize_sequence_honors_cancel(old_book, new_masters):
+    """Stop & keep best (new engine): optimize_sequence stops promptly and reports
+    cancelled when should_cancel trips — it must not run the whole budget first."""
+    from engine.new_engine import optimize_sequence
+    so_lines, old_masters = old_book
+    res = optimize_sequence(so_lines, _CONF, old_masters, budget_evals=200,
+                            should_cancel=lambda: True)
+    assert res.cancelled is True
+    assert res.evals <= 4          # broke out during the seed pass, nowhere near 200
+
+
+def test_sweep_optimize_honors_cancel(old_book, new_masters):
+    """Stop & keep best (new engine): the local Deep Search fallback stops promptly on
+    cancel, reports cancelled, and still returns a usable best plan."""
+    so_lines, old_masters = old_book
+    sw = sweep_optimize(so_lines, _CONF, old_masters, budget_evals=200,
+                        should_cancel=lambda: True)
+    assert sw.cancelled is True

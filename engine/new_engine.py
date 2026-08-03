@@ -433,7 +433,8 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     ppc_frozen = _ppc_frozen(frozen, orders, batch_by_key, nm) if frozen else None
     # Report EVERY plan (on_eval), not just improvements, so the live counter climbs steadily.
     prog = (lambda evals, _sc: on_progress(evals, None)) if on_progress else None
-    res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_eval=prog, frozen=ppc_frozen)
+    res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_eval=prog,
+                       frozen=ppc_frozen, should_cancel=should_cancel)
     best_batches = [batch_by_key[k] for k in res.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
     # Measure the winner against the SAME crew + reservations the plan actually runs.
@@ -446,10 +447,10 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
                                   with_distribution=True,
                                   promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
     return OptimizeResult(ranks=ranks, best=winner_metrics, evals=res.evaluations,
-                          improved=True, cancelled=False)
+                          improved=True, cancelled=res.cancelled)
 
 
-def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=None, reserved=None, frozen=None):
+def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=None, reserved=None, frozen=None, should_cancel=None):
     """The CONTINUOUS overlap optimizer + sequence search (the 'atom optimizer').
 
     Golden-section search over the overlap value: it treats "best plan score achievable at
@@ -481,7 +482,8 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     ppc_frozen = _ppc_frozen(frozen, orders, batch_by_key, new_masters) if frozen else None
 
     tr = tune_overlap(orders, new_masters, base, lo=0.5, hi=0.95, seeds=(int(seed),),
-                      budget_per_eval=int(budget_per_eval), tol=0.01, coarse=5, on_step=on_step, frozen=ppc_frozen)
+                      budget_per_eval=int(budget_per_eval), tol=0.01, coarse=5, on_step=on_step,
+                      frozen=ppc_frozen, should_cancel=should_cancel)
 
     best_batches = [batch_by_key[k] for k in tr.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
@@ -508,6 +510,7 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
     per = max(15, int(budget_evals) // 10)
     best = None                       # (ranks, overlap_pct, metrics, plans, flexible)
     offset = {"n": 0}
+    cancelled = False
 
     for flex in (False, True):
         def _step(plans, _best, _flex=flex):
@@ -516,17 +519,23 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
         cfg = replace(config, flexible_machines=flex)
         ranks, overlap_pct, metrics, plans = tune(so_lines, cfg, masters,
                                                   budget_per_eval=per, seed=seed, on_step=_step,
-                                                  reserved=base_reserved, frozen=frozen)
+                                                  reserved=base_reserved, frozen=frozen,
+                                                  should_cancel=should_cancel)
         offset["n"] += plans
         if ranks and (best is None or score(metrics) < score(best[2])):
             best = (ranks, overlap_pct, metrics, plans, flex)
+        # "Stop & keep best": the tune above already halted promptly (it polls
+        # should_cancel per eval); don't start the next machine-set pass.
+        if should_cancel and should_cancel():
+            cancelled = True
+            break
 
     if best is None:
         return SweepResult(overlap_percent=int(round(_plan_config(config).overlap * 100)),
                            knob="overlap", flexible_machines=False,
                            result=OptimizeResult(evals=0, best=None), table=[], evals=offset["n"],
-                           cancelled=False)
+                           cancelled=cancelled)
     ranks, overlap_pct, metrics, plans, flex = best
-    result = OptimizeResult(ranks=ranks, best=metrics, evals=offset["n"], improved=True, cancelled=False)
+    result = OptimizeResult(ranks=ranks, best=metrics, evals=offset["n"], improved=True, cancelled=cancelled)
     return SweepResult(overlap_percent=overlap_pct, knob="overlap", flexible_machines=flex,
-                       result=result, table=[], evals=offset["n"], cancelled=False)
+                       result=result, table=[], evals=offset["n"], cancelled=cancelled)
