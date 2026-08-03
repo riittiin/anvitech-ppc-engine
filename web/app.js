@@ -229,6 +229,7 @@ function applyConfig(cfg, resolvedStart) {
     scarce: "Save flexible people",
     balanced: "Spread work evenly",
     flexible: "Use flexible people first",
+    bottleneck: "Send help where it's needed most",
   })[cfg.operator_pick] || "Save flexible people";
   const ol = $("cfg-operator-logic");
   if (ol) ol.checked = !!cfg.apply_operator_logic;
