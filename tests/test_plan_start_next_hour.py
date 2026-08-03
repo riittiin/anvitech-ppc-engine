@@ -37,6 +37,19 @@ def test_plan_config_late_run_floor_rolls_to_next_day():
     assert ps == datetime(2025, 3, 4, 0, 0)
 
 
+def test_plan_config_floor_moves_clock_not_rotation_anchor():
+    # A floor that rolls the CLOCK into the next day must NOT move the shift-rotation
+    # anchor — it stays on plan_start_date (the operator-overlay basis), or a Thu-23:xx
+    # run would invert the whole rotation sequence (review-caught regression).
+    from engine.new_engine import _friday_on_or_before
+    d = date(2025, 3, 6)
+    no_floor = _plan_config(Config(plan_start_date=d))
+    rolled = _plan_config(Config(plan_start_date=d, plan_start_floor="2025-03-07T00:00"))
+    assert rolled.plan_start == datetime(2025, 3, 7, 0, 0)      # clock rolled to next day
+    assert rolled.week_anchor == no_floor.week_anchor          # anchor UNCHANGED
+    assert rolled.week_anchor == _friday_on_or_before(d)       # based on the plan date
+
+
 # --- API: _ceil_next_hour + _resolve_config ---------------------------------------
 
 def test_ceil_next_hour():
