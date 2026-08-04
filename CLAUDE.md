@@ -396,8 +396,21 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
 - `engine/pipeline.py` — `run_rule` (snapshots in/out/config/notes), `run_forward`
   (1→2→3→6), `RuleError`, `to_table`.
 - `engine/orderbook.py` — **order-book logic (pure)**: `merge_upload` (add new /
-  flag repeat / flag completed / intra-upload dedup, all by the **(SO#, item code)**
-  pair — same SO# + different item = two orders), `derive_status`
+  **update an active line's delivery date** / flag repeat / flag completed /
+  intra-upload dedup, all by the **(SO#, item code)** pair) returns
+  `(new_orders, updated_orders, flags)`. **Delivery date is the ONLY field a
+  re-import may change** (2026-08-04,
+  `docs/superpowers/specs/2026-08-04-so-delivery-date-reimport-design.md`) —
+  directors revise SO Delivery Date in the Excel and re-import; quantity is
+  entangled with recorded production so it stays report-only. A blank/unreadable
+  uploaded date never wipes an existing one, and a completed order is never
+  updated. `optimize_service.book_signature` now includes `delivery_date` (so the
+  daily auto-optimize stops calling a date-only edit "nothing changed"), and an
+  applied optimization stores a `dates` map in its meta which `_plan` compares —
+  over the INTERSECTION of keys, so a completed or newly added order never
+  false-alarms — to raise `optimize_meta.dates_changed`/`dates_changed_count` and
+  the "run Start deep search" banner. The applied plan is deliberately KEPT, not
+  cleared, so one date edit can never discard a searched plan. `derive_status`
   (Pending/Running/Complete), `active_so_lines` (remaining qty for planning),
   `order_rows` (dashboard). `Order`/`Actual`/`SOLine` each expose `.key = (so_no,
   item_code)`; the good-by-order / orders-with-actuals / per-process maps are all

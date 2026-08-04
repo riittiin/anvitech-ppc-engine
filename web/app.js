@@ -449,7 +449,7 @@ function renderStatusStrip() {
     const n = optimizeMeta.dates_changed_count || 0;
     warns.push(`${n} order${n === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} a delivery `
       + "date that changed since the applied optimization — the job order no longer "
-      + "reflects them. Run Start deep search.");
+      + "reflects the change. Run Start deep search.");
   }
   const unstaffed = currentTrace && currentTrace.analytics && currentTrace.analytics.headline
     ? currentTrace.analytics.headline.unstaffed_hrs : 0;
