@@ -132,12 +132,20 @@ def book_signature(so_lines, absences=None, frozen=None):
     are covered by api._inputs_signature.) ``frozen=None``/``[]`` produces the
     SAME signature as before frozen existed — the third element is only
     added to the blob when frozen is non-empty, so every pre-existing caller
-    is byte-identical."""
+    is byte-identical.
+
+    Note: adding ``delivery_date`` (2026-08-04) changed the hash for every book,
+    so the first auto-optimize after that deploy runs one contest it would
+    otherwise have skipped. Harmless, and one-time."""
     rows = sorted(
         (l.so_no, l.item_code, round(float(l.qty), 3),
          json.dumps(l.process_qty or {}, sort_keys=True, default=str),
          getattr(l, "commitment", "open") or "open",
-         str(getattr(l, "promised_date", None)))
+         str(getattr(l, "promised_date", None)),
+         # 2026-08-04: a re-import can change the SO delivery date. Without it here
+         # the auto trigger would call a date-only edit "nothing changed" and never
+         # re-sequence around the new date.
+         str(getattr(l, "delivery_date", None)))
         for l in so_lines)
     parts = [rows, sorted((a.get("operator", ""), a.get("from_date", ""),
                           a.get("to_date", "")) for a in (absences or []))]

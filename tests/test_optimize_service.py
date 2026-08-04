@@ -178,6 +178,23 @@ def test_book_signature_tracks_material_changes():
         "from_date": "2025-03-02", "to_date": "2025-03-03"}]) != s0
 
 
+def test_book_signature_changes_when_a_delivery_date_changes():
+    """A director's date edit must count as a material book change, or the daily
+    auto-optimize skips it and the job order never reflects the new date."""
+    import datetime
+    from engine.models import SOLine
+    from engine import optimize_service
+
+    a = SOLine(so_no="SO1", item_code="A", item_name="A", qty=10,
+               delivery_date=datetime.date(2025, 8, 1))
+    b = SOLine(so_no="SO1", item_code="A", item_name="A", qty=10,
+               delivery_date=datetime.date(2025, 9, 15))
+
+    assert optimize_service.book_signature([a]) != optimize_service.book_signature([b])
+    # Same book, same signature — still deterministic.
+    assert optimize_service.book_signature([a]) == optimize_service.book_signature([a])
+
+
 def _new_engine_payload(candidates=(70, 80), budget_per_candidate=20, seed=42):
     """A cloud-contest payload for the NEW (ppc_engine-backed) scheduler — mirrors
     ``_payload()`` above but on the fully-staffed new-engine sample workbook, so
