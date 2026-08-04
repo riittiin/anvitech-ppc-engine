@@ -184,6 +184,83 @@ def test_reupload_with_a_changed_delivery_date_preserves_actuals_and_commitment(
     assert so3_after[promised_i] == so3_before[promised_i]
 
 
+def test_reupload_changing_a_punched_committed_orders_own_date_preserves_its_state(client):
+    """The tight version of the round trip: the SAME order is punched, committed,
+    AND the one whose own delivery date changes on re-import. This is the case
+    that actually exercises the update path (`updated_orders`, built via
+    `dataclasses.replace`) on a record carrying both recorded production and a
+    commitment/promise — proving that path preserves both, not merely that an
+    unrelated record survives an unrelated upload."""
+    import datetime
+    import io
+    from tests.sample_workbook import build_workbook
+
+    _upload_test_workbook(client)
+
+    # Partially punch SO1/ITEM_A (ordered qty 5) — Running, not Complete.
+    r = client.post("/actuals", json={
+        "so_no": SO1, "item_code": ITEM_A, "operator": "Operator One",
+        "entry_date": "2025-03-10", "qty_produced": 2,
+    })
+    assert r.status_code == 200
+
+    # Commit THAT SAME order — snapshots its current expected completion as a promise.
+    r = client.post("/orders/commit", json={"orders": [[SO1, ITEM_A]]})
+    assert r.status_code == 200
+
+    before = client.get("/orders").json()["orders"]
+    cols = before["columns"]
+    si, ii = cols.index("SO No"), cols.index("Item Code")
+    promised_i, lane_i = cols.index("Promised"), cols.index("Lane")
+    so1_before = next(row for row in before["rows"] if row[si] == SO1 and row[ii] == ITEM_A)
+    assert so1_before[lane_i] == "committed"
+    assert so1_before[promised_i]          # a promise was snapshotted
+
+    # Re-import the same workbook with SO1's OWN delivery date pushed out by
+    # 30 days — this is the order that is punched AND committed.
+    wb = build_workbook()
+    ws = wb["Sales Order (SO) list"]
+    old = ws.cell(row=2, column=24).value          # SO1's 'SO Delivery Date' cell
+    assert isinstance(old, datetime.date), f"expected a date in that cell, got {old!r}"
+    new_date = old + datetime.timedelta(days=30)
+    ws.cell(row=2, column=24).value = new_date
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    r = client.post("/upload", files={"file": ("t4.xlsx", buf.getvalue(), XLSX_MIME)})
+    body = r.json()
+    assert body["added"] == 0
+    assert body["updated"] == 1        # SO1 went through the UPDATE path...
+    so1_flags = [f for f in body["flagged"] if f["so_no"] == SO1 and f["item_code"] == ITEM_A]
+    assert len(so1_flags) == 1
+    assert "delivery date updated" in so1_flags[0]["reason"]
+    assert "duplicate" not in so1_flags[0]["reason"]   # ...never the duplicate/no-op path
+
+    after = client.get("/orders").json()["orders"]
+    cols = after["columns"]
+    si, ii = cols.index("SO No"), cols.index("Item Code")
+    dd_i, status_i = cols.index("SO Delivery Date"), cols.index("Status")
+    promised_i, lane_i = cols.index("Promised"), cols.index("Lane")
+    so1_after = next(row for row in after["rows"] if row[si] == SO1 and row[ii] == ITEM_A)
+
+    # (a) SO1's own delivery date moved.
+    assert so1_after[dd_i] == new_date.strftime("%d-%m-%Y")
+
+    # (b) SO1's recorded production and derived Running status survive on the
+    # very record whose date just changed.
+    assert so1_after[status_i] == "Running"
+    from engine import book_store
+    so1_actuals = [a for a in book_store.load_actuals()
+                   if a.so_no == SO1 and a.item_code == ITEM_A]
+    assert len(so1_actuals) == 1
+    assert so1_actuals[0].qty_produced == 2
+
+    # (c) SO1 keeps its own commitment and promised_date exactly as snapshotted —
+    # the update path must not have rebuilt the Order without them.
+    assert so1_after[lane_i] == "committed"
+    assert so1_after[promised_i] == so1_before[promised_i]
+
+
 def test_actual_marks_order_complete(client):
     _upload_test_workbook(client)
     r = client.post("/actuals", json={
