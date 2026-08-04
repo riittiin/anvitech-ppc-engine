@@ -234,10 +234,38 @@ def logout():
     return resp
 
 
+# --------------------------------------------------------------------------- #
+# Commit/uncommit feature gate (2026-08-04,
+# docs/superpowers/specs/2026-08-04-hide-commitment-feature-design.md)
+#
+# Anvitech's directors asked for the Committed/Open lanes to be HIDDEN, not
+# removed — they may want them back. Flip this to True and the whole feature
+# returns: the Commit/Uncommit buttons, the Lane + Promised columns, and both
+# endpoints. Any order committed before is still exactly as it was; nothing is
+# migrated or rebuilt.
+#
+# The engine is deliberately untouched — `Order.commitment`, the optimizer's
+# promise penalty and every promise test stay live. With no order committed that
+# machinery is dormant, so hiding the feature does not move the schedule at all.
+# The endpoints close WITH the buttons on purpose: buttons gone + endpoint open
+# would let an order be committed through the API, where it would steer the
+# optimizer (engine/optimizer.py:94) with nothing on screen to reveal or undo it.
+COMMITMENT_FEATURE_ENABLED = False
+
+
+def _require_commitment_feature():
+    """404 while the lanes are hidden — the endpoint simply does not exist."""
+    if not COMMITMENT_FEATURE_ENABLED:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
 @app.get("/me")
 def me(request: Request):
     return {"username": getattr(request.state, "user", None),
-            "role": getattr(request.state, "role", None)}
+            "role": getattr(request.state, "role", None),
+            # The UI hides its commitment controls/columns from this — one source
+            # of truth, so the screen and the server can never disagree.
+            "commitment_enabled": COMMITMENT_FEATURE_ENABLED}
 
 
 # --------------------------------------------------------------------------- #
@@ -1980,7 +2008,8 @@ def clear_orders(req: ClearRequest, request: Request):
 def commit_orders_ep(req: CommitRequest, request: Request):
     """Lock the given orders into the committed lane: each order's current
     expected completion (from a fresh plan) becomes its locked promise. Admin
-    only."""
+    only. 404 while the lanes are hidden (COMMITMENT_FEATURE_ENABLED)."""
+    _require_commitment_feature()
     require_admin(request)
     _commit_orders([(o[0], o[1]) for o in req.orders if len(o) == 2])
     return {"committed": len(req.orders)}
@@ -1989,7 +2018,8 @@ def commit_orders_ep(req: CommitRequest, request: Request):
 @app.post("/orders/uncommit")
 def uncommit_orders_ep(req: CommitRequest, request: Request):
     """Release the given orders back to the open lane (clears their promise).
-    Admin only."""
+    Admin only. 404 while the lanes are hidden (COMMITMENT_FEATURE_ENABLED)."""
+    _require_commitment_feature()
     require_admin(request)
     for o in req.orders:
         if len(o) == 2:

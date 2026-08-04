@@ -827,7 +827,24 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   helper-tab augmentation. **`POST /actuals` (2026-07-18):** requires a
   non-empty `operator` that exists in the current operator master — 400
   `operator is required` (blank) / `unknown operator '<name>'` (not on file);
-  otherwise unchanged, either role. **Commitment endpoints (admin, role-gated, non-destructive,
+  otherwise unchanged, either role. **⚠️ THE WHOLE COMMIT/UNCOMMIT FEATURE IS
+  HIDDEN (2026-08-04,
+  `docs/superpowers/specs/2026-08-04-hide-commitment-feature-design.md`) — the
+  directors don't want lanes for now but may ask for them back. ONE switch:
+  `api/main.COMMITMENT_FEATURE_ENABLED = False`. Set it to `True` and the entire
+  feature returns — the Commit/Uncommit buttons, the Lane + Promised columns, the
+  red "slipped" flag, and both endpoints — with every previously committed order's
+  lane and promise intact. No migration, no frontend edit.** The flag is served to
+  the browser on `GET /me` as `commitment_enabled` (one source of truth, so the UI
+  and the server can never disagree); `web/app.js` reads it into `commitmentEnabled`
+  and hides its controls/columns from that. **The ENGINE IS DELIBERATELY UNTOUCHED**
+  — `Order.commitment`, `optimizer`'s promise penalty and every promise test stay
+  live and green; with no order committed that machinery is dormant, so hiding it
+  moved the schedule by nothing. The endpoints 404 WITH the buttons on purpose:
+  buttons gone + endpoint open would let an order be committed via the API where it
+  would steer the optimizer (weight 5000) with nothing on screen to reveal or undo
+  it. Tests that drive the endpoints monkeypatch the flag on.
+  **Commitment endpoints (admin, role-gated, non-destructive,
   no password re-auth):** `/orders/commit`, `/orders/uncommit` — set status +
   snapshot `promised_date` (= current expected completion from a fresh plan).
   **`/orders/urgent` is removed (2026-07-29)** — the Urgent lane is gone; a stored

@@ -154,6 +154,7 @@ def test_admin_mutations_do_not_start_contests(monkeypatch):
     m = _api(); _seed_book()
     starts = []
     monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
+    monkeypatch.setattr(m, "COMMITMENT_FEATURE_ENABLED", True)   # lanes are hidden by default
     c = TestClient(m.app)
     c.post("/login", data={"username": "anvitech", "password": "1930rail"})
 

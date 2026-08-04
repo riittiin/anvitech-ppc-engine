@@ -111,7 +111,7 @@ def test_reupload_with_a_changed_delivery_date_updates_the_order(client):
     assert so1_row[di] == "09-04-2025"  # 2025-03-10 + 30 days, DD-MM-YYYY display
 
 
-def test_reupload_with_a_changed_delivery_date_preserves_actuals_and_commitment(client):
+def test_reupload_with_a_changed_delivery_date_preserves_actuals_and_commitment(client, monkeypatch):
     """The design spec's missing round trip: punch some production and commit an
     order BEFORE a re-import that changes a (different) order's delivery date —
     the punched progress, its derived Running status, and the committed order's
@@ -130,6 +130,8 @@ def test_reupload_with_a_changed_delivery_date_preserves_actuals_and_commitment(
     assert r.status_code == 200
 
     # Commit SO3/ITEM_B — snapshots its current expected completion as a promise.
+    import api.main as _m
+    monkeypatch.setattr(_m, "COMMITMENT_FEATURE_ENABLED", True)   # lanes are hidden by default
     r = client.post("/orders/commit", json={"orders": [[SO3, ITEM_B]]})
     assert r.status_code == 200
 
@@ -184,7 +186,7 @@ def test_reupload_with_a_changed_delivery_date_preserves_actuals_and_commitment(
     assert so3_after[promised_i] == so3_before[promised_i]
 
 
-def test_reupload_changing_a_punched_committed_orders_own_date_preserves_its_state(client):
+def test_reupload_changing_a_punched_committed_orders_own_date_preserves_its_state(client, monkeypatch):
     """The tight version of the round trip: the SAME order is punched, committed,
     AND the one whose own delivery date changes on re-import. This is the case
     that actually exercises the update path (`updated_orders`, built via
@@ -205,6 +207,8 @@ def test_reupload_changing_a_punched_committed_orders_own_date_preserves_its_sta
     assert r.status_code == 200
 
     # Commit THAT SAME order — snapshots its current expected completion as a promise.
+    import api.main as _m
+    monkeypatch.setattr(_m, "COMMITMENT_FEATURE_ENABLED", True)   # lanes are hidden by default
     r = client.post("/orders/commit", json={"orders": [[SO1, ITEM_A]]})
     assert r.status_code == 200
 

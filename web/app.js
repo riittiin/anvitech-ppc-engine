@@ -35,6 +35,7 @@ let planEverLoaded = false; // true once the first /run response (success or fai
                              // distinguishes "still loading" from a genuinely empty plan
 let bootLoadingTimer = null;
 let optimizePollFailures = 0;   // consecutive failed /optimize/status polls
+let commitmentEnabled = false;  // from /me — are the Committed/Open lanes shown at all?
 
 // ---- View router ----
 // Six destinations, one visible at a time. Each maps to an existing render call
@@ -182,9 +183,16 @@ async function initSession() {
     if (res.status === 401) { window.location = "/login"; return; }
     const me = await res.json();
     currentRole = me.role === "admin" ? "admin" : "user";
+    // Commit/uncommit lanes are hidden for now (2026-08-04 — the directors don't
+    // want them yet). The server owns the switch and reports it here, so the
+    // buttons/columns and the endpoints can never disagree about whether the
+    // feature exists. Flipping COMMITMENT_FEATURE_ENABLED in api/main.py brings
+    // the whole thing back with no frontend change.
+    commitmentEnabled = me.commitment_enabled === true;
     renderSessionInfo(me.username, currentRole);
   } catch (e) {
     currentRole = "user";
+    commitmentEnabled = false;   // fail closed: never show a control we can't confirm
   }
   // Fail closed: drop the default "role-pending" gate (CSS hides .admin-only for
   // it too) and apply the real one — an admin control never flashes visible to
@@ -963,7 +971,7 @@ async function renderOrders() {
   }
   // Commitment controls are admin-only (server enforces this too). Danger actions
   // (delete) live in a separate strip at the bottom, visually set apart.
-  if (isAdmin) {
+  if (isAdmin && commitmentEnabled) {
     html += '<div class="ord-toolbar">'
       + '<button id="ord-commit-sel" class="ghost-btn" title="Label only — does not change the machine schedule">Commit selected</button> '
       + '<button id="ord-uncommit-sel" class="ghost-btn" title="Label only — does not change the machine schedule">Uncommit selected</button>'
@@ -971,8 +979,11 @@ async function renderOrders() {
   }
   html += orderTableHtml(currentOrders, isAdmin);
   html += '<p class="g-note">Pending = not started · Running = production logged · Complete = marked complete on a Daily Entry (archived). Plan schedules every active order by its <strong>remaining</strong> qty. '
-    + 'Lane: <strong>open</strong> = newly arrived · <strong>committed</strong> = promised to the customer — the plan holds its completion date within +3 days when you re-optimize. Commit an order once you\'ve told the customer a date. '
-    + '<strong>Red</strong> "Current expected" = later than the Promised date shown in the same row (the order has slipped).</p>';
+    + (commitmentEnabled
+       ? 'Lane: <strong>open</strong> = newly arrived · <strong>committed</strong> = promised to the customer — the plan holds its completion date within +3 days when you re-optimize. Commit an order once you\'ve told the customer a date. '
+         + '<strong>Red</strong> "Current expected" = later than the Promised date shown in the same row (the order has slipped).'
+       : '"Current expected" is when the plan expects this order to finish.')
+    + '</p>';
   if (isAdmin) {
     html += '<div class="danger-strip">'
       + '<span class="danger-label">Danger zone</span>'
@@ -1005,9 +1016,12 @@ function orderTableHtml(table, showSelect) {
   const itemIdx = table.columns.indexOf("Item Code");
   const laneIdx = table.columns.indexOf("Lane");
   const promIdx = table.columns.indexOf("Promised");
+  // While the commit/uncommit feature is hidden, Lane and Promised are dropped
+  // from the table entirely — they only mean anything alongside those controls.
+  const hidden = commitmentEnabled ? new Set() : new Set([laneIdx, promIdx].filter((i) => i >= 0));
   let h = '<div class="table-wrap"><table><thead><tr>';
   if (showSelect) h += '<th><input type="checkbox" id="ord-all-check" title="select all"></th>';
-  table.columns.forEach((c) => (h += `<th>${escapeHtml(c)}</th>`));
+  table.columns.forEach((c, i) => { if (!hidden.has(i)) h += `<th>${escapeHtml(c)}</th>`; });
   h += '<th>Current expected</th>';
   h += "</tr></thead><tbody>";
   table.rows.forEach((row) => {
@@ -1017,6 +1031,7 @@ function orderTableHtml(table, showSelect) {
     // An order is the (SO#, item) pair — carry both so delete targets the exact line.
     if (showSelect) h += `<td><input type="checkbox" class="ordsel" data-so="${escapeHtml(so)}" data-item="${escapeHtml(item)}"></td>`;
     row.forEach((cell, i) => {
+      if (hidden.has(i)) return;
       const v = cell === null || cell === undefined ? "" : String(cell);
       if (i === sIdx) h += `<td><span class="status-pill status-${v.toLowerCase()}">${escapeHtml(v)}</span></td>`;
       else if (i === laneIdx) h += `<td><span class="lane-badge lane-${v.toLowerCase()}">${escapeHtml(v)}</span></td>`;
@@ -1027,7 +1042,8 @@ function orderTableHtml(table, showSelect) {
     const key = so + "\x1f" + item;
     const expIso = currentExpected ? currentExpected[key] : null;
     const expDisp = expIso ? isoToDdmmyyyy(expIso) : "";
-    const promised = promIdx >= 0 ? String(row[promIdx] || "") : "";
+    // The red "slipped" flag compares against Promised, so it goes with the lanes.
+    const promised = (commitmentEnabled && promIdx >= 0) ? String(row[promIdx] || "") : "";
     const promD = promised ? ddmmyyyyToDate(promised) : null;
     const expD = expIso ? isoToDate(expIso) : null;
     const slip = promD && expD && expD > promD;
