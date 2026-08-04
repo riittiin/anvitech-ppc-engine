@@ -445,6 +445,12 @@ function renderStatusStrip() {
   if (optimizeMeta && optimizeMeta.inputs_changed) {
     warns.push("Your Settings or your uploaded machine/operator/item data changed since the applied optimization. Its numbers may no longer match — run Optimize again.");
   }
+  if (optimizeMeta && optimizeMeta.dates_changed) {
+    const n = optimizeMeta.dates_changed_count || 0;
+    warns.push(`${n} order${n === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} a delivery `
+      + "date that changed since the applied optimization — the job order no longer "
+      + "reflects them. Run Start deep search.");
+  }
   const unstaffed = currentTrace && currentTrace.analytics && currentTrace.analytics.headline
     ? currentTrace.analytics.headline.unstaffed_hrs : 0;
   if (unstaffed && unstaffed > 0) {
