@@ -298,3 +298,4 @@ def test_optimize_meta_ignores_orders_the_optimization_never_saw(monkeypatch):
 
     meta = admin.post("/run", json={}).json()["optimize_meta"]
     assert meta["dates_changed"] is False
+    assert meta["dates_changed_count"] == 0

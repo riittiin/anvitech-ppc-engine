@@ -310,8 +310,14 @@ async function uploadExcel() {
     const d = await res.json();
     ITEMS = null;  // item metadata may have changed
     let msg = `<strong>${escapeHtml(d.name)}</strong>: ${d.added} new order(s) added`;
+    if (d.updated) msg += ` · ${d.updated} delivery date(s) updated`;
     if (d.flagged && d.flagged.length) {
-      const detail = d.flagged.map((f) => `${escapeHtml(f.so_no)}/${escapeHtml(f.item_code || "")} (${escapeHtml(f.reason)})`).join("; ");
+      // Delivery-date updates are the ones a director is most likely to be
+      // checking for — surface them first so they aren't buried among routine
+      // "duplicate: already in the book" flags. Nothing is dropped, only reordered.
+      const isDateUpdate = (f) => (f.reason || "").includes("delivery date updated");
+      const ordered = d.flagged.filter(isDateUpdate).concat(d.flagged.filter((f) => !isDateUpdate(f)));
+      const detail = ordered.map((f) => `${escapeHtml(f.so_no)}/${escapeHtml(f.item_code || "")} (${escapeHtml(f.reason)})`).join("; ");
       msg += ` · <span class="pill-pending">${d.flagged.length} flagged</span>: ${detail}`;
     }
     if (d.masters_updated) msg += " · uploaded machine/operator/item data updated";
@@ -342,6 +348,17 @@ function isoToDisplayDateTime(iso) {       // "2026-07-13T10:04:00" -> "13-07-20
   return d ? isoToDdmmyyyy(d) + (t ? " " + t.slice(0, 5) : "") : s;
 }
 
+// Shared wording for the "delivery dates moved since the applied optimization"
+// warning — rendered in both the Optimize panel (next to the Start deep search
+// button) and the status strip, so the two can never drift.
+function datesChangedWarningText(meta) {
+  if (!meta || !meta.dates_changed) return null;
+  const n = meta.dates_changed_count || 0;
+  return `${n} order${n === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} a delivery `
+    + "date that changed since the applied optimization — the job order no longer "
+    + "reflects the change. Run Start deep search.";
+}
+
 function renderOptimizeBanner() {
   const b = $("optimize-banner");
   if (!b) return;
@@ -356,6 +373,10 @@ function renderOptimizeBanner() {
     h += ` · <span class="pill-pending">Your Settings or your uploaded machine/operator/item ` +
          `data have changed since this optimization ran. Its numbers may no longer match — run ` +
          `Optimize again to refresh them</span>`;
+  }
+  const datesWarn = datesChangedWarningText(optimizeMeta);
+  if (datesWarn) {
+    h += ` · <span class="pill-pending">${datesWarn}</span>`;
   }
   // The live plan is worse than the number the Optimize panel showed (a change the
   // inputs check can't see — e.g. a code update or a cloud/local gap). Say so plainly.
@@ -445,12 +466,8 @@ function renderStatusStrip() {
   if (optimizeMeta && optimizeMeta.inputs_changed) {
     warns.push("Your Settings or your uploaded machine/operator/item data changed since the applied optimization. Its numbers may no longer match — run Optimize again.");
   }
-  if (optimizeMeta && optimizeMeta.dates_changed) {
-    const n = optimizeMeta.dates_changed_count || 0;
-    warns.push(`${n} order${n === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} a delivery `
-      + "date that changed since the applied optimization — the job order no longer "
-      + "reflects the change. Run Start deep search.");
-  }
+  const datesChangedWarn = datesChangedWarningText(optimizeMeta);
+  if (datesChangedWarn) warns.push(datesChangedWarn);
   const unstaffed = currentTrace && currentTrace.analytics && currentTrace.analytics.headline
     ? currentTrace.analytics.headline.unstaffed_hrs : 0;
   if (unstaffed && unstaffed > 0) {

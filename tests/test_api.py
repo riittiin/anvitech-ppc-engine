@@ -111,6 +111,79 @@ def test_reupload_with_a_changed_delivery_date_updates_the_order(client):
     assert so1_row[di] == "09-04-2025"  # 2025-03-10 + 30 days, DD-MM-YYYY display
 
 
+def test_reupload_with_a_changed_delivery_date_preserves_actuals_and_commitment(client):
+    """The design spec's missing round trip: punch some production and commit an
+    order BEFORE a re-import that changes a (different) order's delivery date —
+    the punched progress, its derived Running status, and the committed order's
+    promised_date/commitment must all survive untouched."""
+    import datetime
+    import io
+    from tests.sample_workbook import build_workbook, SO2, SO3, ITEM_B
+
+    _upload_test_workbook(client)
+
+    # Partially punch SO1/ITEM_A (ordered qty 5) — Running, not Complete.
+    r = client.post("/actuals", json={
+        "so_no": SO1, "item_code": ITEM_A, "operator": "Operator One",
+        "entry_date": "2025-03-10", "qty_produced": 2,
+    })
+    assert r.status_code == 200
+
+    # Commit SO3/ITEM_B — snapshots its current expected completion as a promise.
+    r = client.post("/orders/commit", json={"orders": [[SO3, ITEM_B]]})
+    assert r.status_code == 200
+
+    before = client.get("/orders").json()["orders"]
+    cols = before["columns"]
+    si, ii = cols.index("SO No"), cols.index("Item Code")
+    promised_i, lane_i = cols.index("Promised"), cols.index("Lane")
+    so3_before = next(row for row in before["rows"] if row[si] == SO3 and row[ii] == ITEM_B)
+    assert so3_before[lane_i] == "committed"
+    assert so3_before[promised_i]          # a promise was snapshotted
+
+    # Re-import the same workbook with SO2's (a DIFFERENT order, same item as
+    # SO1) delivery date pushed out by 30 days.
+    wb = build_workbook()
+    ws = wb["Sales Order (SO) list"]
+    old = ws.cell(row=3, column=24).value          # SO2's 'SO Delivery Date' cell
+    assert isinstance(old, datetime.date), f"expected a date in that cell, got {old!r}"
+    new_date = old + datetime.timedelta(days=30)
+    ws.cell(row=3, column=24).value = new_date
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    r = client.post("/upload", files={"file": ("t3.xlsx", buf.getvalue(), XLSX_MIME)})
+    body = r.json()
+    assert body["added"] == 0
+    assert body["updated"] == 1
+    assert any("delivery date updated" in f["reason"] for f in body["flagged"])
+
+    after = client.get("/orders").json()["orders"]
+    cols = after["columns"]
+    si, ii = cols.index("SO No"), cols.index("Item Code")
+    dd_i, status_i = cols.index("SO Delivery Date"), cols.index("Status")
+    promised_i, lane_i = cols.index("Promised"), cols.index("Lane")
+
+    # (a) SO2's delivery date moved.
+    so2 = next(row for row in after["rows"] if row[si] == SO2 and row[ii] == ITEM_A)
+    assert so2[dd_i] == new_date.strftime("%d-%m-%Y")
+
+    # (b) SO1's recorded production survives (the punch itself, still on file)
+    # and its derived Running status is unaffected by the re-import.
+    so1 = next(row for row in after["rows"] if row[si] == SO1 and row[ii] == ITEM_A)
+    assert so1[status_i] == "Running"
+    from engine import book_store
+    so1_actuals = [a for a in book_store.load_actuals()
+                   if a.so_no == SO1 and a.item_code == ITEM_A]
+    assert len(so1_actuals) == 1
+    assert so1_actuals[0].qty_produced == 2
+
+    # (c) SO3 keeps its commitment and promised_date exactly as snapshotted.
+    so3_after = next(row for row in after["rows"] if row[si] == SO3 and row[ii] == ITEM_B)
+    assert so3_after[lane_i] == "committed"
+    assert so3_after[promised_i] == so3_before[promised_i]
+
+
 def test_actual_marks_order_complete(client):
     _upload_test_workbook(client)
     r = client.post("/actuals", json={
