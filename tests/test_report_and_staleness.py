@@ -38,6 +38,12 @@ def _seed_book(n_orders=2):
         for i in range(n_orders)])
 
 
+def _admin_client(m):
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    return c
+
+
 # --------------------------------------------------------------------------- #
 # Bug 3 — NO_ROUTING report reflects the CURRENT book, not the stored workbook
 # --------------------------------------------------------------------------- #
@@ -237,3 +243,58 @@ def test_schedule_neutral_settings_do_not_flag_staleness():
     for tweak in (replace(cfg, balance_operator_load=True),
                   replace(cfg, expedite_window_min=45)):
         assert m._plan(tweak)["optimize_meta"]["inputs_changed"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 2026-08-04 — the applied optimization records the delivery dates it was
+# computed against, so a later re-import that moves a date flags staleness.
+# --------------------------------------------------------------------------- #
+def test_optimize_meta_flags_a_changed_delivery_date(monkeypatch):
+    """After an optimization is applied, changing an order's delivery date must
+    mark the applied plan stale so the admin knows to run Start deep search."""
+    m = _api()
+    admin = _admin_client(m)
+    _seed_book()
+
+    # Save an applied optimization whose recorded dates match the book.
+    dates = m._delivery_dates()
+    assert dates, "the seeded book should have at least one order"
+    key = sorted(dates)[0]
+    book_store.save_plan_priority({key: 0}, {"saved_at": "2026-08-04T10:00:00",
+                                              "dates": dict(dates)})
+
+    meta = admin.post("/run", json={}).json()["optimize_meta"]
+    assert meta["dates_changed"] is False
+    assert meta["dates_changed_count"] == 0
+
+    # Move that order's delivery date.
+    so_no, item_code = key.split(m.KEY_SEP)
+    active = book_store.load_active_orders()
+    order = active[(so_no, item_code)]
+    import dataclasses
+    import datetime
+    book_store.add_orders([dataclasses.replace(
+        order, delivery_date=order.delivery_date + datetime.timedelta(days=30))])
+
+    meta = admin.post("/run", json={}).json()["optimize_meta"]
+    assert meta["dates_changed"] is True
+    assert meta["dates_changed_count"] == 1
+
+
+def test_optimize_meta_ignores_orders_the_optimization_never_saw(monkeypatch):
+    """Only orders present in BOTH the applied snapshot and the current book are
+    compared. A newly uploaded or newly completed order is normal traffic, not a
+    reason to tell the admin their optimization is stale."""
+    m = _api()
+    admin = _admin_client(m)
+    _seed_book()
+
+    dates = m._delivery_dates()
+    key = sorted(dates)[0]
+    stale = dict(dates)
+    stale["SO_GONE" + m.KEY_SEP + "ITEM_GONE"] = "2020-01-01"   # not in the book
+    book_store.save_plan_priority({key: 0}, {"saved_at": "2026-08-04T10:00:00",
+                                              "dates": stale})
+
+    meta = admin.post("/run", json={}).json()["optimize_meta"]
+    assert meta["dates_changed"] is False

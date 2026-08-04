@@ -824,12 +824,23 @@ def _plan(config: Config):
         keys = {f"{l.so_no}{KEY_SEP}{l.item_code}" for l in so_lines}
         covered = sum(1 for k in keys if k in prio["ranks"])
         saved_sig = (prio.get("meta") or {}).get("inputs_sig")
+        # Delivery-date staleness. Compare only keys present in BOTH the applied
+        # snapshot and the current book: an order that has since completed or been
+        # newly uploaded is normal traffic, not a reason to cry stale.
+        saved_dates = (prio.get("meta") or {}).get("dates") or {}
+        current_dates = {f"{l.so_no}{KEY_SEP}{l.item_code}":
+                         l.delivery_date.isoformat() if l.delivery_date else None
+                         for l in so_lines}
+        dates_moved = sum(1 for k, v in saved_dates.items()
+                          if k in current_dates and current_dates[k] != v)
         optimize_meta = {"active": True,
                          "saved_at": (prio.get("meta") or {}).get("saved_at"),
                          "covered": covered, "uncovered": len(keys) - covered,
                          # True when the masters/settings differ from what the
                          # optimization was computed on — its numbers will differ.
-                         "inputs_changed": bool(saved_sig and saved_sig != current_inputs_sig)}
+                         "inputs_changed": bool(saved_sig and saved_sig != current_inputs_sig),
+                         "dates_changed": dates_moved > 0,
+                         "dates_changed_count": dates_moved}
         # Reconcile what the applied optimization TARGETED against what THIS plan
         # actually achieves. They match under normal operation (ranks replay to the
         # same plan), but a change the inputs signature can't see — a code deploy
@@ -1061,6 +1072,18 @@ def _current_book_sig() -> str:
                                       actuals, masters)
     absences = book_store.load_absences()
     return optimize_service.book_signature(lines, absences=absences)
+
+
+def _delivery_dates() -> dict:
+    """Every active order's delivery date, keyed like the optimizer's ranks.
+
+    Stored alongside an applied optimization so a later plan can tell whether the
+    delivery dates have moved since it was computed (a director re-importing the
+    Excel with a revised date). A plain map rather than a hash: it costs ~3 KB for
+    a 70-order book and lets the banner say HOW MANY orders moved."""
+    return {f"{o.so_no}{KEY_SEP}{o.item_code}": o.delivery_date.isoformat()
+            for o in book_store.load_active_orders().values()
+            if not o.completed and o.delivery_date}
 
 
 def _plan_fingerprint(config: Config) -> str:
@@ -1776,7 +1799,10 @@ def _optimize_apply():
                 "covered": len(res["ranks"]),
                 "inputs_sig": res.get("inputs_sig"),
                 "best_overlap": res.get("best_overlap"),
-                "book_sig": _current_book_sig()}
+                "book_sig": _current_book_sig(),
+                # The delivery dates this optimization was computed against, so a
+                # later plan can flag "the dates moved, re-run the deep search".
+                "dates": _delivery_dates()}
         book_store.save_plan_priority(res["ranks"], meta)
         # Persist the applied plan's per-op assignment (machine/operator/time) so the
         # next "Done" can freeze whatever is in progress on its real machine. Recompute
