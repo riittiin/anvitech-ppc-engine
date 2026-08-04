@@ -379,3 +379,56 @@ def test_patch_and_delete_do_not_start_a_contest(monkeypatch):
     r = admin.delete(f"/operators/{op_id}")
     assert r.status_code == 200
     assert not starts
+
+
+# --- machine options for the Settings machine picker (2026-08-04) --------- #
+# The picker replaces the free-text machines box, so the browser needs the
+# Machine-master list. GET /operators serves it read-only; nothing about how a
+# plan is computed changes.
+def test_get_returns_machine_options_from_machine_master(monkeypatch):
+    m = _api(); _seed_book()
+    admin = _admin_client(m)
+    machines = admin.get("/operators").json()["machines"]
+
+    by_id = {row["id"]: row for row in machines}
+    assert {"CNC1", "CNC2", "VMC1", "BS1", "MI1", "MW1"} <= set(by_id)
+    assert by_id["CNC1"]["name"] == "CNC 1"          # the master's own spelling
+    assert by_id["CNC1"]["type"] == "CNC lathe"      # drives the dropdown grouping
+    assert by_id["CNC1"]["provisional"] is False
+
+
+def test_get_machine_options_include_provisional_machines_flagged(monkeypatch):
+    # CNC9 is referenced by Item B's routing but is not in Machine master. It must
+    # still be offerable — otherwise nobody could ever be qualified to run it and
+    # its work could never be staffed.
+    m = _api(); _seed_book()
+    admin = _admin_client(m)
+    by_id = {row["id"]: row for row in admin.get("/operators").json()["machines"]}
+
+    assert "CNC9" in by_id
+    assert by_id["CNC9"]["provisional"] is True
+
+
+def test_get_machine_options_never_offer_the_os_sentinel(monkeypatch):
+    m = _api(); _seed_book()
+    admin = _admin_client(m)
+    ids = [row["id"] for row in admin.get("/operators").json()["machines"]]
+    assert "OS" not in ids        # OS means outsourced, not a machine
+
+
+def test_get_machine_options_empty_before_any_upload(monkeypatch):
+    m = _api()
+    admin = _admin_client(m)
+    body = admin.get("/operators").json()
+    assert body["machines"] == []
+    assert body["operators"] == []      # existing fields unchanged
+
+
+def test_get_machine_options_visible_to_the_user_role(monkeypatch):
+    # The read-only role sees the same panel (as plain text), so it needs the
+    # same list to render machine display names.
+    m = _api(); _seed_book()
+    user = _user_client(m)
+    r = user.get("/operators")
+    assert r.status_code == 200
+    assert any(row["id"] == "CNC1" for row in r.json()["machines"])

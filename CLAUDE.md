@@ -847,8 +847,13 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   /absences` / `DELETE /absences/{id}` (admin) — see the `book_store.py`/optimizer
   bullets above; `_absence_orphans` feeds the `ABSENT_OPERATOR_UNKNOWN` rows
   `_report_for_book` appends.
-  **Operators:** `GET /operators` (any role, `{operators, next_rotation}` —
-  triggers seed/rotation as a side effect via `_current_masters()`), `POST
+  **Operators:** `GET /operators` (any role, `{operators, machines,
+  next_rotation}` — triggers seed/rotation as a side effect via
+  `_current_masters()`; `machines` is `_machine_options(masters)`, the uploaded
+  workbook's **Machine master** rows as `{id, name, type, provisional}` sorted
+  `(provisional, type, id)`, added 2026-08-04 to feed the Settings machine
+  picker — read-only, no plan effect, provisional machines included so they can
+  still be staffed), `POST
   /operators` / `PATCH /operators/{id}` / `DELETE /operators/{id}` (admin, each
   calling `_current_masters()` first for the same seed-once guarantee) — see the
   operator-master-rotation bullet above.
@@ -876,9 +881,24 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   on `/optimize/status` progress, then refreshes the plan to pick up the winner), an
   always-visible
   **Operator Absences** panel (list visible to both roles; add/remove controls
-  admin-only), a Settings **Operators & shifts** panel (`#operators-panel` — table
+  admin-only), a Settings **Operators & shifts** panel (table
   of name/machines/shift/"Stays" pin + add-row; "Next rotation: Friday
-  DD-MM-YYYY"; admin edits, user role read-only), a Settings **Operator
+  DD-MM-YYYY"; admin edits, user role read-only). **Machines are PICKED, never
+  typed (2026-08-04,
+  `docs/superpowers/specs/2026-08-04-operator-machine-picker-design.md`):** the
+  cell is chips (✕ to remove) + a "＋ Add machine" `<select>` of the unpicked
+  machines from `GET /operators`'s `machines`, `<optgroup>`-grouped by machine
+  type. It writes canonical ids joined by `/` — the ONE separator both machine
+  parsers agree on (`ppc_engine`'s `parse_machine_options` splits `/,` only;
+  `engine/loaders.parse_resource_candidates` also splits `&`/` or ` and strips
+  non-alphanumerics), so a hand-typed `CNC1.CNC2` can no longer silently
+  canonicalize to one unmatched id and disqualify that operator from every
+  machine. `parseMachinesRaw` in `app.js` MIRRORS the live-engine parser exactly
+  (split `/,`, uppercase, strip whitespace) — deliberately, so any token the
+  scheduler can't match renders as a red "unknown" chip instead of the panel
+  drawing healthy chips the scheduler doesn't agree with. Chip edits PATCH
+  immediately and re-render from a local cache; the follow-up `runPlan(false)`
+  is debounced (`replanSoon`) so a burst of clicks costs one re-plan, a Settings **Operator
   efficiency** block (2026-07-18, admin-only — month picker defaulting to last
   month, "Preview" rendering the on-screen report table, "Download efficiency
   report (CSV)"; `previewEfficiency`/`renderEfficiencyTable`/

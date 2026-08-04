@@ -2030,6 +2030,31 @@ def delete_absence_ep(absence_id: str, request: Request):
 _VALID_SHIFTS = {"First shift", "Second shift", ""}
 
 
+def _machine_options(masters):
+    """The machines the Settings operator picker may offer, as plain dicts.
+
+    Straight off the uploaded workbook's **Machine master** sheet (already parsed
+    and cached by `_current_masters()`), so a machine added to that sheet appears
+    in the picker with no code change — the same "edit Excel, never edit code"
+    rule the rest of the masters follow.
+
+    Machines a routing references but Machine master does not list yet
+    (`provisional`, e.g. CNC7) ARE offered, flagged so the UI can say so:
+    excluding them would make it impossible to qualify anyone to run them, and
+    their work could then never be staffed. The `OS` sentinel is never a machine
+    and is never registered by the loader, so it cannot appear here.
+
+    Read-only — nothing about how a plan is computed depends on this."""
+    return [{"id": m.machine_no,
+             "name": m.display_name or m.machine_no,
+             "type": m.machine_type or "",
+             "provisional": bool(m.provisional)}
+            for m in sorted(masters.machines.values(),
+                            key=lambda m: (bool(m.provisional),
+                                           (m.machine_type or "").lower(),
+                                           m.machine_no))]
+
+
 @app.get("/operators")
 def get_operators():
     """The app-owned operator/shift table, any logged-in role. Calling
@@ -2038,10 +2063,11 @@ def get_operators():
     rotation are applied and persisted (as-of TODAY, for display) before the
     rows are read back. `next_rotation` is the next Friday after today,
     regardless of whether the table exists yet."""
-    _current_masters()
+    masters = _current_masters()
     table = book_store.load_operator_table()
     rows = table.get("operators", []) if table else []
     return {"operators": rows,
+            "machines": _machine_options(masters),
             "next_rotation": operator_master.next_rotation(_ist_today()).isoformat()}
 
 

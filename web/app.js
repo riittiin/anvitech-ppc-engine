@@ -1786,6 +1786,95 @@ async function removeAbsence(id) {
 // per-role conditional-render approach already used for the order book table
 // (`renderOrders`'s `isAdmin` branch). Simplest fit here since every cell but
 // the name needs an admin-only edit affordance, not just one trailing button. ----
+// The machines an operator may be qualified for, straight off the uploaded Excel's
+// "Machine master" sheet (served read-only by GET /operators). Kept in module state
+// so the picker and the add-operator row share one list.
+let machineOptions = [];     // [{id, name, type, provisional}]
+let operatorRows = [];       // last /operators rows — re-rendered locally as chips change
+let newOpMachines = [];      // the Add-operator row's pending selection (canonical ids)
+
+// Split an operator's stored machines string EXACTLY the way the LIVE engine does
+// (ppc_engine/loaders/normalize.py `parse_machine_options`: split on "/" and ","
+// only, then uppercase and drop whitespace). Mirroring it — rather than being more
+// forgiving — is the whole point: a token this panel draws as "unknown" is exactly a
+// token the scheduler cannot match to a machine. So a row broken by a typo (a full
+// stop instead of a separator, say) shows up as a red chip instead of silently
+// disqualifying that operator from every machine, which is what happens today.
+function parseMachinesRaw(raw) {
+  const out = [];
+  String(raw || "").split(/[/,]/).forEach((tok) => {
+    const id = tok.replace(/\s+/g, "").toUpperCase();
+    if (!id || out.some((t) => t.id === id)) return;
+    const known = machineOptions.find((mo) => mo.id === id);
+    out.push({ id, name: known ? known.name : tok.trim(), known: !!known });
+  });
+  return out;
+}
+
+// Selected machines as chips. `editable` adds the ✕; unknown tokens are flagged
+// rather than hidden or silently dropped — removing one is always a human's call.
+function machineChipsHtml(tokens, rowId, editable, emptyMsg) {
+  if (!tokens.length) return `<span class="mach-none">${escapeHtml(emptyMsg)}</span>`;
+  return tokens.map((t) => {
+    const x = editable
+      ? `<button type="button" class="mach-x" data-id="${escapeHtml(rowId)}" ` +
+        `data-token="${escapeHtml(t.id)}" title="Remove ${escapeHtml(t.name)}">✕</button>`
+      : "";
+    if (t.known) return `<span class="mach-chip">${escapeHtml(t.name)}${x}</span>`;
+    return `<span class="mach-chip unknown" title="&quot;${escapeHtml(t.id)}&quot; is not a `
+      + `machine in your Machine master, so the scheduler ignores it — this operator gets no `
+      + `credit for it. Remove it and pick the real machines.">⚠ ${escapeHtml(t.id)}${x}</span>`;
+  }).join("");
+}
+
+// The "+ Add machine" dropdown: every machine not already picked, grouped by the
+// master's machine type, with any machine the routings use but Machine master does
+// not list yet in a trailing group of its own.
+function machineSelectHtml(selectedIds, cls, rowId) {
+  if (!machineOptions.length) {
+    return `<span class="mach-none">Upload your Excel to list machines</span>`;
+  }
+  const taken = new Set(selectedIds);
+  const groups = new Map();       // insertion order = the API's (type, provisional) sort
+  machineOptions.forEach((mo) => {
+    if (taken.has(mo.id)) return;
+    const label = mo.provisional ? "Not in Machine master yet" : (mo.type || "Other");
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(mo);
+  });
+  if (!groups.size) return `<span class="mach-none">All machines selected</span>`;
+  const opts = Array.from(groups).map(([label, rows]) =>
+    `<optgroup label="${escapeHtml(label)}">` +
+    rows.map((mo) => `<option value="${escapeHtml(mo.id)}">${escapeHtml(mo.name)}</option>`).join("") +
+    `</optgroup>`).join("");
+  return `<select class="${cls}" data-id="${escapeHtml(rowId)}">`
+    + `<option value="">＋ Add machine</option>${opts}</select>`;
+}
+
+// Add/remove one machine on an existing operator. The row is updated in the local
+// cache and the table re-rendered from it (a full reload would yank the dropdown out
+// from under the click), the PATCH goes out immediately so an edit is never lost, and
+// the re-plan is debounced so adding four machines costs one re-plan, not four.
+function changeOperatorMachines(id, mutate) {
+  const row = operatorRows.find((o) => o.id === id);
+  if (!row) return;
+  const next = [];
+  mutate(parseMachinesRaw(row.machines_raw).map((t) => t.id))
+    .forEach((x) => { if (x && !next.includes(x)) next.push(x); });
+  row.machines_raw = next.join("/");   // "/" — the one separator both parsers agree on
+  renderOperatorsTable(operatorRows);
+  patchOperator(id, { machines_raw: row.machines_raw }, { reload: false, debounceReplan: true });
+}
+
+function wireMachinePicker(scope, onAdd, onRemove) {
+  scope.querySelectorAll(".mach-add").forEach((sel) => {
+    sel.addEventListener("change", () => { if (sel.value) onAdd(sel.dataset.id, sel.value); });
+  });
+  scope.querySelectorAll(".mach-x").forEach((btn) => {
+    btn.onclick = () => onRemove(btn.dataset.id, btn.dataset.token);
+  });
+}
+
 function renderOperatorsTable(operators) {
   const tbody = $("operators-tbody");
   if (!tbody) return;
@@ -1799,11 +1888,12 @@ function renderOperatorsTable(operators) {
   }
   tbody.innerHTML = operators.map((o) => {
     const id = escapeHtml(o.id);
+    const tokens = parseMachinesRaw(o.machines_raw);
     if (!isAdmin) {
       const shiftLabel = o.shift ? escapeHtml(o.shift) : "Day (9–18)";
       return `<tr>
         <td>${escapeHtml(o.name)}</td>
-        <td>${escapeHtml(o.machines_raw || "")}</td>
+        <td class="mach-cell">${machineChipsHtml(tokens, o.id, false, "No machines")}</td>
         <td>${shiftLabel}</td>
         <td>${o.pinned ? "Yes" : "-"}</td>
       </tr>`;
@@ -1813,16 +1903,17 @@ function renderOperatorsTable(operators) {
     ).join("");
     return `<tr data-id="${id}">
       <td>${escapeHtml(o.name)}</td>
-      <td><input type="text" class="op-machines" data-id="${id}" value="${escapeHtml(o.machines_raw || "")}" /></td>
+      <td class="mach-cell">${machineChipsHtml(tokens, o.id, true, "No machines — this operator won't be scheduled")}`
+      + `${machineSelectHtml(tokens.map((t) => t.id), "mach-add", o.id)}</td>
       <td><select class="op-shift" data-id="${id}">${shiftOpts}</select></td>
       <td><input type="checkbox" class="op-pinned" data-id="${id}" ${o.pinned ? "checked" : ""} /></td>
       <td class="admin-only"><button type="button" class="ghost-btn op-remove" data-id="${id}">✕</button></td>
     </tr>`;
   }).join("");
   if (isAdmin) {
-    tbody.querySelectorAll(".op-machines").forEach((inp) => {
-      inp.addEventListener("change", () => patchOperator(inp.dataset.id, { machines_raw: inp.value }));
-    });
+    wireMachinePicker(tbody,
+      (id, machineId) => changeOperatorMachines(id, (ids) => ids.concat([machineId])),
+      (id, token) => changeOperatorMachines(id, (ids) => ids.filter((x) => x !== token)));
     tbody.querySelectorAll(".op-shift").forEach((sel) => {
       sel.addEventListener("change", () => patchOperator(sel.dataset.id, { shift: sel.value }));
     });
@@ -1847,39 +1938,75 @@ async function loadOperators() {
         ? `Shifts rotate every Friday (effective from first shift). Next rotation: ${isoToDdmmyyyy(data.next_rotation)}.`
         : "Shifts rotate every Friday (effective from first shift).";
     }
-    renderOperatorsTable(data.operators || []);
+    machineOptions = data.machines || [];      // set BEFORE rendering — the chips need it
+    operatorRows = data.operators || [];
+    renderOperatorsTable(operatorRows);
+    renderNewOperatorMachines();
     renderStatusStrip();
   } catch (e) { /* the panel is a convenience view — a fetch hiccup shouldn't block the page */ }
 }
 
-async function patchOperator(id, body) {
+// One re-plan after a burst of edits, not one per click.
+let _replanTimer = null;
+function replanSoon(delayMs) {
+  if (_replanTimer) clearTimeout(_replanTimer);
+  _replanTimer = setTimeout(() => { _replanTimer = null; runPlan(false); }, delayMs || 1200);
+}
+
+async function patchOperator(id, body, opts) {
+  const { reload = true, debounceReplan = false } = opts || {};
   try {
     const res = await fetch(`/operators/${encodeURIComponent(id)}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    // A failed PATCH always resyncs from the server, even when the caller rendered
+    // the change optimistically — the screen must never keep an edit the store rejected.
     if (!res.ok) { setStatus("Update operator failed: " + (await res.text()), true); await loadOperators(); return; }
     setStatus("Operator updated.");
-    await loadOperators();
-    await runPlan(false);
-  } catch (e) { setStatus("Update operator error: " + e.message, true); }
+    if (reload) await loadOperators();
+    if (debounceReplan) replanSoon();
+    else await runPlan(false);
+  } catch (e) { setStatus("Update operator error: " + e.message, true); await loadOperators(); }
+}
+
+// The Add-operator row's machine picker. Its selection lives in `newOpMachines`
+// until the row is submitted, so nothing is stored for an operator who is never added.
+function renderNewOperatorMachines() {
+  const wrap = $("op-add-machines");
+  if (!wrap) return;
+  const tokens = newOpMachines.map((id) => {
+    const mo = machineOptions.find((m) => m.id === id);
+    return { id, name: mo ? mo.name : id, known: !!mo };
+  });
+  wrap.innerHTML = machineChipsHtml(tokens, "__new__", true, "")
+    + machineSelectHtml(newOpMachines, "mach-add", "__new__");
+  wireMachinePicker(wrap,
+    (_id, machineId) => {
+      if (!newOpMachines.includes(machineId)) newOpMachines.push(machineId);
+      renderNewOperatorMachines();
+    },
+    (_id, token) => {
+      newOpMachines = newOpMachines.filter((x) => x !== token);
+      renderNewOperatorMachines();
+    });
 }
 
 async function addOperator() {
-  const name = $("op-add-name"), machines = $("op-add-machines"), shift = $("op-add-shift");
+  const name = $("op-add-name"), shift = $("op-add-shift");
   if (!name || !name.value.trim()) { setStatus("Enter an operator name.", true); return; }
   try {
     const res = await fetch("/operators", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: name.value.trim(),
-        machines_raw: machines ? machines.value : "",
+        machines_raw: newOpMachines.join("/"),
         shift: shift ? shift.value : "",
       }),
     });
     if (!res.ok) { setStatus("Add operator failed: " + (await res.text()), true); return; }
     setStatus(`Added operator ${name.value.trim()}.`);
-    name.value = ""; if (machines) machines.value = ""; if (shift) shift.value = "";
+    name.value = ""; newOpMachines = []; if (shift) shift.value = "";
     await loadOperators();
     await runPlan(false);
   } catch (e) { setStatus("Add operator error: " + e.message, true); }

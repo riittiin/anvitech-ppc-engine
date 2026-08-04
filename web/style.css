@@ -461,3 +461,24 @@ td.slip { color: var(--danger); background: rgba(248,81,73,.12); font-weight: 60
 .a-foot strong { color: var(--ink); }
 
 .rollback-btn { padding: 3px 10px; font-size: 12px; }
+
+/* --- Operator machine picker (Settings → Operators & shifts) -------------
+   Machines are chosen from the Machine master, never typed: a chip per machine
+   plus a "+ Add machine" dropdown. A chip flagged .unknown is a stored value that
+   matches no machine — the scheduler ignores it, so it is shown loudly rather
+   than silently costing that operator every qualification. */
+.mach-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.mach-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 6px 2px 8px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--panel-2); font-size: 12px; white-space: nowrap;
+}
+.mach-chip.unknown { border-color: var(--danger); color: var(--danger); background: transparent; }
+.mach-x {
+  border: 0; background: none; cursor: pointer; padding: 0 1px; line-height: 1;
+  font-size: 12px; color: var(--muted);
+}
+.mach-x:hover { color: var(--danger); }
+.mach-chip.unknown .mach-x { color: var(--danger); }
+.mach-cell select { font-size: 12px; padding: 2px 4px; }
+.mach-none { color: var(--muted); font-size: 12px; }
