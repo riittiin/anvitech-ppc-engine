@@ -28,7 +28,8 @@ def test_merge_adds_unseen_and_flags_known():
     completed = {("SO9", "Z"): _order("SO9", "Z", 5, D, completed=True)}
     lines = [_so("SO1", "A", 10, D), _so("SO2", "B", 20, D), _so("SO9", "Z", 5, D)]
 
-    new, flags = orderbook.merge_upload(lines, active, completed)
+    new, updated, flags = orderbook.merge_upload(lines, active, completed)
+    assert updated == []
     assert [(o.so_no, o.item_code) for o in new] == [("SO2", "B")]   # only the unseen one
     reasons = {(f["so_no"], f["item_code"]): f["reason"] for f in flags}
     assert "duplicate" in reasons[("SO1", "A")]
@@ -40,28 +41,102 @@ def test_same_so_different_item_are_two_distinct_orders():
     an SO number but carry different item codes are two separate orders."""
     active = {("SO1", "A"): _order("SO1", "A", 10, D)}     # SO1/A already in the book
     # Upload SO1 again — but item B. Same SO#, different item => a brand-new order.
-    new, flags = orderbook.merge_upload([_so("SO1", "B", 20, D)], active, {})
+    new, updated, flags = orderbook.merge_upload([_so("SO1", "B", 20, D)], active, {})
     assert [(o.so_no, o.item_code) for o in new] == [("SO1", "B")]   # added, not flagged
+    assert updated == []
     assert flags == []
     # And SO1/A on the SAME upload is still the duplicate it always was.
-    new2, flags2 = orderbook.merge_upload([_so("SO1", "A", 10, D)], active, {})
-    assert new2 == [] and "duplicate" in flags2[0]["reason"]
+    new2, updated2, flags2 = orderbook.merge_upload([_so("SO1", "A", 10, D)], active, {})
+    assert new2 == [] and updated2 == [] and "duplicate" in flags2[0]["reason"]
 
 
-def test_merge_flags_changed_order_without_modifying():
+def test_merge_does_not_update_quantity_only_the_date():
     active = {("SO1", "A"): _order("SO1", "A", 10, D)}
-    new, flags = orderbook.merge_upload([_so("SO1", "A", 99, D)], active, {})
-    assert new == []
-    assert "changed" in flags[0]["reason"]
-    assert active[("SO1", "A")].ordered_qty == 10            # original untouched
+    new, updated, flags = orderbook.merge_upload([_so("SO1", "A", 99, D)], active, {})
+    assert new == [] and updated == []
+    assert flags[0]["reason"] == "changed: only the delivery date can be updated by re-import"
+    assert active[("SO1", "A")].ordered_qty == 10
 
 
 def test_merge_dedupes_within_upload_by_pair():
     # Same (SO, item) twice in one file => second flagged; same SO diff item => both kept.
     lines = [_so("SO1", "A", 10, D), _so("SO1", "A", 10, D), _so("SO1", "B", 5, D)]
-    new, flags = orderbook.merge_upload(lines, {}, {})
+    new, updated, flags = orderbook.merge_upload(lines, {}, {})
+    assert updated == []
     assert [(o.so_no, o.item_code) for o in new] == [("SO1", "A"), ("SO1", "B")]
     assert any("duplicate" in f["reason"] for f in flags)
+
+
+D2 = date(2025, 9, 15)
+
+
+def test_merge_updates_delivery_date_and_nothing_else():
+    """The director's use case: edit SO Delivery Date in Excel, re-import."""
+    ex = Order(so_no="SO1", item_code="A", item_name="A", ordered_qty=10,
+               delivery_date=D, first_seen="2025-08-01", commitment="committed",
+               promised_date=D, committed_at="2025-08-01T10:00:00")
+    active = {("SO1", "A"): ex}
+
+    new, updated, flags = orderbook.merge_upload([_so("SO1", "A", 10, D2)], active, {})
+
+    assert new == []
+    assert len(updated) == 1
+    u = updated[0]
+    assert u.delivery_date == D2                 # the one field that moved
+    # Everything else survives untouched.
+    assert (u.so_no, u.item_code, u.item_name) == ("SO1", "A", "A")
+    assert u.ordered_qty == 10
+    assert u.commitment == "committed"
+    assert u.promised_date == D                  # the PROMISE does not follow the SO date
+    assert u.committed_at == "2025-08-01T10:00:00"
+    assert u.first_seen == "2025-08-01"
+    assert u.completed is False
+    # The input dict is never mutated (merge_upload is pure).
+    assert active[("SO1", "A")].delivery_date == D
+    # The report names both dates, day-first.
+    assert flags[0]["reason"] == "delivery date updated: 01-08-2025 → 15-09-2025"
+
+
+def test_merge_updates_date_but_ignores_a_qty_change_on_the_same_row():
+    active = {("SO1", "A"): _order("SO1", "A", 10, D)}
+    new, updated, flags = orderbook.merge_upload([_so("SO1", "A", 99, D2)], active, {})
+    assert len(updated) == 1
+    assert updated[0].delivery_date == D2
+    assert updated[0].ordered_qty == 10          # qty change ignored, as specified
+
+
+def test_merge_blank_uploaded_date_never_wipes_the_existing_one():
+    active = {("SO1", "A"): _order("SO1", "A", 10, D)}
+    new, updated, flags = orderbook.merge_upload([_so("SO1", "A", 10, None)], active, {})
+    assert new == [] and updated == []
+    assert flags[0]["reason"] == ("delivery date missing or unreadable — "
+                                 "kept the existing date")
+    assert active[("SO1", "A")].delivery_date == D
+
+
+def test_merge_unchanged_row_is_still_a_plain_duplicate():
+    active = {("SO1", "A"): _order("SO1", "A", 10, D)}
+    new, updated, flags = orderbook.merge_upload([_so("SO1", "A", 10, D)], active, {})
+    assert new == [] and updated == []
+    assert flags[0]["reason"] == "duplicate: already in the book"
+
+
+def test_merge_never_updates_a_completed_order():
+    completed = {("SO9", "Z"): _order("SO9", "Z", 5, D, completed=True)}
+    new, updated, flags = orderbook.merge_upload([_so("SO9", "Z", 5, D2)], {}, completed)
+    assert new == [] and updated == []
+    assert "already completed" in flags[0]["reason"]
+
+
+def test_merge_updates_a_repeated_key_only_once_per_upload():
+    """Same (SO#, item) twice in one file with two different dates: the first wins,
+    the second is an intra-upload duplicate — never two updates for one order."""
+    active = {("SO1", "A"): _order("SO1", "A", 10, D)}
+    lines = [_so("SO1", "A", 10, D2), _so("SO1", "A", 10, date(2025, 10, 1))]
+    new, updated, flags = orderbook.merge_upload(lines, active, {})
+    assert len(updated) == 1
+    assert updated[0].delivery_date == D2
+    assert "duplicate (SO#, item) within this upload" in flags[1]["reason"]
 
 
 def test_status_derivation():

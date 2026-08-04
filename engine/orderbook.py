@@ -8,6 +8,7 @@ in isolation; persistence lives in ``book_store``.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import replace
 from datetime import timedelta
 
 import re as _re
@@ -230,45 +231,63 @@ def derive_status(order: Order, started_orders: set) -> str:
 
 
 def merge_upload(so_lines, active_orders: dict, completed_orders: dict, first_seen: str = ""):
-    """Merge uploaded SO lines into the book. Pure — returns ``(new_orders, flags)``
-    and does not mutate the inputs.
+    """Merge uploaded SO lines into the book. Pure — returns
+    ``(new_orders, updated_orders, flags)`` and does not mutate the inputs.
 
     Identity is the **(SO number, item code)** pair, never the SO number alone: one
     SO number can carry several item lines and each is its own order. So SO1/A and
-    SO1/B are two distinct orders, and only an exact (SO#, item) repeat is a duplicate.
+    SO1/B are two distinct orders, and only an exact (SO#, item) repeat is a repeat.
 
     * unseen (SO#, item) -> a new Pending order
-    * (SO#, item) already active -> flagged (changed vs identical), original untouched
-    * (SO#, item) in the completed archive -> flagged "already completed", not re-added
+    * active (SO#, item) with a DIFFERENT delivery date -> an updated copy in
+      ``updated_orders`` (2026-08-04: directors revise delivery dates in the Excel
+      and re-import). ``delivery_date`` is the ONLY field an upload may change —
+      quantity is entangled with recorded production (remaining = ordered − good),
+      so silently changing it could make an order look over-produced.
+    * active (SO#, item) with the same date -> flagged only, original untouched
+    * (SO#, item) in the completed archive -> flagged, never updated: it is
+      archived and out of planning, so moving its date achieves nothing
 
     Each flag carries both ``so_no`` and ``item_code`` so the report is unambiguous.
     """
-    new_orders, flags = [], []
+    new_orders, updated_orders, flags = [], [], []
     seen_in_upload = set()
+
+    def _d(value):
+        return fmt_date(value) if value else "none"
+
     for so in so_lines:
         key = so.key                       # (so_no, item_code)
         base = {"so_no": so.so_no, "item_code": so.item_code}
         if key in seen_in_upload:
             flags.append({**base, "reason": "duplicate (SO#, item) within this upload"})
             continue
+        # Claim the key for EVERY branch, not just new orders: a key repeated in one
+        # file must never be updated twice.
+        seen_in_upload.add(key)
         if key in active_orders:
             ex = active_orders[key]
-            changed = (ex.ordered_qty != so.qty or ex.delivery_date != so.delivery_date)
-            flags.append({
-                **base,
-                "reason": "changed: original kept (revisions deferred)" if changed
-                          else "duplicate: already in the book",
-            })
+            if so.delivery_date is None:
+                # A blank/unparseable date cell must never wipe a real date.
+                reason = "delivery date missing or unreadable — kept the existing date"
+            elif ex.delivery_date != so.delivery_date:
+                updated_orders.append(replace(ex, delivery_date=so.delivery_date))
+                reason = (f"delivery date updated: {_d(ex.delivery_date)} → "
+                          f"{_d(so.delivery_date)}")
+            elif ex.ordered_qty != so.qty or ex.item_name != so.item_name:
+                reason = "changed: only the delivery date can be updated by re-import"
+            else:
+                reason = "duplicate: already in the book"
+            flags.append({**base, "reason": reason})
         elif key in completed_orders:
             flags.append({**base, "reason": "already completed: not re-added"})
         else:
-            seen_in_upload.add(key)
             new_orders.append(Order(
                 so_no=so.so_no, item_code=so.item_code, item_name=so.item_name,
                 ordered_qty=so.qty, delivery_date=so.delivery_date,
                 completed=False, first_seen=first_seen,
             ))
-    return new_orders, flags
+    return new_orders, updated_orders, flags
 
 
 def active_so_lines(active_orders: dict, actuals, masters=None) -> list:
