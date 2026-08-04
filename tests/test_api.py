@@ -75,6 +75,42 @@ def test_reupload_same_file_adds_nothing(client):
     assert len(again["flagged"]) >= 3                # every SO# now flagged
 
 
+def test_reupload_with_a_changed_delivery_date_updates_the_order(client):
+    """A director edits SO Delivery Date in Excel and re-imports: the date moves,
+    the recorded production and the order's identity do not."""
+    import datetime
+    import io
+    from tests.sample_workbook import build_workbook
+
+    _upload_test_workbook(client)
+    before = client.get("/orders").json()["orders"]["rows"]
+    assert before, "upload should have seeded the book"
+
+    # Rebuild the same workbook with SO1's delivery date pushed out by 30 days.
+    wb = build_workbook()
+    ws = wb["Sales Order (SO) list"]
+    old = ws.cell(row=2, column=24).value          # 'SO Delivery Date' column
+    assert isinstance(old, datetime.date), f"expected a date in that cell, got {old!r}"
+    ws.cell(row=2, column=24).value = old + datetime.timedelta(days=30)
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    r = client.post("/upload", files={"file": ("t2.xlsx", buf.getvalue(), XLSX_MIME)})
+    body = r.json()
+    assert body["added"] == 0          # no new orders
+    assert body["updated"] == 1        # exactly the one changed row
+    assert any("delivery date updated" in f["reason"] for f in body["flagged"])
+
+    orders = client.get("/orders").json()["orders"]
+    after = orders["rows"]
+    assert len(after) == len(before)   # no duplicate order was created
+
+    cols = orders["columns"]
+    si, ii, di = cols.index("SO No"), cols.index("Item Code"), cols.index("SO Delivery Date")
+    so1_row = next(row for row in after if row[si] == SO1 and row[ii] == ITEM_A)
+    assert so1_row[di] == "09-04-2025"  # 2025-03-10 + 30 days, DD-MM-YYYY display
+
+
 def test_actual_marks_order_complete(client):
     _upload_test_workbook(client)
     r = client.post("/actuals", json={

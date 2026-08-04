@@ -1844,13 +1844,16 @@ async def upload(request: Request, file: UploadFile = File(...)):
 
     active = book_store.load_active_orders()
     completed = book_store.load_completed_orders()
-    new_orders, flags = orderbook.merge_upload(
+    new_orders, updated_orders, flags = orderbook.merge_upload(
         so_lines, active, completed, first_seen=_ist_today().isoformat())
-    book_store.add_orders(new_orders)
+    # `add_orders` writes by (SO#, item) with hset, so an updated order overwrites
+    # in place — an update needs no separate storage path.
+    book_store.add_orders(new_orders + updated_orders)
 
     result = {
         "name": file.filename,
         "added": len(new_orders),
+        "updated": len(updated_orders),
         "flagged": flags,
         "masters_updated": masters_updated,
         "summary": {"items": len(masters.routings), "machines": len(masters.machines)},
