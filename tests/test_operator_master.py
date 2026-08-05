@@ -61,74 +61,26 @@ def _row(name, shift, pinned=False, machines_raw="CNC 1"):
             "shift": shift, "pinned": pinned}
 
 
-def test_rotate_flips_unpinned_two_shift_operators_across_one_friday():
-    table = {"week_anchor": "2026-07-10",
-             "operators": [_row("A", "First shift"), _row("B", "Second shift")]}
-    new_table, flips = om.rotate_table(table, date(2026, 7, 15))  # 1 Friday (07-10 excl -> 07-17? )
-    # Anchor 07-10 (a Friday) is exclusive, so the next Friday after it is
-    # 07-17, which is AFTER 07-15 -> zero Fridays counted yet.
-    assert flips == 0
-    assert new_table is table
-
-    new_table, flips = om.rotate_table(table, date(2026, 7, 17))
-    assert flips == 1
-    by_name = {r["name"]: r for r in new_table["operators"]}
-    assert by_name["A"]["shift"] == "Second shift"
-    assert by_name["B"]["shift"] == "First shift"
-    assert new_table["week_anchor"] == "2026-07-17"
-
-
-def test_rotate_flips_lowercase_shift_text_case_insensitively():
-    # "first shift" (lowercase, e.g. a manually-edited row) must rotate the
-    # same as the canonical "First shift" — matches engine.efficiency's
-    # case-insensitive shift normalization.
-    table = {"week_anchor": "2026-07-10", "operators": [_row("A", "first shift")]}
-    new_table, flips = om.rotate_table(table, date(2026, 7, 17))
-    assert flips == 1
-    assert new_table["operators"][0]["shift"] == "Second shift"
-
-
-def test_rotate_never_flips_a_pinned_operator():
-    table = {"week_anchor": "2026-07-10",
-             "operators": [_row("Pinned", "First shift", pinned=True)]}
-    new_table, flips = om.rotate_table(table, date(2026, 7, 17))
-    assert flips == 1
-    assert new_table["operators"][0]["shift"] == "First shift"
-
-
-def test_rotate_never_flips_a_blank_shift_operator():
-    table = {"week_anchor": "2026-07-10", "operators": [_row("Manual", "")]}
-    new_table, flips = om.rotate_table(table, date(2026, 7, 17))
-    assert flips == 1
-    assert new_table["operators"][0]["shift"] == ""
-
-
-def test_rotate_catch_up_two_fridays_nets_no_change_for_unpinned():
+def test_rotate_table_is_now_a_no_op_even_across_many_fridays():
+    """Rotation was removed 2026-08-05. Whatever is stored is what is used."""
     table = {"week_anchor": "2026-07-03",
-             "operators": [_row("A", "First shift")]}
-    # Fridays after 07-03 up to 07-24: 07-10 and 07-17 (2 Fridays elapsed if
-    # today is right after the second one, before a third).
-    new_table, flips = om.rotate_table(table, date(2026, 7, 20))
-    assert flips == 2
-    assert new_table["operators"][0]["shift"] == "First shift"  # net no-op
-    assert new_table["week_anchor"] == "2026-07-17"
+             "operators": [
+                 {"id": "1", "name": "A", "machines_raw": "CNC1",
+                  "shift": "First shift", "pinned": False},
+                 {"id": "2", "name": "B", "machines_raw": "CNC2",
+                  "shift": "Second shift", "pinned": False},
+             ]}
+    out, flips = om.rotate_table(table, date(2026, 8, 21))   # seven Fridays later
+    assert flips == 0
+    assert [r["shift"] for r in out["operators"]] == ["First shift", "Second shift"]
 
 
-def test_rotate_idempotent_same_day():
-    table = {"week_anchor": "2026-07-10", "operators": [_row("A", "First shift")]}
-    once, flips1 = om.rotate_table(table, date(2026, 7, 17))
-    assert flips1 == 1
-    twice, flips2 = om.rotate_table(once, date(2026, 7, 17))
-    assert flips2 == 0
-    assert twice is once
-    assert twice["operators"][0]["shift"] == "Second shift"
-
-
-def test_rotate_anchor_advances_to_last_counted_friday():
-    table = {"week_anchor": "2026-06-01", "operators": []}
-    new_table, flips = om.rotate_table(table, date(2026, 7, 15))
-    assert new_table["week_anchor"] == "2026-07-10"
-    assert flips > 0
+def test_operators_as_of_returns_the_stored_shift_for_any_date():
+    table = {"week_anchor": "2026-07-03",
+             "operators": [{"id": "1", "name": "A", "machines_raw": "CNC1",
+                            "shift": "First shift", "pinned": False}]}
+    for day in (date(2026, 7, 1), date(2026, 8, 21), date(2027, 1, 1)):
+        assert om.operators_as_of(table, day)[0].shift == "First shift"
 
 
 def test_rotate_missing_anchor_treated_as_last_friday_no_flip_on_first_call():

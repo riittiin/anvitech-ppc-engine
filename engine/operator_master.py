@@ -90,33 +90,16 @@ def _flip_shift(shift: str) -> str:
 
 
 def rotate_table(table: dict, today: date):
-    """Apply every Friday rotation due between the table's ``week_anchor``
-    (exclusive) and ``today`` (inclusive).
+    """No-op since 2026-08-05: operator shifts no longer rotate.
 
-    Non-pinned, two-shift ("First shift"/"Second shift") rows flip once per
-    elapsed Friday — an even count nets to no change (catch-up), an odd count
-    flips once. Blank-shift (manual/day-window) rows and pinned rows are never
-    touched. A missing/blank anchor is treated as ``last_friday(today)`` (so
-    the very first call never flips anything). Returns ``(new_table,
-    flips_applied)`` where ``flips_applied`` is the number of Fridays counted
-    (0 => the table is returned unchanged, same object)."""
-    anchor = _parse_iso_date(table.get("week_anchor")) or last_friday(today)
-    fridays = _fridays_after(anchor, today)
-    if not fridays:
-        return table, 0
-
-    net_flip = len(fridays) % 2 == 1
-    new_operators = []
-    for row in table.get("operators", []):
-        new_row = dict(row)
-        if net_flip and not row.get("pinned") and _is_two_shift(row.get("shift")):
-            new_row["shift"] = _flip_shift(row["shift"])
-        new_operators.append(new_row)
-
-    new_table = dict(table)
-    new_table["operators"] = new_operators
-    new_table["week_anchor"] = fridays[-1].isoformat()
-    return new_table, len(fridays)
+    The shift an admin sets in Settings is the shift the planner uses, every week,
+    until an admin changes it. Kept (rather than deleted) because it is the shared
+    expression every wiring site calls through -- `operators_as_of`, the display
+    overlay, the contest setup -- and because its `(new_table, flips_applied)`
+    contract is unpacked by those callers. Always returns the table untouched and
+    zero flips, so the stored `week_anchor` and per-row `pinned` fields are inert.
+    """
+    return table, 0
 
 
 def operators_as_of(table: dict, as_of: date) -> list:
