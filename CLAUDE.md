@@ -136,11 +136,12 @@ machines following 9 business rules, then re-plans as actual production comes in
   workbook's "Operator & shift Master" sheet **seeds the table exactly once** — only
   the first time the store table is empty and a workbook is on file — then is
   ignored forever: a later re-upload can never touch operators (the week-2
-  stale-sheet-overwrite problem is impossible by construction). Every Friday,
-  unpinned two-shift operators swap shift automatically (effective from that
-  Friday's first shift); a per-operator pin exempts individuals; admins
-  add/edit/remove/pin operators directly in Settings. See
-  `engine/operator_master.py` and the standalone feature bullet below.
+  stale-sheet-overwrite problem is impossible by construction). **Shifts no longer
+  rotate** (removed 2026-08-05, see the standalone feature bullet below): the shift
+  an admin sets for an operator in Settings is the shift the planner uses, every
+  week, until an admin changes it; admins add/edit/remove operators (incl. shift)
+  directly in Settings. See `engine/operator_master.py` and the standalone feature
+  bullet below.
 
 ## Non-negotiable design principles
 
@@ -291,8 +292,10 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   entry (`_plan`, `_start_optimize`, `_incumbent_metrics`), and the SAVED config keeps
   `None` so a moving "today" isn't mistaken for a settings change (`_inputs_signature`
   hashes the unresolved config). The full `date.today()`/`datetime.now()` sweep in
-  `api/main.py` also went through `_ist_today()`/`_ist_now()` (rotation overlay, first-seen,
-  next-rotation, audit stamps) so every app-derived date is IST-current. Also includes
+  `api/main.py` also went through `_ist_today()`/`_ist_now()` (the operator overlay,
+  first-seen, next-rotation, audit stamps — the rotation *effect* this fed is gone
+  since 2026-08-05, see the operator-shift-rotation bullet below, but the IST-now
+  plumbing itself is unchanged) so every app-derived date is IST-current. Also includes
   `expedite_window_min`
   (default 0 = off): Rule 6's least-slack tie-break window; 0 is byte-identical to the
   legacy non-delay plan. **Its Settings tick mark was REMOVED 2026-07-19** (measured
@@ -381,18 +384,20 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   machine's working window from Available Hrs/Day + operator shift coverage (two-shift
   vs 09:00–18:00 manual); blocked + unmatched-specialty report. Consumed by Rule 6
   when `apply_operator_logic` is on.
-- `engine/operator_master.py` — pure module owning the app's operator/shift table
-  (rotation effective **Friday shift 1**, applied **as-of the plan's start date**;
-  display uses **as-of today**; persistence is a lazy catch-up write on any store
-  touch). `seed_rows_from_masters` (one-time, workbook → app-owned rows, all
-  unpinned), `rotate_table(table, today)` (flips unpinned two-shift rows once per
-  ODD count of elapsed Fridays since `week_anchor` — an EVEN count, e.g. two missed
-  Fridays, nets to no change; blank-shift/day-window rows and pinned rows never
-  flip; idempotent same-day), `operators_as_of(table, as_of)` (the one PURE view
-  every wiring site shares — rotate + convert to `Operator` objects, nothing
-  persisted), `to_operators` (parses `machines_raw` via the same
+- `engine/operator_master.py` — pure module owning the app's operator/shift table.
+  **No longer rotates shifts** (removed 2026-08-05 — see the standalone feature
+  bullet below for why). `seed_rows_from_masters` (one-time, workbook → app-owned
+  rows, all unpinned) is unchanged. `rotate_table(table, today)` is a **retained
+  no-op** — always returns `(table, 0)` untouched — kept, not deleted, because it
+  is the shared expression every wiring site still calls through (`operators_as_of`,
+  the display overlay, the contest setup all unpack its `(table, flips)` tuple).
+  `operators_as_of(table, as_of)` is still the one PURE view every wiring site
+  shares (rotate-then-convert; the rotate step is now a no-op, so this is just
+  `to_operators`), and `to_operators` still parses `machines_raw` via the same
   `loaders.parse_resource_candidates` the Excel loader uses, so a seeded row is
-  indistinguishable from a workbook-loaded one), `last_friday`/`next_rotation`.
+  indistinguishable from a workbook-loaded one. `last_friday`/`next_rotation`
+  remain (still used to seed/report `week_anchor`), but nothing in the plan path
+  reads them for scheduling purposes anymore.
 - `engine/pipeline.py` — `run_rule` (snapshots in/out/config/notes), `run_forward`
   (1→2→3→6), `RuleError`, `to_table`.
 - `engine/orderbook.py` — **order-book logic (pure)**: `merge_upload` (add new /
@@ -648,54 +653,64 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   Done button does). UI: an
   always-visible Settings-area panel (not nested in the admin-only toolbar, so the user
   role sees the read-only list) with add/remove controls CSS- and server-gated admin-only.
-- **Operator & shift master rotation (2026-07-18,
-  `docs/superpowers/specs/2026-07-18-operator-master-rotation-design.md`) — operators
-  moved OUT of Excel, INTO the app.** Store: `anvitech:operators` (`{week_anchor,
-  operators: [{id, name, machines_raw, shift, pinned}]}`). **Seeding is one-time**:
-  `api._with_operator_overlay` seeds from the workbook's operator sheet only when
-  the store table is empty AND a workbook is on file
+- **Operator & shift master, rotation REMOVED (2026-08-05,
+  `docs/superpowers/specs/2026-08-05-manual-operator-shifts-design.md`; operators
+  themselves moved OUT of Excel, INTO the app on 2026-07-18, spec
+  `docs/superpowers/specs/2026-07-18-operator-master-rotation-design.md` — that part
+  stands, only the automatic Friday swap is gone).** Store: `anvitech:operators`
+  (`{week_anchor, operators: [{id, name, machines_raw, shift, pinned}]}`). **Seeding
+  is still one-time**: `api._with_operator_overlay` seeds from the workbook's
+  operator sheet only when the store table is empty AND a workbook is on file
   (`operator_master.seed_rows_from_masters`); every subsequent upload is ignored for
   operators — the sheet becomes a fossil after that. **The ONE wiring point**:
   `api._current_masters()` calls `_with_operator_overlay(base)` on every call, which
   replaces `base.operators` with the store's rows (via `operator_master.to_operators`)
   — every consumer (Rule 6, `operator_coverage`, analytics, gantt, shift-wise)
-  inherits automatically, no per-consumer code. **Rotation**: every Friday, unpinned
-  two-shift ("First shift"/"Second shift") operators swap; a per-operator "stays on
-  current shift" pin exempts them; blank-shift (day-window/manual) operators never
-  rotate. `operator_master.rotate_table` is lazy and idempotent — it counts every
-  elapsed Friday since `week_anchor` and nets an ODD count to one flip (an EVEN
-  count, e.g. two missed Fridays, nets to no change — true catch-up, not a
-  double-flip). **Effectiveness rule (owner, 2026-07-18): the swap takes effect at
-  Friday SHIFT 1**, so a plan whose schedule BEGINS on/after a rotation Friday sees
-  the rotated shifts even if computed on Thursday (the off day) — `api._plan`
-  re-overlays `operator_master.operators_as_of` onto the already-fresh masters using
-  `eff_start` (the plan's effective start date, not `date.today()`);
-  `_with_operator_overlay`/`GET /operators`/the Settings panel use **as-of TODAY**
-  for display. Persistence of `week_anchor` is a **lazy catch-up write** — any
-  request that observes today ≥ an unapplied Friday persists the rotation
-  (idempotent same-day, never a double-write). Cloud payload carries the
-  ALREADY-EFFECTIVE operator rows (computed as-of the plan start when the payload
-  is built), so the worker applies them directly
-  (`optimize_service.prepare_contest(operator_table=)`) with no anchor logic
-  worker-side; local == cloud byte-identical. **`_inputs_signature` now folds in the
-  operator table's sorted row CONTENT** (name/machines/shift/pin — ids and
-  `week_anchor` excluded; the masters sha alone no longer covers operators) so a
-  rotation or an edit correctly flags an applied optimization `inputs_changed`;
-  excluding `week_anchor` specifically avoids firing on a no-op double-Friday
-  catch-up (churn regression-tested). The `_try_start_auto()` skip check is an OR:
-  run when EITHER `book_sig` OR the current `_inputs_signature` differs from the
-  applied meta's (a rotation alone doesn't change `book_sig`). **API**
-  (`api/main.py`): `GET /operators` (any role, `{operators, next_rotation}`,
-  triggers seed/rotation as a side effect), `POST /operators` / `PATCH
+  inherits automatically, no per-consumer code. **The shift an admin sets in
+  Settings is the shift the planner uses, every week, forever** — until an admin
+  changes it. Why it changed: the "stays on current shift" pin never actually
+  reached the planner. `engine/new_engine.py` builds each `ppc_engine` operator from
+  four fields (name/machines/shift/id) and `ppc_engine`'s own `Operator` type has no
+  pin field at all, so `ppc_engine/worktime.py` rotated **every** operator on every
+  odd Friday unconditionally, pin or no pin — the pin was decorative from the day
+  the new engine went live. A director opened the shift-wise schedule and saw a
+  pinned operator on 1st shift one week and 2nd shift the next; the owner's call was
+  to stop rotating rather than fix the plumbing, since the shift-wise view is a
+  live floor document people plan their day around. **How it was removed, three
+  independent copies of the rule:** (1) `engine/new_engine._plan_config` now passes
+  `week_anchor=None` into `ppc_engine` — that's `ppc_engine`'s own native
+  no-rotation path (`worktime._shift_for` returns `base_shift` unchanged when the
+  anchor is `None`), so **`ppc_engine/` itself was never touched**; (2)
+  `engine/operator_master.rotate_table` is now a retained no-op returning
+  `(table, 0)` — kept rather than deleted because `operators_as_of`, the display
+  overlay, and the contest setup all still call through it and unpack its
+  `(table, flips)` tuple; (3) `engine/analytics.py` had a SECOND, independent copy
+  of the same Friday-rotation rule for operator capacity reporting (`_rotations`/
+  `_effective_shift`/`_operator_available_hours`) — its `rotate` flag is now hard
+  `False`, so utilization always uses the nominal on-file shift. **Kept
+  deliberately, doing nothing:** the `pinned` field on each operator row and the
+  `week_anchor` field on the table stay in the store and in the API request models,
+  inert — no data migration was needed, and re-enabling rotation later would need
+  no schema change. `operator_master.last_friday`/`next_rotation` also remain (used
+  to seed/report `week_anchor`) but nothing in the plan path reads them for
+  scheduling anymore. **`_inputs_signature` still folds in the operator table's
+  sorted row CONTENT** (name/machines/shift/pin — ids and `week_anchor` excluded) so
+  an admin's shift EDIT still correctly flags an applied optimization
+  `inputs_changed` — the mechanism is unchanged, only the automatic Friday source of
+  changes is gone; a plan otherwise reflects whatever shift is on file. **API**
+  (`api/main.py`): `GET /operators` (any role, `{operators, machines,
+  next_rotation}` — `next_rotation` is still computed and returned for API
+  compatibility but the UI no longer displays it), `POST /operators` / `PATCH
   /operators/{id}` / `DELETE /operators/{id}` (admin; each calls
   `_current_masters()` FIRST so a direct mutation on a fresh deploy can never
-  suppress the one-time workbook seed — a review-caught data-loss hole, closed). No
-  trigger call (operator mutations don't call `_try_start_auto` directly — only the
-  Done button does; see the feedback-triggered optimize bullet above). **UI**:
-  Settings "Operators & shifts" panel (`#operators-panel` in
-  `web/index.html`) — table (name, machines, shift, "Stays" pin, remove), add-row
-  form, "Next rotation: Friday DD-MM-YYYY"; admin edits, user role read-only (the
-  pin shows as plain text, not a checkbox).
+  suppress the one-time workbook seed). No trigger call (operator mutations don't
+  call `_try_start_auto` directly — only the Done button does; see the
+  feedback-triggered optimize bullet above). **UI**: Settings "Operators & shifts"
+  panel (`web/index.html`) — table (name, machines, shift, remove; the "Stays" pin
+  column, its checkbox and its wiring are removed), add-row form; the "Next
+  rotation: Friday DD-MM-YYYY" line and its status-strip segment are removed, and
+  the panel's explainer now reads "The shift you set here is used every week until
+  you change it." Admin edits, user role read-only.
 - **Phase 2 — promise ceiling — DISCARDED (owner pivot, 2026-07-16).** A one-pool contest
   with a hard promise veto was built and measured on both real books: ~30% worse than
   the (now-removed) two-pass approach, because zero-slack promises collapse the feasible
@@ -878,15 +893,17 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   bullets above; `_absence_orphans` feeds the `ABSENT_OPERATOR_UNKNOWN` rows
   `_report_for_book` appends.
   **Operators:** `GET /operators` (any role, `{operators, machines,
-  next_rotation}` — triggers seed/rotation as a side effect via
-  `_current_masters()`; `machines` is `_machine_options(masters)`, the uploaded
+  next_rotation}` — triggers the one-time seed as a side effect via
+  `_current_masters()` (the rotation call in the same path is a no-op since
+  2026-08-05 — see the operator-shift-rotation bullet above); `machines` is
+  `_machine_options(masters)`, the uploaded
   workbook's **Machine master** rows as `{id, name, type, provisional}` sorted
   `(provisional, type, id)`, added 2026-08-04 to feed the Settings machine
   picker — read-only, no plan effect, provisional machines included so they can
   still be staffed), `POST
   /operators` / `PATCH /operators/{id}` / `DELETE /operators/{id}` (admin, each
   calling `_current_masters()` first for the same seed-once guarantee) — see the
-  operator-master-rotation bullet above.
+  operator-shift-rotation bullet above.
   **Efficiency report (2026-07-18):** `GET /efficiency?year=&month=` (admin,
   JSON `{year, month, rows}`) and `GET /efficiency.csv?year=&month=` (admin,
   CSV download `operator-efficiency-YYYY-MM.csv`, BOM-prefixed, built
@@ -911,9 +928,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   on `/optimize/status` progress, then refreshes the plan to pick up the winner), an
   always-visible
   **Operator Absences** panel (list visible to both roles; add/remove controls
-  admin-only), a Settings **Operators & shifts** panel (table
-  of name/machines/shift/"Stays" pin + add-row; "Next rotation: Friday
-  DD-MM-YYYY"; admin edits, user role read-only). **Machines are PICKED, never
+  admin-only), a Settings **Operators & shifts** panel (table of
+  name/machines/shift + add-row — the shift you set is used every week until you
+  change it; the "Stays" pin column and "Next rotation: Friday DD-MM-YYYY" line
+  were removed 2026-08-05 along with the rotation they described, see the
+  operator-shift-rotation bullet above; admin edits, user role read-only). **Machines are PICKED, never
   typed (2026-08-04,
   `docs/superpowers/specs/2026-08-04-operator-machine-picker-design.md`):** the
   cell is chips (✕ to remove) + a "＋ Add machine" `<select>` of the unpicked
