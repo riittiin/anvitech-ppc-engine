@@ -237,9 +237,9 @@ def build_analytics(schedule, masters, config, batches=None, absences=None):
         # Rotation anchor = the engine's week_anchor (Friday on/before the plan start),
         # so the per-day effective shift here matches the shift the engine scheduled.
         plan_start = getattr(config, "plan_start_date", None) or win_start.date()
-        # Only the NEW engine rotates operator shifts every Friday WITHIN a plan; the
-        # classic engine keeps each operator's shift fixed, so capacity must match.
-        rotate = getattr(config, "scheduler", "classic") == "new"
+        # Shift rotation was removed 2026-08-05: every operator works the shift on
+        # file in Settings, every week. Capacity must match, so never rotate here.
+        rotate = False
         for name, rows in by_op.items():
             busy = sum(r["Minutes"] for r in rows) / 60.0
             absent = _absent_days(name, absences, masters.calendar,

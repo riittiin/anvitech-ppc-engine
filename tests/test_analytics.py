@@ -125,28 +125,76 @@ def test_operator_hours_attributed_per_shift_never_over_100():
         assert o["Utilization %"] <= 100.0
 
 
-def test_operator_capacity_is_rotation_aware_never_over_100():
-    """A two-shift operator ROTATES shift every Friday. Analytics must size their
-    capacity by the shift they're EFFECTIVELY on each day, not their nominal shift —
-    else a Second-shift (10h) person working a rotated First-shift (11h) day shows
-    >100% (the live 2026-07-25 'Khansab Mulla 100.5%' bug)."""
+def test_operator_capacity_never_rotates_across_a_friday():
+    """Shift rotation was removed 2026-08-05 (owner decision: the shift an admin sets
+    holds every week). This test used to prove the OPPOSITE — that analytics rotated a
+    two-shift operator's EFFECTIVE shift across a Friday so a nominal Second-shift
+    (10h) person legitimately working a rotated First-shift (11h) day didn't show a
+    false >100% (the live 2026-07-25 'Khansab Mulla 100.5%' bug). Rotation itself is
+    gone now, so this proves the opposite invariant: a nominal Second-shift operator's
+    capacity for a day AFTER an elapsed Friday still prices at Second-shift (10h), not
+    a rotated First-shift (11h)."""
     masters = _masters([Process(1, "CNC", 30, 30, "M", None)],
                        [("M", "CNC lathe", 19.5)])
     masters.operators = [Operator("X", "M", machines=["M"], shift="Second shift")]
     cfg = Config(scheduler="new", plan_start_date=date(2025, 3, 3),  # anchor Fri 28-02
                  apply_operator_logic=True)
-    # 10-03 is a Monday AFTER the 07-03 Friday → X has rotated to First shift, so they
-    # legitimately work the full 08:00–19:00 (11h) first-shift window that day.
+    # 10-03 is a Monday AFTER the 07-03 Friday. Under the old rotation this would have
+    # flipped X to First shift (11h); now the nominal Second shift must hold (10h).
     e = ScheduleEntry(
         batch_id="B", item_code="X", process_seq=1, process_name="CNC", machine="M",
-        qty=22, occupancy_min=660.0,
-        start=datetime(2025, 3, 10, 8, 0), end=datetime(2025, 3, 10, 19, 0),
+        qty=8, occupancy_min=240.0,
+        start=datetime(2025, 3, 10, 19, 0), end=datetime(2025, 3, 10, 23, 0),
         so_refs=["SO"], operator="X",
-        op_segments=[(datetime(2025, 3, 10, 8, 0), datetime(2025, 3, 10, 19, 0), "X")])
-    a = analytics.build_analytics([e], masters, cfg, [_batch(22)])
+        op_segments=[(datetime(2025, 3, 10, 19, 0), datetime(2025, 3, 10, 23, 0), "X")])
+    a = analytics.build_analytics([e], masters, cfg, [_batch(8)])
     o = next(o for o in a["operators"] if o["Operator"] == "X")
-    assert o["Available (hrs)"] == 11.0, o          # rotated First-shift day = 11h, not 10h
+    assert o["Available (hrs)"] == 10.0, o          # nominal Second shift, unrotated
     assert o["Utilization %"] <= 100.0, o
+
+
+def test_operator_capacity_uses_the_stored_shift_across_a_friday():
+    """Analytics keeps its OWN copy of the rotation rule. With rotation removed,
+    a plan spanning a Friday must measure a person against the shift on file for
+    every day, not a rotated one."""
+    procs = [Process(1, "CNC", 4, 4, "M", None)]
+    masters = _masters(procs, [("M", "CNC lathe", 19.5)])
+    masters.operators = [Operator("Op One", "M", machines=["M"], shift="First shift")]
+    # scheduler="new" is the engine that used to rotate shifts on a Friday boundary;
+    # if analytics still rotated too, the days on/after 2025-03-14 (one Friday after
+    # the next Friday past the anchor -> an ODD rotation count) would flip to Second
+    # shift (10h) instead of staying First shift (11h) for the whole window.
+    cfg = Config(scheduler="new", plan_start_date=date(2025, 3, 5),
+                 apply_operator_logic=True)
+
+    e1 = ScheduleEntry(batch_id="B1", item_code="X", process_seq=1, process_name="CNC",
+                        machine="M", qty=10, occupancy_min=60,
+                        start=datetime(2025, 3, 5, 8, 0), end=datetime(2025, 3, 5, 9, 0),
+                        operator="Op One")
+    # Zero-duration, operator-less entry purely to stretch the plan window past a
+    # second Friday (2025-03-14) without adding any billable work.
+    e2 = ScheduleEntry(batch_id="B2", item_code="X", process_seq=1, process_name="OS",
+                        machine="OS / Outsourced", qty=1, occupancy_min=0,
+                        start=datetime(2025, 3, 17, 8, 0), end=datetime(2025, 3, 17, 8, 0),
+                        operator="")
+    sched = [e1, e2]
+
+    a = analytics.build_analytics(sched, masters, cfg)
+    o = next(o for o in a["operators"] if o["Operator"] == "Op One")
+
+    win_start, win_end = date(2025, 3, 5), date(2025, 3, 17)
+    working_days = []
+    d = win_start
+    while d <= win_end:
+        if masters.calendar.is_working_day(d):
+            working_days.append(d)
+        d += timedelta(days=1)
+
+    FIRST_SHIFT_HOURS = 11.0   # 08:00-19:00, the Config default
+    expected = len(working_days) * FIRST_SHIFT_HOURS
+    assert o["Available (hrs)"] == pytest.approx(expected), (
+        "operator capacity mixed in a rotated (Second shift) day somewhere in the "
+        "window -- analytics rotation was not fully removed")
 
 
 def test_operator_utilization_never_exceeds_100_on_multi_machine_plan():

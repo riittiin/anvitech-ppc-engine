@@ -30,7 +30,6 @@ let ITEMS = null;
 let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour detail)
 let currentRole = "user";   // set from /me; default to the least-privileged role
 let currentConfig = null;   // /run's config (both roles) — feeds the status strip's plan basis
-let nextRotation = null;    // /operators next_rotation (admin only) — status strip segment
 let planEverLoaded = false; // true once the first /run response (success or failure) lands —
                              // distinguishes "still loading" from a genuinely empty plan
 let bootLoadingTimer = null;
@@ -462,9 +461,6 @@ function renderStatusStrip() {
   segs.push(isAuto
     ? `<span class="ss-seg">Plan follows today (${escapeHtml(startDisp)})</span>`
     : `<span class="ss-seg">Plan starts ${escapeHtml(isoToDdmmyyyy(currentConfig.plan_start_date))}</span>`);
-  if (currentRole === "admin" && nextRotation) {
-    segs.push(`<span class="ss-seg">Next rotation: ${escapeHtml(isoToDdmmyyyy(nextRotation))}</span>`);
-  }
 
   // Latest auto-note — collapsible.
   if (autoNote && autoNote.text) {
@@ -1925,7 +1921,7 @@ function renderOperatorsTable(operators) {
     const msg = "No operators yet. The first Excel you upload fills this list automatically "
       + "from its \"Operator &amp; shift Master\" sheet"
       + (isAdmin ? ", or add one below." : ".");
-    tbody.innerHTML = `<tr><td colspan="${isAdmin ? 5 : 4}" class="empty">${msg}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="${isAdmin ? 4 : 3}" class="empty">${msg}</td></tr>`;
     return;
   }
   tbody.innerHTML = operators.map((o) => {
@@ -1937,7 +1933,6 @@ function renderOperatorsTable(operators) {
         <td>${escapeHtml(o.name)}</td>
         <td class="mach-cell">${machineChipsHtml(tokens, o.id, false, "No machines")}</td>
         <td>${shiftLabel}</td>
-        <td>${o.pinned ? "Yes" : "-"}</td>
       </tr>`;
     }
     const shiftOpts = ["", "First shift", "Second shift"].map((v) =>
@@ -1948,7 +1943,6 @@ function renderOperatorsTable(operators) {
       <td class="mach-cell">${machineChipsHtml(tokens, o.id, true, "No machines, so this operator is never scheduled")}`
       + `${machineSelectHtml(tokens.map((t) => t.id), "mach-add", o.id)}</td>
       <td><select class="op-shift" data-id="${id}">${shiftOpts}</select></td>
-      <td><input type="checkbox" class="op-pinned" data-id="${id}" ${o.pinned ? "checked" : ""} /></td>
       <td class="admin-only"><button type="button" class="ghost-btn op-remove" data-id="${id}">✕</button></td>
     </tr>`;
   }).join("");
@@ -1958,9 +1952,6 @@ function renderOperatorsTable(operators) {
       (id, token) => changeOperatorMachines(id, (ids) => ids.filter((x) => x !== token)));
     tbody.querySelectorAll(".op-shift").forEach((sel) => {
       sel.addEventListener("change", () => patchOperator(sel.dataset.id, { shift: sel.value }));
-    });
-    tbody.querySelectorAll(".op-pinned").forEach((chk) => {
-      chk.addEventListener("change", () => patchOperator(chk.dataset.id, { pinned: chk.checked }));
     });
     tbody.querySelectorAll(".op-remove").forEach((btn) => {
       btn.onclick = () => removeOperator(btn.dataset.id);
@@ -1973,12 +1964,9 @@ async function loadOperators() {
     const res = await fetch("/operators");
     if (!res.ok) return;
     const data = await res.json();
-    nextRotation = data.next_rotation || null;   // status-strip "Next rotation" segment
     const header = $("operators-header");
     if (header) {
-      header.textContent = data.next_rotation
-        ? `Shifts rotate every Friday (effective from first shift). Next rotation: ${isoToDdmmyyyy(data.next_rotation)}.`
-        : "Shifts rotate every Friday (effective from first shift).";
+      header.textContent = "The shift you set here is used every week, until you change it.";
     }
     machineOptions = data.machines || [];      // set BEFORE rendering — the chips need it
     operatorRows = data.operators || [];
