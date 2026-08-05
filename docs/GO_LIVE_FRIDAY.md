@@ -5,171 +5,167 @@ or abandons a part-finished job.
 
 ---
 
-## Why Thursday is the right day to do this
+## The one fact that shapes everything
 
-Thursday is the weekly off. **Production stands still for a full day.** That is the
-only moment in the week when the floor's state is not a moving target, so the
-system can be loaded with an accurate picture and it stays accurate.
+**Production is entered between 9:30 and 10:00 in the morning. Shift 1 starts at
+08:00.**
 
-It also lines up with the software on its own: once Wednesday's production is
-entered, the plan automatically starts from **Friday**, because it skips Thursday
-as a non-working day. Nobody has to set a date by hand.
+So the plan can never be refreshed before shift 1 begins. Not on Friday, not on any
+day after. A plan built at 10:30 cannot govern a shift that started two and a half
+hours earlier.
 
-Three steps: **take a snapshot Wednesday night, load it Thursday, follow it Friday.**
+This is not a problem to solve, it is a rhythm to accept:
 
----
+> **Each morning's entry produces the sheets for tonight's shift 2 and tomorrow's
+> shift 1. The floor always works from the sheets printed the day before.**
 
-## Step 1 — Wednesday night (tonight), shift 2
-
-**Who:** the shift-2 supervisor. **Time:** 15 minutes at end of shift.
-
-Write down, on paper, for **every job now on a machine**:
-
-| SO number | Item code | Which step it is on | Good pieces finished at **each** step so far |
-|---|---|---|---|
-
-The last column matters more than it looks. If a job has cleared bandsaw and is
-half way through CNC 1st side, record **both**: bandsaw 500 done, CNC 1st side 300
-done. Not just the step it is sitting on. The reason is in Step 3.
-
-Nothing goes into the software tonight. Tonight is only about capturing the truth
-before the holiday. **Work normally, finish the shift normally.**
+The plan covers weeks of work, so being one cycle behind costs nothing. Trying to
+make shift 1 wait for a mid-morning refresh would cost real hours every day.
 
 ---
 
-## Step 2 — Thursday morning: set up the people
+## The three days
 
-**Who:** the owner, on the computer. **Time:** about 30 minutes. **No production is
-running, so nothing changes underneath you.**
+| Day | What happens | Who |
+|---|---|---|
+| **Thursday** (holiday) | System setup. No production data needed. | Owner, about 45 min |
+| **Friday 9:30 to 10:00** | Enter Wednesday's production, build the plan, print | Owner, about 1 hour total |
+| **Friday 19:00, shift 2** | **The floor starts following the printed sheets** | Shift 2 supervisor |
 
-Do this **before** Step 3. The order is not optional; see the warning at the end.
+Friday's shift 1 runs the way it runs today. That is deliberate: the plan does not
+exist until about 10:45, and switching a shift over halfway through is how mistakes
+get made.
+
+---
+
+## Thursday: setup, nothing to do with production
+
+Nobody is working, so nothing changes underneath you. Take your time.
 
 1. **Upload the current sales-order Excel** on the Orders tab. Check the order
    count looks right.
-2. **Settings → Operators & shifts.** For every person:
-   - correct name,
-   - the machines they actually run, picked from the dropdown,
-   - **their shift.**
-3. **Read every row of the Shift column carefully.** Shifts no longer swap
-   automatically. Whatever you set here is what that person works **every week**
-   until you change it. Some rows may currently show whatever the old automatic
-   swap left behind, which may not be where you want them.
-4. **Settings → Operator absences.** Mark anyone you already know is away next
-   week.
+2. **Settings → Operators & shifts.** For every person: correct name, the machines
+   they actually run picked from the dropdown, and **their shift**.
+3. **Read every row of the Shift column.** Shifts no longer swap automatically.
+   What you set is what that person works **every week** until you change it. Some
+   rows may still show whatever the old automatic swap left behind.
+4. **Settings → Operator absences.** Mark anyone you already know is away.
+
+That is the whole of Thursday. Doing it now is what keeps Friday morning down to
+one hour.
 
 ---
 
-## Step 3 — Thursday: enter the work already in progress
+## Friday 9:30 to 10:00: enter Wednesday's production
 
-**Who:** the owner, with the paper from Wednesday night. **Time:** 30 to 60 minutes
-depending on how many jobs are open.
+Wednesday's work is the only production outstanding. Nobody worked Thursday.
 
-On the **Daily Entry** tab, for each job on the paper, enter the finished pieces at
-**every step from the first one onward**, dated **Wednesday**.
+On the **Daily Entry** tab, enter it **dated Wednesday 05-08-2026**, not Friday.
+The date matters: entering it as Wednesday makes the plan start from Friday on its
+own, because the system skips Thursday as a non-working day. I verified this
+behaviour directly.
 
 ### The one rule that will otherwise stop you
 
-The system will not let you record work at a step until the step **before** it has
-been recorded. This is deliberate: it is what stops the plan from scheduling
-pieces that do not physically exist yet.
+You cannot record work at a step until the step **before** it has been recorded.
+This is deliberate: it stops the plan from scheduling pieces that do not physically
+exist yet.
 
-So for a job at CNC 1st side:
+For a job sitting at CNC 1st side:
 
 - ✅ Enter `Bandsaw OS = 500`, then `CNC FIRST SIDE = 300`.
-- ❌ Entering `CNC FIRST SIDE = 300` on its own is refused, with a message saying
-  only 0 pieces have cleared Bandsaw OS.
+- ❌ Entering `CNC FIRST SIDE = 300` alone is refused, saying only 0 pieces have
+  cleared Bandsaw OS.
 
 **Outside (OS) steps must be entered too**, even though they need no operator name.
-If you skip them, everything after them stays blocked.
+Skip one and everything after it stays blocked.
 
-Quantities add up across days, so entering 500 in one go is the same as 200 plus
-300. Enter what has genuinely been finished, not what is loaded on the machine.
-
-### Then check your work
-
-Open the **Orders** tab and read the **Remaining** column. It should match what
-your floor actually still has to make. **Fix any mistakes now**, on Thursday. Once
-Friday's first entry is saved, Wednesday's entries lock and can no longer be
-undone from that screen.
+Enter what has genuinely been **finished** at each step, not what is loaded on the
+machine. Quantities add up across days.
 
 ---
 
-## Step 4 — Thursday afternoon: build the plan
+## Friday 10:00 to about 10:45: build and print
 
-1. Press **Start deep search** on the Schedule tab. It takes 15 to 30 minutes. You
-   can leave the screen open or come back.
-2. When it finishes, read the result, then press **Apply**. **Nothing changes until
+1. **Check the Orders tab first.** The **Remaining** column should match what your
+   floor actually still has to make. Fix mistakes now. Once you save a Friday-dated
+   entry later, Wednesday's entries lock.
+2. Press **Start deep search** on the Schedule tab. 15 to 30 minutes.
+3. When it finishes, read the result and press **Apply**. **Nothing changes until
    you press Apply.**
-3. Download and print:
-   - **Machine-wise schedule** — one sheet per machine, post it at the machine.
-   - **Shift-wise schedule** — hand to each shift supervisor.
+4. Print:
+   - **Machine-wise schedule**, one sheet per machine, posted at the machine.
+   - **Shift-wise schedule**, handed to the shift supervisor.
 
-Expect the plan to say some orders finish late. That is the system being honest
-about a workload the crew cannot absorb, not a fault. Use the delay report if a
-director asks why a specific order is late.
+**Ignore anything on the sheet dated before 19:00 Friday.** The plan starts from
+late Friday morning because that is when you built it, but the floor is not
+following it until shift 2. That gap corrects itself at the next refresh.
 
----
-
-## Step 5 — Friday: run the shop from it
-
-**Shift 1 start:** hand out the printed sheets. Operators work the machine and job
-order on the sheet.
-
-**End of each shift:** the supervisor enters what was produced on the Daily Entry
-tab. Save is instant, so entering is quick.
-
-**End of the day, when everything is entered:** press **Done entering, update
-plan**. This rebuilds tomorrow's schedule from what actually happened. It takes 15
-to 30 minutes, so start it before you leave.
-
-**Anything already part-finished stays on the same machine.** Re-planning never
-moves a half-cut part to a different machine.
+Expect some orders to show as late. That is the system being honest about a
+workload the crew cannot absorb, not a fault.
 
 ---
 
-## From Saturday onward, the daily rhythm
+## Friday 19:00: the floor goes live
 
-| When | Who | What |
+Shift 2 starts working from the printed sheets. From here on, the sheets are the
+instruction.
+
+**One decision for you:** shift 2 is a night shift and you may not be there. If you
+would rather be standing on the floor for the first shift that follows the system,
+go live **Saturday shift 1** instead and treat Friday shift 2 as a normal shift.
+Everything above is unchanged, you simply print on Friday and start on Saturday.
+Losing half a day to be present for the first one is a fair trade.
+
+---
+
+## The daily rhythm from Saturday onward
+
+| Time | Who | What |
 |---|---|---|
-| Shift start | Supervisor | Work from the printed sheet |
-| Shift end | Supervisor | Enter the shift's production |
-| Day end | Supervisor | Press **Done entering, update plan**, print tomorrow's sheets |
-| Morning, if someone is off | Owner | Mark the absence in Settings, then press **Done entering, update plan** |
-| When a delivery date changes | Owner | Change it in the Excel, upload again. Only the date changes. |
+| Shift start | Supervisor | Work from the sheets printed yesterday |
+| 9:30 to 10:00 | Owner | Enter yesterday's production, both shifts |
+| About 10:00 | Owner | Press **Done entering, update plan**, wait 15 to 30 min |
+| About 10:45 | Owner | Print the new sheets. **They govern tonight's shift 2 and tomorrow's shift 1** |
+| Morning, if someone is off | Owner | Mark the absence first, then press **Done entering, update plan** |
+| When a delivery date changes | Owner | Change it in the Excel and upload again. Only the date changes. |
+
+**Anything already part-finished stays on the same machine** when the plan is
+rebuilt. A half-cut part is never moved.
 
 ---
 
 ## Risks, and what to do about them
 
-**If the plan looks wrong on Friday morning, do not fight it.** Keep the paper
-snapshot. Run Friday the old way and tell me what looked wrong. Nothing is lost:
-no machine has been stopped and no data destroyed. The only cost is a day.
+**If Friday's plan looks wrong, do not fight it.** Run Friday shift 2 the way you
+run it today and tell me what looked wrong. Nothing is lost: no machine stopped, no
+data destroyed. The cost is a day.
 
-**Do not change an operator's machines while that person has a part-finished
-job.** There is a known bug: the system can keep them on a machine you just took
-away from them. It is why Step 2 comes before Step 3. If you must change someone
-mid-job, tell me and I will check that plan before you print it.
+**Do not change an operator's machines while that person has a part-finished job.**
+There is a known bug where the system can keep them on a machine you just took
+away. It is exactly why the operator setup is on Thursday, before any production is
+entered. If you must change someone mid-job, tell me and I will check the plan
+before you print it.
 
-**Do not skip a step when entering in-progress work.** Everything after the skipped
-step will stay blocked and the plan will schedule work that is already done.
+**Do not skip a step when entering production.** Everything after it stays blocked
+and the plan will schedule work that is already done.
 
-**No software updates during the cutover.** Pushing a change now deploys straight
-to the live site. Nothing goes out between Wednesday night and Friday evening
-unless it is fixing something that is blocking you.
+**No software changes from me between now and Friday evening** unless something is
+actively blocking you. Pushing a change deploys straight to the live site.
 
 **One-time on Friday:** the Optimize panel may say the applied plan is out of date.
-That is expected after this week's update. The deep search in Step 4 clears it.
+Expected after this week's update. The deep search clears it.
 
 ---
 
 ## What the director is being asked to agree to
 
-- Thursday is a setup day for one person on a computer. **No production time is
-  lost.**
-- Friday morning the floor starts following printed sheets instead of the current
+- Thursday costs **no production time**. One person, 45 minutes.
+- Friday morning costs **one hour of the owner's time**, not the floor's.
+- From Friday evening, the floor works from printed sheets instead of the current
   method.
-- Someone must enter production at the end of every shift, from Friday onward,
-  permanently. **The plan is only as good as that habit.** This is the one real
-  commitment being made.
-- The first week will need corrections. That is normal for the first week and not
-  a sign the system is wrong.
+- **Someone enters production every day, permanently.** The plan is only ever as
+  good as that habit. This is the one real commitment.
+- **Shift 1 always works from sheets printed the day before**, because entry
+  happens at 9:30. That is by design, not a delay.
+- The first week will need corrections. Normal, and not a sign the system is wrong.
