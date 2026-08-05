@@ -432,3 +432,60 @@ def test_get_machine_options_visible_to_the_user_role(monkeypatch):
     r = user.get("/operators")
     assert r.status_code == 200
     assert any(row["id"] == "CNC1" for row in r.json()["machines"])
+
+
+# --- rotation removal (Tasks 1-3): old fields stay inert, the banner still fires --- #
+def test_a_store_with_the_old_pinned_and_anchor_fields_still_loads(monkeypatch):
+    """Rotation was removed but the fields stay on disk. An existing store must not
+    500, and PATCHing `pinned` must still be accepted so nothing breaks mid-deploy."""
+    m = _api(); _seed_book()
+    admin = _admin_client(m)
+
+    ops = admin.get("/operators").json()["operators"]
+    assert ops, "seeded table expected"
+    op_id = ops[0]["id"]
+
+    r = admin.patch(f"/operators/{op_id}", json={"pinned": True})
+    assert r.status_code == 200
+    assert admin.get("/operators").status_code == 200
+
+
+def test_changing_an_operators_shift_flags_the_applied_plan_stale(monkeypatch):
+    """The owner's requirement: if a shift changes, the banner must say the applied
+    optimization no longer matches, the same way a settings change does.
+
+    `_inputs_signature` takes a single `Config` (checked against the real
+    signature in api/main.py — it is not `(masters, config)` as one might
+    guess). It must be computed on the SAVED (unresolved) config, exactly as
+    `_plan` does internally (`current_inputs_sig = _inputs_signature(config)`
+    BEFORE `_resolve_config` runs) — resolving the auto `plan_start_date`
+    first would fold today's date into the signature and make it disagree
+    with `_plan`'s own for a reason that has nothing to do with operators.
+
+    `save_plan_priority` also requires a non-empty `ranks` dict:
+    `book_store.load_plan_priority` treats `{"ranks": {}, ...}` as absent
+    (falls back to plain Rule 3), so `optimize_meta` never gets `active: True`
+    or an `inputs_changed` key at all with an empty dict — the brief's literal
+    `{}` was checked against the store code and adapted to real keys.
+    """
+    m = _api(); _seed_book()
+    admin = _admin_client(m)
+
+    ops = admin.get("/operators").json()["operators"]
+    target = next(o for o in ops if o["shift"] in ("First shift", "Second shift"))
+
+    # Pin an "applied optimization" whose inputs signature matches the book right
+    # now — same config basis `_plan` uses (SAVED/unresolved, no plan saved yet).
+    sig = m._inputs_signature(m._load_plan_config())
+    ranks = {f"SO1{m.KEY_SEP}{ITEM_A}": 1}
+    m.book_store.save_plan_priority(ranks, {"saved_at": "2026-08-05T10:00:00",
+                                            "inputs_sig": sig})
+    meta = admin.post("/run", json={}).json()["optimize_meta"]
+    assert meta["active"] is True
+    assert meta["inputs_changed"] is False
+
+    flipped = "Second shift" if target["shift"] == "First shift" else "First shift"
+    assert admin.patch(f"/operators/{target['id']}", json={"shift": flipped}).status_code == 200
+
+    meta = admin.post("/run", json={}).json()["optimize_meta"]
+    assert meta["inputs_changed"] is True
