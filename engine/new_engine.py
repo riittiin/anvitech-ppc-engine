@@ -189,11 +189,11 @@ def _plan_config(config) -> PlanConfig:
     overlap = min(0.95, max(0.0, float(getattr(config, "overlap_percent", 0)) / 100.0))
     return PlanConfig(
         plan_start=plan_start,
-        # Anchor the Friday shift-rotation on the plan DATE (config basis), NOT the
-        # floor-adjusted clock: the operator overlay (operators_as_of) uses that same date,
-        # so a late-night floor that rolls the clock into the next day must not shift the
-        # rotation sequence (review-caught: a Thu 23:xx run would otherwise invert it).
-        week_anchor=_friday_on_or_before(start),
+        # No shift rotation (2026-08-05): the shift an admin sets in Settings is the
+        # shift the planner uses, every week. `week_anchor=None` is the engine's own
+        # no-rotation path (ppc_engine/worktime.py: a None anchor returns base_shift
+        # unchanged), so ppc_engine itself needs no change.
+        week_anchor=None,
         first_start=time(int(getattr(config, "first_shift_start_hour", 8)), 0),
         first_end=time(int(getattr(config, "first_shift_end_hour", 19)), 0),
         second_start=time(int(getattr(config, "first_shift_end_hour", 19)), 0),

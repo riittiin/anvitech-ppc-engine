@@ -114,35 +114,40 @@ def _shift_of(masters, name):
     return next(o.shift for o in masters.operators if o.name == name)
 
 
-def test_prepare_contest_rotates_as_of_effective_start():
+def test_prepare_contest_uses_the_operator_table_and_never_mutates_it():
+    """prepare_contest overlays the app-owned operator table onto masters, in place
+    of the workbook's operators — and never mutates the table or the caller's
+    (cached) masters object.
+
+    Rotation itself is REMOVED (2026-08-05, owner decision): the shift an admin
+    sets holds every week, so this no longer proves a Friday-elapsed flip (that
+    was the whole point of the old `test_prepare_contest_rotates_as_of_effective_
+    start`, deleted with this rewrite). The anchor here equals the plan's
+    effective start on purpose, so zero Fridays have elapsed either way — the
+    assertion doesn't depend on whether `operator_master.rotate_table` still does
+    Friday math internally (Task 2) or not."""
     raw = build_sample_bytes()
     so_lines, masters = load_all(io.BytesIO(raw))
     orders = _orders(so_lines)
 
-    anchor = date(2026, 1, 2)            # a Friday
-    table = {"week_anchor": anchor.isoformat(),
+    friday = date(2026, 1, 9)            # a Friday; also the plan's effective start
+    table = {"week_anchor": friday.isoformat(),
              "operators": [
                  {"id": "1", "name": "Alpha", "machines_raw": "CNC 1",
-                  "shift": "First shift", "pinned": False},
+                  "shift": "Second shift", "pinned": False},
                  {"id": "2", "name": "Beta", "machines_raw": "CNC 2",
-                  "shift": "First shift", "pinned": True},   # pinned: never flips
+                  "shift": "First shift", "pinned": True},
              ]}
 
-    # Plan starting the NEXT Friday → one rotation elapsed → unpinned flips.
-    friday = date(2026, 1, 9)
-    setup_fri = svc.prepare_contest(orders, [], masters, _cfg(start=friday),
-                                    operator_table=table)
-    assert _shift_of(setup_fri.masters, "Alpha") == "Second shift"
-    assert _shift_of(setup_fri.masters, "Beta") == "First shift"   # pinned
-
-    # Plan starting the preceding Wednesday → no Friday elapsed → unrotated.
-    wednesday = date(2026, 1, 7)
-    setup_wed = svc.prepare_contest(orders, [], masters, _cfg(start=wednesday),
-                                    operator_table=table)
-    assert _shift_of(setup_wed.masters, "Alpha") == "First shift"
+    setup = svc.prepare_contest(orders, [], masters, _cfg(start=friday),
+                                operator_table=table)
+    # The table's shifts flow straight through — the contest used the app's
+    # operator table, not the workbook's.
+    assert _shift_of(setup.masters, "Alpha") == "Second shift"
+    assert _shift_of(setup.masters, "Beta") == "First shift"
 
     # The STORE (here just the passed dict) is never mutated by planning.
-    assert table["operators"][0]["shift"] == "First shift"
+    assert table["operators"][0]["shift"] == "Second shift"
     # The cached masters object handed in is never mutated either.
     assert masters.operators == load_all(io.BytesIO(raw))[1].operators
 
@@ -295,3 +300,26 @@ def test_scheduled_skips_when_book_and_inputs_both_match(monkeypatch):
     monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
     assert m._try_start_auto() is False
     assert starts == []
+
+
+# --------------------------------------------------------------------------- #
+# No shift rotation (2026-08-05): the admin's Settings shift holds every week.
+# --------------------------------------------------------------------------- #
+def test_operator_shift_never_changes_across_a_friday():
+    """The bug the director saw: an operator on 1st shift in week 1 showed on 2nd
+    shift in week 2. The shift an admin sets must now hold for every week."""
+    import datetime
+    from engine.new_engine import _plan_config
+    from engine.config import Config
+    from ppc_engine.domain.resources import Operator as EngOp, Role, Shift
+    from ppc_engine.worktime import effective_shift
+
+    start = datetime.date(2026, 8, 5)          # a Wednesday
+    cfg = _plan_config(Config(plan_start_date=start))
+    op = EngOp(name="Sidhu Singe", role=Role.OPERATOR,
+               qualified_machines=frozenset({"CNC1"}), base_shift=Shift.FIRST)
+
+    # Six consecutive weeks, crossing five Fridays.
+    shifts = {effective_shift(op, start + datetime.timedelta(days=7 * i), cfg)
+              for i in range(6)}
+    assert shifts == {Shift.FIRST}, f"shift moved across a Friday: {shifts}"
