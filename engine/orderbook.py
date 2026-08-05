@@ -143,14 +143,15 @@ def precedence_cap_error(actuals, so_no, item_code, punched_process,
     got = produced.get(tgt, 0.0)
     if idx == 0:
         if got > ordered_qty:
-            return (f"Can't record {got:g} at '{procs[0].name}' — the order is only for "
-                    f"{ordered_qty:g} pieces.")
+            return (f"Can't record {got:g} at '{procs[0].name}'. The order is only for "
+                    f"{ordered_qty:g} pieces in total.")
         return None
     cap = good.get(names[idx - 1], 0.0)
     if got > cap:
         prev = procs[idx - 1]
-        return (f"Can't record {got:g} at '{procs[idx].name}' — only {cap:g} pieces have "
-                f"cleared the previous step '{prev.name}'. Record '{prev.name}' first.")
+        return (f"Can't record {got:g} at '{procs[idx].name}'. Only {cap:g} pieces have cleared "
+                f"the step before it, '{prev.name}'. Entries add up across days, so check "
+                f"'{prev.name}' first.")
     return None
 
 
@@ -173,9 +174,8 @@ def rollback_cap_error(actuals_after_removal, removed, routing):
     succ_recorded = produced.get(names[idx + 1], 0.0)
     if succ_recorded > good.get(tgt, 0.0):
         succ = procs[idx + 1]
-        return (f"Can't roll back this '{procs[idx].name}' entry — {succ_recorded:g} pieces "
-                f"are already recorded at the later step '{succ.name}'. Roll back "
-                f"'{succ.name}' first.")
+        return (f"Can't undo this '{procs[idx].name}' entry. {succ_recorded:g} pieces are already "
+                f"recorded at the later step '{succ.name}'. Undo '{succ.name}' first.")
     return None
 
 
@@ -269,7 +269,7 @@ def merge_upload(so_lines, active_orders: dict, completed_orders: dict, first_se
             ex = active_orders[key]
             if so.delivery_date is None:
                 # A blank/unparseable date cell must never wipe a real date.
-                reason = "delivery date missing or unreadable — kept the existing date"
+                reason = "delivery date missing or unreadable, kept the old date"
             elif ex.delivery_date != so.delivery_date:
                 updated_orders.append(replace(ex, delivery_date=so.delivery_date))
                 reason = (f"delivery date updated: {_d(ex.delivery_date)} → "

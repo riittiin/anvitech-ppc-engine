@@ -109,8 +109,7 @@ def test_merge_blank_uploaded_date_never_wipes_the_existing_one():
     active = {("SO1", "A"): _order("SO1", "A", 10, D)}
     new, updated, flags = orderbook.merge_upload([_so("SO1", "A", 10, None)], active, {})
     assert new == [] and updated == []
-    assert flags[0]["reason"] == ("delivery date missing or unreadable — "
-                                 "kept the existing date")
+    assert flags[0]["reason"] == "delivery date missing or unreadable, kept the old date"
     assert active[("SO1", "A")].delivery_date == D
 
 

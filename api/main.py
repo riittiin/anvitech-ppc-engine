@@ -666,25 +666,24 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
     visible = orderbook.actuals_on_latest_date(actuals)
     latest = orderbook.latest_actual_date(actuals)
     progress = orderbook.process_progress_rows(book_store.load_active_orders(), actuals, masters)
-    tables = [{"title": "Per item code: output & downtime rollup (minutes summed across ALL entries)",
+    tables = [{"title": "Totals by item: what was produced, and downtime added up from every entry",
                "table": to_table(r7.aggregate_by_item(actuals))}]
     if progress:
         tables.insert(0, {
-            "title": "Per-process progress: pieces cleared at each step (the floor's reality; "
-                     "drives the next Plan's per-process schedule)",
+            "title": "How many pieces are finished at each step so far",
             "table": to_table(progress)})
-    list_note = (f"Showing the {fmt_date(latest)} entries (the latest day): only these can be "
-                 f"rolled back; earlier days are locked and kept in the rollup below."
+    list_note = (f"Showing the {fmt_date(latest)} entries. This is the only day you can undo. "
+                 f"Earlier days are locked, but their totals are still counted below."
                  if latest else "No entries yet.")
     trace["rule7"] = {
-        "input": to_table([{"Source": "Daily Production Entry form → durable store"}]),
+        "input": to_table([{"Note": "Your entries are saved as soon as you click Save"}]),
         "output": to_table(visible), "actuals_ids": [a.id for a in visible], "config": None,
         "notes": [
-            f"{len(actuals)} actual(s) on record; total downtime {total_down:g} min.",
+            f"{len(actuals)} entries saved so far. {total_down:g} min of downtime logged.",
             list_note,
-            "Good at the DISPATCH/last-step gate fulfils the order (remaining qty); "
-            "good at each earlier step lets the next Plan skip that finished work. "
-            "Marking complete on an entry archives that order.",
+            "The last step (Dispatch) is what finishes the order. Good pieces at earlier "
+            "steps are remembered too, so the next plan does not re-schedule work that "
+            "is already done. Ticking Mark complete on an entry closes the order.",
         ],
         "tables": tables,
         "error": None, "reached": True,
@@ -2696,7 +2695,7 @@ def post_actuals(req: ActualRequest):
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="entry_date must be YYYY-MM-DD")
     if entry_date > _ist_today():
-        raise HTTPException(status_code=400, detail="entry_date cannot be in the future")
+        raise HTTPException(status_code=400, detail="the date cannot be after today")
     operator = req.operator.strip()
     masters = _current_masters()
     # OUTSOURCED (OS) steps — Allotted M/c = OS — run off-site; no in-house operator
@@ -2707,9 +2706,9 @@ def post_actuals(req: ActualRequest):
         masters.routings.get(req.item_code), req.process)
     if not operator:
         if not os_step:
-            raise HTTPException(status_code=400, detail="operator is required")
+            raise HTTPException(status_code=400, detail="please pick an operator")
     elif operator not in {o.name for o in masters.operators}:
-        raise HTTPException(status_code=400, detail=f"unknown operator '{operator}'")
+        raise HTTPException(status_code=400, detail=f"'{operator}' is not in the operator list, pick one from the dropdown")
     actual = Actual(
         so_no=req.so_no, item_code=req.item_code,
         entry_date=entry_date,
@@ -2769,7 +2768,7 @@ def rollback_actual(req: RollbackRequest):
     if target.entry_date != orderbook.latest_actual_date(before):
         raise HTTPException(
             status_code=400,
-            detail="only the latest day's entries can be rolled back; earlier days are locked",
+            detail="you can only undo the latest day's entries. Earlier days are locked",
         )
     # Feedback precedence guard: don't let a rollback retro-create the illegal
     # downstream>upstream state (rolling back an upstream punch that a downstream

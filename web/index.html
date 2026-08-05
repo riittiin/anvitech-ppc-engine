@@ -38,14 +38,14 @@
     <div class="card admin-only" id="upload-card">
       <div class="card-head">
         <h2>Add orders</h2>
-        <p class="explainer">Upload your sales-order Excel: new order lines merge into the order book below.</p>
+        <p class="explainer">Upload your sales order Excel file. New orders are added to the list below.</p>
       </div>
       <div class="cfg-row">
         <label class="file-field">
           <input id="xlsx-file" type="file" accept=".xlsx" />
         </label>
-        <button id="upload-btn" class="primary">Upload &amp; merge</button>
-        <span id="dataset-status" class="status">No orders yet. Upload your Excel to add them to the order book.</span>
+        <button id="upload-btn" class="primary">Upload orders</button>
+        <span id="dataset-status" class="status">No orders yet. Upload your Excel file to add orders.</span>
       </div>
       <div id="report-noroute" class="report-noroute hidden"></div>
       <section id="report-panel" class="report hidden">
@@ -56,8 +56,9 @@
 
     <div class="card">
       <div class="card-head">
-        <h2>Order book</h2>
-        <p class="explainer">Every active order and its status. The plan schedules each by its remaining quantity.</p>
+        <h2>Orders</h2>
+        <p class="explainer">Every order and where it stands. Remaining is what is still left to
+          make. Current expected is the date the plan expects the order to finish.</p>
       </div>
       <div id="orders-mount"></div>
     </div>
@@ -67,13 +68,12 @@
   <section class="view" id="view-schedule">
     <section id="optimize-panel" class="card admin-only">
       <div class="card-head">
-        <h2>Optimize plan</h2>
-        <p class="explainer">Tries many job sequences on the current order book and keeps the best plan found (smaller delivery gaps first, fewer total days second).</p>
+        <h2>Find a better job order</h2>
+        <p class="explainer">Tries many different orders for the jobs and keeps the best one. Fewer late deliveries comes first, shortest total time second.</p>
       </div>
       <div class="optimize-intro">
-        Same machines, same people: only the order in which jobs claim the machines
-        changes. Optimize also tunes the overlap between steps and applies the best
-        value it finds.
+        Same machines, same people. Only the order the jobs run in changes. This does
+        not change your plan by itself. After it finishes you must press Apply.
       </div>
       <div class="optimize-controls">
         <button id="optimize-start" class="primary">Start deep search</button>
@@ -81,9 +81,9 @@
         <span id="optimize-progress" class="status"></span>
       </div>
       <div class="optimize-note muted">
-        The full contest is ~1,800 plans in the cloud (~15 min) or ~200 on this
-        server. You can leave this open: watch “best so far” improve and press
-        <strong>Stop &amp; keep best</strong> whenever you’re happy.
+        This takes about 15 to 30 minutes. You can leave this screen open and watch it,
+        or come back later. Press <strong>Stop &amp; keep best</strong> any time to use the
+        best one found so far.
       </div>
       <div id="optimize-result" class="optimize-result hidden"></div>
     </section>
@@ -94,7 +94,7 @@
     <div class="card">
       <div class="card-head">
         <h2>Machine schedule</h2>
-        <p class="explainer">The final allocation of every operation to a machine. Download it to print for the floor.</p>
+        <p class="explainer">The finished plan: which machine does which job, and when. Download it to print for the floor.</p>
       </div>
       <div id="schedule-mount"></div>
     </div>
@@ -105,7 +105,7 @@
     <div class="card">
       <div class="card-head">
         <h2>Gantt</h2>
-        <p class="explainer">Each order's operations placed on the days they run, coloured by machine.</p>
+        <p class="explainer">Shows each order's jobs on the days they run. Each colour is a different machine.</p>
       </div>
       <div id="gantt-mount"></div>
     </div>
@@ -116,7 +116,7 @@
     <div class="card">
       <div class="card-head">
         <h2>Daily entry</h2>
-        <p class="explainer">Log what the floor produced. Pick the order, the process, the operator and shift, then Save.</p>
+        <p class="explainer">Fill in the date, shift and your name. Then pick the order, the item and the process. Enter what you made and click Save.</p>
       </div>
       <div id="entry-mount"></div>
     </div>
@@ -127,7 +127,7 @@
     <div class="card">
       <div class="card-head">
         <h2>Analytics</h2>
-        <p class="explainer">Utilization and bottlenecks across every machine, operator and process in the current plan.</p>
+        <p class="explainer">How busy your machines and operators are in the current plan, and where the work is going.</p>
       </div>
       <div id="analytics-mount"></div>
     </div>
@@ -151,44 +151,37 @@
             <input id="cfg-plan-start" type="date" value="2025-03-01" />
             <span id="cfg-plan-start-echo" class="date-echo"></span>
           </label>
-          <p class="cfg-readonly">Order batching (how far apart two same-item orders can be to
-            run together) is chosen automatically by the engine — you don't set it.</p>
+          <p class="cfg-readonly">How far apart two orders for the same item can be to run
+            together is chosen automatically. You don't set this.</p>
           <label>Setup time (min)
             <input id="cfg-setup" type="number" value="90" min="0" />
           </label>
           <p class="cfg-help">Minutes added before each CNC/VMC job starts, to account for machine
             changeover.</p>
-          <p class="cfg-readonly">Overlap between steps (tuned automatically by Optimize — you
-            don't set this; currently <span id="cfg-overlap-info">50</span>%): how much of a job's
-            next step can start before the previous step is completely finished. Higher overlap
-            finishes orders sooner but runs two of that order's processes at the same time.</p>
-          <p class="cfg-readonly">Machine set (tuned by Optimize — you don't set this):
-            <span id="cfg-machineset-info">Allotted only</span>. Whether the optimizer may
-            also use each step's Suggested machines to balance load off a busy machine.</p>
+          <p class="cfg-readonly">How much two steps can run at the same time (currently
+            <span id="cfg-overlap-info">50</span>%, set automatically by Optimize, you don't
+            change it): how much of the next step can start before the step before it is fully
+            done. More of this finishes orders sooner, but runs two steps of the same order
+            together.</p>
+          <p class="cfg-readonly">Which machines can be used (set automatically by Optimize, you
+            don't change it): currently <span id="cfg-machineset-info">Allotted only</span>.
+            Optimize decides on its own whether to also use a step's Suggested machine, to take
+            work off a busy one.</p>
         </fieldset>
         <fieldset class="settings-group">
           <legend>Order priority</legend>
-          <p class="cfg-readonly">The order in which jobs are scheduled is decided automatically by
-            the engine (most-urgent-first, tuned by Optimize) — you don't set it.</p>
+          <p class="cfg-readonly">The order jobs run in (most urgent first) is decided
+            automatically and fine tuned by Optimize. You don't set this.</p>
         </fieldset>
         <fieldset class="settings-group">
           <legend>Options</legend>
           <label class="cfg-check">
             <input id="cfg-operator-logic" type="checkbox" checked />
-            Apply operator &amp; shift logic (assigns a real, available operator to every shift;
-            turn off only to preview a machine-only schedule that ignores who's actually free to
-            run it)
+            Show operator reports
           </label>
-          <label class="cfg-check">
-            <input id="cfg-split-parallel" type="checkbox" checked />
-            Run big batches across multiple eligible machines at once
-          </label>
-          <p class="cfg-help">When a job step can run on more than one machine, share the work
-            across them so it finishes sooner. Turn off to always keep a batch on one machine.</p>
-          <label class="cfg-check">
-            <input id="cfg-balance-ops" type="checkbox" />
-            Balance operator workload (share load fairly; same schedule)
-          </label>
+          <p class="cfg-help">Adds the per operator section to Analytics, and switches on the
+            shift wise schedule download and the machine coverage report. It does not change the
+            plan. The planner always puts a real operator on every shift.</p>
         </fieldset>
       </div>
       <div class="card-actions">
@@ -199,9 +192,9 @@
     <div class="card">
       <div class="card-head">
         <h2>Operators &amp; shifts</h2>
-        <p class="explainer">Who runs which machines and on which shift. Shifts rotate every
-          Friday. Seeded once from your uploaded Excel's "Operator &amp; shift Master" sheet; edit
-          or add operators here afterward.</p>
+        <p class="explainer">Who runs which machine, and on which shift. Shifts swap every
+          Friday. This list is filled in once from your uploaded Excel. After that, add or edit
+          operators here.</p>
       </div>
       <p id="operators-header" class="muted"></p>
       <div class="table-wrap">
@@ -232,8 +225,9 @@
 
     <div class="card">
       <div class="card-head">
-        <h2>Absences</h2>
-        <p class="explainer">Mark an operator away for a date range: the plan skips them while absent.</p>
+        <h2>Operator absences</h2>
+        <p class="explainer">Mark an operator away for a date range. The plan skips them on those
+          days and gives their work to someone else. Work already started stays on its machine.</p>
       </div>
       <div class="cfg-row admin-only">
         <select id="absence-operator"></select>
@@ -247,7 +241,8 @@
     <div class="card admin-only">
       <div class="card-head">
         <h2>Efficiency report</h2>
-        <p class="explainer">Per-operator output vs standard for a month (pure reporting: never changes the plan).</p>
+        <p class="explainer">How much each operator produced in a month, compared with the
+          standard time for those jobs. This is a report only. It never changes the plan.</p>
       </div>
       <div class="cfg-row">
         <label class="inline-field">Month
@@ -258,12 +253,12 @@
       </div>
       <p class="explainer">
         <strong>Attended (min)</strong> = time on shift minus recorded downtime and setup.
-        <strong>Earned (min)</strong> = standard time credited for GOOD pieces only — rejects earn
+        <strong>Earned (min)</strong> = standard time credited for GOOD pieces only. Rejects earn
         nothing. <strong>Efficiency %</strong> = Earned ÷ Attended × 100.
         <strong>Pace vs standard (x)</strong> = how many times faster/slower than standard cycle
         time (1.0 = exactly standard, 1.2 = 20% faster). <strong>Reject %</strong> = rejected ÷
         (good + rejected) qty. <strong>No-standard punches</strong> = entries for an item/process
-        with no time standard on file — excluded from both earned and attended time, so they never
+        with no time standard on file. These are left out of both earned and attended time, so they never
         count against the operator.
       </p>
       <div id="eff-table" class="eff-table"></div>

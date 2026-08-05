@@ -290,7 +290,7 @@ def test_actual_rejects_future_entry_date(client):
         "entry_date": "2099-01-01", "qty_produced": 5,
     })
     assert r.status_code == 400
-    assert "future" in r.json()["detail"]
+    assert "cannot be after today" in r.json()["detail"]
 
     r = client.post("/actuals", json={
         "so_no": SO1, "item_code": ITEM_A, "operator": "Operator One",

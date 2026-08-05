@@ -117,7 +117,7 @@ def test_non_os_step_still_requires_operator():
     procs = [p.name for p in m._current_masters().routings[ITEM_A].processes]
     r = _punch(c, procs[0], "")                                     # BANDSAW (in-house): operator required
     assert r.status_code == 400
-    assert "operator is required" in r.json()["detail"]
+    assert "please pick an operator" in r.json()["detail"]
 
 
 def test_items_lists_os_processes():
