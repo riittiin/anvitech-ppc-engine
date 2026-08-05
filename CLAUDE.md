@@ -90,7 +90,8 @@
 > - **Deploy:** repo `riittiin/anvitech-ppc-engine` (branch `main`) → Render service `anvitech-ppc`
 >   (https://anvitech-ppc.onrender.com). Env: `DEFAULT_SCHEDULER=new`, `GITHUB_DISPATCH_TOKEN`,
 >   `OPTIMIZE_WORKER_SECRET`, `MONGODB_URI`, `APP_USERNAME`/`APP_PASSWORD`. **Render auto-deploy is
->   OFF** — deploy via the dashboard: **Manual Deploy → Deploy latest commit**. Tests: `pytest`
+>   ON (owner confirmed 2026-08-05): pushing to `main` deploys to the live site.** Treat every
+>   push as a production release. Tests: `pytest`
 >   (508 passing).
 
 Guidance for any Claude session working in this repository. Read this first.
