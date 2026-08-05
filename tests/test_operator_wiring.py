@@ -3,10 +3,13 @@ point (display as-of today, planning as-of the plan's effective start), seeded
 once from the workbook, carried through the cloud payload, folded into the
 inputs fingerprint, and honoured by the scheduled-skip check.
 
-The load-bearing invariants (spec 2026-07-18):
+The load-bearing invariants (spec 2026-07-18; automatic rotation removed 2026-08-05 —
+invariant 3 below now covers the overlay-as-of-effective-start PLUMBING, not a rotation
+outcome):
   1. A seeded-from-sample table plans BYTE-IDENTICALLY to the Excel-loaded plan.
   2. A re-upload NEVER mutates a seeded table.
-  3. Planning rotates AS OF the plan's effective start (Friday shift-1 rule).
+  3. Planning overlays the app-owned table AS OF the plan's effective start; the
+     shifts returned are whatever is on file in Settings, the same for any date.
   4. Cloud (payload-carried table) == local (same table) byte-for-byte.
 """
 import io
@@ -108,7 +111,8 @@ def test_upload_never_mutates_a_seeded_table():
 
 
 # --------------------------------------------------------------------------- #
-# 3. Planning rotates AS OF the effective plan start (Friday shift-1 rule).
+# 3. Planning overlays the operator table AS OF the effective plan start
+#    (rotation removed 2026-08-05 — shifts are the same for any date).
 # --------------------------------------------------------------------------- #
 def _shift_of(masters, name):
     return next(o.shift for o in masters.operators if o.name == name)
@@ -228,7 +232,10 @@ def test_inputs_signature_reflects_the_operator_table():
     book_store.save_operator_table(table)
     assert m._inputs_signature(cfg) == s0
 
-    # A pin change also moves it (pins shape future rotations).
+    # A pin change also moves it — `pinned` no longer shapes any rotation (removed
+    # 2026-08-05); it is kept in the signature only because the field is still
+    # stored and accepted by the API, so a stored/displayed value changing should
+    # still flag the applied optimization stale.
     table["operators"][0]["pinned"] = True
     book_store.save_operator_table(table)
     assert m._inputs_signature(cfg) != s0

@@ -200,13 +200,11 @@ preferred/suggested list** — respecting:
 - the working calendar (**Thursdays off**, holidays, operator leaves), and
 - **shift timings** (1st: 8am–7pm, 2nd: 7pm–5am). **Operators & shifts live in the
   app, not Excel** (2026-07-18) — the admin adds, edits, removes, and sets each
-  operator's shift in **Settings**. Every **Friday**, every two-shift operator
-  automatically **swaps** shift (First ↔ Second), effective from that Friday's
-  **first shift** — "we always assume they will change." A per-operator **"stays
-  on current shift" pin** keeps individuals in place until unpinned. Day-window/
-  manual operators (blank shift, working 09:00–18:00) never rotate. The workbook's
-  "Operator & shift Master" sheet only ever **seeds** this table once, the first
-  time it's empty — a later re-upload never touches operators again.
+  operator's shift in **Settings**, and that shift **holds every week until an
+  admin changes it** (2026-08-05) — there is **no automatic rotation** and no
+  "stays on current shift" pin; the planner always uses the shift on file. The
+  workbook's "Operator & shift Master" sheet only ever **seeds** this table once,
+  the first time it's empty — a later re-upload never touches operators again.
 
 **Time basis.** A process's machine time = **cycle time × qty** (+ the 90-min setup
 for CNC/VMC steps only, Rule 4). The Process "Total time" column in the master is **never** used.

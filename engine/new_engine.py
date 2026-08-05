@@ -91,7 +91,8 @@ def _apply_app_operators(new_masters, old_masters):
     """Replace the new-engine masters' operators (parsed from the WORKBOOK, which is
     now a FOSSIL) with the APP-OWNED operator set carried on ``old_masters``.
 
-    Operators are owned by the app (added/edited/removed/pinned/rotated in Settings),
+    Operators are owned by the app (added/edited/removed in Settings, each with a
+    shift that holds every week until an admin changes it — no automatic rotation),
     NOT the Excel sheet — so the app table is authoritative for WHO exists and their
     machines + shift. The one thing the app table does not carry is ROLE (operator /
     helper / inspector), so role is inherited BY NAME from the workbook operators; a
@@ -394,9 +395,12 @@ def _entries_from_schedule(sched, batch_by_key):
     return entries
 
 
-# A fingerprint the old API mixes into its plan-staleness signature (api/main.py:315),
-# so switching engines correctly invalidates any cached plan.
-SCHEDULER_FINGERPRINT = "new-engine-v1"
+# A fingerprint the API mixes into its plan-staleness signature
+# (api/main.py:_inputs_signature), so a change to how the new engine allocates
+# work (e.g. dropping automatic operator-shift rotation, 2026-08-05) correctly
+# flags an applied optimization stale instead of replaying old ranks under new
+# semantics behind a green banner.
+SCHEDULER_FINGERPRINT = "new-engine-v2-no-rotation"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,

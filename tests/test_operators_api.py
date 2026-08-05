@@ -52,7 +52,7 @@ def test_get_before_any_upload_returns_empty_list(monkeypatch):
     assert r.status_code == 200
     body = r.json()
     assert body["operators"] == []
-    assert body["next_rotation"] == m.operator_master.next_rotation(date.today()).isoformat()
+    assert body["next_rotation"] is None   # rotation removed 2026-08-05; key kept, value None
 
 
 def test_get_after_upload_seeds_from_masters(monkeypatch):

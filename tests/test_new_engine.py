@@ -405,3 +405,26 @@ def test_sweep_optimize_honors_cancel(old_book, new_masters):
     sw = sweep_optimize(so_lines, _CONF, old_masters, budget_evals=200,
                         should_cancel=lambda: True)
     assert sw.cancelled is True
+
+
+def test_new_engine_fingerprint_feeds_the_staleness_signature():
+    """Production runs scheduler=='new' (DEFAULT_SCHEDULER=new), so a change to how
+    the new engine allocates work — e.g. dropping automatic operator-shift rotation,
+    2026-08-05 — must flip the applied-optimization staleness signature the same way
+    a classic/flow fingerprint bump already does (test_scarce_operator_pick.py /
+    test_flow_scheduler.py). Before this fix, engine.new_engine.SCHEDULER_FINGERPRINT
+    was computed but never folded into api.main._inputs_signature, so a deploy that
+    changed the new engine's semantics left the applied ranks looking fresh
+    (inputs_changed: False) under a green banner."""
+    from api import main as api_main
+    from engine import new_engine
+    from engine.config import Config as Cfg
+    cfg = Cfg()
+    sig_now = api_main._inputs_signature(cfg)
+    orig = new_engine.SCHEDULER_FINGERPRINT
+    try:
+        new_engine.SCHEDULER_FINGERPRINT = orig + "-next"
+        assert api_main._inputs_signature(cfg) != sig_now
+    finally:
+        new_engine.SCHEDULER_FINGERPRINT = orig
+    assert api_main._inputs_signature(cfg) == sig_now

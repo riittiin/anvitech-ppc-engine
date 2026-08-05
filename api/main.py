@@ -307,8 +307,9 @@ def _current_masters():
 
     The PARSED WORKBOOK is cached in-process (keyed by content hash / store
     config); the app-owned operator table is overlaid on EVERY call so display
-    always reflects today's rotation and a freshly-emptied store re-seeds. The
-    cache never holds operators — they belong to the store, not the workbook."""
+    always reflects the latest Settings edits and a freshly-emptied store
+    re-seeds. The cache never holds operators — they belong to the store, not
+    the workbook."""
     key = _store_env_key()
     if _MASTERS_CACHE["masters"] is not None and _MASTERS_CACHE["key"] == key:
         base = _MASTERS_CACHE["masters"]
@@ -326,11 +327,13 @@ def _current_masters():
 
 
 def _with_operator_overlay(base):
-    """Overlay the app-owned operator table (seed-once, rotate as-of TODAY for
-    display) onto a COPY of the cached workbook masters — the cache is never
-    mutated. Seeds the store the first time masters carry operators and no table
-    exists yet; persists a lazy rotation advance (flips>0). Empty store + no
-    workbook operators → the base is returned unchanged (nothing to overlay)."""
+    """Overlay the app-owned operator table (seed-once) onto a COPY of the cached
+    workbook masters — the cache is never mutated. Seeds the store the first time
+    masters carry operators and no table exists yet. Automatic Friday rotation
+    was removed 2026-08-05 (`rotate_table` is now a no-op, kept only as the shared
+    call every wiring site still goes through) — an operator's shift is whatever
+    is on file in Settings, every week, until an admin changes it. Empty store +
+    no workbook operators → the base is returned unchanged (nothing to overlay)."""
     today = _ist_today()
     table = book_store.load_operator_table()
     if table is None:
@@ -375,6 +378,8 @@ def _inputs_signature(config: Config) -> str:
     d["scheduler_fingerprint"] = r6.SCHEDULER_FINGERPRINT
     from engine import flow_scheduler as _flow
     d["flow_fingerprint"] = _flow.FLOW_FINGERPRINT
+    from engine import new_engine as _new
+    d["new_engine_fingerprint"] = _new.SCHEDULER_FINGERPRINT
     # Operators live in the store now, so the masters sha no longer covers them.
     # Fold ONLY the table's sorted row CONTENT (name/machines/shift/pin) into
     # the blob so a rotation or an operator edit correctly flags the applied
@@ -736,11 +741,12 @@ def _plan(config: Config):
     if eff_start != config.plan_start_date:
         config = replace(config, plan_start_date=eff_start)
 
-    # Operators effective AS OF the plan's start (Friday shift-1 rule): a plan
-    # that BEGINS on/after a rotation Friday runs the rotated shifts, even when
-    # computed on the off day. `_current_masters()` already overlaid as-of TODAY;
-    # re-overlay as-of `eff_start` onto this (already fresh) masters copy so the
-    # schedule, Gantt, and analytics all agree. Pure view — nothing persisted.
+    # Operators from the app-owned table, re-overlaid onto this (already fresh)
+    # masters copy so the schedule, Gantt, and analytics all agree. `eff_start`
+    # is passed through `operators_as_of` for its (now inert, since rotation was
+    # removed 2026-08-05) `as_of` parameter — the shifts returned are simply
+    # whatever is on file in Settings, the same for any date. Pure view —
+    # nothing persisted.
     op_table = book_store.load_operator_table()
     if op_table:
         masters = replace(masters, operators=operator_master.operators_as_of(
@@ -2117,16 +2123,16 @@ def _machine_options(masters):
 def get_operators():
     """The app-owned operator/shift table, any logged-in role. Calling
     `_current_masters()` first ensures the one-time seed-from-workbook (if a
-    workbook exists and the table has never been seeded) and any due Friday
-    rotation are applied and persisted (as-of TODAY, for display) before the
-    rows are read back. `next_rotation` is the next Friday after today,
-    regardless of whether the table exists yet."""
+    workbook exists and the table has never been seeded) is applied before the
+    rows are read back. `next_rotation` is always `None` (2026-08-05): shifts
+    no longer rotate automatically, so there is no future rotation date to
+    report — the key is kept on the wire so nothing breaks on the client."""
     masters = _current_masters()
     table = book_store.load_operator_table()
     rows = table.get("operators", []) if table else []
     return {"operators": rows,
             "machines": _machine_options(masters),
-            "next_rotation": operator_master.next_rotation(_ist_today()).isoformat()}
+            "next_rotation": None}
 
 
 @app.post("/operators")

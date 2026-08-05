@@ -83,20 +83,6 @@ def test_operators_as_of_returns_the_stored_shift_for_any_date():
         assert om.operators_as_of(table, day)[0].shift == "First shift"
 
 
-def test_rotate_missing_anchor_treated_as_last_friday_no_flip_on_first_call():
-    table = {"operators": [_row("A", "First shift")]}
-    new_table, flips = om.rotate_table(table, date(2026, 7, 15))
-    assert flips == 0
-    assert new_table is table
-
-
-def test_rotate_blank_anchor_treated_as_last_friday_no_flip_on_first_call():
-    table = {"week_anchor": "", "operators": [_row("A", "First shift")]}
-    new_table, flips = om.rotate_table(table, date(2026, 7, 15))
-    assert flips == 0
-    assert new_table is table
-
-
 # --------------------------------------------------------------------------- #
 # to_operators
 # --------------------------------------------------------------------------- #

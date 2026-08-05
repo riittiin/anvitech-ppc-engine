@@ -71,9 +71,11 @@ def _friday_on_or_before(d):
 
 
 def _rotations(anchor, day):
-    """Fridays f with anchor < f <= day — how many Friday rotations have taken effect.
-    Mirrors ppc_engine.worktime._fridays_after so the analytics capacity matches the
-    shift the engine actually scheduled the operator on."""
+    """Fridays f with anchor < f <= day. Historical: used to count how many Friday
+    rotations had taken effect when the new engine still flipped two-shift operators
+    weekly. Rotation was removed 2026-08-05 (an admin's Settings shift now holds every
+    week) — the caller below always passes ``rotate=False``, so this count is no
+    longer consulted, but the function is kept for `_effective_shift`'s dead branch."""
     if day <= anchor:
         return 0
     dtf = (4 - anchor.weekday()) % 7 or 7                 # to the first Friday strictly after
@@ -84,10 +86,13 @@ def _rotations(anchor, day):
 
 
 def _effective_shift(nominal, anchor, day, rotate):
-    """The operator's shift ON `day`. When ``rotate`` (the new engine, which flips
-    two-shift operators every Friday), a two-shift operator's shift flips on an odd
-    Friday count from the anchor; otherwise (classic engine — shifts are fixed for the
-    whole plan) the nominal shift stands. Manual/day operators never rotate."""
+    """The operator's shift ON `day`. ``rotate`` is a historical hook for the old
+    Friday-flip behaviour (removed 2026-08-05) and is always passed ``False`` by the
+    caller below, so this always returns the nominal shift unchanged — an operator's
+    shift is whatever is set in Settings, every week, until an admin changes it. The
+    ``rotate=True`` branch is kept only so a future re-introduction of rotation would
+    not need to relearn this math; it is dead code today. Manual/day operators are
+    unaffected either way."""
     s = (nominal or "").lower()
     if "first" in s:
         base_second = False
@@ -126,11 +131,10 @@ def _absent_days(operator, absences, calendar, win_start_d, win_end_d):
 def _operator_available_hours(nominal, calendar, win_start, win_end, plan_start, config,
                               absent, rotate):
     """The operator's available hours in the window = sum over each working day (not
-    absent) of that day's EFFECTIVE shift hours. When ``rotate`` (new engine), the
-    effective shift follows the Friday rotation — so a two-shift operator's capacity
-    matches the shift they were actually scheduled on, keeping them <=100% (they work
-    at most one shift/day). Classic engine (``rotate`` False): the nominal shift is
-    fixed for the whole plan, so this reduces to working-days x nominal-shift-hours."""
+    absent) of that day's EFFECTIVE shift hours. ``rotate`` is always ``False`` now
+    (rotation removed 2026-08-05 — see `_effective_shift`), so this reduces to
+    working-days x nominal-shift-hours: the operator's Settings shift is fixed for the
+    whole plan, keeping them <=100% since they work at most one shift/day either way."""
     anchor = _friday_on_or_before(plan_start)
     d, last, total = win_start.date(), win_end.date(), 0.0
     while d <= last:

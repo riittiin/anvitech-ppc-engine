@@ -225,8 +225,9 @@ class ContestSetup:
     absence_reserved: object = None
     # The masters the contest must schedule against. Identical to the object
     # handed in UNLESS an operator table was supplied — then it is a shallow
-    # copy carrying the as-of-effective-start rotated operators (the cached
-    # masters object is never mutated). ALL callers plan against ``setup.masters``.
+    # copy carrying the app-owned operator table's shifts (rotation removed
+    # 2026-08-05; the cached masters object is never mutated). ALL callers plan
+    # against ``setup.masters``.
     masters: object = None
     # In-progress operations that must not be rescheduled (a plain list of
     # dict rows, same JSON-safe shape as ``absences``).
@@ -241,9 +242,10 @@ def prepare_contest(orders: dict, actuals, masters, config: Config,
     optimize (no active orders with work remaining).
 
     ``operator_table`` (the app-owned {week_anchor, operators} dict) overrides
-    ``masters.operators`` with the shifts effective **as of the plan's effective
-    start date** (Friday shift-1 rule) — applied onto a SHALLOW COPY so the
-    caller's (cached) masters object is never mutated."""
+    ``masters.operators`` with the shifts on file for each operator — every
+    operator's shift holds every week until an admin changes it in Settings
+    (automatic rotation was removed 2026-08-05) — applied onto a SHALLOW COPY
+    so the caller's (cached) masters object is never mutated."""
     ab = absence_reservations(absences)
     so_lines = orderbook.active_so_lines(orders, actuals, masters)
     eff = orderbook.effective_plan_start_date(actuals, config.plan_start_date,
