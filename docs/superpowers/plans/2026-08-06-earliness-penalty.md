@@ -3,7 +3,9 @@
 > **SUPERSEDED (2026-08-06) by `2026-08-06-symmetric-ontime-objective-design.md`.**
 > The branch this described was deleted, not merged. Do not execute this plan.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> *(Historical, do not act on: this plan originally carried an agentic-worker
+> directive to execute it task-by-task. It has been struck because the phrasing is
+> an execution trigger for this repo's tooling, and this plan must not be run.)*
 
 **Goal:** Make the optimizer stop scheduling work that finishes more than 4 days before its delivery date, without ever increasing total late-days.
 
