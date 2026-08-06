@@ -3,7 +3,7 @@ from datetime import date, datetime
 from ppc_engine.config import PlanConfig
 from ppc_engine.domain.order import Order
 from ppc_engine.objective.metrics import PlanMetrics, compute_metrics
-from ppc_engine.objective.objective import _ceiling_breach, _severity, score
+from ppc_engine.objective.objective import _ceiling_breach, _ontime_breach, score
 from ppc_engine.scheduler.schedule import Schedule
 
 
@@ -62,10 +62,8 @@ def test_no_promise_term_contributes_zero():
         promise_slip_by_order={},
     )
     pre_existing_terms = (
-        metrics.total_tardiness_days
-        + cfg.severity_weight * _severity(metrics, cfg)
+        cfg.ontime_weight * _ontime_breach(metrics, cfg)
         + cfg.ceiling_weight * _ceiling_breach(metrics, cfg)
-        + cfg.fairness_weight * metrics.max_tardiness_days
         + cfg.makespan_weight * metrics.makespan_days
     )
     assert score(metrics, cfg) == pre_existing_terms

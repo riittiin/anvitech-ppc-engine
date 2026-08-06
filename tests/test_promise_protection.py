@@ -1,4 +1,3 @@
-from dataclasses import replace
 from datetime import datetime
 
 from ppc_engine.config import PlanConfig
@@ -19,19 +18,13 @@ def _metrics(latenesses, makespan=40.0):
     )
 
 
-def test_convex_term_protects_the_second_worst_order():
-    # X is structurally impossible (~20 late and sets the max); B is savable.
-    #   sacrifice: X=20, B pushed to 15   (what the old objective picked)
-    #   protect:   X=22, B rescued to 2   (spread a little onto the doomed order)
+def test_ontime_objective_protects_the_second_worst():
+    # sacrifice: orders 20 and 15 days late -> (20-4)^2 + (15-4)^2 = 256 + 121 = 377
+    # protect:   orders 22 and  2 days late -> (22-4)^2 +        0 = 324
+    # Squaring is what makes spreading the pain the better plan.
     cfg = PlanConfig(plan_start=datetime(2025, 3, 1))
     sacrifice = _metrics([20.0, 15.0])
     protect = _metrics([22.0, 2.0])
-
-    # OLD objective (severity off) WRONGLY prefers sacrificing B — the live bug:
-    old = replace(cfg, severity_weight=0.0)
-    assert score(protect, old) > score(sacrifice, old)
-
-    # NEW objective (default convex term) prefers protecting B:
     assert score(protect, cfg) < score(sacrifice, cfg)
 
 

@@ -78,13 +78,22 @@ class PlanConfig:
     # OS/dispatch never overlap. See scheduler/flow_scheduler.py and OPTIMIZATION.md.
     overlap: float = 0.0
 
-    # objective weights
-    # λ = 30: the fairness-sweep (OPTIMIZATION.md §7a) showed λ≈30 protects the worst
-    # order (max tardiness ≤ EDD) while still beating EDD on every axis — the
-    # fairness-respecting default. Lower λ cuts total tardiness more but lets the
-    # worst order regress.
+    # RETAINED BUT UNUSED since 2026-08-06. `score()` no longer reads fairness_weight
+    # or severity_*: the on-time term subsumes both. Kept (not deleted) so the field
+    # names stay stable for anyone reading old plans or notes, matching how `pinned`
+    # and `week_anchor` were retained inert when shift rotation was removed.
     fairness_weight: float = 30.0
     makespan_weight: float = 0.1
+
+    # The on-time objective (2026-08-06 spec). ONE symmetric term replacing
+    # total_tardiness + severity + the fairness term: for each order, how far it
+    # misses its due date in EITHER direction, minus a free band, capped, squared.
+    # Squaring spreads misses across orders instead of concentrating them, which is
+    # the owner's stated requirement. The band is FLAT — no pull toward the exact
+    # date. Must equal engine/optimizer.py ONTIME_* .
+    ontime_band_days: float = 4.0
+    ontime_cap_days: float = 60.0
+    ontime_weight: float = 1.0
 
     # Reputation guard. A CONVEX, capped per-order tardiness penalty that penalizes
     # EVERY order's lateness on an accelerating curve. Must equal engine/optimizer.py
