@@ -1642,33 +1642,40 @@ def _cancel_cloud_job(job_id):
     local search — under cancel that would turn Stop into "start a fresh computation",
     which the owner explicitly rejected. So this clears it.
 
-    `shards_finalizing` is claimed under the lock in the same block that reads it,
-    exactly as the timeout branch does. When the claim is LOST — someone else is
-    already finalizing — this returns without writing any terminal state, because
-    doing so would make their in-flight `_finalize_from_shards` a silent no-op and
-    discard every shard they were about to merge.
+    `shards_finalizing` is claimed under the lock in the same block that reads it.
+    But that flag alone is ambiguous: `_finalize_from_shards`'s no-winner branch leaves
+    it set while clearing `shards`, expecting a later watchdog poll to self-heal. Only
+    `finalizing AND shards` means genuinely in flight — and only then does this return
+    without writing a terminal state, because doing so would make their in-flight
+    finalize a silent no-op. In every other case this ENDS the job, because the caller
+    stops polling immediately after and nothing else would ever finish it.
     """
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["state"] != "running" or _OPTIMIZE["job_id"] != job_id:
             return                       # already finished, or a superseded job
-        already_finalizing = bool(_OPTIMIZE.get("shards_finalizing"))
-        claim = bool(_OPTIMIZE.get("shards")) and not already_finalizing
+        have_shards = bool(_OPTIMIZE.get("shards"))
+        finalizing = bool(_OPTIMIZE.get("shards_finalizing"))
+        # finalizing AND shards  -> someone is genuinely mid-flight
+        # finalizing AND !shards -> already ran, found no winner, latched
+        #                           (see _finalize_from_shards's no-winner branch)
+        in_flight = finalizing and have_shards
+        claim = have_shards and not finalizing
         if claim:
             _OPTIMIZE["shards_finalizing"] = True
-    if already_finalizing:
-        # Someone else (the shard collector, or the timeout branch) already owns
-        # the salvage and is mid-flight. Writing a terminal state here would make
-        # THEIR _finalize_from_shards a silent no-op — it returns early when the
-        # state is no longer "running" — and every arrived shard would be lost.
-        # Leave them alone; their finalize ends the job. This mirrors the timeout
-        # branch, which likewise does nothing when it loses the claim.
+    if in_flight:
+        # Someone else owns the salvage and is still working. Writing a terminal
+        # state here would make THEIR _finalize_from_shards a silent no-op — it
+        # returns early unless the state is "running" — discarding every shard
+        # they were about to merge. Leave them alone; their finalize ends the job.
         return
     if claim:
         _finalize_from_shards(job_id)    # merges whatever subset arrived
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["state"] == "running" and _OPTIMIZE["job_id"] == job_id:
-            # Either nothing had arrived, or the merge found no eligible winner.
-            # End either way, and clear cloud_failed so no local run starts.
+            # Nothing had arrived, or the merge (just now, or on an earlier call
+            # that latched shards_finalizing and was waiting on a watchdog poll
+            # this cancel is about to kill) found no eligible winner. End either
+            # way, and clear cloud_failed so no local run starts.
             _OPTIMIZE.update(state="failed", cancel=False, cloud_failed=False,
                              error="stopped: no finished results had come back yet, "
                                    "so the current plan is unchanged")

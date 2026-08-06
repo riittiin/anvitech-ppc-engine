@@ -128,17 +128,36 @@ def test_cancel_for_a_different_job_id_is_a_noop(monkeypatch):
     assert m._OPTIMIZE["state"] == "running", "the current job must be untouched"
 
 
-def test_cancel_losing_the_claim_leaves_the_real_finalize_able_to_run():
-    """Regression for the race the mocks hid: if the collector already claimed the
-    finalize, a cancel arriving in that window must not poison the state the real
-    _finalize_from_shards checks on entry."""
+def test_cancel_losing_the_claim_leaves_state_intact_for_the_real_finalize():
+    """Regression for the race the mocks hide: if the collector already claimed the
+    finalize (shards non-empty, in flight), a cancel arriving in that window must not
+    write any terminal state — `_finalize_from_shards` checks `state == "running"` on
+    entry, so a cancel that clobbered it here would turn the collector's real finalize
+    into a silent no-op and discard every shard it was about to merge."""
     m = _api()
     _seed(m, shards={i: {"rows": [], "evals": 840} for i in range(20)},
           finalizing=True)
 
     m._cancel_cloud_job("job-1")
 
-    # The collector's call now runs for real. It must still see a live job.
+    # Untouched: the real _finalize_from_shards (not called here) would itself
+    # return early unless state is still "running".
     with m._OPTIMIZE_LOCK:
         assert m._OPTIMIZE["state"] == "running", (
             "the real _finalize_from_shards returns early unless state is 'running'")
+
+
+def test_cancel_ends_a_latched_no_winner_job_instead_of_orphaning_it():
+    """_finalize_from_shards's no-winner branch leaves shards_finalizing set, clears
+    shards, sets cloud_failed, and waits for a later watchdog poll to fall back to
+    local. A cancel arriving in that window must END the job: the caller stops polling
+    right after, so returning silently would leave it 'running' forever."""
+    m = _api()
+    _seed(m, shards={}, finalizing=True)
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["cloud_failed"] = True      # the latched sentinel
+
+    m._cancel_cloud_job("job-1")
+
+    assert m._OPTIMIZE["state"] == "failed", "must not leave the job orphaned"
+    assert m._OPTIMIZE["cloud_failed"] is False, "and must not trigger a local run"
