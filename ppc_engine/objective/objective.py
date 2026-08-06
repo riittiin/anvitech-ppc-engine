@@ -1,42 +1,16 @@
 """The objective function — one number, lower is better.
 
-This is the ONLY place the scoring rule lives (RULES.md Rule 3):
+This is the ONLY place the scoring rule lives (RULES.md Rule 3, 2026-08-06 spec):
 
-    score = total_tardiness            # every late day on every order counts
-          + λ · max_tardiness          # fairness: don't starve any single order
-          + w · makespan               # a strict secondary tie-breaker
-
-The two lessons baked in:
-  - We minimise the *sum* of tardiness (never the *count* of late orders), so no
-    order is ever abandoned to polish another.
-  - The λ·max_tardiness term is the fairness guard the old build never had — it stops
-    a savable order being pushed dramatically late for the others' sake.
-λ (fairness_weight) and w (makespan_weight) live in PlanConfig.
+    score = w_ontime · Σ (|miss| − band, capped)²     # the whole objective
+          + w_makespan · makespan                      # a strict tie-break only
+          + ceiling / committed-promise guards         # dormant in production today
 """
 
 from __future__ import annotations
 
 from ppc_engine.config import PlanConfig
 from ppc_engine.objective.metrics import PlanMetrics
-
-
-def _severity(metrics: PlanMetrics, config: PlanConfig) -> float:
-    """Convex, capped per-order tardiness — the reputation guard. Each order's
-    lateness beyond a tolerance is squared (accelerating) and capped, so a savable
-    order is never dumped for the aggregate and one impossible order can't dominate.
-    Protects EVERY order, not just the single worst (that was max_tardiness's blind
-    spot — see the 2026-07-24 spec)."""
-    tol = config.severity_tolerance_days
-    cap = config.severity_cap_days
-    total = 0.0
-    for late in metrics.lateness_by_order.values():
-        over = late - tol            # `late` is signed; early/on-time -> <= 0
-        if over <= 0.0:
-            continue
-        if over > cap:
-            over = cap
-        total += over * over
-    return total
 
 
 def _ceiling_breach(metrics: PlanMetrics, config: PlanConfig) -> float:
@@ -65,13 +39,34 @@ def _committed_promise_breach(metrics: PlanMetrics, config: PlanConfig) -> float
     return total
 
 
+def _ontime_breach(metrics: PlanMetrics, config: PlanConfig) -> float:
+    """Squared distance from the delivery date, in EITHER direction, beyond a free
+    band and capped. This is the whole objective (2026-08-06 spec).
+
+    `abs()` is the owner's rule that early and late are equally bad. Squaring is the
+    owner's rule that misses must be spread: ten orders 6 days out (10 x 2^2 = 40)
+    beats one order 30 days out ((30-4)^2 = 676). The cap stops one hopeless order
+    swamping the plan.
+
+    `lateness_by_order` is SIGNED — negative means the order finished early.
+    """
+    band = config.ontime_band_days
+    cap = config.ontime_cap_days
+    total = 0.0
+    for late in metrics.lateness_by_order.values():
+        over = abs(late) - band
+        if over > 0:
+            if over > cap:
+                over = cap
+            total += over * over
+    return total
+
+
 def score(metrics: PlanMetrics, config: PlanConfig) -> float:
     """Score a plan from its metrics. Lower is better."""
     return (
-        metrics.total_tardiness_days
-        + config.severity_weight * _severity(metrics, config)
+        config.ontime_weight * _ontime_breach(metrics, config)
         + config.ceiling_weight * _ceiling_breach(metrics, config)
         + config.committed_promise_weight * _committed_promise_breach(metrics, config)
-        + config.fairness_weight * metrics.max_tardiness_days
         + config.makespan_weight * metrics.makespan_days
     )

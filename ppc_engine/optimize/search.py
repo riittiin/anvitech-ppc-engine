@@ -11,8 +11,9 @@ Design guarantees:
     kept as the incumbent; a move is accepted only if it strictly improves.
   - **Deterministic** — a fixed seed + an evaluation budget → the same result every
     run ("what you Apply is what you get").
-  - **Objective-driven** — scored only through engine.objective (total tardiness +
-    fairness + makespan). The search knows nothing about how the score is built.
+  - **Objective-driven** — scored only through engine.objective (the symmetric
+    on-time term plus a makespan tie-break, 2026-08-06). The search knows nothing
+    about how the score is built.
 """
 
 from __future__ import annotations

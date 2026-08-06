@@ -1,5 +1,8 @@
 # Earliness penalty in the optimizer objective — design
 
+> **SUPERSEDED (2026-08-06) by `2026-08-06-symmetric-ontime-objective-design.md`.**
+> The branch this described was deleted, not merged. Do not execute this plan.
+
 **Date:** 2026-08-06
 **Status:** design approved, not implemented
 **Scope:** optimizer objective only. No scheduler, rule, UI, or `new_engine` change.

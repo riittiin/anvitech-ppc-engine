@@ -41,7 +41,8 @@ def test_optimizer_plan_metrics_ceiling_breach():
 
 
 def test_optimizer_score_uses_ceiling_breach():
-    base = {"total_late_days": 20, "makespan_days": 30.0, "slip_severity": 0.0}
+    base = {"total_late_days": 20, "makespan_days": 30.0, "slip_severity": 0.0,
+            "ontime_breach": 0.0}
     clean = {**base, "ceiling_breach": 0.0}
     breach = {**base, "ceiling_breach": 25.0}
     assert optimizer.score(breach) > optimizer.score(clean)

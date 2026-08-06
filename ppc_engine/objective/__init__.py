@@ -1,7 +1,9 @@
 """The objective — how good a schedule is.
 
-The ONE home of the scoring rule (RULES.md Rule 3): minimize total tardiness with a
-fairness guard against starving any single order, then makespan. The scheduler itself
+The ONE home of the scoring rule (RULES.md Rule 3, symmetric on-time objective,
+2026-08-06): ONE squared, capped, band-tolerant penalty for how far each order
+misses its delivery date in either direction, plus a 0.1 makespan tie-break, and
+the dormant worst-order-ceiling and committed-promise guards. The scheduler itself
 is objective-agnostic; only this package knows what "better" means.
 """
 

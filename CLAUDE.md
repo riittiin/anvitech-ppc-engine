@@ -484,8 +484,11 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   (SPT, ATC, then fresh random permutations), each hill-climbed (insertion/swap/block) until
   it stalls (`_RESTART_AFTER`), keeping the **global best** — a single trajectory got stuck
   in a worse local optimum (39.75/778 on Test5; multi-start → 39.7/713). Scores each plan
-  `total_late_days + 10×makespan_days` (delivery gaps dominant — owner priority: fewest late
-  deliveries, since shortest-makespan plans push more orders late). Deterministic (eval-count
+  by ONE symmetric on-time penalty — how far each order misses its delivery date in either
+  direction, ignoring the first 4 days, capped at 60 and squared so misses spread across
+  orders rather than concentrating — plus a 0.1 makespan tie-break, and the dormant
+  worst-order-ceiling and committed-promise guards (delivery gaps dominant — owner priority:
+  fewest late deliveries, since shortest-makespan plans push more orders late). Deterministic (eval-count
   budget + fixed seed). `should_cancel()` is polled between evals so a run can be stopped
   early keeping the best-so-far. (Historical: an `objective="promise_slip"` mode scored
   committed orders against their `promised_date` for the auto committed re-sequencing

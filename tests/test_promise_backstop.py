@@ -46,13 +46,18 @@ def _run(monkeypatch, inc_slip, best_slip):
     _seed_book()
     saved_ranks = {"k": 1}
     book_store.save_plan_priority(saved_ranks, {"saved_at": "t"})
+    # `ontime_breach` is what score() reads since 2026-08-06; `total_late_days` is
+    # still reported and is what the auto-note text asserts on. Both are needed:
+    # the first makes the score premise true, the second makes the note assertion true.
     monkeypatch.setattr(m, "_incumbent_metrics",
                          lambda: {"total_late_days": 500, "makespan_days": 50.0,
+                                  "ontime_breach": 500.0,
                                   "max_late_days": 46, "max_committed_slip": inc_slip})
     with m._OPTIMIZE_LOCK:
         m._OPTIMIZE["state"] = "done"
         m._OPTIMIZE["result"] = {"best": {"total_late_days": 100,
                                           "makespan_days": 50.0,
+                                          "ontime_breach": 100.0,
                                           "max_late_days": 46,
                                           "max_committed_slip": best_slip},
                                  "ranks": {"k": 2},
@@ -62,8 +67,8 @@ def _run(monkeypatch, inc_slip, best_slip):
     # Sanity check on the premise every case isolates: score is strictly
     # better on its own — the backstop (or lack of one) is the only reason
     # apply/reject differs from a plain score comparison.
-    assert (optimizer.score({"total_late_days": 100, "makespan_days": 50.0}) <
-            optimizer.score({"total_late_days": 500, "makespan_days": 50.0}))
+    assert (optimizer.score({"total_late_days": 100, "makespan_days": 50.0, "ontime_breach": 100.0}) <
+            optimizer.score({"total_late_days": 500, "makespan_days": 50.0, "ontime_breach": 500.0}))
 
     m._auto_apply_result()
 
