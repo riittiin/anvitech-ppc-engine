@@ -154,8 +154,12 @@ def main():
     with open(args.workbook, "rb") as fh:
         new_engine.set_masters_bytes(fh.read())
     so_lines, masters = loaders.load_all(args.workbook)
+    # Settings pinned to LIVE production (verified against a plan pulled from the
+    # running site 2026-08-06): overlap 84, consolidation window 10, flexible
+    # machines OFF. The gate must measure at the settings the floor actually uses,
+    # or its verdict does not generalise.
     cfg = Config(plan_start_date=date.fromisoformat(args.start), scheduler="new",
-                 overlap_percent=84, flexible_machines=True,
+                 overlap_percent=84, flexible_machines=False,
                  apply_operator_logic=True, consolidation_window_days=10)
     _self_check()
     print(f"{len(so_lines)} SO lines | budget {args.budget} | seeds {SEEDS}\n")
