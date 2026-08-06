@@ -1627,6 +1627,43 @@ def _optimize_cancel():
     return _optimize_status()
 
 
+def _cancel_cloud_job(job_id):
+    """Honour a Stop during a CLOUD run: salvage whatever shards arrived, then end.
+
+    Stop means stop (2026-08-06 spec). Before this, the wait loop read `cancel` every
+    two seconds and only acted on it inside `if timed_out:`, so a Stop did nothing for
+    up to OPTIMIZE_CLOUD_TIMEOUT_MIN (40) minutes and then produced no plan. Live
+    2026-08-06: GitHub allocated 17 of 20 requested runners, so the collector's
+    all-arrived condition could never be met, and 17 delivered shard results were about
+    to be discarded.
+
+    NEVER falls back to local. `_finalize_from_shards` sets `cloud_failed` when the
+    merged shards yield no eligible winner, and the watchdog reads that flag to start a
+    local search — under cancel that would turn Stop into "start a fresh computation",
+    which the owner explicitly rejected. So this clears it.
+
+    `shards_finalizing` is claimed under the lock in the same block that reads it,
+    exactly as the timeout branch does, so it stays mutually exclusive with the
+    /optimize/shard-result collector's own claim: the two can never both finalize.
+    """
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] != "running" or _OPTIMIZE["job_id"] != job_id:
+            return                       # already finished, or a superseded job
+        claim = (bool(_OPTIMIZE.get("shards"))
+                 and not _OPTIMIZE.get("shards_finalizing"))
+        if claim:
+            _OPTIMIZE["shards_finalizing"] = True
+    if claim:
+        _finalize_from_shards(job_id)    # merges whatever subset arrived
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] == "running" and _OPTIMIZE["job_id"] == job_id:
+            # Either nothing had arrived, or the merge found no eligible winner.
+            # End either way, and clear cloud_failed so no local run starts.
+            _OPTIMIZE.update(state="failed", cancel=False, cloud_failed=False,
+                             error="stopped: no finished results had come back yet, "
+                                   "so the current plan is unchanged")
+
+
 def _all_lines_schedule(setup, masters, ranks):
     """A schedule covering ALL active lines, built the SAME way `_plan` builds it
     (one pass, saved ranks replayed with expedite off, operator absences reserved)
