@@ -324,21 +324,26 @@ def test_auto_apply_keeps_current_when_worst_order_would_regress(monkeypatch):
     book_store.save_plan_priority(saved_ranks, {"saved_at": "t"})
     # Incumbent: worst order 46 days late (high total, to leave headroom for
     # `best` to score strictly better while still regressing the worst order).
+    # `ontime_breach` is what score() reads since 2026-08-06; `total_late_days` is
+    # still reported and is what the auto-note text asserts on. Both are needed:
+    # the first makes the score premise true, the second makes the note assertion true.
     monkeypatch.setattr(m, "_incumbent_metrics",
                          lambda: {"total_late_days": 500, "makespan_days": 50.0,
+                                  "ontime_breach": 500.0,
                                   "max_late_days": 46})
     # Contest best: strictly better score (far fewer total late-days) but its
     # worst order is pushed to 61 days late — the backstop must reject it.
     with m._OPTIMIZE_LOCK:
         m._OPTIMIZE["result"] = {"best": {"total_late_days": 100,
                                           "makespan_days": 50.0,
+                                          "ontime_breach": 100.0,
                                           "max_late_days": 61},
                                  "ranks": {"k": 2}}
         m._OPTIMIZE["auto"] = True
     # Sanity check on the premise this test isolates: score is strictly
     # better on its own — the backstop is the ONLY reason the plan is kept.
-    assert (optimizer.score({"total_late_days": 100, "makespan_days": 50.0}) <
-            optimizer.score({"total_late_days": 500, "makespan_days": 50.0}))
+    assert (optimizer.score({"total_late_days": 100, "makespan_days": 50.0, "ontime_breach": 100.0}) <
+            optimizer.score({"total_late_days": 500, "makespan_days": 50.0, "ontime_breach": 500.0}))
 
     m._auto_apply_result()
 
@@ -379,8 +384,13 @@ def test_auto_apply_result_stamp_is_ist(monkeypatch):
     # "no plan" branch doesn't stamp a time, so drive the "still best" branch too:
     book_store.save_plan_priority({"k": 1}, {"saved_at": "t"})
     with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE["state"] = "done"
         m._OPTIMIZE["result"] = {"best": {"total_late_days": 999,
-                                          "makespan_days": 999}}
+                                          "makespan_days": 999,
+                                          "ontime_breach": 999.0},
+                                 "ranks": {},
+                                 "budget": 15, "seed": 42, "baseline": {},
+                                 "best_overlap": None, "current_overlap": None}
         m._OPTIMIZE["auto"] = True
     m._auto_apply_result()
     note = book_store.load_auto_note()
