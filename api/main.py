@@ -1525,11 +1525,12 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                                       and _OPTIMIZE["job_id"] == job_id)
                         # `continue` below skips the timeout branch for the rest of
                         # this job's life, so the deadline must be enforced HERE or a
-                        # never-resolving in-flight finalize spins forever. Reachable:
-                        # /optimize/shard-result calls _finalize_from_shards unguarded
-                        # (see FIX 2's try/except there — this is the backstop for
-                        # whatever slips past it), and a raise there latches
-                        # shards_finalizing with shards still populated.
+                        # never-resolving in-flight finalize would spin forever. The
+                        # known way to reach that state is a raise inside
+                        # _finalize_from_shards leaving shards_finalizing latched with
+                        # shards still populated; /optimize/shard-result now catches
+                        # and terminalizes, so this is the backstop for anything that
+                        # still slips past.
                         if still_mine and time.monotonic() > deadline:
                             _OPTIMIZE.update(
                                 state="failed", cancel=False, cloud_failed=False,
@@ -1538,10 +1539,11 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                             still_mine = False
                     if not still_mine:
                         return
-                    # Another party owns an in-flight finalize, or the grace window
-                    # simply hasn't produced anything to finalize yet — keep polling
-                    # rather than return, or nothing ever finishes the job and every
-                    # future optimize 409s.
+                    # Reached only when _cancel_cloud_job left the job alive, which
+                    # it does on exactly one path: another party owns an in-flight
+                    # finalize. Every other path writes a terminal state, so still_mine
+                    # is False and we returned above. Keep polling rather than return,
+                    # or nothing ever finishes the job and every future optimize 409s.
                     continue
                 if was_cancelled:
                     # Inside the grace window: keep polling so the workers can hear

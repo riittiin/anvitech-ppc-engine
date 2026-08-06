@@ -10,6 +10,23 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-06-cloud-stop-immediate-design.md`
 
+> **AMENDED DURING EXECUTION (2026-08-06).** This plan prescribed acting on a cancel
+> the instant it is seen. Measurement during the final review disproved that: cloud
+> workers heartbeat every `PROGRESS_EVERY_S = 5.0`s and learn about a Stop from that
+> response, so ending the job on the first 2-second poll kills it before any worker can
+> answer — their next heartbeat 404s, they never stop, and their results are dropped.
+> Measured against `main` on a healthy run: `main` produced ranks=2/evals=2800, the
+> as-planned version produced ranks=0/evals=100, i.e. **worse than no fix at all**.
+>
+> Owner decision: a **~90-second grace window** (`_CANCEL_GRACE_S`). On first sight of a
+> cancel the loop starts a timer, keeps polling so workers can deliver their best-so-far,
+> and only calls `_cancel_cloud_job` once the grace expires — bounded by the original
+> deadline. Verified to match `main` outcome-for-outcome on healthy runs and to beat it
+> on the incident shape (17 of 20 shards salvaged instead of discarded).
+>
+> The error string in the tasks below also changed to "no usable result had come back
+> yet" — the original wording claimed nothing arrived in cases where results had.
+
 ## Global Constraints
 
 - **Stop always means stop.** It must never start a fresh computation. Specifically it must never fall back to a local search.
