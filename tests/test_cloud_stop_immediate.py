@@ -208,17 +208,27 @@ def test_cancel_ends_a_latched_no_winner_job_instead_of_orphaning_it():
 # ---------------------------------------------------------------------------
 # Loop-level tests: drive the REAL cloud_job() wait loop inside _start_optimize
 # (not _cancel_cloud_job directly, which every test above already covers in
-# isolation). These pin the WIRING — the `if was_cancelled:` trigger sitting
-# before `if timed_out:`, and its `continue`-back-into-the-loop behaviour —
-# so the wiring itself has coverage independent of the helper it calls.
+# isolation). These pin the WIRING — the `if was_cancelled:`/`if cancel_expired:`
+# triggers sitting before `if timed_out:`, and their `continue`-back-into-the-loop
+# behaviour — so the wiring itself has coverage independent of the helper it calls.
+#
+# A cancel now waits out a ~_CANCEL_GRACE_S grace window (owner decision,
+# 2026-08-06, see api.main._CANCEL_GRACE_S) before acting, so tests that need a
+# PROMPT terminal state despite a far-off deadline patch the grace window down —
+# real sleeps, never 90 real seconds. Tests where the timeout deadline is already
+# behind the first poll (a ~0.3s OPTIMIZE_CLOUD_TIMEOUT_MIN) don't need the patch:
+# `cancel_deadline = min(now + grace, deadline)` collapses to the already-past
+# deadline regardless of the grace value.
 # ---------------------------------------------------------------------------
 
 def test_loop_cancel_only_reaches_terminal_promptly_and_never_goes_local(monkeypatch):
     """A Stop with the cloud never having answered (long timeout, so the
-    deadline is nowhere close) must still end the run promptly, and `mode`
-    must never become "local" — Stop must never start a fresh computation."""
+    deadline is nowhere close) must still end the run promptly once the (patched
+    down) grace window elapses, and `mode` must never become "local" — Stop must
+    never start a fresh computation."""
     _cloud_env(monkeypatch, timeout_min="5")
     m = _api()
+    monkeypatch.setattr(m, "_CANCEL_GRACE_S", 0.5)   # don't sleep 90 real seconds
     _seed_book_for_contest()
     monkeypatch.setattr(m, "_dispatch_workflow", lambda cloud, job_id: True)
 
@@ -237,7 +247,11 @@ def test_loop_cancel_and_timeout_same_poll_prefers_cancel(monkeypatch):
     """The exact race Finding/§3 of the spec calls out: cancel and the deadline
     both true on the SAME poll must take the cancel path, not the timeout ->
     local-fallback path. A short timeout puts the deadline well behind the
-    first 2s poll tick; cancel is set immediately, before that first tick."""
+    first 2s poll tick; cancel is set immediately, before that first tick.
+    No grace patch needed: `cancel_deadline = min(now + grace, deadline)`
+    collapses to the already-past `deadline` regardless of the (default,
+    unpatched) grace value, so the cancel is already expired on the very
+    first poll — the exact same-poll race this test is about."""
     _cloud_env(monkeypatch, timeout_min="0.005")   # ~0.3s, expires before poll 1
     m = _api()
     _seed_book_for_contest()
@@ -271,6 +285,7 @@ def test_loop_cancel_while_in_flight_does_not_wedge_forever(monkeypatch):
     not a second thread — finishes the job."""
     _cloud_env(monkeypatch, timeout_min="5")   # deadline irrelevant here
     m = _api()
+    monkeypatch.setattr(m, "_CANCEL_GRACE_S", 0.5)   # don't sleep 90 real seconds
     _seed_book_for_contest()
     monkeypatch.setattr(m, "_dispatch_workflow", lambda cloud, job_id: True)
 
@@ -346,3 +361,76 @@ def test_loop_cancel_while_in_flight_never_resolving_still_terminates_via_deadli
     st = _wait(m, "failed", timeout=10.0)
     assert st["mode"] != "local", "a stopped run must never start a local search"
     assert "stopped" in (st["error"] or "").lower()
+
+
+def test_loop_cancel_waits_grace_before_acting(monkeypatch):
+    """FIX 1 (2026-08-06/07): a Stop must WAIT ~_CANCEL_GRACE_S before ending
+    the job, not act on the very first poll that sees `cancel`. Workers
+    heartbeat every PROGRESS_EVERY_S = 5.0s (scripts/cloud_optimize_worker.py)
+    and learn about a cancel from that response — ending the job before any
+    worker can hear about it drops their in-progress results (measured live:
+    ranks=2/evals=2800 on main vs ranks=0/evals=100 on the earlier, grace-less
+    cut of this fix). The grace window is patched down here so the test
+    doesn't sleep 90 real seconds, but it must still be long enough to survive
+    at least one 2s poll tick, or this test can't tell "waited briefly" apart
+    from "hasn't polled yet" — see the mutation check in the task report."""
+    _cloud_env(monkeypatch, timeout_min="5")   # deadline nowhere close
+    m = _api()
+    monkeypatch.setattr(m, "_CANCEL_GRACE_S", 3.0)
+    _seed_book_for_contest()
+    monkeypatch.setattr(m, "_dispatch_workflow", lambda cloud, job_id: True)
+
+    st = m._start_optimize(budget_evals=15, label="deep", background=True)
+    assert st["state"] == "running" and st["mode"] == "cloud"
+
+    time.sleep(0.3)
+    m._optimize_cancel()
+
+    # Past the loop's first 2s poll (which starts the grace timer) but still
+    # inside the 3s grace window: the job must still be alive, waiting for a
+    # worker's next heartbeat — not ended on the first sight of the cancel.
+    time.sleep(2.5)
+    with m._OPTIMIZE_LOCK:
+        assert m._OPTIMIZE["state"] == "running", (
+            "a Stop must wait out the grace window, not end on the first poll")
+
+    st = _wait(m, "failed", timeout=15.0)
+    assert st["mode"] != "local", "cancel must never trigger a local search"
+    assert "stopped" in (st["error"] or "").lower()
+
+
+def test_cancel_grace_constant_stays_meaningfully_large():
+    """Every loop-level test above patches `_CANCEL_GRACE_S` down for speed (real
+    90s sleeps in a test suite are a non-starter), so none of them would notice a
+    regression that quietly shrank the real default back toward zero — i.e.
+    re-introduced the exact bug this whole fix exists for (a Stop ending the job
+    before any worker's PROGRESS_EVERY_S = 5.0s heartbeat,
+    scripts/cloud_optimize_worker.py, can ever hear about it). Pin the constant
+    itself, with real margin over a single heartbeat cycle."""
+    import api.main as m
+    assert m._CANCEL_GRACE_S >= 30.0, (
+        "the grace window must survive several worker heartbeat cycles, "
+        "not just theoretically exist")
+
+
+def test_cancel_marks_a_salvaged_result_as_cancelled(monkeypatch):
+    """FIX 3: shards that finished BEFORE the Stop carry cancelled=False, so
+    merge_shard_rows' any() derives False for a partial salvage — the UI would
+    then present a part-searched (e.g. 17-of-20-shards) plan as a finished
+    contest. `_cancel_cloud_job` must mark the salvaged result cancelled=True
+    itself, after a successful finalize."""
+    m = _api()
+    _seed(m, shards={i: {"rows": [], "evals": 840} for i in range(17)})
+
+    def _fake_finalize(job_id):
+        with m._OPTIMIZE_LOCK:           # a real finalize ends the job w/ a result
+            m._OPTIMIZE.update(
+                state="done", cancel=False,
+                result={"ranks": {"k": 1}, "cancelled": False, "best": {}})
+    monkeypatch.setattr(m, "_finalize_from_shards", _fake_finalize)
+
+    m._cancel_cloud_job("job-1")
+
+    assert m._OPTIMIZE["state"] == "done"
+    assert m._OPTIMIZE["result"]["cancelled"] is True, (
+        "a salvaged partial result must report itself as cancelled/stopped-early")
