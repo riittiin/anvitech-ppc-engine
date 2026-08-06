@@ -1468,13 +1468,11 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                     timed_out = (time.monotonic() > deadline
                                  or _OPTIMIZE.get("cloud_failed"))
                     was_cancelled = _OPTIMIZE["cancel"]
-                    if timed_out:
-                        if was_cancelled:
-                            # Cancelled and the cloud never answered → just stop.
-                            _OPTIMIZE.update(state="failed", cancel=False,
-                                             error="stopped: the cloud run did not "
-                                                   "answer before the timeout")
-                            return
+                    # Cancel is its OWN trigger, checked on every 2-second poll — not
+                    # only when the deadline passes (2026-08-06 spec). The salvage and
+                    # the clean-stop both live in _cancel_cloud_job, called below once
+                    # this lock is released.
+                    if not was_cancelled and timed_out:
                         # Prefer salvaging arrived shards over a full local
                         # recompute. `claim_shard_finalize` is an ATOMIC claim
                         # of `shards_finalizing` — mutually exclusive with the
@@ -1498,6 +1496,9 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                         # claimed (the collector, e.g. the very last shard
                         # landing at the same moment) — do nothing, let it
                         # finish; falls through to the plain `return` below.
+                if was_cancelled:
+                    _cancel_cloud_job(job_id)
+                    return
                 if timed_out:
                     if claim_shard_finalize:
                         _finalize_from_shards(job_id)   # salvage what arrived
