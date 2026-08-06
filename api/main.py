@@ -1430,15 +1430,16 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                 # ever dispatched. Pre-Oracle this race was unreachable
                 # (dispatch was immediate); the claim window makes it common,
                 # so it must be handled here rather than left to the 40-min
-                # watchdog. Mirrors the watchdog's own cloud-never-answered
-                # cancelled branch below (same terminal state, same message)
+                # watchdog. Same terminal state and message as the wait loop's
+                # own cancel-with-nothing-arrived path (via _cancel_cloud_job)
                 # so a Stop pressed during the window ends the run promptly
                 # with the same UX — no dispatch, no local fallback.
                 with _OPTIMIZE_LOCK:
                     if _OPTIMIZE["state"] == "running" and _OPTIMIZE["job_id"] == job_id:
                         _OPTIMIZE.update(state="failed", cancel=False,
-                                         error="stopped: the cloud run did not "
-                                               "answer before the timeout")
+                                         error="stopped: no finished results had "
+                                               "come back yet, so the current plan "
+                                               "is unchanged")
                 return
 
             if not claimed:
@@ -1498,7 +1499,18 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                         # finish; falls through to the plain `return` below.
                 if was_cancelled:
                     _cancel_cloud_job(job_id)
-                    return
+                    with _OPTIMIZE_LOCK:
+                        still_mine = (_OPTIMIZE["state"] == "running"
+                                      and _OPTIMIZE["job_id"] == job_id)
+                    if not still_mine:
+                        return
+                    # _cancel_cloud_job left the job alive because another party owns
+                    # an in-flight finalize. Its no-winner branch does NOT end the job
+                    # — it clears `shards` and waits for a later poll — so this thread
+                    # must keep watching rather than return, or nothing ever finishes
+                    # the job and every future optimize 409s. Next poll, `shards` is
+                    # empty and _cancel_cloud_job takes its latched path and ends it.
+                    continue
                 if timed_out:
                     if claim_shard_finalize:
                         _finalize_from_shards(job_id)   # salvage what arrived
