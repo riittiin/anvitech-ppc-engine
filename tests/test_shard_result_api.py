@@ -81,6 +81,38 @@ def test_all_shards_finalize_matches_run_contest(monkeypatch):
     assert res.get("flexible_machines") == full["winner_flexible"]
 
 
+def test_finalize_crash_terminalizes_instead_of_wedging(monkeypatch):
+    """FIX 2 regression. The endpoint's `_finalize_from_shards` call was
+    unguarded — a raise there (reachable beyond malformed worker data:
+    `_finalize_optimize` reads the operator table from the durable store
+    before its terminal state write, and a transient DB blip raises there)
+    left `shards_finalizing` latched with `shards` still populated and state
+    stuck "running" forever: `_start_optimize`'s guard then 409s every future
+    optimize, including the daily auto-run, until a process restart. The
+    endpoint must still terminalize the job even though it re-raises (so the
+    worker's retry/error handling is unaffected)."""
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
+    import importlib, api.main as m
+    importlib.reload(m)
+    payload = _payload()
+    _seed_running(m, payload, job_id="job-1")
+
+    def _boom(job_id):
+        raise RuntimeError("boom: transient store blip")
+    monkeypatch.setattr(m, "_finalize_from_shards", _boom)
+
+    c = TestClient(m.app, raise_server_exceptions=False)
+    r = c.post("/optimize/shard-result", headers={"X-Worker-Secret": "s3cr3t"},
+               json={"job_id": "job-1", "shard_index": 0, "shard_total": 1,
+                     "rows": [], "evals": 10, "cancelled": False})
+    assert r.status_code == 500, "the crash must still surface to the caller"
+    assert m._OPTIMIZE["state"] == "failed", (
+        "a finalize crash must terminalize the job, not leave it wedged 'running'")
+    assert m._OPTIMIZE["cancel"] is False
+    assert m._OPTIMIZE["cloud_failed"] is False
+    assert "could not finalize" in (m._OPTIMIZE["error"] or "")
+
+
 def test_stale_shard_is_noop(monkeypatch):
     monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3cr3t")
     import importlib, api.main as m

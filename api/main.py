@@ -975,6 +975,16 @@ def _load_plan_config() -> Config:
 _OPT_BUDGETS = {"deep": 1000, "quick": 1000}
 _OPT_SEED = 42
 
+# How long a Stop waits for live cloud workers to hear about it and post their
+# best-so-far before we finalize without them. Workers heartbeat every
+# PROGRESS_EVERY_S = 5.0s (scripts/cloud_optimize_worker.py) and learn about a
+# cancel from that response, so ending the job on the first 2-second poll — as an
+# earlier cut of this fix did — kills it before any worker can answer: their next
+# heartbeat 404s, they never stop, and their results are dropped. Measured: that
+# turned a Stop that yielded a real plan into one that yielded nothing.
+# 90s is ~18 heartbeat cycles, and still bounded far below the 40-minute deadline.
+_CANCEL_GRACE_S = 90.0
+
 _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              "baseline": None, "best": None, "error": None, "elapsed_s": 0.0,
              "started_mono": None, "result": None, "cancel": False,
@@ -1430,15 +1440,16 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                 # ever dispatched. Pre-Oracle this race was unreachable
                 # (dispatch was immediate); the claim window makes it common,
                 # so it must be handled here rather than left to the 40-min
-                # watchdog. Mirrors the watchdog's own cloud-never-answered
-                # cancelled branch below (same terminal state, same message)
+                # watchdog. Same terminal state and message as the wait loop's
+                # own cancel-with-nothing-arrived path (via _cancel_cloud_job)
                 # so a Stop pressed during the window ends the run promptly
                 # with the same UX — no dispatch, no local fallback.
                 with _OPTIMIZE_LOCK:
                     if _OPTIMIZE["state"] == "running" and _OPTIMIZE["job_id"] == job_id:
                         _OPTIMIZE.update(state="failed", cancel=False,
-                                         error="stopped: the cloud run did not "
-                                               "answer before the timeout")
+                                         error="stopped: no usable result had "
+                                               "come back yet, so the current plan "
+                                               "is unchanged")
                 return
 
             if not claimed:
@@ -1458,6 +1469,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                     return
 
             deadline = time.monotonic() + cloud["timeout_min"] * 60
+            cancel_deadline = None      # set on first sight of a cancel
             while True:
                 time.sleep(2)
                 with _OPTIMIZE_LOCK:
@@ -1468,13 +1480,21 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                     timed_out = (time.monotonic() > deadline
                                  or _OPTIMIZE.get("cloud_failed"))
                     was_cancelled = _OPTIMIZE["cancel"]
-                    if timed_out:
-                        if was_cancelled:
-                            # Cancelled and the cloud never answered → just stop.
-                            _OPTIMIZE.update(state="failed", cancel=False,
-                                             error="stopped: the cloud run did not "
-                                                   "answer before the timeout")
-                            return
+                    # Cancel is its OWN trigger, checked on every 2-second poll — not
+                    # only when the deadline passes (2026-08-06 spec) — but it does
+                    # NOT act immediately: a ~_CANCEL_GRACE_S grace window (owner
+                    # decision, 2026-08-06) gives live cloud workers a chance to hear
+                    # about the Stop on their next heartbeat and post their
+                    # best-so-far before we finalize without them. The salvage lives
+                    # in _cancel_cloud_job, called below (once the grace expires and
+                    # the lock is released); the clean-stop for a never-resolving
+                    # in-flight finalize lives in this loop's own deadline check.
+                    if was_cancelled and cancel_deadline is None:
+                        cancel_deadline = min(time.monotonic() + _CANCEL_GRACE_S,
+                                              deadline)
+                    cancel_expired = (cancel_deadline is not None
+                                      and time.monotonic() > cancel_deadline)
+                    if not was_cancelled and timed_out:
                         # Prefer salvaging arrived shards over a full local
                         # recompute. `claim_shard_finalize` is an ATOMIC claim
                         # of `shards_finalizing` — mutually exclusive with the
@@ -1498,6 +1518,39 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                         # claimed (the collector, e.g. the very last shard
                         # landing at the same moment) — do nothing, let it
                         # finish; falls through to the plain `return` below.
+                if cancel_expired:
+                    _cancel_cloud_job(job_id)
+                    with _OPTIMIZE_LOCK:
+                        still_mine = (_OPTIMIZE["state"] == "running"
+                                      and _OPTIMIZE["job_id"] == job_id)
+                        # `continue` below skips the timeout branch for the rest of
+                        # this job's life, so the deadline must be enforced HERE or a
+                        # never-resolving in-flight finalize would spin forever. The
+                        # known way to reach that state is a raise inside
+                        # _finalize_from_shards leaving shards_finalizing latched with
+                        # shards still populated; /optimize/shard-result now catches
+                        # and terminalizes, so this is the backstop for anything that
+                        # still slips past.
+                        if still_mine and time.monotonic() > deadline:
+                            _OPTIMIZE.update(
+                                state="failed", cancel=False, cloud_failed=False,
+                                error="stopped: no usable result had come back yet, "
+                                      "so the current plan is unchanged")
+                            still_mine = False
+                    if not still_mine:
+                        return
+                    # Reached only when _cancel_cloud_job left the job alive, which
+                    # it does on exactly one path: another party owns an in-flight
+                    # finalize. Every other path writes a terminal state, so still_mine
+                    # is False and we returned above. Keep polling rather than return,
+                    # or nothing ever finishes the job and every future optimize 409s.
+                    continue
+                if was_cancelled:
+                    # Inside the grace window: keep polling so the workers can hear
+                    # the Stop on their next heartbeat and deliver their best-so-far.
+                    # The normal collector then finalizes and the top-of-loop state
+                    # check ends this thread.
+                    continue
                 if timed_out:
                     if claim_shard_finalize:
                         _finalize_from_shards(job_id)   # salvage what arrived
@@ -1625,6 +1678,78 @@ def _optimize_cancel():
         if _OPTIMIZE["state"] == "running":
             _OPTIMIZE["cancel"] = True
     return _optimize_status()
+
+
+def _cancel_cloud_job(job_id):
+    """Honour a Stop during a CLOUD run: salvage whatever shards arrived, then end.
+
+    Stop means stop (2026-08-06 spec), but not on the very first poll: the caller
+    (the wait loop in `_start_optimize`'s `cloud_job()`) waits out a
+    ~`_CANCEL_GRACE_S` grace window first, so a live worker's next heartbeat has a
+    chance to hear about the Stop and post its best-so-far — only calling this once
+    that grace has expired (or the overall deadline has, whichever is sooner). Before
+    the grace window existed, the wait loop read `cancel` every two seconds and acted
+    immediately, which ended the job before any worker still computing could ever
+    answer: their next heartbeat 404s, `state["cancel"]` is never set worker-side, and
+    their eventual results are dropped — measured turning a Stop that would have
+    yielded a real plan into one that yielded nothing. Before THAT, cancel was only
+    read inside `if timed_out:`, so a Stop did nothing for up to
+    OPTIMIZE_CLOUD_TIMEOUT_MIN (40) minutes. Live 2026-08-06: GitHub allocated 17 of
+    20 requested runners, so the collector's all-arrived condition could never be
+    met, and 17 delivered shard results were about to be discarded.
+
+    NEVER falls back to local. `_finalize_from_shards` sets `cloud_failed` when the
+    merged shards yield no eligible winner, and the watchdog reads that flag to start a
+    local search — under cancel that would turn Stop into "start a fresh computation",
+    which the owner explicitly rejected. So this clears it.
+
+    `shards_finalizing` is claimed under the lock in the same block that reads it.
+    But that flag alone is ambiguous: `_finalize_from_shards`'s no-winner branch leaves
+    it set while clearing `shards`, expecting a later watchdog poll to self-heal. Only
+    `finalizing AND shards` means genuinely in flight — and only then does this return
+    without writing a terminal state, because doing so would make their in-flight
+    finalize a silent no-op. In every other case this ENDS the job. The caller does
+    NOT simply stop polling after that in-flight case, though — it keeps polling
+    (bounded by the overall deadline, enforced in the caller itself) until either
+    this function's own terminal write lands on a later call, or the deadline forces
+    one; the caller enforces that backstop, not this function.
+    """
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] != "running" or _OPTIMIZE["job_id"] != job_id:
+            return                       # already finished, or a superseded job
+        have_shards = bool(_OPTIMIZE.get("shards"))
+        finalizing = bool(_OPTIMIZE.get("shards_finalizing"))
+        # finalizing AND shards  -> someone is genuinely mid-flight
+        # finalizing AND !shards -> already ran, found no winner, latched
+        #                           (see _finalize_from_shards's no-winner branch)
+        in_flight = finalizing and have_shards
+        claim = have_shards and not finalizing
+        if claim:
+            _OPTIMIZE["shards_finalizing"] = True
+    if in_flight:
+        # Someone else owns the salvage and is still working. Writing a terminal
+        # state here would make THEIR _finalize_from_shards a silent no-op — it
+        # returns early unless the state is "running" — discarding every shard
+        # they were about to merge. Leave them alone; their finalize ends the job.
+        return
+    if claim:
+        _finalize_from_shards(job_id)    # merges whatever subset arrived
+        with _OPTIMIZE_LOCK:
+            res = _OPTIMIZE.get("result")
+            if res is not None and _OPTIMIZE.get("job_id") == job_id:
+                # Shards that finished BEFORE the Stop carry cancelled=False, so
+                # merge_shard_rows' any() derives False for a partial salvage. Mark
+                # it here or the UI presents a part-searched plan as a finished one.
+                res["cancelled"] = True
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] == "running" and _OPTIMIZE["job_id"] == job_id:
+            # Nothing had arrived, or the merge (just now, or on an earlier call
+            # that latched shards_finalizing and was waiting on a watchdog poll
+            # this cancel is about to kill) found no eligible winner. End either
+            # way, and clear cloud_failed so no local run starts.
+            _OPTIMIZE.update(state="failed", cancel=False, cloud_failed=False,
+                             error="stopped: no usable result had come back yet, "
+                                   "so the current plan is unchanged")
 
 
 def _all_lines_schedule(setup, masters, ranks):
@@ -2621,7 +2746,18 @@ def optimize_shard_result_ep(req: WorkerShardResult, request: Request):
                 _OPTIMIZE["shards_finalizing"] = True
                 ready = True
     if ready:
-        _finalize_from_shards(req.job_id)
+        try:
+            _finalize_from_shards(req.job_id)
+        except Exception as e:  # noqa: BLE001 — a finalize crash must not wedge the job
+            # Without this, `shards_finalizing` stays latched with `shards` populated
+            # and state stays "running" forever: _start_optimize's guard then 409s
+            # every future optimize, including the daily auto-run, until a restart.
+            with _OPTIMIZE_LOCK:
+                if (_OPTIMIZE["state"] == "running"
+                        and _OPTIMIZE.get("job_id") == req.job_id):
+                    _OPTIMIZE.update(state="failed", cancel=False, cloud_failed=False,
+                                     error=f"could not finalize the cloud result: {e}")
+            raise
     return {"ok": True}
 
 
