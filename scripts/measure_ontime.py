@@ -31,7 +31,7 @@ SEEDS = (42, 7, 2026)
 # ontime_weight=0 leaves only makespan — pure makespan minimisation, which has
 # never run. A faithful baseline must reconstruct the pre-branch formula.
 # Values below are the pre-branch PlanConfig defaults, taken from
-# `git show <pre-branch>:ppc_engine/config.py`. Note makespan was ALWAYS 0.1
+# `git show 9c81c41:ppc_engine/config.py`. Note makespan was ALWAYS 0.1
 # on this side; 40 was the engine-side (classic) weight and never applied here.
 # ---------------------------------------------------------------------------
 _OLD_SEVERITY_TOL = 2.0

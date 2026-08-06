@@ -95,7 +95,7 @@ def test_run_contest_parallel_equals_sequential():
 
 def test_pick_winner_tie_keeps_the_current_setting():
     best = {"makespan_days": 1.0, "late_orders": 0, "total_late_days": 0,
-            "max_late_days": 0, "orders": 1}
+            "max_late_days": 0, "orders": 1, "ontime_breach": 0.0}
     rows = [{"overlap": 50, "flexible": False, "eligible": True, "best": dict(best)},
             {"overlap": 80, "flexible": False, "eligible": True, "best": dict(best)}]
     assert svc.pick_winner(80, False, rows)["overlap"] == 80
@@ -107,7 +107,7 @@ def test_pick_winner_tie_keeps_the_current_setting():
 
 def test_pick_winner_tie_also_prefers_current_machine_set():
     best = {"makespan_days": 1.0, "late_orders": 0, "total_late_days": 0,
-            "max_late_days": 0, "orders": 1}
+            "max_late_days": 0, "orders": 1, "ontime_breach": 0.0}
     rows = [{"overlap": 80, "flexible": False, "eligible": True, "best": dict(best)},
             {"overlap": 80, "flexible": True, "eligible": True, "best": dict(best)}]
     # Same score, same overlap — the current machine-set wins the tie.

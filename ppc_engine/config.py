@@ -31,10 +31,11 @@ class PlanConfig:
     Scheduling knobs:
         setup_min:   Setup minutes charged once per *machining* operation (RULES.md).
 
-    Objective weights (used only by objective/objective.py):
-        fairness_weight:  λ — weight on the worst single-order lateness (the
-                          no-starvation guard, RULES.md Rule 3).
-        makespan_weight:  w — weight on makespan (a strict secondary goal).
+    Objective weights (read by objective/objective.py):
+        fairness_weight:  λ — RETAINED BUT UNUSED since 2026-08-06 (the on-time
+                          term below subsumes the no-starvation guard it used to
+                          express, RULES.md Rule 3); no longer read at all.
+        makespan_weight:  w — weight on makespan (now a tie-break only).
     """
 
     plan_start: datetime
@@ -95,15 +96,18 @@ class PlanConfig:
     ontime_cap_days: float = 60.0
     ontime_weight: float = 1.0
 
-    # Reputation guard. A CONVEX, capped per-order tardiness penalty that penalizes
+    # Reputation guard. RETAINED BUT UNUSED since 2026-08-06 (see the fairness_weight/
+    # makespan_weight note above) — the on-time term now subsumes it, `score()` no
+    # longer reads severity_*. Kept for the field names' stability. While it was
+    # live, this was a CONVEX, capped per-order tardiness penalty that penalized
     # EVERY order's lateness on an accelerating curve. Must equal engine/optimizer.py
-    # SEVERITY_* . cap=60 is the owner's "DISTRIBUTE THE PAIN" choice (2026-07-25):
-    # measured on the real book, raising the cap 30->60 spreads unavoidable lateness so
-    # the worst orders drop hard (SO108 53->26, SO107 47->23, plan worst 53->40) instead
-    # of a few orders being catastrophically late while others sit on-time. The trade the
-    # owner explicitly accepted: ~15 orders slide from on-time into 5-13 days late (10 of
-    # them 10-13 d) so NO order is left catastrophically worse than it must be. cap 60/90/
-    # 120 gave identical plans (60 is the plateau). Re-measure before moving.
+    # SEVERITY_* . cap=60 was the owner's "DISTRIBUTE THE PAIN" choice (2026-07-25):
+    # measured on the real book, raising the cap 30->60 spread unavoidable lateness so
+    # the worst orders dropped hard (SO108 53->26, SO107 47->23, plan worst 53->40)
+    # instead of a few orders being catastrophically late while others sat on-time.
+    # The trade the owner explicitly accepted: ~15 orders slid from on-time into
+    # 5-13 days late (10 of them 10-13 d) so no order was left catastrophically worse
+    # than it had to be. cap 60/90/120 gave identical plans (60 was the plateau).
     #   severity_tolerance_days (T): first T late days cost nothing extra.
     #   severity_weight (mu):        strength of the squared overage.
     #   severity_cap_days:           overage capped at this many days before squaring.

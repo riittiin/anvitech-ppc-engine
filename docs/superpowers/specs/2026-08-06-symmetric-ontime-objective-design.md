@@ -24,7 +24,7 @@ Three requirements, and nothing else:
 
 ## 2. Why the current formula does not express this
 
-The score has six terms. Measured on the live plan (2026-08-06, 68 orders, applied
+The score has five terms. Measured on the live plan (2026-08-06, 68 orders, applied
 optimization 10:30):
 
 | Term | Live contribution | Share |
@@ -32,11 +32,11 @@ optimization 10:30):
 | `total_late_days` | 483 | 3.4% |
 | `slip_severity` (squared lateness beyond 2 d, capped 60) | 11,366 | 80.8% |
 | `makespan_days` × 40 | 2,224 | **15.8%** |
-| `ceiling_breach` | **0** | dormant (`worst_ceiling_days` is null) |
+| `ceiling_breach` | **0** | dormant *in the saved config* — `worst_ceiling_days` is null there by design (`api/main.py:368` strips it as a transient per-run value); every optimize run itself sets it from the incumbent's `max_late_days` (`api/main.py:1282`), so the term is live during search, not dormant |
 | `committed_promise_breach` | **0** | dormant (0 committed orders, feature hidden) |
-| `earliness_breach` | **0** | dormant (weight 0) |
 
-Three of the six are contributing nothing. The engine is really running on three terms.
+Two of the five are contributing nothing on today's book. The engine is really running on
+three-and-a-half terms — `ceiling_breach` is armed but not currently binding.
 
 **Three concrete mismatches with the goal:**
 
@@ -116,17 +116,36 @@ chose it: ±4 is the promise, not a target to beat.
 
 - **`ceiling_breach`** — guards against a *re-optimization* pushing an order past where the
   current plan already has it. That is stability between plans, not plan quality; the new
-  term cannot express it. Currently dormant.
+  term cannot express it. **Not dormant** — `api/main.py:1282` sets `worst_ceiling_days` to
+  the incumbent's `max_late_days` on every optimize run, and it reaches
+  `PlanConfig.ceiling_days` at `engine/new_engine.py:205`. It reads null only in the *saved*
+  Config (`api/main.py:368` strips it there on purpose, since it is a per-run transient, not
+  a setting) — that is a different thing from it being inactive during search.
 - **`committed_promise_breach`** — measures against `promised_date`, a different date from
   the delivery date. Currently dormant (feature hidden, zero committed orders).
 
-Both remain in the code and in the score, exactly as they are.
+Both remain in the code and in the score, exactly as they are. Because the new on-time
+term's live contribution is measured smaller than the old three-term total it replaces
+(≈2.71× smaller on the live book), `ceiling_weight` (100) and `committed_promise_weight`
+(5000) — both tuned against the old, larger scale — are now proportionally ~2.7× more
+dominant relative to the main term than the values they were measured against.
+`ceiling_breach` is live today, so this is not a purely theoretical interaction;
+`committed_promise_breach` stays dormant only as long as the (currently hidden) commitment
+feature stays off. Unmeasured — re-measure before either guard next binds.
 
 ### 3.4 The side effect worth having
 
-Both scorers end up with the identical formula. The 400× makespan divergence and the
-missing fairness term both disappear, because there is only one rule left to disagree
-about. The mirror test becomes genuinely meaningful rather than pinning a known defect.
+Both scorers end up identical in formula, still different in domain. `ppc_engine`'s search
+scores one entry per *consolidated batch*, using the batch's earliest member's delivery
+date; `engine/optimizer.plan_metrics` scores one entry per *SO-line*, at that line's own
+date — a measured 5.1% disagreement on the same plan. Consolidation (Rule 1) is exactly the
+mechanism that produces this: a batch built around its earliest-due member delivers its
+later-due members early, and the new symmetric term — with no pull toward the exact date
+inside the band — has no reason to see that as a cost, so it is systematically invisible to
+the search and only charged at the winner-pick, per-line. The 400× makespan divergence and
+the missing fairness term both disappear, because there is now only one rule left to
+disagree about at the formula level. The mirror test becomes meaningful for the formula it
+checks, but it does not — and was never meant to — cover this domain difference.
 
 ## 4. Architecture
 

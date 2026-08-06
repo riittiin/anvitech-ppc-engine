@@ -3,8 +3,10 @@ search. The state-of-the-art shape for this problem class (OPTIMIZATION.md).
 
 Why memetic (GA + local search) rather than plain GA or plain local search:
   - The population + crossover give *diversity* — a way to escape the single-basin
-    trap that iterated local search can fall into (the fairness sweep showed the
-    search, not the objective, is the bottleneck).
+    trap that iterated local search can fall into (a historical sweep, back when the
+    objective still carried a separate fairness term, showed the search, not the
+    objective, was the bottleneck; the objective is now one symmetric on-time term
+    plus a makespan tie-break, 2026-08-06 — see ppc_engine/objective).
   - The local-search polish gives *sample-efficiency* — critical because each schedule
     evaluation costs ~0.6s, so we can't afford a purely random GA.
 

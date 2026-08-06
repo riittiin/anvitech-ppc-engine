@@ -125,7 +125,8 @@ def test_result_endpoint_stores_winner_flexible(monkeypatch):
         "/optimize/result",
         headers={"X-Worker-Secret": WORKER_SECRET},
         json={"job_id": job_id, "winner_overlap": 80, "winner_flexible": True,
-              "ranks": {}, "best": {"total_late_days": 1, "makespan_days": 1},
+              "ranks": {}, "best": {"total_late_days": 1, "makespan_days": 1,
+                                     "ontime_breach": 0.0},
               "rows": [], "evals": 10, "cancelled": False})
     assert r.status_code == 200, r.text
 

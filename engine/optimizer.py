@@ -42,7 +42,7 @@ from .rules import rule1_consolidate, rule2_sort_by_date, rule3_tiebreak_process
 MAKESPAN_WEIGHT = 0.1           # == ppc_engine makespan_weight
 
 # The on-time objective (2026-08-06 spec). ONE symmetric term replacing
-# total_late_days + slip_severity + earliness: for each order take how far it misses
+# total_late_days + slip_severity: for each order take how far it misses
 # its delivery date in EITHER direction, ignore the first ONTIME_BAND_DAYS, cap the
 # rest, and square it.
 #
@@ -115,9 +115,12 @@ def score(metrics: dict) -> float:
     production today; they do jobs the on-time term cannot express (no-regression
     across re-plans, and a different promised date).
 
-    ``.get`` keeps legacy metrics dicts safe.
+    ``ontime_breach`` is REQUIRED, not ``.get``-defaulted: a metrics dict missing it
+    would otherwise score as a PERFECT plan, and dicts arrive here from remote
+    contest workers (engine/optimize_service.py). Fail loud, per CLAUDE.md. The
+    two dormant guards below keep ``.get`` — absent means genuinely zero for them.
     """
-    return (ONTIME_WEIGHT * metrics.get("ontime_breach", 0.0)
+    return (ONTIME_WEIGHT * metrics["ontime_breach"]
             + MAKESPAN_WEIGHT * metrics["makespan_days"]
             + CEILING_WEIGHT * metrics.get("ceiling_breach", 0.0)
             + COMMITTED_PROMISE_WEIGHT * metrics.get("committed_promise_breach", 0.0))
@@ -254,7 +257,8 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
     """Search for a better batch sequence for THIS book (rolling: call it on
     whatever the order book holds today; the result is disposable and re-computable).
 
-    "Better" = lower ``score`` (delivery lateness + makespan) — every active line
+    "Better" = lower ``score`` (a symmetric on-time penalty for missing the delivery
+    date in either direction, plus a makespan tie-break) — every active line
     competes in one pool (lanes are pure status labels, no scheduling effect).
 
     ``on_progress(evals_done, best_metrics)`` is called after every evaluation.
