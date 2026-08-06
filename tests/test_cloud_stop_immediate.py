@@ -94,6 +94,10 @@ def test_cancel_does_not_double_finalize(monkeypatch):
     m._cancel_cloud_job("job-1")
 
     assert calls == [], "the collector already owns the finalize"
+    assert m._OPTIMIZE["state"] == "running", (
+        "must NOT write a terminal state — that would make the collector's "
+        "in-flight _finalize_from_shards a no-op and discard its shards")
+    assert m._OPTIMIZE["error"] is None
 
 
 def test_cancel_on_an_already_finished_job_is_a_noop(monkeypatch):
@@ -122,3 +126,19 @@ def test_cancel_for_a_different_job_id_is_a_noop(monkeypatch):
 
     assert calls == []
     assert m._OPTIMIZE["state"] == "running", "the current job must be untouched"
+
+
+def test_cancel_losing_the_claim_leaves_the_real_finalize_able_to_run():
+    """Regression for the race the mocks hid: if the collector already claimed the
+    finalize, a cancel arriving in that window must not poison the state the real
+    _finalize_from_shards checks on entry."""
+    m = _api()
+    _seed(m, shards={i: {"rows": [], "evals": 840} for i in range(20)},
+          finalizing=True)
+
+    m._cancel_cloud_job("job-1")
+
+    # The collector's call now runs for real. It must still see a live job.
+    with m._OPTIMIZE_LOCK:
+        assert m._OPTIMIZE["state"] == "running", (
+            "the real _finalize_from_shards returns early unless state is 'running'")

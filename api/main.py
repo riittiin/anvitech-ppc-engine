@@ -1643,16 +1643,26 @@ def _cancel_cloud_job(job_id):
     which the owner explicitly rejected. So this clears it.
 
     `shards_finalizing` is claimed under the lock in the same block that reads it,
-    exactly as the timeout branch does, so it stays mutually exclusive with the
-    /optimize/shard-result collector's own claim: the two can never both finalize.
+    exactly as the timeout branch does. When the claim is LOST — someone else is
+    already finalizing — this returns without writing any terminal state, because
+    doing so would make their in-flight `_finalize_from_shards` a silent no-op and
+    discard every shard they were about to merge.
     """
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["state"] != "running" or _OPTIMIZE["job_id"] != job_id:
             return                       # already finished, or a superseded job
-        claim = (bool(_OPTIMIZE.get("shards"))
-                 and not _OPTIMIZE.get("shards_finalizing"))
+        already_finalizing = bool(_OPTIMIZE.get("shards_finalizing"))
+        claim = bool(_OPTIMIZE.get("shards")) and not already_finalizing
         if claim:
             _OPTIMIZE["shards_finalizing"] = True
+    if already_finalizing:
+        # Someone else (the shard collector, or the timeout branch) already owns
+        # the salvage and is mid-flight. Writing a terminal state here would make
+        # THEIR _finalize_from_shards a silent no-op — it returns early when the
+        # state is no longer "running" — and every arrived shard would be lost.
+        # Leave them alone; their finalize ends the job. This mirrors the timeout
+        # branch, which likewise does nothing when it loses the claim.
+        return
     if claim:
         _finalize_from_shards(job_id)    # merges whatever subset arrived
     with _OPTIMIZE_LOCK:
