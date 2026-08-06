@@ -11,6 +11,7 @@ comparable by score, so only outcomes count:
 """
 import argparse
 import sys
+from dataclasses import replace
 from datetime import date
 
 sys.path.insert(0, ".")
@@ -130,6 +131,30 @@ def _outcomes(so_lines, masters, cfg, budget, seed):
     }
 
 
+def _baseline_ceiling(so_lines, masters, cfg, budget):
+    """Derive the worst-order ceiling the same way production arms it.
+
+    Production (`api/main.py:1282-1286`, inside `_start_optimize` — the single
+    entry point for both the admin's manual "Start deep search" and the
+    automatic daily run) reads `_incumbent_metrics().get("max_late_days")` —
+    the CURRENTLY APPLIED plan's worst order — and feeds it through
+    `worst_ceiling_days` into `PlanConfig.ceiling_days`
+    (`engine/new_engine.py:205`) with `ceiling_weight=100`. This harness has
+    no already-applied incumbent to read, so the faithful stand-in is one
+    OLD-objective plan at seed 42 (the first of `SEEDS`), scored with
+    `optimizer.plan_metrics` exactly the way `_incumbent_metrics()` does
+    downstream. An earlier run of this harness left the ceiling unarmed
+    entirely, which understated how dominant that term is against the new
+    objective's smaller scale and made its verdict meaningless.
+    """
+    _use_old_objective()
+    res = optimizer.optimize(so_lines, cfg, masters, budget_evals=budget, seed=42)
+    pr = PlanRun(so_lines=so_lines)
+    run_forward(pr, cfg, masters, priority_rank=res.ranks)
+    m = optimizer.plan_metrics(pr.schedule, so_lines, cfg.plan_start_date)
+    return float(m["max_late_days"])
+
+
 def _best_of_seeds(so_lines, masters, cfg, budget, label):
     runs = [_outcomes(so_lines, masters, cfg, budget, s) for s in SEEDS]
     for s, r in zip(SEEDS, runs):
@@ -162,6 +187,18 @@ def main():
                  overlap_percent=84, flexible_machines=False,
                  apply_operator_logic=True, consolidation_window_days=10)
     _self_check()
+
+    # Arm the worst-order ceiling exactly as production does on every real
+    # optimize run (api/main.py:1282-1286, inside `_start_optimize`). Leaving
+    # it unarmed (as an earlier run of this harness did) is not the
+    # production configuration and its verdict means nothing. The SAME
+    # ceiling value is used for both the OLD and NEW measurement runs below,
+    # or the comparison is not controlled.
+    ceiling = _baseline_ceiling(so_lines, masters, cfg, args.budget)
+    cfg = replace(cfg, worst_ceiling_days=ceiling)
+    print(f"worst-order ceiling armed at {ceiling:.1f} days (from an OLD-objective "
+          f"seed-42 baseline plan, mirroring api/main.py:1282) — applied to BOTH "
+          f"OLD and NEW runs below")
     print(f"{len(so_lines)} SO lines | budget {args.budget} | seeds {SEEDS}\n")
 
     print("OLD objective (pre-2026-08-06, reconstructed verbatim)")
