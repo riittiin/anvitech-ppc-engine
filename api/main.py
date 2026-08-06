@@ -1502,14 +1502,24 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                     with _OPTIMIZE_LOCK:
                         still_mine = (_OPTIMIZE["state"] == "running"
                                       and _OPTIMIZE["job_id"] == job_id)
+                        # `continue` below skips the timeout branch for the rest of
+                        # this job's life (cancel stays set), so the deadline must be
+                        # enforced HERE or a never-resolving in-flight finalize spins
+                        # forever. Reachable: /optimize/shard-result calls
+                        # _finalize_from_shards unguarded, and a raise there latches
+                        # shards_finalizing with shards still populated.
+                        if still_mine and time.monotonic() > deadline:
+                            _OPTIMIZE.update(
+                                state="failed", cancel=False, cloud_failed=False,
+                                error="stopped: no finished results had come back yet, "
+                                      "so the current plan is unchanged")
+                            still_mine = False
                     if not still_mine:
                         return
-                    # _cancel_cloud_job left the job alive because another party owns
-                    # an in-flight finalize. Its no-winner branch does NOT end the job
-                    # — it clears `shards` and waits for a later poll — so this thread
-                    # must keep watching rather than return, or nothing ever finishes
-                    # the job and every future optimize 409s. Next poll, `shards` is
-                    # empty and _cancel_cloud_job takes its latched path and ends it.
+                    # Another party owns an in-flight finalize. Its no-winner branch
+                    # does NOT end the job — it clears `shards` and waits for a later
+                    # poll — so keep watching rather than return, or nothing ever
+                    # finishes the job and every future optimize 409s.
                     continue
                 if timed_out:
                     if claim_shard_finalize:

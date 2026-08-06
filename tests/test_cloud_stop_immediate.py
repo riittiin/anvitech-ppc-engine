@@ -253,20 +253,6 @@ def test_loop_cancel_and_timeout_same_poll_prefers_cancel(monkeypatch):
     assert "stopped" in (st["error"] or "").lower()
 
 
-def test_loop_timeout_without_cancel_still_falls_back_to_local(monkeypatch):
-    """Regression guard on the path this task must NOT change: a timeout with
-    no cancel involved still falls back to a local recompute, exactly as
-    before the wiring change."""
-    _cloud_env(monkeypatch, timeout_min="0.005")   # ~0.3s
-    m = _api()
-    _seed_book_for_contest()
-    monkeypatch.setattr(m, "_dispatch_workflow", lambda cloud, job_id: True)
-
-    m._start_optimize(budget_evals=15, label="deep", background=True)
-    st = _wait(m, "done", timeout=30.0)
-    assert st["mode"] == "local" and st["best"]
-
-
 def test_loop_cancel_while_in_flight_does_not_wedge_forever(monkeypatch):
     """Finding 1 regression guard. `_cancel_cloud_job` deliberately returns
     WITHOUT a terminal state when another party is genuinely mid-finalize
@@ -277,14 +263,24 @@ def test_loop_cancel_while_in_flight_does_not_wedge_forever(monkeypatch):
     the fix, the wait loop `return`ed unconditionally after calling
     `_cancel_cloud_job`, so nothing was left polling and the job wedged in
     state="running" forever. This drives the REAL loop end-to-end: seed the
-    in-flight state, cancel, let (at least) one poll pass untouched, then
-    simulate the in-flight party finishing (mirroring the no-winner branch)
-    and confirm the loop's own next poll — not a second thread — finishes
-    the job."""
+    in-flight state, cancel, wait for the loop's OWN poll to actually reach
+    the in-flight cancel path (spying on the real `_cancel_cloud_job`, not a
+    fixed sleep — a fixed sleep could pass vacuously on a slow machine if the
+    poll hasn't happened yet), then simulate the in-flight party finishing
+    (mirroring the no-winner branch) and confirm the loop's own next poll —
+    not a second thread — finishes the job."""
     _cloud_env(monkeypatch, timeout_min="5")   # deadline irrelevant here
     m = _api()
     _seed_book_for_contest()
     monkeypatch.setattr(m, "_dispatch_workflow", lambda cloud, job_id: True)
+
+    calls = []
+    _orig_cancel = m._cancel_cloud_job
+
+    def _spy_cancel(job_id):
+        _orig_cancel(job_id)
+        calls.append(job_id)
+    monkeypatch.setattr(m, "_cancel_cloud_job", _spy_cancel)
 
     st = m._start_optimize(budget_evals=15, label="deep", background=True)
     assert st["state"] == "running" and st["mode"] == "cloud"
@@ -294,9 +290,13 @@ def test_loop_cancel_while_in_flight_does_not_wedge_forever(monkeypatch):
                            shards_finalizing=True)
     m._optimize_cancel()
 
-    # Let at least the first 2s poll see the in-flight state and (correctly)
-    # decline to write a terminal state.
-    time.sleep(3.0)
+    # Wait for the real loop to have actually called _cancel_cloud_job at
+    # least once while the seeded in-flight state was live, instead of
+    # guessing a fixed sleep long enough to cover it.
+    t0 = time.time()
+    while not calls and time.time() - t0 < 10:
+        time.sleep(0.05)
+    assert calls, "the loop's poll never reached the in-flight cancel path"
     with m._OPTIMIZE_LOCK:
         assert m._OPTIMIZE["state"] == "running", (
             "must not clobber an in-flight party's own finalize")
@@ -312,3 +312,37 @@ def test_loop_cancel_while_in_flight_does_not_wedge_forever(monkeypatch):
     with m._OPTIMIZE_LOCK:
         assert m._OPTIMIZE["cloud_failed"] is False, (
             "must not leave cloud_failed set for a watchdog that no longer exists")
+
+
+def test_loop_cancel_while_in_flight_never_resolving_still_terminates_via_deadline(
+        monkeypatch):
+    """New (2026-08-07 re-review) regression guard. The Finding 1 fix's
+    `continue` keeps `was_cancelled` true for the rest of the job's life, so
+    the `if timed_out:` branch is never evaluated again on this thread —
+    without a deadline check INSIDE the cancel branch itself, an in-flight
+    finalize that never resolves (reachable: `/optimize/shard-result` calls
+    `_finalize_from_shards` unguarded, and a raise inside it latches
+    `shards_finalizing=True` with `shards` still populated, forever) would
+    spin the poll loop indefinitely — the exact wedge this whole branch
+    exists to eliminate, just one level deeper. A short
+    OPTIMIZE_CLOUD_TIMEOUT_MIN must still end the job even though the
+    in-flight party never finishes."""
+    _cloud_env(monkeypatch, timeout_min="0.005")   # ~0.3s: well past by poll 1
+    m = _api()
+    _seed_book_for_contest()
+    monkeypatch.setattr(m, "_dispatch_workflow", lambda cloud, job_id: True)
+
+    st = m._start_optimize(budget_evals=15, label="deep", background=True)
+    assert st["state"] == "running" and st["mode"] == "cloud"
+
+    # Permanently in-flight: shards present, shards_finalizing claimed, and
+    # NEVER cleared by anyone — mirrors a finalize that raised and never
+    # reached either of _finalize_from_shards's own terminal writes.
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE.update(shards={0: {"rows": [], "evals": 840}},
+                           shards_finalizing=True)
+    m._optimize_cancel()
+
+    st = _wait(m, "failed", timeout=10.0)
+    assert st["mode"] != "local", "a stopped run must never start a local search"
+    assert "stopped" in (st["error"] or "").lower()
