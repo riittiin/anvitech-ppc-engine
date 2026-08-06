@@ -10,7 +10,6 @@ comparable by score, so only outcomes count:
     python3 scripts/measure_ontime.py Test9.xlsx --budget 400
 """
 import argparse
-import dataclasses
 import sys
 from datetime import date
 
@@ -19,53 +18,90 @@ sys.path.insert(0, ".")
 from engine import loaders, new_engine, optimizer
 from engine.config import Config
 from engine.models import PlanRun
+from engine.optimizer import ONTIME_BAND_DAYS as BAND
 from engine.pipeline import run_forward
+import ppc_engine.optimize.search as _search
+from ppc_engine.objective.objective import _ceiling_breach, _committed_promise_breach
 
-BAND = 4
 SEEDS = (42, 7, 2026)
 
-# PlanConfig is a FROZEN dataclass whose defaults are baked into __init__ at class
-# creation, so assigning the class attribute is silently ignored. Override at the one
-# construction site in the plan path instead.
-_ORIG_PLAN_CONFIG = new_engine._plan_config
-_OVERRIDE = {}
+# ---------------------------------------------------------------------------
+# The OLD objective CANNOT be recovered by zeroing the new weight: Tasks 1-2
+# deleted total_tardiness_days, _severity and the fairness term outright, so
+# ontime_weight=0 leaves only makespan — pure makespan minimisation, which has
+# never run. A faithful baseline must reconstruct the pre-branch formula.
+# Values below are the pre-branch PlanConfig defaults, taken from
+# `git show <pre-branch>:ppc_engine/config.py`. Note makespan was ALWAYS 0.1
+# on this side; 40 was the engine-side (classic) weight and never applied here.
+# ---------------------------------------------------------------------------
+_OLD_SEVERITY_TOL = 2.0
+_OLD_SEVERITY_WEIGHT = 2.0
+_OLD_SEVERITY_CAP = 60.0
+_OLD_FAIRNESS_WEIGHT = 30.0
+_OLD_MAKESPAN_WEIGHT = 0.1
 
 
-def _patched_plan_config(config):
-    pc = _ORIG_PLAN_CONFIG(config)
-    return dataclasses.replace(pc, **_OVERRIDE) if _OVERRIDE else pc
+def _old_severity(metrics):
+    """The pre-branch _severity: squared lateness beyond a tolerance, capped.
+    One-sided — early orders contributed nothing, which is the whole reason the
+    objective was rewritten."""
+    total = 0.0
+    for late in metrics.lateness_by_order.values():
+        over = late - _OLD_SEVERITY_TOL
+        if over <= 0.0:
+            continue
+        if over > _OLD_SEVERITY_CAP:
+            over = _OLD_SEVERITY_CAP
+        total += over * over
+    return total
 
 
-def _install_patch():
-    """From main() only — installing at import would redirect any importing process."""
-    new_engine._plan_config = _patched_plan_config
+def _old_score(metrics, config):
+    """The pre-2026-08-06 ppc objective, reconstructed verbatim."""
+    return (
+        metrics.total_tardiness_days
+        + _OLD_SEVERITY_WEIGHT * _old_severity(metrics)
+        + config.ceiling_weight * _ceiling_breach(metrics, config)
+        + config.committed_promise_weight * _committed_promise_breach(metrics, config)
+        + _OLD_FAIRNESS_WEIGHT * metrics.max_tardiness_days
+        + _OLD_MAKESPAN_WEIGHT * metrics.makespan_days
+    )
+
+
+_NEW_SCORE = _search.score          # search.py bound `score` at import time
 
 
 def _use_old_objective():
-    """Approximate the pre-2026-08-06 objective by switching the on-time term off and
-    restoring the old makespan weight, so the baseline is measured on the same code."""
-    optimizer.ONTIME_WEIGHT = 0.0
-    optimizer.MAKESPAN_WEIGHT = 40.0
-    _OVERRIDE.clear()
-    _OVERRIDE.update(ontime_weight=0.0, makespan_weight=40.0)
+    _search.score = _old_score
 
 
 def _use_new_objective():
-    optimizer.ONTIME_WEIGHT = 1.0
-    optimizer.MAKESPAN_WEIGHT = 0.1
-    _OVERRIDE.clear()
-    _OVERRIDE.update(ontime_weight=1.0, makespan_weight=0.1)
+    _search.score = _NEW_SCORE
 
 
 def _self_check():
-    """Prove the knob reaches the search before any number is trusted."""
-    _use_new_objective()
-    pc = new_engine._plan_config(Config(plan_start_date=date(2026, 8, 6)))
-    assert pc.ontime_weight == 1.0, f"ppc knob is dead: {pc.ontime_weight}"
+    """Prove the swap reaches the search AND that the two formulas actually differ.
+
+    An earlier version of this harness tried to reach the old objective by zeroing
+    a weight. That silently produced pure makespan minimisation, and every number
+    it printed would have been a comparison against a configuration that never ran.
+    """
     _use_old_objective()
-    pc = new_engine._plan_config(Config(plan_start_date=date(2026, 8, 6)))
-    assert pc.ontime_weight == 0.0, f"ppc knob is dead: {pc.ontime_weight}"
-    print("self-check OK: the objective switch reaches the search\n")
+    assert _search.score is _old_score, "OLD swap did not reach the search"
+    _use_new_objective()
+    assert _search.score is _NEW_SCORE, "NEW swap did not reach the search"
+
+    from ppc_engine.objective.metrics import PlanMetrics
+    pm = PlanMetrics(total_tardiness_days=100.0, max_tardiness_days=30.0,
+                     late_order_count=5, makespan_days=50.0,
+                     lateness_by_order={("A", "x"): 30.0, ("B", "y"): -30.0},
+                     promise_slip_by_order={})
+    cfg = new_engine._plan_config(Config(plan_start_date=date(2026, 8, 6)))
+    old_v, new_v = _old_score(pm, cfg), _NEW_SCORE(pm, cfg)
+    assert old_v != new_v, (
+        f"the two objectives score identically ({old_v}) — the comparison is meaningless")
+    print(f"self-check OK: swap reaches the search; OLD={old_v:.1f} NEW={new_v:.1f} "
+          f"on the same metrics\n")
 
 
 def _outcomes(so_lines, masters, cfg, budget, seed):
@@ -115,7 +151,6 @@ def main():
     ap.add_argument("--start", default="2026-08-06")
     args = ap.parse_args()
 
-    _install_patch()
     with open(args.workbook, "rb") as fh:
         new_engine.set_masters_bytes(fh.read())
     so_lines, masters = loaders.load_all(args.workbook)
@@ -125,7 +160,7 @@ def main():
     _self_check()
     print(f"{len(so_lines)} SO lines | budget {args.budget} | seeds {SEEDS}\n")
 
-    print("OLD objective (on-time term off, makespan 40)")
+    print("OLD objective (pre-2026-08-06, reconstructed verbatim)")
     _use_old_objective()
     old = _best_of_seeds(so_lines, masters, cfg, args.budget, "OLD")
 
