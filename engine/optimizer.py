@@ -29,20 +29,38 @@ from .pipeline import KEY_SEP
 from .rules import rule1_consolidate, rule2_sort_by_date, rule3_tiebreak_process_time, \
     rule6_allocate
 
-# Score = total_late_days + MAKESPAN_WEIGHT x makespan_days. Both owner goals in one
-# number. 2026-07-19 (owner: minimize BOTH late days and completion days, after
-# rejecting the 79-84 d plans): weight raised 10 -> 40, measured on the live
-# 71-order book under the crew-smart scheduler — at 10 the search lands
-# 78.4 d / 1327 late-days; at 40 it lands 72.7 d / 1528, which beats the
-# previous live optimum (83.6 d / 1531) on BOTH axes; at 80 it trades real
-# lateness for speed (69.7 d / 1701+). 40 is the dominance point, not a taste
-# choice — re-measure before moving it.
-MAKESPAN_WEIGHT = 40.0
+# Score = ONTIME_WEIGHT x ontime_breach + MAKESPAN_WEIGHT x makespan_days
+#         (+ the two dormant guards: ceiling, committed-promise).
+#
+# 2026-08-06 (owner: "we care only about the deliveries-on-time thing"): makespan
+# demoted 40 -> 0.1, a pure TIE-BREAK. It was 40 because on 2026-07-19 the goal was
+# to minimize BOTH late days and schedule length; that note recorded the trade
+# honestly — raising 10 -> 40 moved the live book from 78.4 d / 1327 late-days to
+# 72.7 d / 1528, i.e. it bought 5.7 schedule days for 201 extra late-days. The goal
+# is now on-time delivery only, which makes that trade the wrong way round. 0.1
+# matches ppc_engine/config.py makespan_weight, so the two scorers finally agree.
+MAKESPAN_WEIGHT = 0.1           # == ppc_engine makespan_weight
 
-# Reputation guard — the mirror of ppc_engine's convex severity term (2026-07-24
-# spec). Kept numerically EQUAL to ppc_engine/config.py severity_* so the overlap
-# contest winner-pick and the Thursday auto-apply gate judge plans the same
-# reputation-aware way the sequence search does. Measured — re-measure before moving.
+# The on-time objective (2026-08-06 spec). ONE symmetric term replacing
+# total_late_days + slip_severity + earliness: for each order take how far it misses
+# its delivery date in EITHER direction, ignore the first ONTIME_BAND_DAYS, cap the
+# rest, and square it.
+#
+# Squaring is the mechanism the owner asked for by name: ten orders 6 days out
+# (10 x 2^2 = 40) must beat one order 30 days out ((30-4)^2 = 676). The cap stops a
+# single hopeless order swamping the plan. The band is FLAT by owner decision — no
+# pull toward the exact date; anywhere inside +/-4 days is equally on time.
+#
+# Must stay numerically EQUAL to ppc_engine/config.py ontime_* .
+ONTIME_BAND_DAYS = 4.0          # == ppc_engine ontime_band_days
+ONTIME_CAP_DAYS = 60.0          # == ppc_engine ontime_cap_days
+ONTIME_WEIGHT = 1.0             # == ppc_engine ontime_weight
+
+# REPORTING ONLY since 2026-08-06. `score()` no longer reads slip_severity — the
+# on-time term above subsumes it (same squared shape, tolerance 2 -> 4, now
+# two-sided). `plan_metrics` still COMPUTES and RETURNS slip_severity because it is
+# a reported field: three tests assert it and removing a reported field is
+# needless risk. Kept equal to ppc_engine/config.py severity_* .
 SEVERITY_TOLERANCE_DAYS = 2.0   # == ppc_engine severity_tolerance_days (T)
 SEVERITY_WEIGHT = 2.0           # == ppc_engine severity_weight (mu)
 SEVERITY_CAP_DAYS = 60.0        # == ppc_engine severity_cap_days (owner "distribute the pain", 2026-07-25)
@@ -83,13 +101,24 @@ class OptimizeResult:
 
 
 def score(metrics: dict) -> float:
-    """Lower is better: lateness + makespan + convex slip guard + worst-order ceiling
-    barrier + committed-promise ceiling. Each added term reads a field plan_metrics
-    supplies; ``.get`` keeps legacy metrics dicts safe (byte-identical when the field
-    is absent/zero)."""
-    return (metrics["total_late_days"]
+    """Lower is better. ONE on-time term plus a makespan tie-break, and the two
+    dormant guards.
+
+    `ontime_breach` is the whole objective: squared distance from the delivery date
+    in either direction, beyond a 4-day band, capped. It replaces total_late_days,
+    slip_severity and the search's fairness term (2026-08-06 spec).
+
+    Makespan is a TIE-BREAK at 0.1 — it separates plans that are otherwise equal and
+    must never outrank a genuine on-time improvement.
+
+    `ceiling_breach` and `committed_promise_breach` are unchanged and both dormant in
+    production today; they do jobs the on-time term cannot express (no-regression
+    across re-plans, and a different promised date).
+
+    ``.get`` keeps legacy metrics dicts safe.
+    """
+    return (ONTIME_WEIGHT * metrics.get("ontime_breach", 0.0)
             + MAKESPAN_WEIGHT * metrics["makespan_days"]
-            + SEVERITY_WEIGHT * metrics.get("slip_severity", 0.0)
             + CEILING_WEIGHT * metrics.get("ceiling_breach", 0.0)
             + COMMITTED_PROMISE_WEIGHT * metrics.get("committed_promise_breach", 0.0))
 
@@ -159,6 +188,15 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
                 over = slip - promise_slack_days
                 if over > 0:
                     committed_promise_breach += float(over * over)
+    # The on-time objective (spec 2026-08-06). `gaps` is SIGNED — negative is early —
+    # and abs() is what makes early and late count the same, which is the owner's rule.
+    ontime_breach = 0.0
+    for g in gaps:
+        over = abs(g) - ONTIME_BAND_DAYS
+        if over > 0:
+            if over > ONTIME_CAP_DAYS:
+                over = ONTIME_CAP_DAYS
+            ontime_breach += float(over * over)
     result = {
         "makespan_days": makespan_days(schedule, plan_start),
         "late_orders": len(late),
@@ -169,6 +207,7 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
         "committed_promise_breach": round(committed_promise_breach, 2),
         "max_committed_slip": int(max_committed_slip),
         "orders": len(gaps),
+        "ontime_breach": round(ontime_breach, 2),
     }
     if with_distribution:
         per = sorted(((k[0], k[1], (expected[k] - due[k]).days)

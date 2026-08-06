@@ -42,12 +42,14 @@ from engine import optimizer
 
 
 def test_optimizer_score_convex_protects_second_worst():
-    # Same scenario as the ppc test, in the old-space metrics dict. Makespan is
-    # equal on both plans, so only the severity term can flip the preference.
-    sacrifice = {"total_late_days": 35, "makespan_days": 40.0,
-                 "slip_severity": (20 - 2) ** 2 + (15 - 2) ** 2}
-    protect = {"total_late_days": 24, "makespan_days": 40.0,
-               "slip_severity": (22 - 2) ** 2 + 0}
+    # Same scenario, expressed in the on-time term the score now reads (2026-08-06).
+    # sacrifice: orders 20 and 15 days late  -> (20-4)^2 + (15-4)^2 = 256 + 121 = 377
+    # protect:   orders 22 and  2 days late  -> (22-4)^2 +        0 = 324
+    # Makespan equal, so only the on-time term can flip the preference.
+    sacrifice = {"makespan_days": 40.0,
+                 "ontime_breach": (20 - 4) ** 2 + (15 - 4) ** 2}
+    protect = {"makespan_days": 40.0,
+               "ontime_breach": (22 - 4) ** 2 + 0}
     assert optimizer.score(protect) < optimizer.score(sacrifice)
 
 
