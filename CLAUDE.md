@@ -90,6 +90,32 @@
 >   identically by every feature, not a per-feature re-derivation, so it cannot make two
 >   features disagree. Changing it would move the plan itself.
 >
+> - **SILENT OMISSION — a resource with no work must never disappear (2026-08-07, live
+>   report).** Settings showed **20 staff, Analytics showed 19** (Sandeep Kumar missing).
+>   Root cause: `engine/analytics.py` built its per-operator and per-machine tables by
+>   walking the **SCHEDULE**, so anyone/anything the plan gave no work to was never
+>   listed at all — backwards for a utilization report, where the fully idle resource is
+>   the most actionable row. Same bug hit machines: on Test9 **4 of 26 (MA1, MP1, MPK3,
+>   MW3) were silently absent**; the strengthened audit found 8/26 missing across both
+>   utilization views. Fix: **seed the tables from the MASTERS** —
+>   `analytics.build_analytics` pre-seeds `by_machine` from `masters.machines` and
+>   `by_op` from `masters.operators`, and `rule6_allocate.build_machine_view` pre-seeds
+>   `by_machine` the same way (idle machine → real row, 0 ops / 0 busy / **0%**, not the
+>   `span == 0 → 100%` branch, which means something else; `order` sorts idle last on a
+>   `datetime.max` sentinel instead of crashing on `min(())`). Both utilization views now
+>   list the identical machine set. Third instance, same class: `delay_report` skipped
+>   any order with no in-house op, so a **fully-outsourced order vanished** from the
+>   report while showing on the Orders tab and the Gantt — it is now listed with its real
+>   completion date. Effect on the numbers: avg machine utilization **23.2% → 19.6%** on
+>   Test9, because it finally counts the four idle machines. **Rule for any new
+>   report: enumerate from the master/table, then fill in from the schedule — never the
+>   other way round.**
+>   **This also exposed a flaw in the audit harness itself**: its operator and machine
+>   checks compared only keys present in BOTH sources (an intersection), so a missing
+>   row was invisible to it. It now compares full sets and additionally asserts every
+>   machine in the master and every operator in Settings appears (checks G2 / I2). When
+>   writing a consistency check, **compare sets, not overlaps.**
+>
 > - **Audit, 2026-08-07 (`/private` scratch harness, re-runnable):** 15 cross-feature
 >   checks over Test5/8/9 with the production config — expected completion across Orders/
 >   Gantt/delay report/machine-wise/shift-wise, Days Late vs the dates, SO delivery date,

@@ -1199,6 +1199,11 @@ def build_machine_view(schedule, masters, config, batches=None):
 
     NON_MACHINE_LANES = {"OS / Outsourced", "Off-machine"}
     by_machine: dict[str, list] = {}
+    # Seed EVERY machine in the master so an idle one still gets a utilization row
+    # (0 ops, 0%) instead of silently vanishing — same rule as engine/analytics.py,
+    # so the two utilization views can never list different machines (2026-08-07).
+    for mid in masters.machines:
+        by_machine[mid] = []
     for e in schedule:
         if e.machine in NON_MACHINE_LANES:
             continue   # outsourcing / dispatch lanes are not machines
@@ -1217,7 +1222,11 @@ def build_machine_view(schedule, masters, config, batches=None):
         return r.description if r else ""
 
     # Order machines by when they first start working (then by id).
-    order = sorted(by_machine, key=lambda mid: (min(e.start for e in by_machine[mid]), mid))
+    # Busy machines first, in the order they start working; idle ones (no ops at all)
+    # sort last on the datetime.max sentinel rather than crashing on min(()).
+    order = sorted(by_machine,
+                   key=lambda mid: (min((e.start for e in by_machine[mid]), default=datetime.max),
+                                    mid))
 
     timeline, summary = [], []
     for mid in order:
@@ -1250,6 +1259,15 @@ def build_machine_view(schedule, masters, config, batches=None):
             busy += e.occupancy_min
             prev_end = e.end
 
+        if not ops:
+            # Idle machine: real row, honest zeros. Never 100% (the `span == 0` branch
+            # below means "one instantaneous op", which is a different thing entirely).
+            summary.append({
+                "Machine": display(mid), "Ops": 0, "First Start": "", "Last End": "",
+                "Busy (min)": 0.0, "Idle within span (min)": 0.0,
+                "Utilization %": 0.0, "Provisional": provisional(mid),
+            })
+            continue
         first, last = ops[0].start, ops[-1].end
         span = clock.working_minutes_between(first, last)
         idle_within = max(span - busy, 0.0)

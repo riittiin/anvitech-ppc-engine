@@ -154,10 +154,16 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters)
     for line in so_lines:
         so, item = line.so_no, line.item_code
         ops = _order_ops(schedule, so, item)
-        if not ops:
-            continue
+        if not ops and (so, item) not in completion_by_key:
+            continue          # genuinely not in this plan at all — nothing to explain
         running = _merge([(e.start, e.end) for e in ops])
-        completion = max(e.end for e in ops)
+        # A fully-OUTSOURCED order has no in-house op but is still scheduled and still
+        # has a real completion date. It used to be dropped here, so it vanished from
+        # the delay report while appearing on the Orders tab and the Gantt (the same
+        # silent-omission class as the missing operator/machine rows, 2026-08-07).
+        completion = (max(e.end for e in ops) if ops
+                      else datetime.combine(completion_by_key[(so, item)],
+                                            datetime.min.time()))
         this_rank = rank.get((so, item), 10 ** 9)
         rows = []
         for e in ops:

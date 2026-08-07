@@ -216,7 +216,69 @@ def test_single_shift_station_coverage_window_follows_the_active_engine():
     assert win_classic["MI3"] == [(9 * 60, 18 * 60)]
 
 
-# --- 5. The delay report reads the plan every other tab shows --------------- #
+# --- 5. Nothing disappears for being idle ----------------------------------- #
+
+def test_analytics_lists_every_operator_and_machine_even_with_no_work():
+    """Live report 2026-08-07: Settings showed 20 staff, Analytics showed 19 — Sandeep
+    Kumar was missing. Both lists were built by walking the SCHEDULE, so a person or a
+    machine the plan gave no work to vanished instead of showing 0%. That is backwards
+    for a utilization report: a completely idle resource is the one you most need to
+    see. (On Test9 four machines — MA1, MP1, MPK3, MW3 — were silently absent.)"""
+    from engine.analytics import build_analytics
+    from engine.models import Operator
+
+    busy_m = Machine(machine_no="CNC1", display_name="CNC 1",
+                     machine_type="CNC lathe", available_hrs_per_day=19.5)
+    idle_m = Machine(machine_no="MW3", display_name="MW3",
+                     machine_type="Washing", available_hrs_per_day=9.0)
+    masters = Masters(machines={"CNC1": busy_m, "MW3": idle_m}, calendar=WorkCalendar())
+    masters.operators.extend([
+        Operator(name="Rohan", shift="First shift", machines=["CNC1"]),
+        Operator(name="Sandeep Kumar", shift="First shift", machines=["MW3"]),
+    ])
+    entry = ScheduleEntry(
+        batch_id="B1", item_code="X", process_seq=1, process_name="CNC",
+        machine="CNC1", qty=10, occupancy_min=240.0,
+        start=datetime(2025, 3, 3, 8, 0), end=datetime(2025, 3, 3, 12, 0),
+        notes="", so_refs=["SO1"], operator="Rohan",
+        op_segments=[(datetime(2025, 3, 3, 8, 0), datetime(2025, 3, 3, 12, 0), "Rohan")])
+
+    an = build_analytics([entry], masters, Config(scheduler="new",
+                                                  apply_operator_logic=True), [])
+
+    assert {m["Machine"] for m in an["machines"]} == {"CNC 1", "MW3"}
+    assert {o["Operator"] for o in an["operators"]} == {"Rohan", "Sandeep Kumar"}
+
+    idle_row = next(m for m in an["machines"] if m["Machine"] == "MW3")
+    assert idle_row["Busy (hrs)"] == 0.0 and idle_row["Ops"] == 0
+    idle_op = next(o for o in an["operators"] if o["Operator"] == "Sandeep Kumar")
+    assert idle_op["Busy (hrs)"] == 0.0 and idle_op["Ops"] == 0
+
+
+def test_delay_report_still_lists_an_order_with_no_in_house_work():
+    """Same silent-omission class: the delay report skipped any order with no in-house
+    operation, so a fully-outsourced order vanished from the report while appearing on
+    the Orders tab and the Gantt. It must be listed, with its real completion date."""
+    outsourced = ScheduleEntry(
+        batch_id="B1", item_code="X", process_seq=1, process_name="PLATING",
+        machine="OS / Outsourced", qty=10, occupancy_min=2880.0,
+        start=datetime(2025, 3, 3, 8, 0), end=datetime(2025, 3, 5, 8, 0),
+        notes="", so_refs=["SO1"], operator="", op_segments=[])
+    masters = Masters(machines={}, calendar=WorkCalendar())
+    masters.routings["X"] = Routing(item_code="X", description="X", customer="",
+                                    rm_type="", moq=None, processes=[])
+    line = SOLine(so_no="SO1", item_code="X", item_name="X", qty=10,
+                  delivery_date=date(2025, 3, 4))
+
+    rep = build_delay_report([outsourced], [line], [],
+                             Config(plan_start_date=date(2025, 3, 3)), masters)
+    assert [r["SO No"] for r in rep["summary"]] == ["SO1"]
+    row = rep["summary"][0]
+    assert row["Expected Completion"] == date(2025, 3, 5)
+    assert row["Days Late"] == 1
+
+
+# --- 6. The delay report reads the plan every other tab shows --------------- #
 
 def test_delay_report_reuses_the_plan_run_instead_of_computing_its_own():
     """The report must be a VIEW of the cached plan, not a second plan. Guarded by

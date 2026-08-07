@@ -180,11 +180,17 @@ def build_analytics(schedule, masters, config, batches=None, absences=None):
         return m.machine_type if (m and m.machine_type) else "Other"
 
     # --- Machines (exclude non-machine lanes) ---
+    # EVERY machine in the master gets a row, not just the ones this plan used. A
+    # utilization report that walks only the schedule silently DROPS an idle machine —
+    # exactly the row that matters most (live 2026-08-07: Test9 lost MA1/MP1/MPK3/MW3,
+    # and the same bug hid an operator with no work from the per-operator table).
     by_machine = defaultdict(list)
+    for mid in masters.machines:
+        by_machine[mid] = []
     for e in schedule:
         if e.machine in NON_MACHINE_LANES:
             continue
-        by_machine[e.machine].append(e)
+        by_machine[e.machine].append(e)   # a lane-less resource not in the master still counts
 
     machines = []
     for mid, ops in by_machine.items():
@@ -228,6 +234,13 @@ def build_analytics(schedule, masters, config, batches=None, absences=None):
     if getattr(config, "apply_operator_logic", False):
         segs = build_shiftwise_timeline(schedule, masters, config, batches)
         by_op = defaultdict(list)
+        # EVERY operator on the app's Settings table gets a row, not just the ones this
+        # plan gave work to. Walking only the schedule silently dropped an unused person
+        # — the live 2026-08-07 report: "20 staff in Settings, 19 in Analytics" (Sandeep
+        # Kumar). A 0% row is the most actionable row in a utilization table.
+        for o in masters.operators:
+            if o.name:
+                by_op[o.name] = []
         for r in segs:
             if r["Operator"] == UNSTAFFED:
                 # No qualified person was free for this shift segment — the plan
