@@ -36,8 +36,15 @@ def build_machine_pools(masters: Masters) -> dict[str, tuple[Operator, ...]]:
     """
     pools: dict[str, tuple[Operator, ...]] = {}
     for mid, machine in masters.machines.items():
-        role = ROLE_FOR_KIND[machine.kind]
-        eligible = [o for o in masters.operators if o.role == role and mid in o.qualified_machines]
+        # Qualification is EXACTLY the machine list the admin set in Settings — role is
+        # NOT a gate (2026-08-07). Role is inherited by name from the workbook's operator
+        # sheet, a fossil since 2026-07-18, and is never re-derived from what the admin
+        # assigned; gating on it silently discarded the assignment. One person also
+        # legitimately spans kinds (manual stations AND a CNC), which a single role can
+        # never express. Live bug: Sandeep Kumar was given CNC4 in Settings, was dropped
+        # from CNC4's pool for being a workbook "helper", showed 0% in Analytics, and
+        # CNC4 sat idle with work waiting — with nothing anywhere reporting it.
+        eligible = [o for o in masters.operators if mid in o.qualified_machines]
         eligible.sort(key=lambda o: (o.flexibility, o.name))
         pools[mid] = tuple(eligible)
     return pools

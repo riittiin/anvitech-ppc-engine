@@ -116,8 +116,9 @@ def _fridays_after(anchor: date, day: date) -> int:
 @lru_cache(maxsize=None)
 def _shift_for(role: Role, base_shift: Shift, anchor: date | None, day: date) -> Shift:
     """Pure, cached core of effective_shift (keyed only on hashable, immutable values)."""
-    if role != Role.OPERATOR:
-        return Shift.FIRST
+    # The shift an admin sets in Settings is the shift the planner uses, for EVERY role
+    # (2026-08-05 rule; enforced here 2026-08-07). This used to force any non-operator
+    # role to FIRST, so putting a helper or inspector on nights silently did nothing.
     if anchor is None:
         return base_shift  # no rotation reference → base shift is fixed
     flips = _fridays_after(anchor, day)

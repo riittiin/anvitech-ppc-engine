@@ -439,7 +439,7 @@ def _absence_orphans(masters, absences=None) -> list:
                   if a["operator"] not in names})
 
 
-def _report_for_book(masters, so_lines, absences=None, config=None):
+def _report_for_book(masters, so_lines, absences=None, config=None, schedule=None):
     """The validation report scoped to the CURRENT order book. Loader-level rows
     about the masters (pending machines, time coercions, …) pass through, but
     NO_ROUTING is re-derived from the live book: the stored workbook's own SO
@@ -472,6 +472,19 @@ def _report_for_book(masters, so_lines, absences=None, config=None):
     # make a REPORT able to stamp the plan clock as a side effect.
     rows.extend(operator_coverage.staffing_gaps(
         masters, config if config is not None else _load_plan_config()))
+    # Hard invariant, checked rather than assumed: the plan must never put an operator
+    # on a machine they are not assigned to in Settings. Surfaced, not raised — a live
+    # plan must not break — but tests assert it is empty. See
+    # new_engine.qualification_violations for why this exists.
+    if schedule:
+        try:
+            from engine import new_engine as _ne
+            _nm = _ne._apply_app_operators(
+                _ne._new_masters(bool(getattr(config, "flexible_machines", False))),
+                masters)
+            rows.extend(_ne.qualification_violations(schedule, _nm))
+        except Exception:  # noqa: BLE001 — a self-check must never break the report
+            pass
     return to_table([
         {"Kind": r["kind"], "Reference": r["ref"], "Message": r["message"]}
         for r in rows
@@ -907,7 +920,7 @@ def _plan(config: Config):
 
     result = {"run_id": run_id, "trace": trace,
               "report": _report_for_book(masters, so_lines, absences=absences_raw,
-                                         config=config),
+                                         config=config, schedule=plan_run.schedule),
               "gantt": gantt, "orders": orders,
               # SAVED (unresolved) config — null plan_start_date = auto survives
               # the round-trip; the resolved start is a separate display key.

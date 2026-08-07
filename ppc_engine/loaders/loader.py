@@ -41,11 +41,16 @@ class LoadResult:
 
 
 def _staffed_machines(masters: Masters) -> set[str]:
-    """Machine ids that have at least one qualified operator for their role."""
+    """Machine ids somebody in Settings is assigned to.
+
+    Role is NOT a gate here either (2026-08-07, same fix as
+    ``scheduler.staffing.build_machine_pools``) — and the blast radius of getting it
+    wrong is larger: an "unstaffed" machine's orders are BLOCKED as unschedulable, so a
+    machine covered only by a role-mismatched person silently took its whole order book
+    out of the plan."""
     staffed: set[str] = set()
-    for mid, machine in masters.machines.items():
-        role = ROLE_FOR_KIND[machine.kind]
-        if any(op.role == role and mid in op.qualified_machines for op in masters.operators):
+    for mid in masters.machines:
+        if any(mid in op.qualified_machines for op in masters.operators):
             staffed.add(mid)
     return staffed
 

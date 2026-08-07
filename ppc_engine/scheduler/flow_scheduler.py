@@ -414,6 +414,13 @@ def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, planned_operator,
         seg_end = seg_start + timedelta(minutes=take)
         name = None
         if (planned_op_obj
+                # The pinned operator must STILL be assigned to this machine in
+                # Settings. Without this, an admin who removed a machine from someone
+                # while they had work in progress got them frozen straight back onto it
+                # on the next re-plan — the live "Sidhu Singe on CNC5" bug (2026-08-03).
+                # The machine pin stays (the work is physically there); only the person
+                # is re-staffed, via candidate_operator below.
+                and machine.id in planned_op_obj.qualified_machines
                 and effective_shift(planned_op_obj, win.shift_date, config) == win.shift
                 and masters.calendar.is_operator_available(planned_operator, win.shift_date)
                 and staffing.free_during(planned_operator, seg_start, seg_end)):

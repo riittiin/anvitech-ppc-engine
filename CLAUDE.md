@@ -90,6 +90,43 @@
 >   identically by every feature, not a per-feature re-derivation, so it cannot make two
 >   features disagree. Changing it would move the plan itself.
 >
+> - **⚠️ THE SETTINGS OPERATOR TABLE IS AUTHORITATIVE — ROLE IS NOT A GATE (2026-08-07,
+>   live bug, in front of directors).** Sandeep Kumar was assigned **CNC4** in Settings,
+>   Analytics showed him **0%**, and **CNC4 sat idle with work waiting**. Root cause:
+>   `ppc_engine` gated the operator pool on ROLE as well as the assigned machine —
+>   `o.role == ROLE_FOR_KIND[machine.kind] and mid in o.qualified_machines` — and role is
+>   inherited **BY NAME from the workbook's operator sheet**, a fossil since 2026-07-18,
+>   and **never re-derived from what the admin assigned**. A workbook "helper" could
+>   therefore never be scheduled on a CNC no matter what Settings said, and **nothing
+>   anywhere reported it**. Worse, one person legitimately spans kinds (Sandeep runs
+>   manual stations AND CNC4), which a single role can never express. Reproduced on
+>   Test9: assigning him CNC4 gave him **0 minutes on CNC4** and *dropped* his total work
+>   **5,455 → 1,705 min** (his `flexibility` count rose, so scarce-first deprioritised
+>   him) — the admin's action silently made things worse. After the fix he works **3,300
+>   min on CNC4**. **Role silently overrode Settings in THREE places, all now fixed —
+>   these are the first-ever edits to `ppc_engine/`, and they are deliberate:**
+>   `scheduler/staffing.build_machine_pools` (who may run a machine),
+>   `loaders/loader._staffed_machines` (whether a machine counts as staffed at all — an
+>   "unstaffed" machine's orders are **BLOCKED as unschedulable**, so a machine covered
+>   only by a role-mismatched person took its whole order book out of the plan), and
+>   `worktime._shift_for` (a non-operator role was forced to FIRST shift, ignoring the
+>   admin's shift — latent on Test9, where every helper/inspector happens to be first
+>   shift, but a landmine). **Qualification is now EXACTLY the machine list in Settings.**
+>   Byte-identical where nobody is mis-assigned (Test9 makespan 61.68 unchanged) — it
+>   only bites where the assignment was being discarded.
+>   **Same class, other direction, ALSO fixed (open since 2026-08-03, designed but never
+>   built):** `flow_scheduler._lay_frozen` re-pinned a frozen in-progress op's planned
+>   operator **without re-checking qualification**, so removing a machine from someone
+>   who had work in progress froze them straight back onto it (the live "Sidhu Singe on
+>   CNC5" bug). The machine pin stays (the work is physically there); only the person is
+>   re-staffed via `candidate_operator`.
+>   **Defense in depth — `new_engine.qualification_violations(entries, new_masters)`:**
+>   pure, returns `OPERATOR_NOT_QUALIFIED` rows for any operator planned on a machine
+>   outside their Settings list. Surfaced by `_report_for_book` (non-blocking — a live
+>   plan must never break) and asserted empty in tests. **This class shipped silently
+>   twice; an invariant that is CHECKED beats one that is merely intended.**
+>   Tests: `tests/test_operator_qualification.py`.
+>
 > - **SILENT OMISSION — a resource with no work must never disappear (2026-08-07, live
 >   report).** Settings showed **20 staff, Analytics showed 19** (Sandeep Kumar missing).
 >   Root cause: `engine/analytics.py` built its per-operator and per-machine tables by

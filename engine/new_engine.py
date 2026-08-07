@@ -335,6 +335,34 @@ def _machine_for(kind, machine_id) -> str:
     return _OFF_LANE
 
 
+def qualification_violations(entries, new_masters):
+    """Every place the schedule puts an operator on a machine they are NOT assigned to
+    in Settings. Pure; returns ``[{"kind", "ref", "message"}]``, empty when clean.
+
+    Defense in depth for the 2026-08-03 / 2026-08-07 class of bugs: the scheduler is
+    supposed to make this impossible, but it silently shipped twice — once via frozen
+    in-progress ops re-pinning a de-qualified operator, once via a role gate that threw
+    the admin's assignment away. An invariant that is CHECKED beats one that is merely
+    intended. Tests assert it is empty; the API surfaces it as a non-blocking report row
+    rather than breaking a live plan."""
+    quals = {o.name: set(o.qualified_machines) for o in new_masters.operators}
+    seen, out = set(), []
+    for e in entries:
+        if e.machine in (_OS_LANE, _OFF_LANE):
+            continue
+        for (_s, _e, op) in (getattr(e, "op_segments", None) or []):
+            if not op or (op, e.machine) in seen:
+                continue
+            if e.machine not in quals.get(op, set()):
+                seen.add((op, e.machine))
+                out.append({
+                    "kind": "OPERATOR_NOT_QUALIFIED", "ref": f"{op} / {e.machine}",
+                    "message": (f"the plan plans operator '{op}' on machine "
+                                f"'{e.machine}', which is not in their machine list "
+                                f"under Settings > Operators & shifts")})
+    return out
+
+
 def _entries_from_schedule(sched, batch_by_key):
     """New Segment[] -> old ScheduleEntry[]. One entry per operation; the new engine's
     per-shift segments become the entry's `op_segments` (the per-shift operator
