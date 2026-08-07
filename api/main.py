@@ -46,6 +46,7 @@ from engine import optimizer
 from engine import optimize_service
 from engine.gantt import build_gantt
 from engine import book_store, orderbook
+from engine import operator_coverage
 from engine import storage
 from engine import efficiency
 from engine import operator_master
@@ -438,7 +439,7 @@ def _absence_orphans(masters, absences=None) -> list:
                   if a["operator"] not in names})
 
 
-def _report_for_book(masters, so_lines, absences=None):
+def _report_for_book(masters, so_lines, absences=None, config=None):
     """The validation report scoped to the CURRENT order book. Loader-level rows
     about the masters (pending machines, time coercions, …) pass through, but
     NO_ROUTING is re-derived from the live book: the stored workbook's own SO
@@ -462,6 +463,15 @@ def _report_for_book(masters, so_lines, absences=None):
         rows.append({"kind": "ABSENT_OPERATOR_UNKNOWN", "ref": name,
                      "message": f"absence entry for an operator not in the "
                                 f"current masters: ignored"})
+    # Cross-check the two sources of truth: the workbook's Machine master says which
+    # machines exist, the Settings operator table says who can run them (`masters` has
+    # already had the Settings table overlaid by `_current_masters`). A machine nobody
+    # is assigned to can never be scheduled — flag it rather than let the plan quietly
+    # route around it (owner, 2026-08-07). Non-blocking, like every row here.
+    # `config` is passed in by callers that already resolved one; resolving here would
+    # make a REPORT able to stamp the plan clock as a side effect.
+    rows.extend(operator_coverage.staffing_gaps(
+        masters, config if config is not None else _load_plan_config()))
     return to_table([
         {"Kind": r["kind"], "Reference": r["ref"], "Message": r["message"]}
         for r in rows
@@ -896,7 +906,8 @@ def _plan(config: Config):
             diverged=diverged)
 
     result = {"run_id": run_id, "trace": trace,
-              "report": _report_for_book(masters, so_lines, absences=absences_raw),
+              "report": _report_for_book(masters, so_lines, absences=absences_raw,
+                                         config=config),
               "gantt": gantt, "orders": orders,
               # SAVED (unresolved) config — null plan_start_date = auto survives
               # the round-trip; the resolved start is a separate display key.

@@ -12,6 +12,7 @@ for one order. Two independent causes, both pinned here:
      54 of 68 orders' completion dates, worst case by 24 days.
 """
 import importlib
+import json
 from datetime import date, datetime
 
 import pytest
@@ -278,7 +279,73 @@ def test_delay_report_still_lists_an_order_with_no_in_house_work():
     assert row["Days Late"] == 1
 
 
-# --- 6. The delay report reads the plan every other tab shows --------------- #
+# --- 6. Operators come from SETTINGS; machines come from the workbook -------- #
+
+def test_operators_come_from_settings_not_the_workbook_sheet():
+    """Owner's rule: operators, their shifts and their machines live in the Settings
+    tab ONLY. The workbook's operator sheet seeds that table once and is a fossil after
+    — the Excel is the source for the SO list and the Machine master, never for people.
+    So Analytics must follow Settings: a person added there appears even though the
+    workbook has never heard of them, and a person deleted there disappears even though
+    the workbook still lists them."""
+    m = _api()
+    book_store.save_masters_bytes(build_sample_bytes())
+    book_store.add_orders([Order("SO1", ITEM_A, ITEM_A, 40, date(2025, 3, 20))])
+    book_store.save_plan_config(json.dumps({"apply_operator_logic": True}))
+    admin = TestClient(m.app)
+    admin.post("/login", data={"username": "anvitech", "password": "1930rail"})
+
+    from engine.loaders import load_all
+    import io as _io
+    _so, workbook_masters = load_all(_io.BytesIO(book_store.load_masters_bytes()))
+    workbook_names = {o.name for o in workbook_masters.operators}
+
+    seeded = {o["name"] for o in admin.get("/operators").json()["operators"]}
+    assert seeded == workbook_names          # one-time seed from the sheet
+
+    def analytics_operators():
+        m._PLAN_CACHE.update(key=None, result=None, artifacts=None)
+        run = admin.post("/run", json={}).json()
+        return {o["Operator"] for o in run["trace"]["analytics"]["operators"]}
+
+    assert admin.post("/operators", json={"name": "Settings Only Person",
+                                          "machines_raw": "CNC1",
+                                          "shift": "First shift"}).status_code == 200
+    assert "Settings Only Person" not in workbook_names
+    assert "Settings Only Person" in analytics_operators()
+
+    victim = next(o for o in admin.get("/operators").json()["operators"]
+                  if o["name"] in workbook_names)
+    assert admin.delete(f"/operators/{victim['id']}").status_code == 200
+    assert victim["name"] in workbook_names          # still in the Excel...
+    assert victim["name"] not in analytics_operators()   # ...but gone from the plan
+
+
+def test_machine_with_no_operator_in_settings_is_flagged():
+    """Every machine in the workbook's Machine master must have somebody in Settings who
+    can run it, or the plan can never schedule it. Report it (non-blocking), don't let
+    it fail silently. A two-shift machine with nobody on the night shift is called out
+    separately — it can still run days, but its night capacity is unusable."""
+    m = _api()
+    book_store.save_masters_bytes(build_sample_bytes())
+    admin = TestClient(m.app)
+    admin.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    admin.get("/operators")                     # trigger the one-time seed
+
+    for o in admin.get("/operators").json()["operators"]:
+        admin.delete(f"/operators/{o['id']}")   # nobody left in Settings at all
+
+    m._PLAN_CACHE.update(key=None, result=None, artifacts=None)
+    report = admin.post("/run", json={}).json()["report"]
+    kinds = {r[0] for r in report["rows"]}
+    assert "MACHINE_NO_OPERATOR" in kinds
+
+    flagged = {r[1] for r in report["rows"] if r[0] == "MACHINE_NO_OPERATOR"}
+    masters = m._current_masters()
+    assert flagged == set(masters.machines)     # every machine, none skipped
+
+
+# --- 7. The delay report reads the plan every other tab shows --------------- #
 
 def test_delay_report_reuses_the_plan_run_instead_of_computing_its_own():
     """The report must be a VIEW of the cached plan, not a second plan. Guarded by

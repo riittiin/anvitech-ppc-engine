@@ -116,6 +116,31 @@
 >   machine in the master and every operator in Settings appears (checks G2 / I2). When
 >   writing a consistency check, **compare sets, not overlaps.**
 >
+> - **TWO SOURCES OF TRUTH, and the cross-check between them (owner, 2026-08-07).**
+>   Restating the rule because it has been missed repeatedly: **operators — who exists,
+>   their shift, and which machines they run — come from the SETTINGS tab ONLY**
+>   (`anvitech:operators`). The uploaded Excel is the source for the **SO list and the
+>   Machine master**, and its operator sheet is a one-time seed that becomes a fossil.
+>   **Verified, not assumed** (`tests/test_plan_consistency.py::
+>   test_operators_come_from_settings_not_the_workbook_sheet`): a person added only in
+>   Settings appears in Analytics though the workbook never heard of them (20→21), and a
+>   person deleted in Settings disappears though the workbook still lists them (21→20).
+>   The wiring that makes this true is `api._current_masters()` → `_with_operator_overlay`
+>   replacing `masters.operators` on every call — so anything reading `masters.operators`
+>   downstream (Rule 6, analytics, gantt, the new engine via `_apply_app_operators`) is
+>   already reading Settings. **The `masters.operators` name is misleading — it is the
+>   Settings table, not the workbook sheet.**
+>   **New cross-check:** `operator_coverage.staffing_gaps(masters, config)` (pure,
+>   reporting-only) flags every machine in the **Machine master** that the **Settings**
+>   table cannot staff, appended to the validation report by `_report_for_book`:
+>   `MACHINE_NO_OPERATOR` (nobody on any shift can run it — the plan can never schedule
+>   it; **provisional machines included**, since a routing already points at them) and
+>   `MACHINE_SHIFT_UNCOVERED` (a two-shift machine with nobody on one of its shifts — it
+>   runs, but that shift's capacity is unusable). Verified live: intact Test9 raises **0**
+>   flags; deleting MI3's only operator raises exactly one naming MI3. `_report_for_book`
+>   takes `config` from its caller rather than resolving one, so building a REPORT can
+>   never stamp the plan clock as a side effect.
+>
 > - **Audit, 2026-08-07 (`/private` scratch harness, re-runnable):** 15 cross-feature
 >   checks over Test5/8/9 with the production config — expected completion across Orders/
 >   Gantt/delay report/machine-wise/shift-wise, Days Late vs the dates, SO delivery date,

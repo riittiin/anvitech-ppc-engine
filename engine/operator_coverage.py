@@ -103,6 +103,54 @@ def eligible_window(machine, config):
     return [_day_window(config)]
 
 
+def staffing_gaps(masters, config):
+    """Every machine in the workbook's **Machine master** that the **Settings operator
+    table** cannot staff. Pure; reporting-only — never changes a plan.
+
+    Operators, their shifts and their machines are owned by the Settings tab (the
+    workbook's operator sheet only seeds it once and is a fossil afterwards), so this is
+    the cross-check between the two sources of truth: Excel says which machines exist,
+    Settings says who can run them.
+
+    Returns a list of ``{"kind", "ref", "message"}`` rows, ready for the validation
+    report. Two kinds:
+
+      MACHINE_NO_OPERATOR      nobody in Settings can run it on any shift — the plan can
+                               never schedule it. Provisional machines are included:
+                               a routing already points at them, so an unstaffed one is
+                               a real gap, not a placeholder to ignore.
+      MACHINE_SHIFT_UNCOVERED  a two-shift machine with nobody on one of its shifts —
+                               it still runs, but that shift's capacity is unusable.
+    """
+    rows = []
+    for mid, machine in sorted(masters.machines.items()):
+        first_ops = [o for o in masters.operators
+                     if _shift_kind(o) == "first" and _qualifies(o, machine)]
+        second_ops = [o for o in masters.operators
+                      if _shift_kind(o) == "second" and _qualifies(o, machine)]
+        name = machine.display_name or mid
+        if not first_ops and not second_ops:
+            rows.append({
+                "kind": "MACHINE_NO_OPERATOR", "ref": mid,
+                "message": (f"machine '{name}' has no operator assigned in Settings — "
+                            f"add someone under Settings > Operators & shifts who can "
+                            f"run it, or the plan can never schedule work on it")})
+            continue
+        if not machine.is_two_shift(config.two_shift_threshold_hours):
+            continue
+        if not second_ops:
+            rows.append({
+                "kind": "MACHINE_SHIFT_UNCOVERED", "ref": mid,
+                "message": (f"machine '{name}' runs two shifts but nobody in Settings "
+                            f"is on 2nd shift for it — its night capacity is unusable")})
+        elif not first_ops:
+            rows.append({
+                "kind": "MACHINE_SHIFT_UNCOVERED", "ref": mid,
+                "message": (f"machine '{name}' runs two shifts but nobody in Settings "
+                            f"is on 1st shift for it — its day capacity is unusable")})
+    return rows
+
+
 def machine_windows(masters, config):
     """Return ``(windows, report)``.
 
