@@ -838,17 +838,11 @@ def _plan(config: Config):
                         status_by_order=status_by_order)
     orders = to_table(orderbook.order_rows(active, completed, actuals, masters))
 
-    # Expected completion per order (SO#, item) = the latest scheduled End across
-    # every op tied to that order, keyed "SO\x1fitem" (a schedule entry can carry
-    # several so_refs when Rule 1 consolidated same-item SOs into one batch).
-    exp_end_dates = {}
-    for e in plan_run.schedule:
-        for r in (e.so_refs or []):
-            k = f"{r}\x1f{e.item_code}"
-            d = e.end.date()
-            if k not in exp_end_dates or d > exp_end_dates[k]:
-                exp_end_dates[k] = d
-    exp_end = {k: d.isoformat() for k, d in exp_end_dates.items()}
+    # Expected completion per order (SO#, item), keyed "SO\x1fitem" — from the ONE
+    # shared definition (optimizer.expected_completion) the Gantt, the delay report
+    # and plan_metrics also use, so no two surfaces can publish different dates.
+    exp_end = {f"{so}{KEY_SEP}{item}": d.isoformat()
+               for (so, item), d in optimizer.expected_completion(plan_run.schedule).items()}
 
     # Staleness info for the Optimize banner: how many of the currently planned
     # orders the applied optimization covers (uncovered = uploaded after it ran).
@@ -910,7 +904,13 @@ def _plan(config: Config):
               "resolved_plan_start": resolved_plan_start,
               "expected_end": exp_end, "optimize_meta": optimize_meta,
               "auto_note": book_store.load_auto_note()}
-    _PLAN_CACHE.update(key=_fp, result=result)
+    # The raw artifacts of THIS run, cached alongside the response under the same
+    # fingerprint. Downloads that need the schedule itself (the delay justification
+    # report) read these instead of planning again — a second plan is a second set of
+    # dates (live 2026-08-07: Gantt 07-Sep vs delay report 04-Sep for one order).
+    _PLAN_CACHE.update(key=_fp, result=result,
+                       artifacts={"plan_run": plan_run, "so_lines": so_lines,
+                                  "masters": masters, "config": config})
     return result
 
 
@@ -1085,6 +1085,23 @@ def _ceil_next_hour(dt):
     return dt.replace(minute=0, second=0, microsecond=0) + _td(hours=1)
 
 
+def _stamp_plan_clock() -> str:
+    """Start a new plan clock at the next full hour (IST) and persist it; returns the
+    ISO floor. Called when an optimization finishes (`_finalize_optimize`) and on the
+    first plan of a day that has not had one. Between stamps every planning entry reads
+    the stored value, so all features plan from the same instant — see `_resolve_config`.
+
+    Never raises: if the store write fails the floor is still returned and used for this
+    run, which is no worse than the pre-2026-08-07 per-call behaviour."""
+    now = _ist_now()
+    floor = _ceil_next_hour(now).isoformat(timespec="minutes")
+    try:
+        book_store.save_plan_start_floor(now.date().isoformat(), floor)
+    except Exception:  # noqa: BLE001 — a pin failure must not break planning
+        pass
+    return floor
+
+
 def _resolve_config(config: Config) -> Config:
     """Resolve an 'auto' plan start (plan_start_date is None) to today (IST) so
     the pure engine NEVER sees None. Called at every planning entry; a config
@@ -1100,8 +1117,26 @@ def _resolve_config(config: Config) -> Config:
         # Auto: resolve to today AND floor the plan at the next full hour (IST), so a run
         # late in the day never schedules from 08:00 that (past) morning. The engine starts
         # at max(08:00-of-date, floor). See engine/new_engine._plan_config.
-        floor = _ceil_next_hour(_ist_now()).isoformat(timespec="minutes")
-        return replace(config, plan_start_date=_ist_today(), plan_start_floor=floor)
+        #
+        # The floor is a STORED PLAN CLOCK, not a per-call `now()` (2026-08-07). It shifts
+        # the engine's plan start, and the scheduler is a greedy dispatcher, so it does not
+        # merely offset the plan — it re-decides it: on the real book a 6-hour difference
+        # re-sequenced 54 of 68 orders and moved completion dates by up to 24 days.
+        # Recomputing it per call meant the Gantt and a report pulled an hour later were
+        # DIFFERENT PLANS from identical inputs (the live 07-Sep vs 04-Sep bug).
+        #
+        # It advances at exactly two events, both discrete and visible:
+        #   * an optimization FINISHES  -> `_stamp_plan_clock`, next full hour (owner's
+        #     rule: a contest landing 09:01 Mon makes the plan start 10:00 Mon)
+        #   * the first plan of a NEW day, when no contest has run yet that day
+        # Between those it holds, so every feature reports the same dates.
+        today = _ist_today()
+        pinned = book_store.load_plan_start_floor()
+        if pinned and pinned.get("date") == today.isoformat() and pinned.get("floor"):
+            floor = pinned["floor"]
+        else:
+            floor = _stamp_plan_clock()
+        return replace(config, plan_start_date=today, plan_start_floor=floor)
     # Fixed date (testing/reproducibility): start at 08:00 of that date; clear any stale floor.
     if config.plan_start_floor is not None:
         config = replace(config, plan_start_floor=None)
@@ -1364,15 +1399,20 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                 _OPTIMIZE["evals"] = evals
                 _OPTIMIZE["best"] = best
 
-            # Honest baseline = the admin's CURRENT plan for these orders, under their
-            # real config (expedite as set) — what they have if they DON'T optimize.
+            # Honest baseline = the admin's CURRENT plan — the applied optimized
+            # sequence replayed, NOT the book with no sequence at all (2026-08-07: that
+            # showed a plan the owner did not have, and disagreed with the auto-note's
+            # "was N" for the same instant). `_incumbent_metrics` is the one definition.
             real_baseline = _OPTIMIZE.get("baseline")
             if real_baseline is None:
-                base_sched, base_lines = _all_lines_schedule(setup, setup.masters, None)
-                real_baseline = optimizer.plan_metrics(
-                    base_sched, base_lines, setup.config.plan_start_date,
-                    with_distribution=True,
-                    promise_slack_days=getattr(setup.config, "committed_promise_slack_days", 3))
+                try:
+                    real_baseline = _incumbent_metrics(with_distribution=True)
+                except Exception:  # noqa: BLE001 — fall back to the unranked book
+                    base_sched, base_lines = _all_lines_schedule(setup, setup.masters, None)
+                    real_baseline = optimizer.plan_metrics(
+                        base_sched, base_lines, setup.config.plan_start_date,
+                        with_distribution=True,
+                        promise_slack_days=getattr(setup.config, "committed_promise_slack_days", 3))
 
             # One pool: search ALL active lines together (lanes are status labels
             # with no scheduling effect). Only operator absences reserve time.
@@ -1589,6 +1629,13 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                        table, cancelled):
     """Store a finished contest (local sweep OR cloud worker result) as the
     Optimize outcome — one place computes improved/inputs_sig for both paths."""
+    # THE PLAN CLOCK STARTS HERE (owner's rule, 2026-08-07): when the optimization
+    # finishes, the plan begins at the NEXT FULL HOUR. A contest landing 09:01 Monday
+    # makes every plan start 10:00 Monday, and that clock then HOLDS — for the Gantt,
+    # the Orders tab, the reports, the next incumbent measurement — until the next
+    # contest finishes. Stamped BEFORE the metric recomputes below so the numbers this
+    # panel shows are measured on the same clock the applied plan will run on.
+    _stamp_plan_clock()
     # RECOMPUTE the winner's metrics locally, by replaying its ranks through the same
     # path _plan uses. The contest's own `best` (especially a cloud worker's) can be
     # measured a hair differently from how the app actually replays, so trusting it made
@@ -1600,6 +1647,16 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
         _local_best = _metrics_for_ranks(ranks, winner_overlap, winner_flexible)
         if _local_best is not None:
             best = _local_best
+    # `real_baseline` was measured when the contest STARTED, on the previous plan clock.
+    # Re-measure it through `_incumbent_metrics` — the ONE "plan you have now" — on the
+    # clock just stamped, so the panel's before/after compares two plans on one clock and
+    # reports the same "before" the auto-note does. Falls back to the contest-start
+    # number if the replay fails.
+    if real_baseline is not None:
+        try:
+            real_baseline = _incumbent_metrics(with_distribution=True)
+        except Exception:  # noqa: BLE001 — a re-measure must never fail a finished contest
+            pass
     improved = (best is not None and real_baseline is not None
                 and optimizer.score(best) < optimizer.score(real_baseline))
     # Fingerprint against the WINNING settings: Apply persists the winning
@@ -1771,17 +1828,9 @@ _MOVE_LATER_THRESHOLD_DAYS = 1
 
 
 def _expected_by_order(schedule):
-    """Each order's expected completion DATE: the latest entry end across its
-    processes, keyed (so_no, item_code). Mirrors optimizer.plan_metrics' expected
-    map — the customer-facing 'when will it be done'."""
-    expected = {}
-    for e in schedule:
-        d = e.end.date()
-        for ref in (e.so_refs or []):
-            k = (ref, e.item_code)
-            if k not in expected or d > expected[k]:
-                expected[k] = d
-    return expected
+    """Each order's expected completion DATE, keyed (so_no, item_code) — the ONE shared
+    definition (optimizer.expected_completion), not a local copy of it."""
+    return optimizer.expected_completion(schedule)
 
 
 def _movers(exp_old, exp_new, threshold):
@@ -1860,10 +1909,17 @@ def _metrics_for_ranks(ranks, overlap=None, flexible=None, *, with_distribution=
         return None
 
 
-def _incumbent_metrics():
-    """Score of the plan users currently see: the applied ranks (if any) replayed
-    on TODAY'S book, measured over ALL active lines — the same domain the contest's
-    ``best`` is scored on. Expedite off when ranks replay."""
+def _incumbent_metrics(*, with_distribution=False):
+    """THE one measure of "the plan you have right now": the applied ranks (if any)
+    replayed on TODAY'S book, over ALL active lines — the same domain the contest's
+    ``best`` is scored on. Expedite off when ranks replay.
+
+    Every "before" number the owner reads comes from here: the auto-note's "was N", the
+    auto-apply gate, and (since 2026-08-07) the Optimize panel's "Now" column. The panel
+    used to measure the book with NO optimized sequence at all, so once an optimization
+    was applied it reported a plan the owner did not have — on Test9, 967 late-days /
+    61.68 days against the note's 956 / 61.5 at the same instant. ``with_distribution``
+    adds the panel's lateness bands."""
     config = _resolve_config(_load_plan_config())   # None -> today (IST) for the engine
     masters = _current_masters()
     actuals = book_store.load_actuals()
@@ -1878,6 +1934,7 @@ def _incumbent_metrics():
     schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks)
     return optimizer.plan_metrics(
         schedule, all_lines, setup.config.plan_start_date,
+        with_distribution=with_distribution,
         promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
 
 
@@ -2468,10 +2525,22 @@ def _delay_report_xlsx(report) -> bytes:
 
 
 def _plan_run_for_report(config: Config):
-    """Reproduce _plan's scheduling setup and return (plan_run, so_lines, masters, cfg).
-    Standalone (does NOT share _plan's body) so _plan stays byte-identical (golden). Same
-    inputs as /run: active orders at remaining qty, actuals-advanced start, operator
-    overlay as-of the effective start, applied optimization ranks, and absence reservations."""
+    """(plan_run, so_lines, masters, cfg) for THE plan every tab is showing.
+
+    Runs ``_plan`` and reads back the artifacts it cached, so a report is a VIEW of the
+    displayed plan and can never disagree with it. This used to build its own plan; with
+    an auto start that resolved to 'the next full hour from now', a report generated an
+    hour after the Gantt was a materially different schedule (live 2026-08-07).
+
+    The standalone rebuild below is the fallback for the one case the cache can't cover
+    (artifacts missing — e.g. an older cache entry after a hot reload). It reproduces
+    _plan's setup exactly: active orders at remaining qty, actuals-advanced start,
+    operator overlay as-of the effective start, applied ranks, absence reservations."""
+    _plan(config)
+    art = _PLAN_CACHE.get("artifacts")
+    if art:
+        return art["plan_run"], art["so_lines"], art["masters"], art["config"]
+
     masters = _current_masters()
     config = _resolve_config(config)
     active = book_store.load_active_orders()

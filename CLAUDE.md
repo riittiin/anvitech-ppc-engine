@@ -1,6 +1,107 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-07-29)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-07)
+>
+> - **ONE PLAN, ONE SET OF DATES — cross-feature consistency (2026-08-07, live bug).**
+>   The Gantt said 07-Sep and the delay justification report said 04-Sep for the same
+>   (SO#, item). Two independent causes, both fixed; measured on Test9 (68 orders) the
+>   Gantt vs report disagreed on **50 of 68 orders, up to 6 days**, now **0**.
+>   **(1) Root cause — the auto plan-start floor was recomputed on every call.**
+>   `api.main._resolve_config` set `plan_start_floor = _ceil_next_hour(_ist_now())` per
+>   invocation. That floor feeds `PlanConfig.plan_start` (`new_engine._plan_config`), and
+>   the scheduler is a greedy dispatcher, so the start time is not a mere offset: on the
+>   real book a **6-hour difference in the floor re-sequenced 54 of 68 orders and moved
+>   completion dates by up to 24 days**, with nothing else changed. Two features that
+>   planned at different moments were therefore different plans. The floor is now a
+>   **STORED PLAN CLOCK** (`anvitech:plan_start_floor`,
+>   `book_store.save/load_plan_start_floor`, `{date, floor}`; written by
+>   `api.main._stamp_plan_clock`) that advances at exactly **two discrete, visible
+>   events** and holds in between:
+>   **(a) an optimization FINISHES** — `_finalize_optimize` stamps the next full hour
+>   (**owner's rule, 2026-08-07: a contest landing 09:01 Monday makes the plan start
+>   10:00 Monday**), stamped BEFORE the `_metrics_for_ranks` recompute so the panel's
+>   numbers are measured on the clock the applied plan will actually run on; the
+>   contest-start `real_baseline` is likewise re-measured on the new clock
+>   (`_metrics_for_ranks(None)`) or the before/after would straddle two different plans.
+>   **(b) the first plan of a new IST day**, when no contest has run yet that day —
+>   otherwise a morning-stamped clock would leave an evening run planning from 08:00
+>   that past morning, the very thing the 2026-08-03 next-hour fix existed to stop.
+>   Side benefit: `_plan_fingerprint` (which hashes the resolved config) is now stable
+>   between stamps, so the plan cache actually holds, and the Optimize contest, the
+>   incumbent measurement and the live replay all share one clock.
+>   **(2) The delay report built its OWN plan.** `_plan_run_for_report` deliberately did
+>   not share `_plan`'s body and bypassed the plan cache, so `/delay-report.xlsx` always
+>   re-planned. It now calls `_plan(config)` and reads back the run's artifacts, which
+>   `_plan` caches alongside its response (`_PLAN_CACHE["artifacts"]` = plan_run /
+>   so_lines / masters / config). The standalone rebuild is kept as the
+>   artifacts-missing fallback. **Any future download that needs the schedule must go
+>   through `_plan_run_for_report` — never call `run_forward` for a report.**
+>   **(3) ONE definition of expected completion:** `optimizer.expected_completion(schedule)
+>   -> {(so_no, item_code): date}` (sibling of `makespan_days`, same "one definition every
+>   surface must use" rule). Now used by `plan_metrics`, `/run`'s `expected_end` (Orders
+>   tab), `_expected_by_order`, and `delay_report`'s summary. The delay report used to
+>   derive its own completion from real machine ops only, dropping the OS / Outsourced and
+>   Off-machine lanes — latent on all four real workbooks, but a genuine second way for the
+>   same order to read two ways, so it is gone. Its **wait analysis** still runs over real
+>   machine ops (there is no machine to wait for on an off-lane); only the published DATE
+>   changed. The Gantt's per-batch max is provably the same value (a batch's entries carry
+>   every member so_ref) and was verified equal on Test5/6/8/9. Regression:
+>   `tests/test_plan_consistency.py`.
+>   **(4) ONE "the plan you have now":** found by the same-day audit. The Optimize
+>   panel's **"Now"** column and the auto-note's **"was N"** were different plans measured
+>   at different moments — the panel's `real_baseline` was the book with **no optimized
+>   sequence at all** (`_all_lines_schedule(..., None)`), measured when the contest
+>   STARTED, so once an optimization was applied it reported a plan the owner did not
+>   have. Measured on Test9 at one instant: panel **967 late-days / 61.68 d** vs note
+>   **956 / 61.5**. `_incumbent_metrics(with_distribution=False)` is now THE definition —
+>   it gained the kwarg (for the panel's lateness bands) and is used by the auto-note, the
+>   auto-apply gate, the contest-start baseline (`local_job`) and the finalize re-measure.
+>   Visible effect: the panel's improvement now reads SMALLER, because it is measured
+>   against the plan actually in force rather than against never having optimized.
+>
+>   **(5) ONE working-hours model — reporting features must model the shop the way the
+>   ENGINE that built the plan does.** Found by asking the structural question rather
+>   than the numeric one. The plan comes from `ppc_engine`, but **Analytics** ("Available
+>   hrs", Utilization %, bottleneck / under-used lists), the **delay justification report**
+>   ("off-hours" vs "waiting for operators"), the Rule-6 **"when each machine can run"**
+>   table and the **shift-wise** download's shift LABEL each rebuilt the working window
+>   from the retired classic engine's rule. They disagree on single-shift stations:
+>   `ppc_engine.worktime.iter_windows` skips only the SECOND shift, so a manual /
+>   inspection / packing station runs the whole FIRST shift **08:00–19:00**, while
+>   `operator_coverage` gave it the manual window **09:00–18:00**. Measured on Test9:
+>   **9,470 minutes (158 hours) of genuinely planned work fell outside the window those
+>   features believed in** — 120 min/day/station, exactly 08:00–09:00 + 18:00–19:00; now
+>   **0** (Test5/8/9). Fix: **`operator_coverage._day_window(config)` is the one place
+>   that rule lives**, keyed off `config.scheduler` (classic keeps 09:00–18:00, so the
+>   golden trace and the ~500 classic tests are byte-identical); `eligible_window`,
+>   `machine_windows` and `rule6_allocate.build_shiftwise_timeline`'s `_windows`/`_label`
+>   all delegate to it. **Any new reporting surface must use it, never re-derive shift
+>   hours.** Real effect on the numbers: single-shift stations' Available went 483.4h →
+>   589.4h over the plan window, so utilization fell to the truth (DTC2 40.5%→33.2%,
+>   MI1 35.9%→29.4%, CMM 35.0%→28.7%, avg 24.8%→23.2%), and 3.4 order-days of waiting
+>   moved out of "off-hours" into "waiting for operators" where they belonged.
+>   **Verified NOT independently derived** (they read the engine's own output):
+>   shift-wise operators + Analytics operator hours (both via
+>   `build_shiftwise_timeline`'s fast path, which trusts `ScheduleEntry.op_segments`
+>   verbatim), and the Gantt / Schedule / machine-wise / delay-report operator names
+>   (all `ScheduleEntry.operator_label`). **Known simplification, deliberately left:**
+>   `rule3_tiebreak_process_time` measures slack on the legacy two-shift `WorkClock`
+>   regardless of machine — but that is a plan INPUT computed once and consumed
+>   identically by every feature, not a per-feature re-derivation, so it cannot make two
+>   features disagree. Changing it would move the plan itself.
+>
+> - **Audit, 2026-08-07 (`/private` scratch harness, re-runnable):** 15 cross-feature
+>   checks over Test5/8/9 with the production config — expected completion across Orders/
+>   Gantt/delay report/machine-wise/shift-wise, Days Late vs the dates, SO delivery date,
+>   operator + end time per op (Schedule vs Gantt, 422 ops), makespan (Analytics vs
+>   `makespan_days`), machine busy hours (machine-wise vs Analytics), remaining qty
+>   (Orders vs rule8), shift-wise qty summing to the op total, operator hours (Analytics
+>   vs shift-wise), and the whole set again after punching an actual and letting hours
+>   pass — plus the STRUCTURAL check in (5): does any feature model the shop differently
+>   from the engine that built the plan? All clean after the fixes above. **What this did
+>   NOT cover, and is still unverified:** the cloud/Oracle contest paths end-to-end, the
+>   efficiency report, rollback, absences, multi-user concurrency, and anything only
+>   reachable through the browser UI.
 >
 > This app now runs a **NEW operator-stable scheduling engine**, swapped in behind the old
 > scheduler seam. **Everything below this banner describes the PRE-SWAP classic/flow engine and

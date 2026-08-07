@@ -1028,9 +1028,13 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
                      base.replace(hour=config.first_shift_end_hour)),
                     ("Second shift", base.replace(hour=config.first_shift_end_hour),
                      base + timedelta(days=1, hours=config.second_shift_end_hour))]
-        return [(f"Day shift ({config.manual_start_hour:02d}:00–{config.manual_end_hour:02d}:00)",
-                 base.replace(hour=config.manual_start_hour),
-                 base.replace(hour=config.manual_end_hour))]
+        # A single-shift station's window comes from the ONE shared rule
+        # (operator_coverage._day_window) so this download can never label a row
+        # "Day shift (09:00–18:00)" while its own Start/End columns read 08:00–19:00.
+        from ..operator_coverage import _day_window
+        s_min, e_min = _day_window(config)
+        return [(f"Day shift ({s_min // 60:02d}:00–{e_min // 60:02d}:00)",
+                 base + timedelta(minutes=s_min), base + timedelta(minutes=e_min))]
 
     batch_by_id = {b.batch_id: b for b in (batches or [])}
     end_by_batch: dict = {}
@@ -1069,13 +1073,15 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
     # and no UNSTAFFED can arise here. (Manually-built schedules with no op_segments —
     # e.g. some unit tests — fall through to the legacy two-phase derivation below.)
     if any(getattr(e, "op_segments", None) for e in schedule):
-        from ..operator_coverage import _shift_of
+        from ..operator_coverage import _day_window, _shift_of
 
         def _label(mid, dt):
             if _two_shift(mid):
                 return "First shift" if _shift_of(dt, config) == "first" else "Second shift"
-            return (f"Day shift ({config.manual_start_hour:02d}:00–"
-                    f"{config.manual_end_hour:02d}:00)")
+            # Same shared rule as `_windows` above — the label must describe the hours
+            # this row's Start/End actually fall in.
+            s_min, e_min = _day_window(config)
+            return f"Day shift ({s_min // 60:02d}:00–{e_min // 60:02d}:00)"
 
         segs = []
         for e in schedule:

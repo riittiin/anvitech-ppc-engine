@@ -71,18 +71,36 @@ def qualified_operators(machine_id, start_dt, masters, config) -> list:
             if _shift_kind(o) == want and (set(o.machines) & keys)]
 
 
+def _day_window(config):
+    """The window a SINGLE-SHIFT (manual / inspection / packing) station runs, **as the
+    ACTIVE scheduler defines it** — the one place that rule lives.
+
+    The production NEW engine (`ppc_engine.worktime.iter_windows`) skips only the
+    SECOND shift for such a station, so it runs the whole FIRST shift, 08:00–19:00.
+    The retired classic engine used the narrower manual window, 09:00–18:00.
+
+    Reporting features must model the shop the way the engine that BUILT the plan does,
+    or they describe a different shop: before this was shared (2026-08-07), Analytics
+    understated those stations' capacity by 2 h/day and the delay justification report
+    labelled 08:00–09:00 and 18:00–19:00 waits "outside working hours" while the shop
+    was open — 158 hours of genuinely planned work on Test9 fell outside the window
+    those two features believed in."""
+    first, _second, manual = _shift_windows(config)
+    return first if getattr(config, "scheduler", "classic") == "new" else manual
+
+
 def eligible_window(machine, config):
     """A machine's PHYSICAL working window by its Available Hrs/Day, IGNORING operator
     coverage: a two-shift machine runs first + second, a single-shift/manual resource
-    runs 09:00-18:00. This is the un-gated version of ``machine_windows`` (before the
-    "is an operator qualified this shift?" filter). Used by analytics so a station the
-    plan actually uses is never reported as zero-capacity just because no operator
-    currently qualifies for it — staffing is a separate concern (the operator panel).
-    Returns a list of (start_min, end_min) intervals."""
-    first, second, manual = _shift_windows(config)
+    runs ``_day_window`` (the active engine's own rule). This is the un-gated version of
+    ``machine_windows`` (before the "is an operator qualified this shift?" filter). Used
+    by analytics so a station the plan actually uses is never reported as zero-capacity
+    just because no operator currently qualifies for it — staffing is a separate concern
+    (the operator panel). Returns a list of (start_min, end_min) intervals."""
+    first, second, _manual = _shift_windows(config)
     if machine.is_two_shift(config.two_shift_threshold_hours):
         return [first, second]
-    return [manual]
+    return [_day_window(config)]
 
 
 def machine_windows(masters, config):
@@ -110,7 +128,7 @@ def machine_windows(masters, config):
             reason = "no operator (any shift) specialises in this machine"
         else:
             covered = any(_shift_kind(o) == "first" and _qualifies(o, machine) for o in ops)
-            iv = [manual] if covered else []
+            iv = [_day_window(config)] if covered else []
             reason = "no first-shift operator specialises in this single-shift resource"
         windows[mid] = iv
         if not iv:

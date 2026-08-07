@@ -28,6 +28,7 @@ ABSENCES_KEY = "anvitech:absences"          # kv: json list of operator absences
 OPERATORS_KEY = "anvitech:operators"        # kv: json {week_anchor, operators:[...]}
 LAST_APPLIED_SCHEDULE_KEY = "anvitech:last_applied_schedule"  # kv: json list of applied-schedule op rows
 FROZEN_OPS_KEY = "anvitech:frozen_ops"       # kv: json list of frozen (in-progress) op rows for today
+PLAN_START_FLOOR_KEY = "anvitech:plan_start_floor"  # kv: json {date, floor} — today's pinned auto start
 
 _SEP = "\x1f"   # ASCII unit separator — never appears in an SO# or item code
 
@@ -225,6 +226,22 @@ def save_auto_note(note: dict) -> None:
 
 def load_auto_note():
     raw = get_store().kv_get(AUTO_NOTE_KEY)
+    return json.loads(raw) if raw else None
+
+
+# --- pinned auto plan-start floor (one per day) --- #
+def save_plan_start_floor(day_iso: str, floor_iso: str) -> None:
+    """Pin the day's auto plan start. Written once per day by ``api._resolve_config``
+    so every run that day — every tab, every download, every optimize candidate —
+    plans from the SAME clock. See ``load_plan_start_floor``."""
+    get_store().kv_set(PLAN_START_FLOOR_KEY,
+                       json.dumps({"date": day_iso, "floor": floor_iso}))
+
+
+def load_plan_start_floor():
+    """``{"date": ISO, "floor": ISO}`` or None. The caller uses it only when its
+    ``date`` is still today; a stale day is ignored, not cleaned up."""
+    raw = get_store().kv_get(PLAN_START_FLOOR_KEY)
     return json.loads(raw) if raw else None
 
 

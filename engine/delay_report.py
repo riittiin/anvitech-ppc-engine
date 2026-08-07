@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from .operator_coverage import eligible_window
+from .optimizer import expected_completion
 from .worktime import WorkClock
 
 _OFF_LANES = {"OS / Outsourced", "Off-machine"}
@@ -142,6 +143,13 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters)
             clock_cache[mid] = WorkClock(masters.calendar, iv)
         return clock_cache[mid]
 
+    # THE shared completion definition (engine/optimizer.expected_completion) — over
+    # ALL of an order's entries, OS/dispatch lanes included. The wait analysis below
+    # still runs over real machine ops only (there is no machine to wait for on an
+    # off-lane), but the DATE this report publishes must be the same date the Gantt
+    # and the Orders tab publish, or the same order reads two ways (live 2026-08-07).
+    completion_by_key = expected_completion(schedule)
+
     detail, summary = [], []
     for line in so_lines:
         so, item = line.so_no, line.item_code
@@ -180,11 +188,12 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters)
             elif r["State"] == "WAITING (crew)":
                 buckets["crew"] += r["Hours"]
         days = {k: round(v / 24.0, 1) for k, v in buckets.items()}
-        days_late = (completion.date() - line.delivery_date).days
+        completion_date = completion_by_key.get((so, item), completion.date())
+        days_late = (completion_date - line.delivery_date).days
         summary.append({
             "SO No": so, "Item Code": item, "Item Name": line.item_name,
             "Ordered Qty": int(line.qty), "SO Delivery Date": line.delivery_date,
-            "Expected Completion": completion.date(), "Days Late": days_late,
+            "Expected Completion": completion_date, "Days Late": days_late,
             "Working (days)": days["work"], "Waiting: machine (days)": days["machine"],
             "Waiting: off-hours (days)": days["off"], "Waiting: crew (days)": days["crew"],
             "Why": _why_summary(days_late, days)})

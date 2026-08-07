@@ -140,6 +140,28 @@ def makespan_days(schedule, plan_start) -> float:
     return round((last_end - t0).total_seconds() / 86400.0, 2)
 
 
+def expected_completion(schedule) -> dict:
+    """The ONE expected-completion definition every surface must use: for each order
+    ``(so_no, item_code)``, the DATE of the latest end across every schedule entry
+    tied to it — including the OS / Outsourced and Off-machine lanes, because an
+    order genuinely is not finished until its outsourcing and dispatch milestones are.
+
+    A consolidated batch's entries carry every member's ``so_ref``, so each member is
+    measured on the same ops; an SO carrying two item codes gets one date per item.
+
+    Sibling of ``makespan_days``: shared so the Gantt, the Orders tab, the delay
+    justification report and ``plan_metrics`` can never report different dates for the
+    same plan (live 2026-08-07: the Gantt said 07-Sep, the delay report 04-Sep)."""
+    out: dict = {}
+    for e in schedule:
+        d = e.end.date()
+        for ref in (e.so_refs or []):
+            k = (ref, e.item_code)
+            if k not in out or d > out[k]:
+                out[k] = d
+    return out
+
+
 def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
                  with_distribution=False, promise_slack_days=None) -> dict:
     """Owner-facing quality of one plan: makespan + lateness vs SO delivery dates.
@@ -156,13 +178,7 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
     for each committed order's ceiling = promised_date + slack.
     """
     due = {(l.so_no, l.item_code): l.delivery_date for l in so_lines}
-    expected: dict = {}
-    for e in schedule:
-        d = e.end.date()
-        for ref in (e.so_refs or []):
-            k = (ref, e.item_code)
-            if k not in expected or d > expected[k]:
-                expected[k] = d
+    expected = expected_completion(schedule)
     gaps = [(expected[k] - due[k]).days for k in expected if k in due]
     late = [g for g in gaps if g > 0]
     slip_severity = 0.0
