@@ -1,6 +1,40 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-07)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-08)
+>
+> - **THE PLAN CACHE MUST BE KEYED ON WHAT IS DISPLAYED, NOT ON WHAT IS SCHEDULED
+>   (2026-08-08, live bug, two admins).** A director marked three (SO#, item) lines
+>   complete in the office; the owner at home refreshed ~20 times and still saw them
+>   **Running**. Not a login, network or database problem — the completion was saved.
+>   Root cause: `_plan_fingerprint` hashed the book via `_current_book_sig()`, which is
+>   built from `orderbook.active_so_lines` — and that **SKIPS any order with nothing
+>   left to make** (`remaining <= 0`). An order you mark complete is normally *already
+>   fully produced*, so it was **already invisible to the planner**: archiving it
+>   changed **no input the cache could see**, the fingerprint was byte-identical
+>   (verified: `plan fingerprint unchanged? True`), and `_PLAN_CACHE` kept serving the
+>   pre-completion response — which carries the **Orders tab table** (`order_rows` over
+>   active **plus** completed) and the **Rule 8 tab**. Why only one of them saw it:
+>   after the click `web/app.js` refetches **`GET /orders`**, a live store read; a
+>   plain refresh goes through **`POST /run`** → the cache. Same user, F5, and the
+>   "Complete" would have vanished for him too. **The PLAN was never wrong** — a
+>   finished order contributes no work — only the DISPLAY, and the display spans a
+>   wider book than the planner. Fixed in **two places, deliberately both**:
+>   **(1)** `_plan_fingerprint` gained **`book_rows`**, a digest of the whole book as
+>   displayed (active + archived, every field), so the Rule 8 tab and everything else
+>   in the cached blob stay coherent; **(2)** `_plan` rebuilds the Orders table live on
+>   **every cache hit** via the new **`_orders_table()`** — now the ONE definition,
+>   also used by `GET /orders`, the plan response and `/actuals/rollback`, so the
+>   dashboard can never have a second way to read the book. (1) fixes this bug; (2)
+>   kills the class. Measured on Test9 (68 orders, `DEFAULT_SCHEDULER=new`), punching
+>   a real order's 10 routing steps to full qty then completing it: before
+>   `Running/Running/Running`, after `Complete/Complete/Complete`; **0 of the other 67
+>   orders' expected completion moved** and the makespan note is unchanged (a cache-key
+>   change cannot move a plan); cache-hit `/run` **23 ms → 28 ms**. **Rule for any new
+>   field added to the `/run` response: if it is derived from anything wider than the
+>   scheduled lines, it must be in the fingerprint or rebuilt on hit.** Regression:
+>   `tests/test_plan_cache_freshness.py` (5 tests; `test_plan_cache.py`'s
+>   `a is b` identity assertion was relaxed to value-equality — a hit now returns a
+>   shallow copy on purpose, and the equal `run_id` is what proves no recompute).
 >
 > - **ONE PLAN, ONE SET OF DATES — cross-feature consistency (2026-08-07, live bug).**
 >   The Gantt said 07-Sep and the delay justification report said 04-Sep for the same

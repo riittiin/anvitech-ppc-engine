@@ -286,6 +286,11 @@ _MASTERS_CACHE: dict = {"key": None, "masters": None}
 # _plan_fingerprint), so a login with no changes is served instantly. The fingerprint
 # self-invalidates on any real change (orders, actuals, absences, masters, operators,
 # config, applied ranks, or a new day), so a stale plan can never be served.
+# CAREFUL — the response carries more than the plan. It also carries the Orders tab
+# table, which spans the WHOLE book (active + archived) while the plan spans only the
+# lines with work remaining. The fingerprint must cover what is DISPLAYED, not just
+# what is SCHEDULED (`book_rows`), and `_plan` rebuilds that one table on every hit.
+# Both, deliberately: 2026-08-08 shipped this bug because only the plan was covered.
 _PLAN_CACHE: dict = {"key": None, "result": None}
 
 
@@ -722,13 +727,34 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
 # --------------------------------------------------------------------------- #
 # Core: plan the active order book
 # --------------------------------------------------------------------------- #
+def _orders_table():
+    """The Orders tab table, read live from the store.
+
+    ONE definition, shared by GET /orders, every plan response and the rollback
+    endpoint — the dashboard must never have a second way to read the book. Note it
+    spans the WHOLE book (active **plus** archived), which is a WIDER set than the
+    lines the planner schedules: `active_so_lines` drops anything with nothing left
+    to make. That gap is what made the plan cache serve a stale order status
+    (see `_plan` and `_plan_fingerprint`)."""
+    return to_table(orderbook.order_rows(book_store.load_active_orders(),
+                                         book_store.load_completed_orders(),
+                                         book_store.load_actuals(),
+                                         _current_masters()))
+
+
 def _plan(config: Config):
     # Serve the cached plan when EVERY input is unchanged (the common login/refresh
     # case) — the fingerprint is complete, so a hit is byte-identical to recomputing.
     _fp = _plan_fingerprint(config)
     _cached = _PLAN_CACHE.get("result")
     if _cached is not None and _PLAN_CACHE.get("key") == _fp:
-        return _cached
+        # …with ONE exception, rebuilt live: the Orders tab table. It is the only
+        # part of this response derived from the whole book rather than from the
+        # plan, so it can go stale in ways the fingerprint is not built to see.
+        # Belt-and-braces on top of the fingerprint fix (live 2026-08-08: a director
+        # marked three lines complete and the owner's 20 refreshes still showed them
+        # running). Cost is three store reads, deduped by the per-request cache.
+        return {**_cached, "orders": _orders_table()}
 
     masters = _current_masters()
     # Fingerprint of the plan-shaping inputs as REQUESTED (base config, before the
@@ -859,7 +885,7 @@ def _plan(config: Config):
     _store_run(run_id, trace)
     gantt = build_gantt(plan_run.schedule, plan_run.batches_prioritized, masters,
                         status_by_order=status_by_order)
-    orders = to_table(orderbook.order_rows(active, completed, actuals, masters))
+    orders = _orders_table()
 
     # Expected completion per order (SO#, item), keyed "SO\x1fitem" — from the ONE
     # shared definition (optimizer.expected_completion) the Gantt, the delay report
@@ -1199,6 +1225,21 @@ def _plan_fingerprint(config: Config) -> str:
     per-request cache, so this is cheap relative to the plan compute it can skip."""
     parts = {
         "book": _current_book_sig(),
+        # The order book AS DISPLAYED — active PLUS archived, every field. `book`
+        # above is built from `active_so_lines`, which SKIPS any order with nothing
+        # left to make, so an order that was already fully produced was invisible
+        # here: marking it complete (or editing it) changed no input the cache could
+        # see, and the stale response kept publishing the old Orders and Rule 8 tabs.
+        # Live 2026-08-08: a director marked three (SO#, item) lines complete in the
+        # office and the owner at home refreshed ~20 times still seeing them running.
+        # The PLAN was right either way (a finished order contributes no work) — only
+        # the display was stale, and the display spans a wider book than the planner.
+        "book_rows": hashlib.sha256(json.dumps(
+            [o.to_json() for o in sorted(
+                list(book_store.load_active_orders().values())
+                + list(book_store.load_completed_orders().values()),
+                key=lambda o: o.key)],
+            sort_keys=True, default=str).encode("utf-8")).hexdigest(),
         "masters": _masters_sha(),
         "operators": book_store.load_operator_table(),
         "config": _resolve_config(config).to_dict(),
@@ -2188,10 +2229,7 @@ def rerun(request: Request, req: Optional[RunRequest] = None):
 
 @app.get("/orders")
 def orders():
-    active = book_store.load_active_orders()
-    completed = book_store.load_completed_orders()
-    actuals = book_store.load_actuals()
-    return {"orders": to_table(orderbook.order_rows(active, completed, actuals, _current_masters()))}
+    return {"orders": _orders_table()}
 
 
 @app.post("/orders/delete")
@@ -3026,8 +3064,6 @@ def rollback_actual(req: RollbackRequest):
             uncompleted = book_store.uncomplete_order(removed.so_no, removed.item_code)
 
     all_actuals = book_store.load_actuals()
-    active = book_store.load_active_orders()
-    completed = book_store.load_completed_orders()
     visible = orderbook.actuals_on_latest_date(all_actuals)   # show only the latest day
     return {
         "removed": True,
@@ -3035,7 +3071,7 @@ def rollback_actual(req: RollbackRequest):
         "actuals": to_table(visible),
         "actuals_ids": [a.id for a in visible],
         "by_item": to_table(r7.aggregate_by_item(all_actuals)),
-        "orders": to_table(orderbook.order_rows(active, completed, all_actuals, _current_masters())),
+        "orders": _orders_table(),
     }
 
 

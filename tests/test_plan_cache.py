@@ -47,8 +47,13 @@ def test_second_identical_call_is_a_cache_hit():
     m = _fresh_api(); _seed()
     a = _plan(m)
     b = _plan(m)
-    assert a is b                                 # same object served, not recomputed
+    # NOT `a is b`: since 2026-08-08 a hit returns a shallow copy whose Orders tab
+    # table is rebuilt live from the store, so a change the fingerprint cannot see
+    # (archiving an already-finished order) can never be published stale. `run_id` is
+    # a fresh uuid per compute, so an equal run_id is the proof nothing was recomputed.
     assert a["run_id"] == b["run_id"]
+    assert a == b
+    assert a["trace"] is b["trace"]               # the heavy payload is still shared
 
 
 def test_cache_hit_is_byte_identical_to_a_fresh_recompute():
