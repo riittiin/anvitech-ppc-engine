@@ -185,22 +185,8 @@ def decode(
             remaining.remove(key)
         else:
             nxt = ops_of[key][idx_of[key]]
-            # Overlap: the next op may start once THIS op is `overlap` through cutting,
-            # but only between two in-house ops (OS/dispatch stay fully sequential).
-            o = order_by_key[key]
-            just_qty = (o.process_remaining.get(just.seq, o.qty)
-                        if o.process_remaining is not None else o.qty)
-            if config.overlap > 0 and just.kind in _INHOUSE and nxt.kind in _INHOUSE and just_qty > 0:
-                setup = config.setup_min if just.kind == OperationKind.MACHINING else 0.0
-                cutting = just_qty * just.cycle_min
-                release = placement["start"] + timedelta(
-                    minutes=setup + (1.0 - config.overlap) * cutting
-                )
-                # Can't release later than the op actually finished, nor earlier than
-                # the op's own start.
-                ready_of[key] = min(release, paced_end)
-            else:
-                ready_of[key] = paced_end
+            ready_of[key] = _ready_after(order_by_key[key], just, nxt,
+                                         placement["start"], paced_end, config)
 
     return Schedule(tuple(segments), completion)
 
@@ -444,51 +430,124 @@ def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, planned_operator,
             "segments": segments, "assignments": assignments}
 
 
+def _ready_after(order, just, nxt, start, paced_end, config):
+    """When the NEXT operation of an order may start, given the one just placed.
+
+    THE one definition of the routing gate, shared by the main loop and the frozen
+    pre-placement below. Overlap (Rule 5) lets the next op begin once this one is
+    ``overlap`` through cutting, but only between two in-house ops — OS and dispatch
+    stay fully sequential. Never later than this op actually finished.
+
+    It is a shared function on purpose: the two callers used to disagree, and the
+    frozen path having no routing gate at all is what let an in-progress step be
+    pinned before the step feeding it (live 2026-08-09)."""
+    if nxt is None:
+        return paced_end
+    just_qty = (order.process_remaining.get(just.seq, order.qty)
+                if order.process_remaining is not None else order.qty)
+    if config.overlap > 0 and just.kind in _INHOUSE and nxt.kind in _INHOUSE and just_qty > 0:
+        setup = config.setup_min if just.kind == OperationKind.MACHINING else 0.0
+        cutting = just_qty * just.cycle_min
+        release = start + timedelta(minutes=setup + (1.0 - config.overlap) * cutting)
+        return min(release, paced_end)
+    return paced_end
+
+
 def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of,
                      machine_free, staffing, completion, masters, config):
     """Pin every in-progress op onto its machine+operator BEFORE the main loop.
-    Per machine, frozen ops resume in previous-plan (prev_start) order; the machine's
-    free time is advanced past them so new work queues after. The owning order's index
-    is advanced past the frozen op and its ready/prev_end set to the frozen end, so
-    downstream steps wait for it. Returns the frozen segments."""
+
+    Frozen ops resume in previous-plan (``prev_start``) order — but an op is never
+    placed until every frozen step AHEAD OF IT IN ITS OWN ROUTING has been placed,
+    and its start is gated by the owning order's ``ready_of`` exactly as in the main
+    loop, with the same piece-flow guard on its end.
+
+    That gate is the 2026-08-09 fix. Before it, frozen ops were grouped BY MACHINE and
+    each laid at ``machine_free[machine]`` with no reference to the order at all, so a
+    free machine ran a later step days before a busy machine could run the step that
+    feeds it: on the real book, 63 inversions across 21 of 68 orders — CNC SECOND SIDE,
+    VMC, DEBURING and INSP all running before CNC FIRST SIDE. Checked, not assumed, by
+    `new_engine.routing_order_violations`.
+
+    The machine's free time still advances past each frozen op, so new work queues
+    after it. Returns the frozen segments."""
     from collections import defaultdict
     seq_index = {k: {op.seq: i for i, op in enumerate(ops_of[k])} for k in ops_of}
-    by_machine = defaultdict(list)
+
+    todo = []
     for fo in frozen:
-        by_machine[fo.machine_id].append(fo)
+        if fo.machine_id not in masters.machines:
+            continue            # machine gone from masters — not frozen (schedule normally)
+        if order_by_key.get(fo.order_key) is None:
+            continue
+        oi = seq_index.get(fo.order_key, {}).get(fo.op_seq)
+        if oi is None:
+            continue
+        todo.append((fo, oi))
+    todo.sort(key=lambda t: (t[0].prev_start, t[0].order_key, t[0].op_seq))
+
+    frozen_pos = defaultdict(set)          # order -> routing positions that are frozen
+    for fo, oi in todo:
+        frozen_pos[fo.order_key].add(oi)
+    placed = defaultdict(set)
+
     out: list[Segment] = []
-    for mid, fos in by_machine.items():
-        if mid not in masters.machines:
-            continue  # machine gone from masters — not frozen (schedule normally)
-        fos.sort(key=lambda f: (f.prev_start, f.order_key, f.op_seq))
-        for fo in fos:
-            order = order_by_key.get(fo.order_key)
-            if order is None:
-                continue
-            oi = seq_index[fo.order_key].get(fo.op_seq)
-            if oi is None:
-                continue
-            op = ops_of[fo.order_key][oi]
-            dur = fo.remaining_qty * op.cycle_min      # no setup on resume
-            if dur <= 0:
-                continue
-            earliest = machine_free.get(mid, config.plan_start)
-            laid = _lay_frozen(masters.machines[mid], earliest, dur, order, op,
-                               int(fo.remaining_qty), fo.operator, staffing, masters, config)
-            if laid is None:
-                continue  # unstaffable — leave to the main loop
-            for a in laid["assignments"]:
-                staffing.commit(*a)
-            machine_free[mid] = laid["end"]
-            for seg in laid["segments"]:
-                if seg.operator is not None:
-                    staffing.add_load(seg.operator,
-                                      (seg.end - seg.start).total_seconds() / 60.0)
-            out.extend(laid["segments"])
-            end = laid["end"]
-            idx_of[fo.order_key] = max(idx_of[fo.order_key], oi + 1)
-            ready_of[fo.order_key] = max(ready_of[fo.order_key], end)
-            prev_end_of[fo.order_key] = max(prev_end_of[fo.order_key], end)
-            if idx_of[fo.order_key] >= len(ops_of[fo.order_key]):
-                completion[fo.order_key] = prev_end_of[fo.order_key]
+    while todo:
+        # Previous-plan order, restricted to ops whose own frozen predecessors are down.
+        pick = next((t for t in todo
+                     if all(j in placed[t[0].order_key]
+                            for j in frozen_pos[t[0].order_key] if j < t[1])), None)
+        if pick is None:
+            # Previous-plan order and routing order disagree. Routing wins: it is
+            # physics, the other is only a preference.
+            pick = min(todo, key=lambda t: (t[1], t[0].prev_start))
+        todo.remove(pick)
+        fo, oi = pick
+        key = fo.order_key
+        placed[key].add(oi)
+
+        order = order_by_key[key]
+        op = ops_of[key][oi]
+        dur = fo.remaining_qty * op.cycle_min          # no setup on resume
+        if dur <= 0:
+            continue
+        mid = fo.machine_id
+        machine = masters.machines[mid]
+        qty = int(fo.remaining_qty)
+        # The order's OWN predecessor gates the start, not just the machine's queue.
+        earliest = max(machine_free.get(mid, config.plan_start), ready_of[key])
+        laid = _lay_frozen(machine, earliest, dur, order, op, qty, fo.operator,
+                           staffing, masters, config)
+        if laid is None:
+            continue  # unstaffable — leave to the main loop
+        # Piece-flow guard, identical in spirit to the main loop's: a fast op must not
+        # finish its work before its predecessor delivered the last piece. Push it
+        # later by the shortfall; a few passes absorb shift and day gaps.
+        for _ in range(8):
+            if laid["end"] >= prev_end_of[key]:
+                break
+            shifted = _lay_frozen(machine,
+                                  laid["start"] + (prev_end_of[key] - laid["end"]),
+                                  dur, order, op, qty, fo.operator, staffing,
+                                  masters, config)
+            if shifted is None:
+                break
+            laid = shifted
+        for a in laid["assignments"]:
+            staffing.commit(*a)
+        machine_free[mid] = laid["end"]
+        for seg in laid["segments"]:
+            if seg.operator is not None:
+                staffing.add_load(seg.operator,
+                                  (seg.end - seg.start).total_seconds() / 60.0)
+        out.extend(laid["segments"])
+
+        paced_end = max(laid["end"], prev_end_of[key])
+        prev_end_of[key] = paced_end
+        idx_of[key] = max(idx_of[key], oi + 1)
+        nxt = ops_of[key][idx_of[key]] if idx_of[key] < len(ops_of[key]) else None
+        ready_of[key] = max(ready_of[key],
+                            _ready_after(order, op, nxt, laid["start"], paced_end, config))
+        if nxt is None:
+            completion[key] = prev_end_of[key]
     return out

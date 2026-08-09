@@ -363,6 +363,74 @@ def qualification_violations(entries, new_masters):
     return out
 
 
+def routing_order_violations(entries, masters):
+    """Every place the schedule runs an operation before the step that FEEDS it.
+
+    Pure; returns ``[{"kind", "ref", "message"}]``, empty when clean. Per
+    ``(SO number, item code)``, for consecutive steps ``a`` then ``b`` of the item's
+    routing in Item's Process Master:
+
+        start(b) >  start(a)      b cannot begin before, or with, a
+        end(b)   >= end(a)        b cannot finish before a finishes
+
+    Deliberately NOT flagged, because the engine means both: Rule 5 **overlap** lets
+    ``b`` start while ``a`` is still cutting, and overlap **pacing** stretches a fast
+    ``b`` to end exactly with ``a``. An equal start is only allowed after a
+    zero-duration step (an OS / off-machine milestone produces no pieces, so nothing
+    has to wait for it).
+
+    Sibling of `qualification_violations`, and it exists for the same reason: the
+    scheduler is supposed to make this impossible, and on a clean book it does — but
+    once work was IN PROGRESS, `flow_scheduler._preplace_frozen` pinned each
+    part-finished op at its own machine's first free slot with no reference to the
+    order's own predecessor, and shipped a schedule that ran CNC SECOND SIDE two days
+    before CNC FIRST SIDE (live 2026-08-09, 63 inversions over 21 of 68 real orders).
+    An invariant that is CHECKED beats one that is merely intended: tests assert this
+    is empty, and the API surfaces it as a non-blocking report row rather than
+    breaking a live plan."""
+    pos_of = {}
+    for item, routing in (getattr(masters, "routings", None) or {}).items():
+        for i, p in enumerate(routing.processes):
+            pos_of[(item, p.seq)] = (i, p.name)
+
+    # One span per (order, routing step): a step split across machines or shifts is
+    # still ONE step, so take its full extent.
+    spans = defaultdict(dict)
+    for e in entries:
+        found = pos_of.get((e.item_code, e.process_seq))
+        if found is None:
+            continue                      # step not in the master — nothing to order by
+        i, name = found
+        for so in (e.so_refs or []):
+            cur = spans[(so, e.item_code)].get(i)
+            if cur is None:
+                spans[(so, e.item_code)][i] = [name, e.start, e.end]
+            else:
+                cur[1] = min(cur[1], e.start)
+                cur[2] = max(cur[2], e.end)
+
+    out = []
+    for (so, item), by_pos in sorted(spans.items()):
+        steps = sorted(by_pos.items())
+        for (_ia, (na, sa, ea)), (_ib, (nb, sb, eb)) in zip(steps, steps[1:]):
+            ref = f"{so} / {item}"
+            if sb < sa:
+                out.append({"kind": "ROUTING_ORDER_VIOLATION", "ref": ref,
+                            "message": (f"'{nb}' starts before '{na}', the step that "
+                                        f"feeds it ({sb:%d-%m %H:%M} vs "
+                                        f"{sa:%d-%m %H:%M})")})
+            elif sb == sa and ea > sa:
+                out.append({"kind": "ROUTING_ORDER_VIOLATION", "ref": ref,
+                            "message": (f"'{nb}' starts at the same instant as '{na}', "
+                                        f"the step that feeds it ({sa:%d-%m %H:%M})")})
+            if eb < ea:
+                out.append({"kind": "ROUTING_ORDER_VIOLATION", "ref": ref,
+                            "message": (f"'{nb}' finishes before '{na}', the step that "
+                                        f"feeds it ({eb:%d-%m %H:%M} vs "
+                                        f"{ea:%d-%m %H:%M})")})
+    return out
+
+
 def _entries_from_schedule(sched, batch_by_key):
     """New Segment[] -> old ScheduleEntry[]. One entry per operation; the new engine's
     per-shift segments become the entry's `op_segments` (the per-shift operator

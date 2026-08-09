@@ -490,6 +490,16 @@ def _report_for_book(masters, so_lines, absences=None, config=None, schedule=Non
             rows.extend(_ne.qualification_violations(schedule, _nm))
         except Exception:  # noqa: BLE001 — a self-check must never break the report
             pass
+        # Same deal for the routing: the plan must never run a step before the step
+        # that feeds it. On a clean book the scheduler gets this right; with work
+        # IN PROGRESS it shipped 63 inversions over 21 of 68 real orders
+        # (live 2026-08-09). Checked every plan now. See
+        # new_engine.routing_order_violations.
+        try:
+            from engine import new_engine as _ne2
+            rows.extend(_ne2.routing_order_violations(schedule, masters))
+        except Exception:  # noqa: BLE001 — a self-check must never break the report
+            pass
     return to_table([
         {"Kind": r["kind"], "Reference": r["ref"], "Message": r["message"]}
         for r in rows

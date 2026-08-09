@@ -2,6 +2,45 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-09)
 >
+> - **🔴 THE ROUTING ORDER IS PHYSICS — IN-PROGRESS WORK BROKE IT (2026-08-09, live,
+>   owner escalation).** A director opened the shift-wise Excel for
+>   `26-27SO113 / 9611416360` and found **CNC FIRST SIDE running on 11-08 while
+>   CNC SECOND SIDE, VMC FIRST SIDE, DEBURING and INSP — every step that eats its
+>   output — had already run on 09-08 and 10-08.** On a **clean book the order is
+>   perfect (0 violations)**; the inversion appears only once work is **IN PROGRESS**,
+>   which is why it survived every earlier check.
+>   **Root cause: `ppc_engine/scheduler/flow_scheduler.py::_preplace_frozen`.** It
+>   grouped frozen (part-finished) ops **BY MACHINE**, sorted them by previous-plan
+>   start, and laid each one at `machine_free[machine]` — **never once consulting the
+>   owning order's `ready_of`**. So every in-progress step landed in its own machine's
+>   first free slot, independent of the routing: a free CNC4 started step 3 on Saturday
+>   while a busy CNC5 could not start step 2 until Monday. The **main** decode loop has
+>   both a precedence gate and the 2026-07-25 piece-flow guard; **the frozen path had
+>   neither.** Measured on the real books with every order part-finished:
+>   **Test5 138 inversions / 57 of 57 orders, Test8 193 / 65 of 67, Test9 179 / 67 of
+>   68 → now 0 on all three**, at every WIP level tested (10/30/68 orders, up to 441
+>   frozen ops), and 0 on a clean book and on the classic engine.
+>   **Fix, three parts:** (1) `_ready_after(order, just, nxt, start, paced_end, config)`
+>   is now **THE one definition** of the routing/overlap gate, shared by the main loop
+>   and the frozen pre-placement — they used to disagree because the frozen path had no
+>   gate at all; (2) `_preplace_frozen` places frozen ops in previous-plan order **but
+>   never before the frozen steps ahead of them in their own routing** (routing wins if
+>   the two orders conflict), starts each at `max(machine_free[mid], ready_of[key])`,
+>   and applies the **same piece-flow guard** on the end; (3) **`new_engine.
+>   routing_order_violations(entries, masters)`** — pure, sibling of
+>   `qualification_violations`, appended to the validation report by `_report_for_book`
+>   on **every plan**. Invariant: for consecutive routing steps a→b,
+>   `start(b) > start(a)` and `end(b) >= end(a)`; overlap (b starts before a ends) and
+>   pacing (b ends exactly with a) stay legal, and an equal start is allowed only after
+>   a zero-duration OS/off-machine milestone.
+>   **Honest cost — the old dates were IMPOSSIBLE, not better** (same lesson as the
+>   2026-07-25 piece-flow guard): Test8 makespan 33.43→35.59 d and late-days
+>   1638→1860; Test9 makespan 45.72→**43.79** d (better) and late-days 424→537. A deep
+>   search recovers part of it. Regression: `tests/test_routing_precedence.py` (8
+>   tests, RED first) + the re-runnable audit harness pattern in the commit message.
+>   **Rule: any new code path that PLACES an operation must go through `_ready_after`
+>   and the piece-flow guard. Never lay an op at a machine's free time alone.**
+>
 > - **"DONE ENTERING — UPDATE PLAN" MUST NEVER BE INVISIBLE (2026-08-09, live).** An
 >   operator on the floor pressed Done; the owner 10 km away saw nothing and could not
 >   tell whether a search had started, been skipped, failed, or been killed. **Three
