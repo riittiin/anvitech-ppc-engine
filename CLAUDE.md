@@ -40,6 +40,42 @@
 >   tests, RED first) + the re-runnable audit harness pattern in the commit message.
 >   **Rule: any new code path that PLACES an operation must go through `_ready_after`
 >   and the piece-flow guard. Never lay an op at a machine's free time alone.**
+>   **Mutation-tested (2026-08-09) — which parts are load-bearing, measured not assumed:**
+>   removing the `ready_of` gate ⇒ **2 tests fail** and Test9 regains **30–56** violations;
+>   removing the topological ordering ⇒ **1 test fails**; removing the piece-flow guard
+>   from `_preplace_frozen` ⇒ **no test fails and Test9 stays at 0** — it is genuine
+>   belt-and-braces, KEPT only so the frozen path behaves identically to the main loop.
+>   Two earlier versions of the fixture passed under every mutation (a single operator
+>   covering both machines serialised them by accident, and an equal-length successor
+>   was already caught by the end-guard); the discriminating case is a **SHORT step
+>   feeding a LONG one on machines with different operators**. **When adding a
+>   scheduling test here, mutate the fix and confirm the test actually fails —
+>   this fixture family passes vacuously by default.**
+>
+> - **CROSS-SURFACE INTEGRATION AUDIT (2026-08-09, owner question: "does the optimizer
+>   and every process follow this?").** Re-runnable harness; each surface read from ITS
+>   OWN published output, never from the engine, and checked independently against
+>   Item's Process Master, on Test9 with 201 frozen ops **after a real contest applied
+>   its winner** (overlap 50→79, 537→510 late-days): **0 routing violations on all
+>   seven** — engine plan, optimizer's applied winner (`_all_lines_schedule` with
+>   ranks), incumbent "Now" measurement, delay-report plan (`_plan_run_for_report`),
+>   Schedule tab, Gantt, shift-wise export (666 rows). Dates: Orders vs Gantt **0 of 68
+>   disagree**, Orders vs delay report **0 of 68**. Plan fingerprint stable throughout.
+>   **Structurally there is ONE scheduler**: every producer — `_plan`, the optimizer's
+>   per-candidate evaluation (`ppc_engine.optimize.search._Evaluator`), the contest
+>   (`ppc_engine.optimize.contest`), the local sweep, and the cloud/Oracle worker
+>   (`optimize_service.build_payload`/`parse_payload` round-trip `frozen`) — bottoms out
+>   in `flow_scheduler.decode`, and every one of them passes the frozen set.
+>   **Trap worth knowing:** an early version of this audit reported "32 of 68 dates
+>   disagree" — it was the HARNESS racing the contest's auto-apply, comparing a
+>   pre-apply `/run` with a post-apply `/gantt`. Settle on `state != running` **AND**
+>   `not note.get("running")`, then derive every surface from ONE `/run` response.
+>   **Known, deliberate gaps:** the retired **classic/flow** engines ignore `frozen`
+>   entirely (`rule6_allocate.run` — "classic engine ignores frozen"), so the freeze and
+>   this fix apply to `DEFAULT_SCHEDULER=new` only, which is what production runs; and
+>   the GitHub-Actions path was verified by code path, not executed end-to-end here (the
+>   Oracle/Mac worker `refresh_code()` hard-resets to `origin/main` before every job, so
+>   it picks the fix up automatically).
 >
 > - **"DONE ENTERING — UPDATE PLAN" MUST NEVER BE INVISIBLE (2026-08-09, live).** An
 >   operator on the floor pressed Done; the owner 10 km away saw nothing and could not

@@ -124,19 +124,25 @@ def _plan_with_work_in_progress(m, c):
     cannot start immediately while the later steps' machines sit free: exactly the
     shape that produced the live inversion."""
     book_store.save_masters_bytes(build_new_sample_bytes())
-    book_store.add_orders([
-        Order("SO1", ITEM_A, ITEM_A, 120, date(2025, 3, 20)),
-        Order("SO2", ITEM_A, ITEM_A, 120, date(2025, 3, 21)),
-        Order("SO3", ITEM_B, ITEM_B, 300, date(2025, 3, 20)),
-        Order("SO4", ITEM_B, ITEM_B, 300, date(2025, 3, 21)),
-    ])
+    # Enough orders to CONGEST the CNCs (step 1 of ITEM_A, step 2 of ITEM_B) while
+    # VMC1 and MI1 — the machines for the LATER steps — sit comparatively free. That
+    # gap is the whole bug: without the routing gate a free machine runs a later step
+    # while the congested machine has not run the step feeding it. Verified to
+    # discriminate: with the gate removed from `_preplace_frozen`, these tests fail.
+    orders = []
+    for i in range(8):
+        orders.append(Order(f"SOA{i}", ITEM_A, ITEM_A, 120, date(2025, 3, 20 + i % 5)))
+    for i in range(6):
+        orders.append(Order(f"SOB{i}", ITEM_B, ITEM_B, 300, date(2025, 3, 20 + i % 5)))
+    book_store.add_orders(orders)
     masters = m._current_masters()
     c.post("/run", json={"persist": False})
     book_store.save_last_applied_schedule(
         freeze.schedule_projection(m._PLAN_CACHE["artifacts"]["plan_run"].schedule))
 
     op = sorted({o.name for o in masters.operators})[0]
-    for so, item in (("SO1", ITEM_A), ("SO2", ITEM_A), ("SO3", ITEM_B), ("SO4", ITEM_B)):
+    for o in orders:
+        so, item = o.so_no, o.item_code
         procs = masters.routings[item].processes
         # A descending ladder: every step part-done, none ahead of the step above it.
         for k, p in enumerate(procs[:-1]):
@@ -199,3 +205,187 @@ def test_the_validation_report_surfaces_a_routing_order_violation():
                                  config=m._load_plan_config())
         kinds = [r[0] for r in rep["rows"]]
         assert "ROUTING_ORDER_VIOLATION" in kinds
+
+
+# --------------------------------------------------------------------------- #
+# The optimizer must obey the same routing as the plan on screen
+# --------------------------------------------------------------------------- #
+def test_the_optimizer_replay_path_also_runs_in_routing_order():
+    """`_all_lines_schedule` is how an optimized sequence is scored AND how Apply
+    replays it. Hand it a deliberately hostile sequence (every order's rank
+    reversed) on a book with work in progress: routing order must still hold, or
+    the optimizer would be picking winners among physically impossible plans."""
+    with pytest.MonkeyPatch.context() as mp:
+        from engine import optimize_service
+        m = _api(mp)
+        c = _client(m)
+        masters, _ = _plan_with_work_in_progress(m, c)
+
+        setup = optimize_service.prepare_contest(
+            book_store.load_active_orders(), book_store.load_actuals(), masters,
+            m._resolve_config(m._load_plan_config()),
+            absences=book_store.load_absences(),
+            operator_table=book_store.load_operator_table(),
+            frozen=book_store.load_frozen_ops())
+        keys = [f"{l.so_no}\x1f{l.item_code}" for l in setup.target]
+        hostile = {k: i for i, k in enumerate(reversed(keys))}
+
+        for label, ranks in (("no ranks", None), ("reversed ranks", hostile)):
+            schedule, _ = m._all_lines_schedule(setup, setup.masters, ranks)
+            hits = routing_order_violations(schedule, masters)
+            assert hits == [], f"{label}: " + "\n".join(h["message"] for h in hits)
+
+
+def test_the_gantt_and_the_shift_wise_export_show_the_same_routing_order():
+    """The two artifacts the directors actually open. Both are read from their own
+    published output, not from the engine — a view that re-derives anything would
+    show its own order, which is the whole class of bug being guarded here."""
+    with pytest.MonkeyPatch.context() as mp:
+        m = _api(mp)
+        c = _client(m)
+        masters, _ = _plan_with_work_in_progress(m, c)
+        cfg = m._load_plan_config().to_dict()
+        cfg["apply_operator_logic"] = True          # what makes shift-wise exist
+        m._PLAN_CACHE.update(key=None, result=None)
+        run = c.post("/run", json={"persist": True, "config": cfg}).json()
+
+        pos = {}
+        for item, r in masters.routings.items():
+            for i, p in enumerate(r.processes):
+                pos[(item, p.name.strip().upper())] = i
+
+        def violations(spans):
+            out = []
+            for key, by in spans.items():
+                steps = sorted(by.items())
+                for (_ia, (sa, ea)), (_ib, (sb, eb)) in zip(steps, steps[1:]):
+                    if sb < sa or (sb == sa and ea > sa) or eb < ea:
+                        out.append(f"{key}: step order broken at {sb}")
+            return out
+
+        gantt = {}
+        for row in run["gantt"]["rows"]:
+            item = row["item_code"]
+            for so in [s.strip() for s in (row["so_no"] or "").split(",") if s.strip()]:
+                for bar in row["bars"]:
+                    i = pos.get((item, bar["process"].strip().upper()))
+                    if i is None:
+                        continue
+                    s = datetime.strptime(bar["start"], "%d-%m-%Y %H:%M")
+                    e = datetime.strptime(bar["end"], "%d-%m-%Y %H:%M")
+                    cur = gantt.setdefault((so, item), {}).get(i)
+                    gantt[(so, item)][i] = ((min(cur[0], s), max(cur[1], e))
+                                            if cur else (s, e))
+        assert gantt, "the Gantt must have bars to check"
+        assert violations(gantt) == []
+
+        sw = run["trace"]["rule6"].get("shiftwise")
+        assert sw and sw["rows"], "the shift-wise export must exist with operator logic on"
+        col = {n: i for i, n in enumerate(sw["columns"])}
+        rows = {}
+        for r in sw["rows"]:
+            item, proc = str(r[col["Item Code"]]), str(r[col["Process"]])
+            pname = proc.split(".", 1)[1].strip() if proc[:2].strip().rstrip(".").isdigit() else proc
+            i = pos.get((item, pname.strip().upper()))
+            if i is None:
+                continue
+            year = str(r[col["Date"]])[-4:]
+            s = datetime.strptime(f"{r[col['Start']]}-{year}", "%d-%m %H:%M-%Y")
+            e = datetime.strptime(f"{r[col['End']]}-{year}", "%d-%m %H:%M-%Y")
+            for so in [x.strip() for x in str(r[col["SO No"]]).split(",") if x.strip()]:
+                cur = rows.setdefault((so, item), {}).get(i)
+                rows[(so, item)][i] = ((min(cur[0], s), max(cur[1], e))
+                                       if cur else (s, e))
+        assert rows, "the shift-wise export must have parseable rows"
+        assert violations(rows) == []
+
+
+# --------------------------------------------------------------------------- #
+# Engine level: the frozen pre-placement itself, on IDLE machines
+# --------------------------------------------------------------------------- #
+def _frozen_ctx():
+    """One order with every real step frozen, and every machine otherwise idle —
+    the geometry the routing gate exists for. Nothing else competes, so if the gate
+    is missing each step is laid at its own machine's free time, i.e. all at once."""
+    import io
+    from engine.config import Config as _Config
+    from engine.new_engine import _orders_from_batches, _plan_config
+    from engine.rules import rule1_consolidate
+    from engine import loaders as _loaders
+    from ppc_engine.loaders import load_all as _new_load
+
+    conf = _Config(scheduler="new", plan_start_date=date(2025, 3, 3),
+                   apply_operator_logic=True)
+    wb = build_new_sample_bytes()
+    book_store.save_masters_bytes(wb)
+    nm = _new_load(io.BytesIO(wb)).masters
+    so_lines, _ = _loaders.load_all(io.BytesIO(wb))
+    batches = rule1_consolidate.run(so_lines, conf)
+    orders, _ = _orders_from_batches(batches, nm)
+    return orders, [o.key for o in orders], nm, _plan_config(conf)
+
+
+def _starts_by_seq(sched, key):
+    out = {}
+    for s in sched.segments:
+        if s.order_key != key:
+            continue
+        cur = out.get(s.op_seq)
+        out[s.op_seq] = (min(cur[0], s.start), max(cur[1], s.end)) if cur else (s.start, s.end)
+    return out
+
+
+def _freeze_all_real_ops(order, nm, cfg, prev_starts, qtys=None):
+    """Freeze every real step. `qtys` defaults to a SHORT step feeding a LONG one —
+    the case only the routing gate catches. When the successor is longer, its end
+    already clears its predecessor's, so the piece-flow guard is satisfied and would
+    happily start it in the same minute; only `ready_of` stops that. (Verified by
+    mutation: drop the gate from `_preplace_frozen` and this fails.)"""
+    from ppc_engine.scheduler import FrozenOp
+    routing = nm.routings[order.item_code]
+    real = [op for op in routing.operations if op.machine_options and op.cycle_min > 0]
+    qtys = qtys or ([5] * (len(real) - 1) + [400])
+    return real, [FrozenOp(order_key=order.key, op_seq=op.seq,
+                           machine_id=op.machine_options[0], operator="",
+                           remaining_qty=qtys[i], prev_start=prev_starts[i])
+                  for i, op in enumerate(real)]
+
+
+def test_frozen_steps_of_one_order_never_run_together_on_idle_machines():
+    """Every machine free, every step in progress. Each step still has to wait for
+    the step that feeds it — laying them all at their own machine's free time would
+    start the whole routing in the same minute."""
+    from datetime import timedelta as _td
+    orders, seq, nm, cfg = _frozen_ctx()
+    o0 = orders[0]
+    real, frozen = _freeze_all_real_ops(
+        o0, nm, cfg, [cfg.plan_start + _td(hours=i) for i in range(9)])
+    assert len(real) >= 3, "need a routing with at least three real steps"
+
+    from ppc_engine.scheduler import decode as _decode
+    starts = _starts_by_seq(_decode(orders, seq, nm, cfg, frozen=frozen), o0.key)
+    ordered = [starts[op.seq] for op in real if op.seq in starts]
+    assert len(ordered) == len(real), "a frozen step went missing"
+    for (sa, _ea), (sb, _eb) in zip(ordered, ordered[1:]):
+        assert sb > sa, (
+            "a frozen step starts at or before the step feeding it: "
+            + " | ".join(f"{op.name}@{starts[op.seq][0]:%d-%m %H:%M}" for op in real))
+
+
+def test_frozen_steps_follow_the_routing_even_when_the_last_plan_disagrees():
+    """The previous plan's order is a preference; the routing is physics. Hand the
+    pre-placement a previous plan that ran the LAST step first and the routing must
+    still win."""
+    from datetime import timedelta as _td
+    orders, seq, nm, cfg = _frozen_ctx()
+    o0 = orders[0]
+    real, frozen = _freeze_all_real_ops(
+        o0, nm, cfg, [cfg.plan_start + _td(hours=9 - i) for i in range(9)])
+
+    from ppc_engine.scheduler import decode as _decode
+    starts = _starts_by_seq(_decode(orders, seq, nm, cfg, frozen=frozen), o0.key)
+    ordered = [starts[op.seq] for op in real if op.seq in starts]
+    for (sa, _ea), (sb, _eb) in zip(ordered, ordered[1:]):
+        assert sb > sa, (
+            "reversed previous-plan order beat the routing: "
+            + " | ".join(f"{op.name}@{starts[op.seq][0]:%d-%m %H:%M}" for op in real))
