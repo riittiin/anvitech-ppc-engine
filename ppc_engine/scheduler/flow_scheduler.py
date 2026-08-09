@@ -513,7 +513,8 @@ def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, planned_operator,
             "segments": segments, "assignments": assignments}
 
 
-def _ready_after(order, just, nxt, start, paced_end, config):
+def _ready_after(order, just, nxt, start, paced_end, config, *,
+                 qty=None, setup_min=None):
     """When the NEXT operation of an order may start, given the one just placed.
 
     THE one definition of the routing gate, shared by the main loop and the frozen
@@ -523,13 +524,21 @@ def _ready_after(order, just, nxt, start, paced_end, config):
 
     It is a shared function on purpose: the two callers used to disagree, and the
     frozen path having no routing gate at all is what let an in-progress step be
-    pinned before the step feeding it (live 2026-08-09)."""
+    pinned before the step feeding it (live 2026-08-09).
+
+    ``qty`` / ``setup_min`` override what the op actually cost, and the frozen caller
+    MUST pass them: a resumed op is already set up, so `_preplace_frozen` charges
+    `remaining_qty * cycle` and no setup. Taking the defaults there added 90 min of
+    CNC setup nobody spends to every in-progress op's successor — measured the same
+    day the gate shipped, while attributing a live rise in late-days."""
     if nxt is None:
         return paced_end
-    just_qty = (order.process_remaining.get(just.seq, order.qty)
-                if order.process_remaining is not None else order.qty)
+    just_qty = qty if qty is not None else (
+        order.process_remaining.get(just.seq, order.qty)
+        if order.process_remaining is not None else order.qty)
     if config.overlap > 0 and just.kind in _INHOUSE and nxt.kind in _INHOUSE and just_qty > 0:
-        setup = config.setup_min if just.kind == OperationKind.MACHINING else 0.0
+        setup = (setup_min if setup_min is not None
+                 else (config.setup_min if just.kind == OperationKind.MACHINING else 0.0))
         cutting = just_qty * just.cycle_min
         release = start + timedelta(minutes=setup + (1.0 - config.overlap) * cutting)
         return min(release, paced_end)
@@ -631,8 +640,12 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
         prev_end_of[key] = paced_end
         idx_of[key] = max(idx_of[key], oi + 1)
         nxt = ops_of[key][idx_of[key]] if idx_of[key] < len(ops_of[key]) else None
-        ready_of[key] = max(ready_of[key],
-                            _ready_after(order, op, nxt, laid["start"], paced_end, config))
+        ready_of[key] = max(
+            ready_of[key],
+            # A resumed op is already set up: it was laid as `remaining_qty * cycle`
+            # with no setup, so its successor must not be charged one either.
+            _ready_after(order, op, nxt, laid["start"], paced_end, config,
+                         qty=fo.remaining_qty, setup_min=0.0))
         if nxt is None:
             completion[key] = prev_end_of[key]
     return out

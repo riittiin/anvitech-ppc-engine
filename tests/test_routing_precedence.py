@@ -389,3 +389,33 @@ def test_frozen_steps_follow_the_routing_even_when_the_last_plan_disagrees():
         assert sb > sa, (
             "reversed previous-plan order beat the routing: "
             + " | ".join(f"{op.name}@{starts[op.seq][0]:%d-%m %H:%M}" for op in real))
+
+
+def test_a_resumed_op_does_not_delay_its_successor_by_a_setup_it_never_paid():
+    """`_preplace_frozen` charges NO setup on resume ("dur = remaining_qty * cycle"),
+    but the routing gate added `config.setup_min` to the successor's release anyway —
+    90 minutes of CNC setup nobody spends, on every in-progress machining op. Found
+    while attributing a live late-days rise (2026-08-09).
+
+    Tested by CHANGING the setup time: a resumed op pays no setup, so its successor
+    must not move at all. (Only this one order is scheduled, so nothing else can move
+    it either.)"""
+    from dataclasses import replace as _replace
+    from ppc_engine.scheduler import FrozenOp, decode as _decode
+    orders, _seq, nm, cfg = _frozen_ctx()
+    o0 = orders[0]
+    real = [op for op in nm.routings[o0.item_code].operations
+            if op.machine_options and op.cycle_min > 0]
+    first, second = real[0], real[1]
+    frozen = [FrozenOp(order_key=o0.key, op_seq=first.seq,
+                       machine_id=first.machine_options[0], operator="",
+                       remaining_qty=100, prev_start=cfg.plan_start)]
+
+    starts = {}
+    for setup in (0.0, 90.0, 240.0):
+        c = _replace(cfg, setup_min=setup)
+        sched = _decode([o0], [o0.key], nm, c, frozen=frozen)
+        starts[setup] = _starts_by_seq(sched, o0.key)[second.seq][0]
+    assert starts[0.0] == starts[90.0] == starts[240.0], (
+        "the successor of a RESUMED op moved when setup_min changed, so a setup that "
+        f"is never charged is being counted against it: {starts}")
