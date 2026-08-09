@@ -114,6 +114,46 @@ def harvest(schedule: Schedule, masters, config) -> Schedule:
             op_busy[s.operator].append((s.start, s.end))
     op_busy = defaultdict(list, {k: _merge(v) for k, v in op_busy.items()})
 
+    # --- Rule 1: one operator per machine per shift, and nobody runs two --------- #
+    # Who already owns each machine-shift in the plan, and which machine each person is
+    # already committed to that shift. A hole on CNC1 must be filled by CNC1's operator
+    # for that shift — never by someone hopping over from CNC4 mid-shift, which is the
+    # exact thing this engine exists to prevent (RULES.md Rule 1).
+    owner_of, committed = {}, {}
+    segs_on = defaultdict(list)
+    for s in real:
+        if s.operator:
+            segs_on[s.machine_id].append(s)
+    for mid, lst in segs_on.items():
+        machine = masters.machines.get(mid)
+        if machine is None:
+            continue
+        for win in iter_windows(machine, start_at, masters.calendar, config):
+            if win.start >= horizon:
+                break
+            for s in lst:
+                if s.start < win.end and win.start < s.end:
+                    owner_of.setdefault((win.shift_date, win.shift, mid), s.operator)
+                    committed.setdefault((win.shift_date, win.shift, s.operator), mid)
+
+    def _operator_for(mid, win, a, b):
+        """CNC1's shift operator, or — if nobody is on it — a qualified person not
+        already committed to another machine that shift."""
+        key = (win.shift_date, win.shift, mid)
+        owner = owner_of.get(key)
+        if owner is not None:
+            ok = (masters.calendar.is_operator_available(owner, win.shift_date)
+                  and _free(op_busy[owner], a, b))
+            return owner if ok else None
+        for o in masters.operators:
+            if (mid in o.qualified_machines
+                    and effective_shift(o, win.shift_date, config) == win.shift
+                    and masters.calendar.is_operator_available(o.name, win.shift_date)
+                    and committed.get((win.shift_date, win.shift, o.name), mid) == mid
+                    and _free(op_busy[o.name], a, b)):
+                return o.name
+        return None
+
     # --- the holes, oldest first --------------------------------------------- #
     holes = []
     for mid, busy in machine_busy.items():
@@ -133,63 +173,62 @@ def harvest(schedule: Schedule, masters, config) -> Schedule:
 
     added, trimmed_min = [], defaultdict(float)
     for ga, gb, mid, win in holes:
-        machine = masters.machines[mid]
-        avail = (gb - ga).total_seconds() / 60.0
-        if _free(machine_busy.get(mid, []), ga, gb) is False:
-            continue                                   # filled by an earlier harvest
+        cur = ga
+        # Keep filling THIS hole until nothing more fits. Taking one job and moving on
+        # left most of an 8-hour hole empty.
+        while (gb - cur).total_seconds() / 60.0 >= _MIN_USEFUL_MIN:
+            if not _free(machine_busy.get(mid, []), cur, gb):
+                break                                  # filled by an earlier pass
+            avail = (gb - cur).total_seconds() / 60.0
 
-        # who can run it — the same checks _lay_frozen makes, not a new rule
-        who = None
-        for o in masters.operators:
-            if mid not in o.qualified_machines:
-                continue
-            if effective_shift(o, win.shift_date, config) != win.shift:
-                continue
-            if not masters.calendar.is_operator_available(o.name, win.shift_date):
-                continue
-            if _free(op_busy[o.name], ga, gb):
-                who = o.name
+            who = _operator_for(mid, win, cur, gb)
+            if who is None:
                 break
-        if who is None:
-            continue
 
-        best = None
-        for key, lst in ops.items():
-            if lst[0].machine_id != mid or lst[0].kind == OperationKind.DISPATCH:
-                continue
-            if min(x.start for x in lst) <= gb:        # already runs at/before the hole
-                continue
-            op = op_of.get((key[0][1], key[1]))
-            if op is None or not op.cycle_min:
-                continue
-            pe = pred_end(key)
-            if pe is not None and pe > ga:
-                continue
-            left = sum((x.end - x.start).total_seconds() / 60.0
-                       for x in lst) - trimmed_min[key]
-            if left <= _EPS:
-                continue
-            if best is None or min(x.start for x in lst) < best[1]:
-                best = (key, min(x.start for x in lst), op, left)
-        if best is None:
-            continue
+            best = None
+            for key, lst in ops.items():
+                if lst[0].kind == OperationKind.DISPATCH or lst[0].machine_id is None:
+                    continue
+                if min(x.start for x in lst) <= gb:    # already runs at/before the hole
+                    continue
+                op = op_of.get((key[0][1], key[1]))
+                # ANY machine the ROUTING allows — not just the one this job happens to
+                # be planned on. An idle operator beside an idle machine they can run is
+                # the thing being fixed; which machine the plan picked is not a reason to
+                # leave both sitting (owner, 2026-08-09).
+                if op is None or not op.cycle_min or mid not in (op.machine_options or ()):
+                    continue
+                pe = pred_end(key)
+                if pe is not None and pe > cur:
+                    continue
+                left = sum((x.end - x.start).total_seconds() / 60.0
+                           for x in lst) - trimmed_min[key]
+                if left <= _EPS:
+                    continue
+                if best is None or min(x.start for x in lst) < best[1]:
+                    best = (key, min(x.start for x in lst), op, left)
+            if best is None:
+                break
 
-        key, _st, op, left = best
-        setup = config.setup_min if op.kind == OperationKind.MACHINING else 0.0
-        pieces = int((avail - setup) // op.cycle_min)
-        if pieces < 1:
-            continue
-        take = min(pieces * op.cycle_min, left)
-        if take < _EPS or take + setup > avail + _EPS:
-            continue
-        used = take + setup
-        s0, s1 = ga, ga + timedelta(minutes=used)
-        first = ops[key][0]
-        added.append(Segment(key[0], key[1], first.op_name, first.kind, mid, who,
-                             s0, s1, int(round(take / op.cycle_min))))
-        trimmed_min[key] += take
-        machine_busy[mid] = _merge(machine_busy.get(mid, []) + [(s0, s1)])
-        op_busy[who] = _merge(op_busy[who] + [(s0, s1)])
+            key, _st, op, left = best
+            setup = config.setup_min if op.kind == OperationKind.MACHINING else 0.0
+            pieces = int((avail - setup) // op.cycle_min)
+            if pieces < 1:
+                break
+            take = min(pieces * op.cycle_min, left)
+            if take < _EPS or take + setup > avail + _EPS:
+                break
+            used = take + setup
+            s0, s1 = cur, cur + timedelta(minutes=used)
+            first = ops[key][0]
+            added.append(Segment(key[0], key[1], first.op_name, first.kind, mid, who,
+                                 s0, s1, int(round(take / op.cycle_min))))
+            trimmed_min[key] += take
+            machine_busy[mid] = _merge(machine_busy.get(mid, []) + [(s0, s1)])
+            op_busy[who] = _merge(op_busy[who] + [(s0, s1)])
+            owner_of.setdefault((win.shift_date, win.shift, mid), who)
+            committed.setdefault((win.shift_date, win.shift, who), mid)
+            cur = s1
 
     if not added:
         return schedule
