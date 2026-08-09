@@ -496,7 +496,16 @@ def _entries_from_schedule(sched, batch_by_key):
 # work (e.g. dropping automatic operator-shift rotation, 2026-08-05) correctly
 # flags an applied optimization stale instead of replaying old ranks under new
 # semantics behind a green banner.
-SCHEDULER_FINGERPRINT = "new-engine-v2-no-rotation"
+# The scheduler's SEMANTICS version. Saved optimization ranks were scored under a
+# specific placement policy, so ANY deploy that changes how operations are placed must
+# bump this: `api._inputs_signature` folds it in, which flags the applied optimization
+# stale, shows the "run Start deep search" banner, and lets the next Done click
+# actually re-run a contest instead of skipping on "nothing changed". Forgetting it
+# replays old ranks under new semantics behind a green banner.
+# v3 (2026-08-09) = two placement changes in one day: the routing gate + piece-flow
+# guard in `_preplace_frozen` (in-progress ops no longer run before the step feeding
+# them) and first-fit gap backfill (`_first_fit_on_machine`).
+SCHEDULER_FINGERPRINT = "new-engine-v3-routing-gate-and-gap-backfill"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,

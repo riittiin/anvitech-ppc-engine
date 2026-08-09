@@ -39,6 +39,25 @@
 >   Regression: `tests/test_gap_backfill.py` (6 tests, RED first, incl. a whole-plan
 >   no-double-booking invariant). Routing order stays **0 violations** on Test5/8/9 at
 >   wip 0/30/68.
+>   **⚠️ INTEGRATION STEP THAT WAS ALMOST MISSED — bump `new_engine.SCHEDULER_FINGERPRINT`
+>   on ANY placement change.** Both of today's scheduler changes shipped without it, so
+>   the owner's already-applied ranks would have replayed under new semantics behind a
+>   green "up to date" banner. Now `"new-engine-v3-routing-gate-and-gap-backfill"`.
+>   `api._inputs_signature` folds it in, so the bump (a) flags the applied optimization
+>   stale, (b) shows the "run Start deep search" banner, and (c) lets the next Done click
+>   actually run a contest instead of skipping on "nothing changed". Proven end-to-end,
+>   not assumed: apply under v2 ⇒ `inputs_changed False`; switch to v3 ⇒ `True` and
+>   `_try_start_auto` returns True. The mechanism was already covered by
+>   `tests/test_new_engine.py::test_new_engine_fingerprint_feeds_the_staleness_signature`
+>   — what was missing was the discipline of bumping it, which is why the reason now
+>   sits in a comment on the constant itself.
+>   **Re-audited after the change (2026-08-09, second run of the cross-surface harness):**
+>   0 routing violations on all seven surfaces with 201 frozen ops after a REAL contest
+>   auto-applied (481 → 449 late-days, so the optimizer is demonstrably searching on top
+>   of the new placement); Orders vs Gantt and Orders vs delay report both **0 of 68**
+>   disagreeing. The only other `machine_free` scalar in the tree is the RETIRED
+>   `engine/flow_scheduler.py` (its own `FLOW_FINGERPRINT`, untouched, not what production
+>   runs) — so no second placement model was left behind.
 >
 > - **🔴 THE DELAY REPORT BLAMED THE CREW FOR EVERYTHING (2026-08-09, owner audit).**
 >   The owner cross-read two of his own exports and found operator **Narayan Fatak and
