@@ -66,7 +66,65 @@ end of `decode()`. Everything — the plan, every optimizer candidate, the conte
 cloud worker — goes through `decode`, so there is exactly one definition and no surface
 can disagree. Cost is one pass over a finished plan; the deep search is not slowed.
 
-## 4. ⛔ THE BLOCKER — fix this FIRST
+## 4. ✅ THE BLOCKER — RESOLVED in `b1256f2` (step 1 shipped)
+
+`engine/new_engine._entries_from_schedule` now emits **one entry per continuous
+block**. A break caused by night / weekly off / shift change does NOT split an entry;
+only the machine running ANOTHER job in between does. Each block publishes its own
+start, end, qty, occupancy and operator segments.
+
+Verified as a no-op on the current engine: Test9 wip=30 gave **410 entries before, 410
+after, sha `8090ccb4` both** — byte-identical. Cross-surface audit clean (0 routing
+violations on all seven surfaces, 0 of 68 date disagreements). Suite 847 passed. No
+`SCHEDULER_FINGERPRINT` bump: presentation changed, placement did not.
+Tests: `tests/test_entry_blocks.py`.
+
+**Step 2 is therefore unobstructed.** Start here:
+
+### Step 2 — the harvest, concretely
+
+New pure function, `ppc_engine/scheduler/gap_harvest.py`:
+`harvest(schedule, masters, config) -> Schedule`, called at the END of
+`flow_scheduler.decode()` (so plan, contest, search and cloud worker all share it).
+
+Inputs it must derive from the finished schedule only:
+* machine busy intervals — from segments with `machine_id is not None`
+* operator bookings — one interval list per operator name across ALL segments
+* per `(order_key, op_seq)`: machine, total qty, earliest start, cycle_min
+  (`masters.routings[item].operations`), and the predecessor's END (max end over the
+  order's earlier routing positions — OS steps included)
+* working windows — `worktime.iter_windows(machine, from, masters.calendar, config)`
+
+Loop, gaps oldest-first:
+1. Gap = machine idle inside a working window.
+2. Operator = first in `masters.operators` qualified for the machine, whose
+   `effective_shift` matches the window, available in the calendar, and not already
+   booked in that interval (mirror `_lay_frozen`'s checks — do not invent a new rule).
+3. Candidate = an op on that machine whose **predecessor END <= gap start**, whose
+   current start is AFTER the gap, and which still has un-harvested pieces.
+4. `setup = config.setup_min if op.kind is MACHINING else 0`;
+   `pieces = int((gap_minutes - setup) // cycle_min)`; require `pieces >= 1` and a
+   minimum useful run (30 min measured) so a hole is never spent on setup alone.
+5. Emit new Segment(s) for `pieces` in the gap; **trim the SAME number of pieces from
+   the END of that op's later block** (start never moves, so its end only comes
+   earlier); update both blocks' `qty`.
+6. Book the operator and the machine so the next gap sees them busy.
+7. Recompute `Schedule.completion` per order as max end over its segments.
+
+Then bump `new_engine.SCHEDULER_FINGERPRINT` (placement changes).
+
+### The assertion that makes it safe
+
+Not a general "score did not worsen" — assert **per order** that
+`completion_after <= completion_before`. The design guarantees it (nothing moves later,
+blocks only shrink); the test proves it on Test5/8/9 at wip 0/30/68. If any order moves
+later, the harvest has a bug — do not paper over it with a score check.
+
+Also assert: no machine double-booked, no operator double-booked,
+`routing_order_violations == 0`, and mutation-test each part (this fixture family
+passes vacuously — see CLAUDE.md).
+
+## 4b. Original blocker description (kept for context)
 
 `engine/new_engine._entries_from_schedule` builds **one ScheduleEntry per
 `(order_key, op_seq)`**, with `start = min(segments)` and `end = max(segments)`.
