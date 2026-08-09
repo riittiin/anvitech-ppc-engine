@@ -440,35 +440,63 @@ def _entries_from_schedule(sched, batch_by_key):
     for s in sched.segments:
         groups[(s.order_key, s.op_seq)].append(s)
 
+    # Every segment on each machine, so an operation's break can be classified. A
+    # night / weekly off / shift change is NOT a break in the work — it happens every
+    # day and must stay ONE entry, exactly as before. Only the machine actually
+    # running ANOTHER job in between is a real interruption, and that only happens
+    # once the idle-gap harvest splits a job to fill a hole (step 1 of
+    # docs/superpowers/specs/2026-08-09-idle-gap-harvest-design.md). Nothing in
+    # today's plans is interrupted, so this is a deliberate no-op until then.
+    on_machine = defaultdict(list)
+    for s in sched.segments:
+        if s.machine_id is not None:
+            on_machine[s.machine_id].append(s)
+
+    def _blocks(segs):
+        """An operation's segments split into continuously-worked blocks."""
+        out = [[segs[0]]]
+        for prev, cur in zip(segs, segs[1:]):
+            interrupted = any(
+                (o.order_key, o.op_seq) != (cur.order_key, cur.op_seq)
+                and o.start < cur.start and o.end > prev.end
+                for o in on_machine.get(cur.machine_id, ()))
+            if interrupted:
+                out.append([cur])
+            else:
+                out[-1].append(cur)
+        return out
+
     entries = []
     for (order_key, op_seq), segs in groups.items():
         segs = sorted(segs, key=lambda s: s.start)
-        first = segs[0]
-        if first.kind == OperationKind.DISPATCH:
+        if segs[0].kind == OperationKind.DISPATCH:
             continue
         batch = batch_by_key.get(order_key)
-        start = min(s.start for s in segs)
-        end = max(s.end for s in segs)
-        occupancy_min = sum((s.end - s.start).total_seconds() for s in segs) / 60.0
-        operator = next((s.operator for s in segs if s.operator), "")
-        # OS steps are single milestone entries (no per-shift operator segments).
-        op_segments = ([] if first.kind == OperationKind.OUTSOURCED
-                       else [(s.start, s.end, s.operator or "") for s in segs])
-        entries.append(ScheduleEntry(
-            batch_id=order_key[0],
-            item_code=order_key[1],
-            process_seq=op_seq,
-            process_name=first.op_name,
-            machine=_machine_for(first.kind, first.machine_id),
-            qty=float(first.qty),
-            occupancy_min=occupancy_min,
-            start=start,
-            end=end,
-            notes="",
-            so_refs=list(batch.source_so_refs) if batch else [],
-            operator=operator,
-            op_segments=op_segments,
-        ))
+        for block in _blocks(segs):
+            first = block[0]
+            # Per BLOCK, never per operation: a split job's second block must publish
+            # its own dates, its own pieces and its own machine time, or every sheet
+            # reads the first block's numbers for both.
+            occupancy_min = sum((s.end - s.start).total_seconds() for s in block) / 60.0
+            operator = next((s.operator for s in block if s.operator), "")
+            # OS steps are single milestone entries (no per-shift operator segments).
+            op_segments = ([] if first.kind == OperationKind.OUTSOURCED
+                           else [(s.start, s.end, s.operator or "") for s in block])
+            entries.append(ScheduleEntry(
+                batch_id=order_key[0],
+                item_code=order_key[1],
+                process_seq=op_seq,
+                process_name=first.op_name,
+                machine=_machine_for(first.kind, first.machine_id),
+                qty=float(first.qty),
+                occupancy_min=occupancy_min,
+                start=min(s.start for s in block),
+                end=max(s.end for s in block),
+                notes="",
+                so_refs=list(batch.source_so_refs) if batch else [],
+                operator=operator,
+                op_segments=op_segments,
+            ))
     # PACE the DISPLAY span: with overlap the new engine lets a fast downstream op
     # finish its cutting before the slow step feeding it — physically impossible (the
     # pieces don't exist yet). Extend each op's `end` to >= its predecessor's paced end
