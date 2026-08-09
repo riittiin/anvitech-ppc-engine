@@ -40,7 +40,14 @@ def test_delay_xlsx_has_two_sheets_and_headers():
 
 # ---- Task 6: endpoint ----------------------------------------------------- #
 
-def test_delay_report_admin_only_and_returns_xlsx():
+def test_delay_report_returns_xlsx_to_either_role():
+    """Role-open since 2026-08-09 (director asked the two portals to match).
+
+    Deliberate change, not a relaxed assertion: the report is a read-only view of
+    the same plan both roles already see on Schedule and Gantt. The user-role leg
+    below used to assert 403. Role PARITY is pinned in tests/test_role_parity.py,
+    which also pins what stays admin-only (e.g. /efficiency).
+    """
     m = _api()
     book_store.save_masters_bytes(build_sample_bytes())
     book_store.add_orders([Order("SO1", ITEM_A, ITEM_A, 40, date(2025, 3, 20))])
@@ -56,4 +63,6 @@ def test_delay_report_admin_only_and_returns_xlsx():
 
     user = TestClient(m.app)
     user.post("/login", data={"username": "anvitech_user", "password": "anvitech12345678"})
-    assert user.get("/delay-report.xlsx").status_code == 403
+    ru = user.get("/delay-report.xlsx")
+    assert ru.status_code == 200, ru.text
+    assert "spreadsheetml" in ru.headers["content-type"]

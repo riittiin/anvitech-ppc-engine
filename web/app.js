@@ -91,13 +91,13 @@ function renderView(v) {
 
 function showView(v, push) {
   if (!VIEWS.includes(v)) v = "orders";
-  // Analytics is admin-only (owner rule, 2026-07-27): the nav link is CSS-hidden for
-  // the user role, and a direct #analytics hash / stored last-view is redirected here
-  // too, so the user role can never land on it. currentRole is resolved (initSession
-  // is awaited) before the first showView, so this never misfires for an admin.
-  if (v === "analytics" && currentRole !== "admin") v = "orders";
-  // Settings shows Operators & shifts / Absences read-only to the user role too
-  // (the truly admin-only sections inside it are their own admin-only cards).
+  // Every tab is open to every role (2026-08-09 role-parity fix). Analytics used
+  // to be admin-only (owner rule, 2026-07-27) — nav link CSS-hidden AND a redirect
+  // here — but a director compared the two logins and asked for them to match. It
+  // is a read-only view of the plan both roles already hold, so nothing new is
+  // exposed by showing it. Settings likewise shows Operators & shifts / Absences
+  // read-only to the user role (the truly admin-only sections inside it — Plan
+  // settings, the efficiency report — are their own admin-only cards).
   activeView = v;
   try { localStorage.setItem("anvitech-view", v); } catch (e) { /* private mode */ }
   document.querySelectorAll(".view").forEach((s) => s.classList.toggle("active", s.id === "view-" + v));
@@ -638,11 +638,20 @@ function renderOptimizeResult(st) {
     });
     h += "</ul></div>";
   }
-  h += `<div class="optimize-actions">
-          <button id="optimize-apply-btn" class="primary">Apply this job order</button>
-          <button id="optimize-discard-btn" class="ghost-btn">Discard</button>
-        </div>`;
+  // Apply / Discard are built here rather than in index.html, so the CSS
+  // .admin-only rule can never reach them — the role gate has to be in JS
+  // (2026-08-09 role-parity fix). The user role sees the SAME result table above
+  // and is simply told whose decision it is; the server 403s both endpoints too.
+  if (currentRole === "admin") {
+    h += `<div class="optimize-actions">
+            <button id="optimize-apply-btn" class="primary">Apply this job order</button>
+            <button id="optimize-discard-btn" class="ghost-btn">Discard</button>
+          </div>`;
+  } else {
+    h += `<p class="muted">Your admin decides whether to use this job order.</p>`;
+  }
   box.innerHTML = h;
+  if (currentRole !== "admin") return;   // nothing below to wire for the user role
   $("optimize-apply-btn").onclick = async () => {
     const applyBtn = $("optimize-apply-btn");
     const discardBtn = $("optimize-discard-btn");
@@ -795,10 +804,25 @@ const REPORT_LABELS = {
   BAD_DELIVERY_DATE: "bad delivery dates", MISSING_SHEET: "missing sheets",
   BAD_QTY: "unreadable SO quantities", DUPLICATE_PROCESS: "repeated process names in a routing",
 };
+// The data-gaps card wraps BOTH warning panels and lives outside the admin-only
+// "Add orders" card, so the user role sees warnings about its own data too
+// (2026-08-09 role-parity fix). Show the card only while one of them has content,
+// or every plan would render an empty box on the Orders tab.
+function syncDataGapsCard() {
+  const card = $("data-gaps-card");
+  if (!card) return;
+  const shown = ["report-panel", "report-noroute"]
+    .some((id) => { const el = $(id); return el && !el.classList.contains("hidden"); });
+  card.classList.toggle("hidden", !shown);
+}
+
 function renderReport(report) {
   const panel = $("report-panel"), toggle = $("report-toggle"), detail = $("report-detail");
-  if (!report || !report.rows || report.rows.length === 0) { panel.classList.add("hidden"); return; }
+  if (!report || !report.rows || report.rows.length === 0) {
+    panel.classList.add("hidden"); syncDataGapsCard(); return;
+  }
   panel.classList.remove("hidden");
+  syncDataGapsCard();
   const counts = {};
   report.rows.forEach((r) => { counts[r[0]] = (counts[r[0]] || 0) + 1; });
   const parts = Object.entries(counts).map(([k, v]) => `${v} ${REPORT_LABELS[k] || k}`).join(", ");
@@ -819,10 +843,13 @@ function renderMissingRoutings(report) {
   const noroute = $("report-noroute");
   const rows = (report && report.rows) || [];
   const codes = [...new Set(rows.filter((r) => r[0] === "NO_ROUTING").map((r) => r[1]))];
-  if (!codes.length) { noroute.classList.add("hidden"); noroute.textContent = ""; return; }
+  if (!codes.length) {
+    noroute.classList.add("hidden"); noroute.textContent = ""; syncDataGapsCard(); return;
+  }
   noroute.textContent = "Missing routings. Add these item codes to the Item's "
     + "process Master so they can be scheduled: " + codes.join(", ") + ".";
   noroute.classList.remove("hidden");
+  syncDataGapsCard();
 }
 
 // ---- Per-view content (rule6 = Schedule, rule7 = Daily Entry) ----
@@ -879,7 +906,7 @@ function renderTab(key) {
       + '<button id="dl-schedule" class="primary" title="Every operation, one row each">⬇ Download schedule (CSV)</button>'
       + '<button id="dl-machine" title="Same schedule, grouped by machine. Post one at each machine.">⬇ Download machine-wise view</button>'
       + '<button id="dl-shiftwise" title="Grouped by shift. Hand this to the shift supervisors.">⬇ Download shift-wise schedule</button>'
-      + '<button id="dl-delay" class="admin-only" title="Per-order justification: why each order is delayed and by how much">⬇ Download delay justification</button>'
+      + '<button id="dl-delay" title="Per-order justification: why each order is delayed and by how much">⬇ Download delay justification</button>'
       + '<span class="muted"> (opens in Excel; print it for the floor)</span></div>';
   }
 
@@ -906,7 +933,8 @@ function renderTab(key) {
   if (key === "rule6") {
     const sched = $("dl-schedule");
     if (sched) sched.onclick = () => downloadCsv(`anvitech-schedule-${todayStamp()}.csv`, entry.output);
-    // Delay justification: a server-built 2-sheet .xlsx (admin only); a plain file download.
+    // Delay justification: a server-built 2-sheet .xlsx (both roles since the
+    // 2026-08-09 role-parity fix); a plain file download.
     const dly = $("dl-delay");
     if (dly) dly.onclick = () => { window.location.href = "/delay-report.xlsx"; };
     const mach = $("dl-machine");
@@ -2116,11 +2144,11 @@ if (_effDownloadBtn) _effDownloadBtn.onclick = downloadEfficiencyCsv;
   await runPlan(false);
   // A search may still be running (or have finished) from before a page reload.
   // Resume the progress display so a refresh mid-run never loses the work — the
-  // Optimize card lives on the Schedule view and updates in place.
-  if (currentRole === "admin") {
-    try {
-      const st = await (await fetch("/optimize/status")).json();
-      if (st.state === "running" || (st.state === "done" && st.best)) pollOptimizeStatus();
-    } catch (e) { /* status is cosmetic at boot */ }
-  }
+  // Optimize card lives on the Schedule view and updates in place. Both roles:
+  // the panel is read-only for a user but they still need to see a search is
+  // running (2026-08-09 role-parity fix), and GET /optimize/status is role-open.
+  try {
+    const st = await (await fetch("/optimize/status")).json();
+    if (st.state === "running" || (st.state === "done" && st.best)) pollOptimizeStatus();
+  } catch (e) { /* status is cosmetic at boot */ }
 })();

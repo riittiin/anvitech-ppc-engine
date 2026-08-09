@@ -2293,9 +2293,15 @@ def run(request: Request, req: Optional[RunRequest] = None):
         book_store.save_plan_config(json.dumps(config.to_dict()))
     elif book_store.load_plan_config():
         config = _load_plan_config()   # a saved plan exists → everyone sees it
-    elif sent is not None:
-        # No saved plan yet → honor the caller's config (the web UI defaults, e.g.
-        # operator logic / downtime ON), falling back to defaults if it's invalid.
+    elif sent is not None and role == auth.ADMIN:
+        # No saved plan yet → honor the ADMIN caller's config (the web UI defaults,
+        # e.g. operator logic / downtime ON), falling back to defaults if it's invalid.
+        # Admin-only since 2026-08-09: a user's browser also posts a config on every
+        # re-plan (Daily Entry save, Done), read from Settings form fields that are
+        # CSS-hidden for that role and therefore NEVER refreshed from the server
+        # (_plan's applyConfig runs for admins only). With no config saved yet that
+        # stale DOM steered the plan, so the two portals could show two different
+        # schedules. The user role must never be able to shape a plan.
         config = Config.from_dict(sent)
         try:
             config.validate()
@@ -2716,10 +2722,14 @@ def _plan_run_for_report(config: Config):
 
 @app.get("/delay-report.xlsx")
 def delay_report_xlsx(request: Request):
-    """Per-(SO#, item) delay justification (admin only): every hour from plan start to
+    """Per-(SO#, item) delay justification (either role): every hour from plan start to
     completion accounted for, waits attributed to machine contention (each blocking order
-    named), off-hours, or crew. A 2-sheet .xlsx download."""
-    require_admin(request)
+    named), off-hours, or crew. A 2-sheet .xlsx download.
+
+    Role-open since 2026-08-09 (director asked for the two portals to match): this is a
+    read-only view of the SAME plan both roles already see on the Schedule and Gantt
+    tabs, so it exposes nothing the user role could not already read. Contrast
+    /efficiency, which stays admin-only because it ranks named people."""
     from engine import delay_report as _dr
     plan_run, so_lines, masters, cfg = _plan_run_for_report(_load_plan_config())
     report = _dr.build_delay_report(plan_run.schedule, so_lines,

@@ -47,6 +47,13 @@ h1, h2, h3 { margin: 0; }
    class) so an admin control never flashes visible before /me resolves. */
 body.role-pending .admin-only, body.role-user .admin-only { display: none !important; }
 
+/* The mirror of the above, for the handful of places where the two roles need
+   DIFFERENT wording rather than one of them seeing nothing (e.g. the Optimize
+   panel: an admin is told to press Apply, a user is told their admin decides).
+   Same fail-closed shape — :not(.role-user) also covers role-pending, so the
+   user-facing copy never flashes at an admin while /me is in flight. */
+body:not(.role-user) .user-only { display: none !important; }
+
 /* ---------------- Boot loading banner ---------------- */
 .boot-loading {
   position: fixed; bottom: 0; left: 0; right: 0; z-index: 300;

@@ -2,6 +2,58 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-09)
 >
+> - **🔴 THE ADMIN PORTAL AND THE USER PORTAL SHOWED DIFFERENT THINGS (2026-08-09,
+>   director escalation).** A director compared the two logins and reported that they
+>   differ. **The PLAN was never the difference** — `POST /run` ignores a user's config
+>   and plans from the admin's saved one, and both roles share the plan cache, so
+>   Orders/Schedule/Gantt/Daily Entry were already byte-identical (the only per-role
+>   cell is an extra select-checkbox column for admin). **Six visibility asymmetries
+>   were found; the owner equalized three and kept the rest.**
+>   **Equalized:** (1) the **Analytics tab** — nav link was `admin-only` AND `showView`
+>   redirected `#analytics` → Orders for a non-admin; both gone. The data was ALREADY in
+>   the user's `/run` response, only the tab was hidden. (2) the **delay justification
+>   download** — button un-hidden and `require_admin` dropped from
+>   `/delay-report.xlsx`; it is a read-only view of the same plan both roles already
+>   see, unlike `/efficiency`. (3) the **"Find a better job order" panel**, now visible
+>   **read-only** — progress + result table for everyone, Start/Stop `admin-only`, and
+>   **Apply/Discard gated in JS** inside `renderOptimizeResult` because they are built
+>   at runtime and CSS cannot reach them. New `.user-only` CSS class (mirror of
+>   `.admin-only`, `body:not(.role-user)` so it also fails closed while the role is in
+>   flight) carries the different wording each role needs. Boot now resumes
+>   `/optimize/status` polling for **both** roles.
+>   **Two bugs found while verifying, neither deliberate:**
+>   **(a) THE DATA-GAPS BANNER WAS NEVER VISIBLE TO THE USER ROLE.** `renderReport`
+>   runs for BOTH roles on every plan, but `#report-panel`/`#report-noroute` sat
+>   *inside* the `admin-only` "Add orders" card — so a user could never see a
+>   NO_ROUTING / PENDING_MASTER_DATA warning about their own data. Moved into their own
+>   `#data-gaps-card`, shown only when one of them has content (`syncDataGapsCard`, or
+>   every plan would render an empty box).
+>   **(b) A USER'S BROWSER COULD SHAPE THE PLAN.** `/run`'s `elif sent is not None`
+>   honored ANY caller's config when nothing was saved yet. The user role also posts a
+>   config on every re-plan (Daily Entry save, Done), read from Settings fields that are
+>   **CSS-hidden and therefore never refreshed from the server** (`applyConfig` runs for
+>   admins only) — so a stale DOM steered the plan and the two portals really could show
+>   two different schedules. Now `elif sent is not None and role == auth.ADMIN`.
+>   Latent live (an admin has long since saved a config) but the same class.
+>   **Deliberately still admin-only, pinned by tests so a future "make it all equal"
+>   sweep can't take them:** the **efficiency report** (it ranks named people, and the
+>   floor shares one `user` login — owner's call), the **Plan settings** card, and every
+>   write control (upload, delete, commit, operators, absences, optimize
+>   start/stop/apply/clear).
+>   **Verified on the real book, not just in tests:** a throwaway local instance with
+>   Test9 (68 orders) driven through the browser as each role — user sees Analytics
+>   rendering fully, the read-only search panel, and downloads a 113 KB delay xlsx;
+>   `/efficiency` still 403s; admin keeps Start deep search and its own wording; no
+>   console errors. **Mutation-tested: all 8 parts load-bearing** — each reverted
+>   individually kills ≥1 test. Regression: `tests/test_role_parity.py` (12 tests, RED
+>   first) incl. a whole-nav invariant (`no tab is admin-only`) and a plan-parity test
+>   proving a user's submitted config cannot move a single expected completion.
+>   `test_delay_report_api.py`'s user-role leg was rebased 403 → 200 — a deliberate
+>   behaviour change, not a fudge.
+>   **Rule: role gating belongs on the CONTROL, never on a container that also holds
+>   information. And anything built in JS needs its own role check — the `.admin-only`
+>   CSS rule cannot reach markup that does not exist yet.**
+>
 > - **↩️ GAP BACKFILL WAS BUILT, MEASURED, SHIPPED AND REVERTED THE SAME DAY
 >   (2026-08-09). DO NOT REBUILD IT WITHOUT READING THIS.** `machine_free` is a SCALAR —
 >   a machine's last committed end — so one operation committed late for its own routing
