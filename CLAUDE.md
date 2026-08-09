@@ -2,6 +2,44 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-09)
 >
+> - **🔴 THE SCHEDULER NEVER BACKFILLED — A MACHINE'S GAPS WERE DEAD TIME (2026-08-09).**
+>   Chased down from the owner's idle-capacity finding. **`machine_free` was a SCALAR** —
+>   the machine's last committed end — and `_place_operation` started every candidate at
+>   `max(ready, machine_free[mid])`. The moment ONE operation was committed late for its
+>   own routing reasons, the entire span in front of it became **permanently unusable**,
+>   even for work that was ready and staffable the whole time. Proven on Test9 (30 orders
+>   part-finished), CNC3: `18-08 12:09` → `22-08 17:36` **idle 101.4 h**, because SO118's
+>   seq4 waited on its own seq3 elsewhere and then jumped the pointer four days; SO69's
+>   seq1 (ready, staffable, CNC3-eligible) was pushed to `22-08 20:36`.
+>   **Fix: first-fit backfill.** `machine_busy[mid]` now holds the machine's real
+>   occupied intervals (segment-level, kept sorted+merged at COMMIT time by `_add_busy`),
+>   and **`_first_fit_on_machine`** tries the earliest gap that can hold the WHOLE
+>   operation before falling back to the tail. An op is **never fragmented across another
+>   order's work** — resuming would need a second setup the block model does not charge —
+>   so a gap is used only on a complete fit. `_lay_on_machine` gained a `deadline`; with
+>   `busy` empty the whole path is byte-identical to before.
+>   **Measured (the real state is WITH work in progress):**
+>   Test8 wip=30 makespan **36.54 → 33.75 d**, late-days **1914 → 1748**, worst **71 → 67**,
+>   late orders **67/67 → 65/67**; Test9 wip=30 makespan **49.72 → 42.75 d**, late-days
+>   **517 → 481**. Clean books ≈ neutral (Test8 −1.0 d / −24 late-days; Test9 makespan
+>   unchanged, −40 late-days but **worst 49 → 55** — backfill can pull one order forward
+>   and push another out; the auto-apply `worst_ok` gate already refuses such a result at
+>   apply time, but the DISPLAY plan is not gated, so this is a real if narrow trade-off).
+>   Recoverable idle **335.6 h → 286.3 h**, of which **184.6 h is work too big for its
+>   gap** (would need mid-job re-setup — out of model) and only **101.7 h is genuine
+>   remaining headroom** for a smarter, non-greedy search.
+>   **Cost: `decode()` 370 ms → 548 ms per plan (1.48×)** on Test9, so contests get ~50%
+>   longer. Two optimisations already applied and needed: merge-on-commit (naive re-sort
+>   was 599 ms) and an early-out when `ready >= tail`; `_MAX_GAP_TRIES = 3` bounds a
+>   ragged machine.
+>   **Mutation-tested:** disable backfill ⇒ 2 tests fail; ignore the `deadline` ⇒ 1 fails
+>   — and note the FIRST version of that test suite did **not** catch the deadline,
+>   because every crafted gap sat inside one working day; the discriminating case is a
+>   gap that is long in WALL-CLOCK but short in WORKING time (straddling the night).
+>   Regression: `tests/test_gap_backfill.py` (6 tests, RED first, incl. a whole-plan
+>   no-double-booking invariant). Routing order stays **0 violations** on Test5/8/9 at
+>   wip 0/30/68.
+>
 > - **🔴 THE DELAY REPORT BLAMED THE CREW FOR EVERYTHING (2026-08-09, owner audit).**
 >   The owner cross-read two of his own exports and found operator **Narayan Fatak and
 >   CNC1 both idle** in a window the report called *"Machine free — waiting for a free
