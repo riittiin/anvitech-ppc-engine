@@ -1,6 +1,37 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-08)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-09)
+>
+> - **"DONE ENTERING — UPDATE PLAN" MUST NEVER BE INVISIBLE (2026-08-09, live).** An
+>   operator on the floor pressed Done; the owner 10 km away saw nothing and could not
+>   tell whether a search had started, been skipped, failed, or been killed. **Three
+>   paths produced exactly that symptom and NONE left a trace:** `_try_start_auto`
+>   swallowed any exception with a bare `except Exception: return False`; a
+>   `_start_optimize` `HTTPException` did the same; and **a contest lives in `_OPTIMIZE`,
+>   which is process memory only** — a Render restart (every deploy) or a free-tier
+>   spin-down erases it, state back to `idle`, no note, no error. Fixed:
+>   **(1) every Done click now ends in a durable one-line note** naming WHO pressed it
+>   and WHAT happened (searching / nothing-new-to-re-plan / could-not-start / failed),
+>   written by `_try_start_auto` and by both background `state="failed"` handlers.
+>   **(2) `_auto_note_write(text, running=True)` stamps `_PROCESS_TOKEN`** (a per-process
+>   uuid), and `_auto_note_for_display()` — the ONE reader, used by `_plan` on both the
+>   compute and cache-hit paths — appends **"⚠ This update was INTERRUPTED … press Done
+>   again"** when the note was written by a process that is gone. Deliberately keyed on
+>   the process token ALONE, not on "is a contest running now": between a contest
+>   finishing and its result note landing there is a real window, and crying interrupted
+>   there would send the floor to re-press a search that is about to succeed
+>   (`tests/test_plan_update_visibility.py::test_a_live_search_is_never_mislabelled_as_interrupted`).
+>   **(3) `auto_note` LEFT `_plan_fingerprint`** — it is display, not a plan input, so
+>   keying on it threw away a good plan every time a status line changed, i.e. precisely
+>   while a contest was eating Render's free CPU. It is rebuilt on every cache hit
+>   instead, exactly like `orders` (the 2026-08-08 rule below, second application).
+>   **Not a regression from the 2026-08-08 cache fix** — verified: that commit touches
+>   only the plan cache and the orders table, and on Test9 the Done → contest → owner
+>   sees `state: running` chain works identically on both commits; cache-hit `/run` is
+>   **61 ms on both**. The real cause was invisibility, so the fix is visibility.
+>   Regression: `tests/test_plan_update_visibility.py` (6 tests, all RED first).
+>   `test_auto_optimize.py`'s two `"plan unchanged"` literals were relaxed to assert the
+>   skip is EXPLAINED rather than pinning exact copy.
 >
 > - **THE PLAN CACHE MUST BE KEYED ON WHAT IS DISPLAYED, NOT ON WHAT IS SCHEDULED
 >   (2026-08-08, live bug, two admins).** A director marked three (SO#, item) lines

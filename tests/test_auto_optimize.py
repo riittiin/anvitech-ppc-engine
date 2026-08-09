@@ -97,7 +97,10 @@ def test_done_skips_and_notes_when_nothing_changed(monkeypatch):
     assert r.status_code == 200
     assert r.json()["started"] is False
     assert starts == []
-    assert "plan unchanged" in (book_store.load_auto_note() or {}).get("text", "")
+    # Wording changed 2026-08-09 (the note now names who pressed and what to do);
+    # what is pinned here is that the skip is EXPLAINED, never silent.
+    _note = (book_store.load_auto_note() or {}).get("text", "")
+    assert "nothing new to re-plan" in _note and "unchanged" in _note
 
 
 def test_done_skips_when_last_searched_matches_even_without_applied_plan(monkeypatch):
@@ -118,7 +121,10 @@ def test_done_skips_when_last_searched_matches_even_without_applied_plan(monkeyp
     assert r.status_code == 200
     assert r.json()["started"] is False
     assert starts == []
-    assert "plan unchanged" in (book_store.load_auto_note() or {}).get("text", "")
+    # Wording changed 2026-08-09 (the note now names who pressed and what to do);
+    # what is pinned here is that the skip is EXPLAINED, never silent.
+    _note = (book_store.load_auto_note() or {}).get("text", "")
+    assert "nothing new to re-plan" in _note and "unchanged" in _note
 
 
 def test_done_disabled_by_internal_env(monkeypatch):

@@ -754,7 +754,10 @@ def _plan(config: Config):
         # Belt-and-braces on top of the fingerprint fix (live 2026-08-08: a director
         # marked three lines complete and the owner's 20 refreshes still showed them
         # running). Cost is three store reads, deduped by the per-request cache.
-        return {**_cached, "orders": _orders_table()}
+        # Same reasoning for `auto_note`: it reports whether a search is running
+        # RIGHT NOW, which has nothing to do with the plan being served.
+        return {**_cached, "orders": _orders_table(),
+                "auto_note": _auto_note_for_display()}
 
     masters = _current_masters()
     # Fingerprint of the plan-shaping inputs as REQUESTED (base config, before the
@@ -953,7 +956,7 @@ def _plan(config: Config):
               "config": saved_config_dict,
               "resolved_plan_start": resolved_plan_start,
               "expected_end": exp_end, "optimize_meta": optimize_meta,
-              "auto_note": book_store.load_auto_note()}
+              "auto_note": _auto_note_for_display()}
     # The raw artifacts of THIS run, cached alongside the response under the same
     # fingerprint. Downloads that need the schedule itself (the delay justification
     # report) read these instead of planning again — a second plan is a second set of
@@ -1043,6 +1046,12 @@ _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              "claimed": False, "shards": {}, "shard_total": None,
              "shards_finalizing": False, "shard_evals": {}}
 _OPTIMIZE_LOCK = threading.Lock()
+
+# Identity of THIS server process. A contest lives only in `_OPTIMIZE` above, so a
+# restart or a Render free-tier spin-down kills it with nothing written down. Notes
+# about a running search carry this token; when it no longer matches, the search is
+# known to have died and the Orders tab says so (see `_auto_note_for_display`).
+_PROCESS_TOKEN = uuid.uuid4().hex
 
 
 # --------------------------------------------------------------------------- #
@@ -1248,9 +1257,11 @@ def _plan_fingerprint(config: Config) -> str:
         # machine/operator — a freeze change must bust the cache, or a stale plan
         # (computed before the freeze) would keep being served.
         "frozen": book_store.load_frozen_ops(),
-        # The plan response also carries the scheduled-optimize note; fold it in so a
-        # new note is never served stale from the cache (a note change is rare).
-        "note": book_store.load_auto_note(),
+        # NOT the Orders-tab note. It is DISPLAY, not a plan input, so it is rebuilt
+        # on every cache hit by `_auto_note_for_display()` instead of being keyed on
+        # here. Keying on it threw away a perfectly good plan every time a status
+        # message changed — and those messages land while a contest is running, i.e.
+        # exactly when Render's free CPU has none to spare (2026-08-09).
         # FULL actuals content, plan-cache only (NOT book_signature — a net-zero-good
         # punch must not fire the Thursday optimize trigger). `_current_book_sig` is
         # quantity-derived, so a downtime-only / all-reject / rolled-back entry leaves
@@ -1264,9 +1275,49 @@ def _plan_fingerprint(config: Config) -> str:
         json.dumps(parts, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
-def _auto_note_write(text: str):
-    book_store.save_auto_note({"text": text,
-                               "at": _ist_now().isoformat(timespec="seconds")})
+def _hhmm() -> str:
+    return _ist_now().strftime("%H:%M")
+
+
+def _who(by: str) -> str:
+    """'ravi ' / '' — so the owner can see WHO on the floor pressed the button."""
+    return f"{by} " if by else ""
+
+
+def _auto_note_write(text: str, *, running: bool = False):
+    """Write the one-line status the Orders tab shows to BOTH roles.
+
+    `running=True` marks a search that is still in flight, and stamps the process
+    that owns it. A contest lives in `_OPTIMIZE`, which is process memory only, so
+    a Render restart (every deploy) or a free-tier spin-down erases it with no
+    trace — the stamp is what lets `_auto_note_for_display` notice afterwards and
+    say so instead of leaving 'searching…' on screen forever."""
+    note = {"text": text, "at": _ist_now().isoformat(timespec="seconds")}
+    if running:
+        note.update(running=True, process=_PROCESS_TOKEN)
+    book_store.save_auto_note(note)
+
+
+def _auto_note_for_display():
+    """The stored note, corrected for what this process can actually still see.
+
+    A note that claims a search is running, written by a process that is gone (or
+    by this one before the contest vanished from `_OPTIMIZE`), is a lie — say it
+    was interrupted and tell the operator what to do. Display-only: deliberately
+    NOT in `_plan_fingerprint`, and rebuilt on every cache hit."""
+    note = book_store.load_auto_note()
+    if not note or not note.get("running"):
+        return note
+    if note.get("process") == _PROCESS_TOKEN:
+        # Same process: either it really is still searching, or it has just finished
+        # and the result note is milliseconds away. Both are fine — say nothing. A
+        # thread that dies instead writes its own failure note.
+        return note
+    return {**note, "running": False,
+            "text": (note.get("text", "") + "  ⚠ This update was INTERRUPTED (the "
+                     "server restarted or went to sleep) and did not finish. The "
+                     "plan is unchanged — press \"Done entering: update plan\" "
+                     "again to restart it.")}
 
 
 def _applied_plan_meta():
@@ -1305,7 +1356,7 @@ def _compute_and_store_frozen() -> list:
     return rows
 
 
-def _try_start_auto() -> bool:
+def _try_start_auto(by: str = "") -> bool:
     """Start an auto-applying re-optimization if it makes sense. Invoked by
     POST /optimize/done (the 'Done entering — update plan' button). Returns True
     iff a contest was started. Returns False — starting nothing — when auto is
@@ -1338,16 +1389,27 @@ def _try_start_auto() -> bool:
         searched_match = (last.get("book_sig") == cur_book
                          and last.get("inputs_sig") == cur_inputs)
         if applied_match or searched_match:
-            _auto_note_write("No new feedback since the last optimization — "
-                             "plan unchanged.")
+            _auto_note_write(f"{_who(by)}pressed \"Done entering\" at {_hhmm()}: nothing "
+                             "new to re-plan since the last update, so the plan is "
+                             "unchanged. Enter today's production first, then press it.")
             return False                         # nothing material changed
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        # NEVER silent. This used to be a bare `return False`: the floor pressed the
+        # button, nothing happened, and the owner 10 km away had no way to find out.
+        _auto_note_write(f"{_who(by)}pressed \"Done entering\" at {_hhmm()} but the plan "
+                         f"update could NOT start: {e}. The plan is unchanged — please "
+                         "try again, and tell your admin if it keeps happening.")
         return False
     try:
         _start_optimize(_OPT_BUDGETS["deep"], "auto", background=True, auto=True)
-        return True
-    except HTTPException:
-        return False                             # e.g. nothing to optimize
+    except HTTPException as e:                   # e.g. nothing to optimize
+        _auto_note_write(f"{_who(by)}pressed \"Done entering\" at {_hhmm()} but the plan "
+                         f"update could NOT start: {e.detail}. The plan is unchanged.")
+        return False
+    _auto_note_write(f"{_who(by)}pressed \"Done entering\" at {_hhmm()}: searching for a "
+                     "better schedule now. This takes 15 to 30 minutes; the new plan "
+                     "appears here by itself when it lands.", running=True)
+    return True
 
 
 def _start_optimize(budget_evals: int, label: str, background: bool = True,
@@ -1496,6 +1558,12 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         except Exception as e:  # noqa: BLE001 — a failed search must report, not hang
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE.update(state="failed", error=str(e), cancel=False)
+            # A crashed search left the 'searching…' note standing forever, so the
+            # floor and the owner both kept waiting for a plan that was never coming.
+            if auto:
+                _auto_note_write(f"The plan update started earlier FAILED at {_hhmm()}: "
+                                 f"{e}. The plan is unchanged — press \"Done entering: "
+                                 "update plan\" to try again.")
 
     def cloud_job():
         try:
@@ -1680,6 +1748,12 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         except Exception as e:  # noqa: BLE001
             with _OPTIMIZE_LOCK:
                 _OPTIMIZE.update(state="failed", error=str(e), cancel=False)
+            # A crashed search left the 'searching…' note standing forever, so the
+            # floor and the owner both kept waiting for a plan that was never coming.
+            if auto:
+                _auto_note_write(f"The plan update started earlier FAILED at {_hhmm()}: "
+                                 f"{e}. The plan is unchanged — press \"Done entering: "
+                                 "update plan\" to try again.")
 
     job = cloud_job if cloud else local_job
     if background:
@@ -2900,7 +2974,7 @@ def optimize_done_ep(request: Request):
     contest starts; the winner auto-applies if strictly better."""
     # No require_admin: the gatekeeper already verified a valid session for any
     # non-public path, and this must be reachable by the user role.
-    started = _try_start_auto()
+    started = _try_start_auto(by=getattr(request.state, "user", "") or "")
     return {"started": started, "reason": ("started" if started else "skipped"),
             "state": _optimize_status()["state"]}
 
