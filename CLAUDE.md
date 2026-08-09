@@ -2,6 +2,53 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-09)
 >
+> - **🔴 THE DELAY REPORT BLAMED THE CREW FOR EVERYTHING (2026-08-09, owner audit).**
+>   The owner cross-read two of his own exports and found operator **Narayan Fatak and
+>   CNC1 both idle** in a window the report called *"Machine free — waiting for a free
+>   qualified operator"*. Three defects in `engine/delay_report.py`, each proven in the
+>   source before any code changed:
+>   **(1) `crew` was a FALLBACK, not a finding.** `_classify_free(a, b, clock)` took **no
+>   operator data at all** and printed that sentence for ANY machine-free hour inside
+>   working hours. Measured on the live export: of **3,142.6 h** so labelled,
+>   **1,331.1 h (55 days, 308 windows, all 57 orders) had a qualified operator sitting
+>   free**. It now consults **`operator_coverage.qualified_operators`** — the SAME rule
+>   Rule 6 staffs by — against the operators' real bookings (`_operator_bookings`, read
+>   from the committed `op_segments`), splitting at shift boundaries
+>   (`_next_shift_boundary`, `_staffing_split`). Truly unstaffable time stays
+>   `WAITING (crew)`; the rest becomes the new **`IDLE (capacity free)`** — machine AND
+>   operator free, i.e. spare capacity, which is a different management problem.
+>   **(2) OUTSOURCING WAS INVISIBLE.** `_order_ops` dropped `machine in _OFF_LANES`, so a
+>   96-hour OS block became a GAP and was billed to the next in-house machine — **0 of
+>   1,648 detail rows ever named an OS step**, though items carry 48–264 h of it. Proof
+>   case `26-27SO84 / 2109801`: routing BAND SAW OS (48h) → WIRECUT OS (48h) → DEBURING;
+>   the report blamed **36 h of "no operator"** while **both** MD1/MD2 operators (Anturam,
+>   Sanjay) were free — the order was at a vendor. New state **`OUTSOURCED`** (+
+>   `OFF-MACHINE`), counted as occupied so it can never be re-billed.
+>   **(3) THE CLOCK STARTED AT MIDNIGHT.** `plan_start = combine(plan_start_date,
+>   midnight)` while the plan really begins at the plan-start floor — **607 h across 57
+>   orders** charged before the plan existed, all landing in crew. Now
+>   `min(e.start for e in schedule)`.
+>   **Rebuilt on Test9 with 201 frozen ops:** crew rows with a free operator
+>   **1,331 h → 0**; rows before plan start **607 h → 0**; outsourcing **0 → 28 rows /
+>   2,328 h visible**; the directors' crew figure **130.9 d → 56.2 d**, with **84.3 d**
+>   correctly reclassified as idle capacity and **97.0 d** as outsourcing. Accounting
+>   still closes on **68 of 68** orders (merged occupancy + waits == span; ops can run
+>   CONCURRENTLY, so never sum RUNNING rows — that is what makes a naive check report
+>   60 false failures). Summary gains `Outsourced (days)` + `Idle: capacity free (days)`;
+>   the xlsx gains both columns and two fill colours.
+>   **Mutation-tested, all three load-bearing:** restore the operator-blind bucket ⇒ 1
+>   test fails; hide outsourcing ⇒ 2 fail; go back to midnight ⇒ 3 fail. Regression:
+>   `tests/test_delay_report_attribution.py` (8 tests, RED first) incl. a whole-plan
+>   invariant (verified non-vacuous: the fixture really does produce crew rows).
+>   `test_delay_report.py`'s three span assertions were rebased onto the plan's real
+>   start — a deliberate behaviour change, not a fudge.
+>   **Still open:** whether the SCHEDULE actually wasted the owner's 2.25 h CNC1 window
+>   (10-08 02:45→05:00). The report's REASON is now honest; whether the slot was usable
+>   needs an engine reproduction against live store state. Prime suspect: the 90-min CNC
+>   setup leaves only 45 min of cutting before the second shift ends at 05:00.
+>   **Rule: a report may never attribute a cause it did not CHECK. If the data to check
+>   it is not in scope, pass it in or invent a state that says "unexplained".**
+>
 > - **🔴 THE ROUTING ORDER IS PHYSICS — IN-PROGRESS WORK BROKE IT (2026-08-09, live,
 >   owner escalation).** A director opened the shift-wise Excel for
 >   `26-27SO113 / 9611416360` and found **CNC FIRST SIDE running on 11-08 while

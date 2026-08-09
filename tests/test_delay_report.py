@@ -51,7 +51,9 @@ def test_on_time_order_has_one_running_block_and_no_late():
     s = rep["summary"][0]
     assert s["Days Late"] <= 0
     total = sum(r["Hours"] for r in rep["detail"])
-    span_h = (datetime(2025, 3, 3, 12, 0) - datetime(2025, 3, 3, 0, 0)).total_seconds() / 3600
+    # From the plan's FIRST SCHEDULED MOMENT, not midnight (2026-08-09): the hours
+    # before the plan starts are nobody's delay, and used to be billed to the crew.
+    span_h = (datetime(2025, 3, 3, 12, 0) - datetime(2025, 3, 3, 8, 0)).total_seconds() / 3600
     assert abs(total - span_h) < 1e-6
 
 
@@ -77,14 +79,18 @@ def test_wait_names_every_higher_priority_blocker():
 def test_night_gap_is_off_hours_and_every_minute_is_attributed():
     cfg = Config(plan_start_date=date(2025, 3, 3), apply_operator_logic=True)
     masters = _with_routing(_masters([("BS1", "Band saw", 9.5)]), "X")   # single-shift 09–18
-    e = _entry("SO1", "X", 1, "BS1", datetime(2025, 3, 4, 9, 0), datetime(2025, 3, 4, 11, 0))
-    rep = build_delay_report([e], [_so_line("SO1", "X")], [], cfg, masters)
+    # Two ops a day apart, so the night between them is a real off-hours gap. (The
+    # report now starts at the first scheduled op, so a LEADING night no longer exists
+    # to be measured — that was time before the plan began.)
+    e1 = _entry("SO1", "X", 1, "BS1", datetime(2025, 3, 3, 9, 0), datetime(2025, 3, 3, 11, 0))
+    e2 = _entry("SO1", "X", 2, "BS1", datetime(2025, 3, 4, 9, 0), datetime(2025, 3, 4, 11, 0))
+    rep = build_delay_report([e1, e2], [_so_line("SO1", "X")], [], cfg, masters)
     off = [r for r in rep["detail"] if r["State"] == "WAITING (off-hours)"]
     assert off and all("hours" in r["Why"].lower() for r in off)
     assert not [r for r in rep["detail"]
                 if "unattributed" in r["State"] or "(free)" in r["State"]]
     total = sum(r["Hours"] for r in rep["detail"] if r["SO No"] == "SO1")
-    span = (datetime(2025, 3, 4, 11, 0) - datetime(2025, 3, 3, 0, 0)).total_seconds() / 3600
+    span = (datetime(2025, 3, 4, 11, 0) - datetime(2025, 3, 3, 9, 0)).total_seconds() / 3600
     assert abs(total - span) < 1e-3
 
 
@@ -117,6 +123,6 @@ def test_concurrent_ops_do_not_double_count_the_span():
     merged = _merge([(r["From"], r["To"]) for r in rows if r["State"] == "RUNNING"])
     merged_h = sum(_hours(a, b) for a, b in merged)
     wait_h = sum(r["Hours"] for r in rows if r["State"].startswith("WAITING"))
-    span = _hours(datetime(2025, 3, 3, 0, 0), datetime(2025, 3, 3, 14, 0))
+    span = _hours(datetime(2025, 3, 3, 8, 0), datetime(2025, 3, 3, 14, 0))
     assert merged_h == 6.0                      # 08:00–14:00 merged, not 10h summed
     assert abs(merged_h + wait_h - span) < 1e-6

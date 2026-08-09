@@ -2609,11 +2609,15 @@ _DELAY_FILLS = {
     "WAITING (machine busy)": "FFE699",  # amber
     "WAITING (off-hours)": "D9D9D9",     # grey
     "WAITING (crew)": "F8CBAD",          # orange
+    "OUTSOURCED": "BDD7EE",              # blue — away at a vendor, not our capacity
+    "OFF-MACHINE": "BDD7EE",
+    "IDLE (capacity free)": "FFC7CE",    # red — machine AND operator free, work waiting
 }
 _DELAY_SUMMARY_COLS = ["SO No", "Item Code", "Item Name", "Ordered Qty", "SO Delivery Date",
                        "Expected Completion", "Days Late", "Working (days)",
                        "Waiting: machine (days)", "Waiting: off-hours (days)",
-                       "Waiting: crew (days)", "Why"]
+                       "Waiting: crew (days)", "Outsourced (days)",
+                       "Idle: capacity free (days)", "Why"]
 _DELAY_DETAIL_COLS = ["SO No", "Item Code", "State", "Process", "Machine", "Operator",
                       "From", "To", "Hours", "Why"]
 
