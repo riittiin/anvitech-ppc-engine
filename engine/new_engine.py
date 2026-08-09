@@ -505,7 +505,7 @@ def _entries_from_schedule(sched, batch_by_key):
 # v3 (2026-08-09) = two placement changes in one day: the routing gate + piece-flow
 # guard in `_preplace_frozen` (in-progress ops no longer run before the step feeding
 # them) and first-fit gap backfill (`_first_fit_on_machine`).
-SCHEDULER_FINGERPRINT = "new-engine-v3-routing-gate-and-gap-backfill"
+SCHEDULER_FINGERPRINT = "new-engine-v4-routing-gate-no-backfill"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,

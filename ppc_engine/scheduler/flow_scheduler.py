@@ -39,24 +39,6 @@ _EPS_MIN = 1e-9
 # In-house op kinds — the only ones that can overlap (OS/dispatch stay sequential).
 _INHOUSE = (OperationKind.MACHINING, OperationKind.MANUAL, OperationKind.INSPECTION)
 
-# How many gaps `_first_fit_on_machine` will try before giving up and queueing at the
-# end. The list is oldest-first, so the earliest (most valuable) gaps are always the
-# ones tried; the cap only bounds the cost on a machine with a long ragged history.
-_MAX_GAP_TRIES = 3
-
-
-def _add_busy(ivs, new):
-    """Insert intervals into a sorted, merged list, keeping it sorted and merged.
-    Done at COMMIT time so the placement hot path never re-sorts a growing list —
-    that alone was most of the cost of gap search (599 ms -> see below)."""
-    out = []
-    for s, e in sorted(ivs + list(new)):
-        if out and s <= out[-1][1]:
-            out[-1] = (out[-1][0], max(out[-1][1], e))
-        else:
-            out.append((s, e))
-    return out
-
 
 def decode(
     orders: list[Order],
@@ -113,10 +95,6 @@ def decode(
         prev_end_of[key] = config.plan_start
 
     machine_free: dict[str, datetime] = {mid: config.plan_start for mid in masters.machines}
-    # What each machine is ACTUALLY occupied with, not just when it was last busy. A
-    # scalar pointer made every gap permanently unusable (2026-08-09): see
-    # `_first_fit_on_machine`. Segment-level, so non-working time is never reserved.
-    machine_busy: dict[str, list] = {mid: [] for mid in masters.machines}
     staffing = StaffingBoard(build_machine_pools(masters))
     segments: list[Segment] = []
     completion: dict[tuple[str, str], datetime] = {}
@@ -124,7 +102,7 @@ def decode(
     if frozen:
         segments.extend(_preplace_frozen(
             frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of,
-            machine_free, machine_busy, staffing, completion, masters, config))
+            machine_free, staffing, completion, masters, config))
 
     # Orders that still have operations left to schedule.
     remaining = [key for key in sequence if idx_of[key] < len(ops_of[key])]
@@ -142,7 +120,7 @@ def decode(
         placements = {
             key: _place_operation(
                 ops_of[key][idx_of[key]], order_by_key[key], ready_of[key],
-                machine_free, machine_busy, staffing, masters, config,
+                machine_free, staffing, masters, config,
             )
             for key in remaining
         }
@@ -182,7 +160,7 @@ def decode(
                 _r = placement["start"] + (prev_end_of[key] - placement["end"])
                 placement = _place_operation(
                     ops_of[key][idx_of[key]], order_by_key[key], _r,
-                    machine_free, machine_busy, staffing, masters, config)
+                    machine_free, staffing, masters, config)
                 if placement["end"] >= prev_end_of[key]:
                     break
         # Commit the winning placement onto the real state. The machine frees after its
@@ -190,14 +168,7 @@ def decode(
         for machine_id, day, shift, name, seg_start, seg_end in placement["assignments"]:
             staffing.commit(machine_id, day, shift, name, seg_start, seg_end)
         if placement["machine_id"] is not None:
-            machine_free[placement["machine_id"]] = max(
-                machine_free.get(placement["machine_id"], placement["end"]),
-                placement["end"])
-            _mid = placement["machine_id"]
-            machine_busy[_mid] = _add_busy(
-                machine_busy.get(_mid, []),
-                [(sg.start, sg.end) for sg in placement["segments"]
-                 if sg.machine_id is not None])
+            machine_free[placement["machine_id"]] = placement["end"]
         for seg in placement["segments"]:
             if seg.operator is not None:  # track load for the "balanced" operator pick
                 staffing.add_load(seg.operator, (seg.end - seg.start).total_seconds() / 60.0)
@@ -264,7 +235,6 @@ def _place_operation(
     order: Order,
     ready: datetime,
     machine_free: dict[str, datetime],
-    machine_busy: dict[str, list],
     staffing: StaffingBoard,
     masters: Masters,
     config: PlanConfig,
@@ -309,9 +279,8 @@ def _place_operation(
         machine = masters.machines.get(mid)
         if machine is None:
             continue  # unknown machine id (provisional handling comes with the loader)
-        laid = _first_fit_on_machine(machine, ready, dur, order, op, int(op_qty),
-                                     staffing, masters, config,
-                                     machine_busy.get(mid, []))
+        earliest = max(ready, machine_free.get(mid, config.plan_start))
+        laid = _lay_on_machine(machine, earliest, dur, order, op, int(op_qty), staffing, masters, config)
         if laid is None:
             continue
         cand = (laid["end"], opt_idx)
@@ -343,14 +312,8 @@ def _lay_on_machine(
     staffing: StaffingBoard,
     masters: Masters,
     config: PlanConfig,
-    deadline: datetime | None = None,
 ) -> dict | None:
     """Lay ``dur_min`` minutes of work for ``op`` onto ``machine`` from ``earliest``.
-
-    ``deadline`` (optional) is a hard wall the work must finish before — used by
-    `_first_fit_on_machine` to test whether the operation fits inside a GAP in the
-    machine's already-committed timeline. ``None`` means no wall, which is the
-    historical behaviour exactly.
 
     Walks the machine's working windows, splitting the work into per-window segments,
     and staffs each shift with a stable operator (reusing the shift's operator if one
@@ -373,10 +336,7 @@ def _lay_on_machine(
             break
 
         seg_start = max(cursor, win.start)
-        win_end = win.end if deadline is None else min(win.end, deadline)
-        if deadline is not None and seg_start >= deadline:
-            return None                       # cannot finish inside the gap
-        avail = (win_end - seg_start).total_seconds() / 60.0
+        avail = (win.end - seg_start).total_seconds() / 60.0
         if avail <= 0:
             cursor = win.end
             continue
@@ -408,49 +368,6 @@ def _lay_on_machine(
     if remaining > _EPS_MIN or first_start is None:
         return None  # unschedulable within the lookahead horizon
     return {"start": first_start, "end": segments[-1].end, "segments": segments, "assignments": assignments}
-
-
-def _first_fit_on_machine(machine, ready, dur_min, order, op, op_qty, staffing,
-                          masters, config, busy):
-    """Place the operation in the EARLIEST slot on this machine that can hold it whole.
-
-    `machine_free` used to be a single scalar — the machine's last committed end — so
-    the instant one operation was committed late for its own routing reasons, every
-    hour before it became unusable forever. Measured on Test9: 335.6 h (14 days) of
-    machine time idle inside working hours with ready work and a free qualified
-    operator, e.g. CNC3 idle 18-08 12:09 → 22-08 17:36 while a ready order waited.
-
-    Gaps are tried oldest first; the tail (after everything committed) is the last
-    resort and reproduces the old behaviour exactly. An operation is never split
-    ACROSS another order's work — resuming would need a second setup, which the block
-    model does not charge — so a gap is used only when the whole operation fits.
-    `busy` empty ⇒ byte-identical to `_lay_on_machine`.
-    """
-    if not busy:
-        return _lay_on_machine(machine, ready, dur_min, order, op, op_qty,
-                               staffing, masters, config)
-    tail = busy[-1][1]            # sorted + merged by _add_busy
-    if ready >= tail:
-        # Nothing is committed after this op is ready — there is no gap to search.
-        # The common case late in a plan; keeps gap search off the hot path.
-        return _lay_on_machine(machine, ready, dur_min, order, op, op_qty,
-                               staffing, masters, config)
-    tries = 0
-    cursor = ready
-    for bs, be in busy:
-        if bs > cursor:
-            # Cheap necessary condition: working time can never exceed wall-clock.
-            if (bs - cursor).total_seconds() / 60.0 >= dur_min:
-                laid = _lay_on_machine(machine, cursor, dur_min, order, op, op_qty,
-                                       staffing, masters, config, deadline=bs)
-                if laid is not None:
-                    return laid
-                tries += 1
-                if tries >= _MAX_GAP_TRIES:
-                    break
-        cursor = max(cursor, be)
-    return _lay_on_machine(machine, max(ready, tail), dur_min, order, op, op_qty,
-                           staffing, masters, config)
 
 
 def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, planned_operator,
@@ -546,7 +463,7 @@ def _ready_after(order, just, nxt, start, paced_end, config, *,
 
 
 def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of,
-                     machine_free, machine_busy, staffing, completion, masters, config):
+                     machine_free, staffing, completion, masters, config):
     """Pin every in-progress op onto its machine+operator BEFORE the main loop.
 
     Frozen ops resume in previous-plan (``prev_start``) order — but an op is never
@@ -627,9 +544,7 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
             laid = shifted
         for a in laid["assignments"]:
             staffing.commit(*a)
-        machine_free[mid] = max(machine_free.get(mid, laid["end"]), laid["end"])
-        machine_busy[mid] = _add_busy(machine_busy.get(mid, []),
-                                      [(sg.start, sg.end) for sg in laid["segments"]])
+        machine_free[mid] = laid["end"]
         for seg in laid["segments"]:
             if seg.operator is not None:
                 staffing.add_load(seg.operator,
