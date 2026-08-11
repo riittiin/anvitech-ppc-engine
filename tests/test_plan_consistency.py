@@ -92,12 +92,18 @@ def test_expected_completion_is_the_latest_end_per_so_and_item():
 
 
 # --- 2. The auto plan-start floor is pinned for the day --------------------- #
+# ⚠️ The next-hour plan clock is switched OFF live (owner decision 2026-08-11: the plan
+# starts at the 08:00 shift start again — api.main.PLAN_START_NEXT_HOUR). These two
+# tests turn it back ON so the mechanism keeps its coverage for the day it is wanted
+# again; the LIVE behaviour, including that all these dates stay consistent without any
+# clock at all, is pinned in tests/test_plan_start_shift_start.py.
 
 def test_finished_optimization_starts_the_plan_at_the_next_full_hour():
     """Owner's rule: when the optimization finishes, the plan begins at the next full
     hour. A contest that lands at 09:01 on Monday makes the plan start 10:00 Monday —
     and that clock then HOLDS for every feature until the next contest finishes."""
     m = _api()
+    m.PLAN_START_NEXT_HOUR = True          # safe: every _api() call reloads the module
     clock = {"now": datetime(2026, 8, 10, 8, 30)}       # Monday, before the contest
     m._ist_now = lambda: clock["now"]
     m._ist_today = lambda: clock["now"].date()
@@ -123,6 +129,7 @@ def test_plan_clock_holds_between_optimizations():
     """Nothing finished, so nothing may move: the plan start an admin sees at 09:20
     must be the same one a report uses at 16:45."""
     m = _api()
+    m.PLAN_START_NEXT_HOUR = True          # safe: every _api() call reloads the module
     clock = {"now": datetime(2026, 8, 10, 9, 20)}
     m._ist_now = lambda: clock["now"]
     m._ist_today = lambda: clock["now"].date()

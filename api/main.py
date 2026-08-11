@@ -254,6 +254,32 @@ def logout():
 COMMITMENT_FEATURE_ENABLED = False
 
 
+# --------------------------------------------------------------------------- #
+# PLAN START: SHIFT START, NOT THE NEXT HOUR (owner decision, 2026-08-11 —
+# docs/superpowers/specs/2026-08-11-plan-start-at-shift-start-design.md)
+#
+# False (live) = the plan always begins at 08:00 of the plan date. Press Optimize
+# at 09:30 and the schedule starts 08:00 that morning, because the book needs the
+# whole shift. This is the pre-2026-08-03 behaviour, restored on the owner's call
+# after he ran the next-hour version on the floor for a week.
+#
+# True = the 2026-08-03/08-07 behaviour: a stored plan clock at the next full hour
+# (`_stamp_plan_clock`), advancing when an optimization finishes or on the first
+# plan of a new day. The whole mechanism is kept live and tested behind this one
+# flag — `_ceil_next_hour`, `_stamp_plan_clock`, `book_store.save/load_plan_start_
+# floor`, `Config.plan_start_floor` and `new_engine._plan_config`'s
+# max(08:00, floor) — so bringing it back is this line and nothing else.
+#
+# Known and accepted: with it off, a run after the shifts end plans from 08:00
+# THAT morning, so the schedule's first hours have already passed. The next day's
+# punches and the freeze pass correct it.
+#
+# The 2026-08-07 "one plan, one set of dates" guarantee is not weakened by this —
+# 08:00-of-today is constant for the whole IST day, whereas the clock it replaces
+# advanced every time a contest landed.
+PLAN_START_NEXT_HOUR = False
+
+
 def _require_commitment_feature():
     """404 while the lanes are hidden — the endpoint simply does not exist."""
     if not COMMITMENT_FEATURE_ENABLED:
@@ -1183,9 +1209,17 @@ def _resolve_config(config: Config) -> Config:
     if config.consolidation_window_days != 1:
         config = replace(config, consolidation_window_days=1)
     if config.plan_start_date is None:
-        # Auto: resolve to today AND floor the plan at the next full hour (IST), so a run
-        # late in the day never schedules from 08:00 that (past) morning. The engine starts
-        # at max(08:00-of-date, floor). See engine/new_engine._plan_config.
+        # Auto: resolve to today. The plan then starts at 08:00 of that date — the shift
+        # start — whatever time of day this runs (owner decision 2026-08-11; see
+        # PLAN_START_NEXT_HOUR at the top of this file). No floor means the engine's
+        # max(08:00-of-date, floor) degenerates to 08:00, and the start cannot drift
+        # within the day at all.
+        if not PLAN_START_NEXT_HOUR:
+            return replace(config, plan_start_date=_ist_today(), plan_start_floor=None)
+        # --- PLAN_START_NEXT_HOUR only, below ---
+        # Floor the plan at the next full hour (IST), so a run late in the day never
+        # schedules from 08:00 that (past) morning. The engine starts at
+        # max(08:00-of-date, floor). See engine/new_engine._plan_config.
         #
         # The floor is a STORED PLAN CLOCK, not a per-call `now()` (2026-08-07). It shifts
         # the engine's plan start, and the scheduler is a greedy dispatcher, so it does not
@@ -1778,13 +1812,18 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                        table, cancelled):
     """Store a finished contest (local sweep OR cloud worker result) as the
     Optimize outcome — one place computes improved/inputs_sig for both paths."""
-    # THE PLAN CLOCK STARTS HERE (owner's rule, 2026-08-07): when the optimization
-    # finishes, the plan begins at the NEXT FULL HOUR. A contest landing 09:01 Monday
-    # makes every plan start 10:00 Monday, and that clock then HOLDS — for the Gantt,
-    # the Orders tab, the reports, the next incumbent measurement — until the next
-    # contest finishes. Stamped BEFORE the metric recomputes below so the numbers this
-    # panel shows are measured on the same clock the applied plan will run on.
-    _stamp_plan_clock()
+    # THE PLAN CLOCK STARTS HERE — only while PLAN_START_NEXT_HOUR is on (2026-08-07
+    # rule): when the optimization finishes, the plan begins at the NEXT FULL HOUR. A
+    # contest landing 09:01 Monday makes every plan start 10:00 Monday, and that clock
+    # then HOLDS — for the Gantt, the Orders tab, the reports, the next incumbent
+    # measurement — until the next contest finishes. Stamped BEFORE the metric recomputes
+    # below so the numbers this panel shows are measured on the same clock the applied
+    # plan will run on.
+    # With the flag off (live since 2026-08-11) every plan starts at 08:00 of its date,
+    # so there is no clock to advance and nothing may be written: a pinned floor left in
+    # the store would come back the moment the flag is flipped on again.
+    if PLAN_START_NEXT_HOUR:
+        _stamp_plan_clock()
     # RECOMPUTE the winner's metrics locally, by replaying its ranks through the same
     # path _plan uses. The contest's own `best` (especially a cloud worker's) can be
     # measured a hair differently from how the app actually replays, so trusting it made

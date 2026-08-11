@@ -4,6 +4,13 @@ Bug (2026-08-03): the plan clock was always anchored to 08:00 of the date, ignor
 current time — so a run at 11:30pm planned from 8am that morning (15h in the past). Fix:
 in AUTO mode the API sets a per-run floor = the next full hour after now (IST), and the
 engine starts at max(08:00-of-date, floor). Fixed/testing dates keep 08:00.
+
+⚠️ THIS BEHAVIOUR IS SWITCHED OFF LIVE (owner decision 2026-08-11 — the plan starts at
+the 08:00 shift start again; see ``api.main.PLAN_START_NEXT_HOUR`` and
+``tests/test_plan_start_shift_start.py``). The MECHANISM is deliberately kept, and this
+file keeps testing it so flipping the flag back on is safe. Only the one test that
+drives ``_resolve_config``'s auto branch needs the flag; everything below exercises
+``_plan_config``/``_ceil_next_hour`` directly, which the flag does not gate.
 """
 from datetime import date, datetime
 
@@ -57,6 +64,7 @@ def test_ceil_next_hour():
 
 def test_resolve_config_sets_floor_in_auto_mode(monkeypatch):
     import api.main as m
+    monkeypatch.setattr(m, "PLAN_START_NEXT_HOUR", True)   # off live since 2026-08-11
     monkeypatch.setattr(m, "_ist_now", lambda: datetime(2026, 8, 2, 23, 30))
     monkeypatch.setattr(m, "_ist_today", lambda: date(2026, 8, 2))
     c = m._resolve_config(Config(plan_start_date=None))
