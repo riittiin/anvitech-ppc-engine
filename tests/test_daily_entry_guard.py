@@ -234,7 +234,15 @@ def test_item_to_sos_lists_both_orders_sharing_an_item_code(client):
 # --------------------------------------------------------------------------- #
 def _fits_another_so(progress, item_to_sos, typed, picked_so, item, process):
     """Mirror of quantityFitsAnotherSo() in web/app.js. Returns the other open SOs
-    whose remaining at this step is exactly the typed quantity."""
+    whose remaining at this step is exactly the typed quantity.
+
+    This mirror pins the match SET, not its ORDER: the shipped JS orders its
+    result by delivery date (via ``sosForItem``), this mirror by SO number, and on
+    3,737 differential checks against real data the two never disagreed on which
+    SOs matched -- only on the order of a 10-case tail, which is harmless today
+    because the switch button only appears for a single match. If a switch is ever
+    offered on multiple matches, ``matches[0]`` becomes meaningful and this mirror
+    must be taught the same delivery-date ordering."""
     if typed <= 0:
         return []
     sos = item_to_sos.get(item, [])
@@ -327,3 +335,12 @@ def test_cross_check_is_silent_when_the_picked_items_routing_is_missing():
     prog = orderbook.entry_progress(active, [], _masters(_R))
     assert prog == {}
     assert _fits_another_so(prog, {"ZZ": ["SO1"]}, 10, "SO1", "ZZ", _STEP) == []
+
+
+def test_cross_check_is_silent_on_a_zero_quantity_punch():
+    """A downtime-only / rejects-only entry types 0 good pieces. SO150's 23 are
+    already punched, so ITS still_to_make is 0 -- without the ``typed > 0`` guard the
+    cross-check would match that 0 and offer to switch a zero-quantity punch onto
+    SO150. Punching nothing never "exactly finishes" anything."""
+    acts = [_act("SO150", "A", _STEP, 23)]
+    assert _fits_another_so(_club_progress(acts), _CLUB_MAP, 0, "SO149", "A", _STEP) == []

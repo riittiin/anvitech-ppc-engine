@@ -28,9 +28,14 @@
 >   construction what the server accepts — pinned by
 >   `test_can_enter_now_agrees_with_the_save_guard`. Served on **`GET /items`** (live
 >   read, already fetched per render, role-open); deliberately **NOT** on `/run`,
->   whose response is cached by `_plan_fingerprint`. Mutation-checked: each clause of
->   the cross-check, reverted on its own, fails a test. **Not one scheduled date
->   moves** — golden trace unchanged. Regression: `tests/test_daily_entry_guard.py`.
+>   whose response is cached by `_plan_fingerprint`. Mutation-checked: three of the
+>   cross-check's four guard clauses (`typed <= 0`, `len(sos) < 2`, `typed ==
+>   still_to_make`) each fail a test when reverted; the fourth (skipping the picked
+>   SO inside the match loop), reverted on its own, fails no test and is provably
+>   unreachable (the "fits picked" clause above it already rules that row out); it
+>   is genuine belt-and-braces, kept only so the loop never depends on that
+>   ordering. **Not one scheduled date moves**, golden trace unchanged. Regression:
+>   `tests/test_daily_entry_guard.py`.
 >   **Deliberately NOT built (owner's call, prevention first):** no way to move a past
 >   mis-punch to the right SO. Undo is still latest-day only, so the 23 already on
 >   SO149 need a direct database correction.

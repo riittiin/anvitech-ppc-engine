@@ -1593,7 +1593,7 @@ function renderOutstanding() {
   // where nothing upstream exists, the limit is the order's own total instead.
   let capLine = "";
   if (step.can_enter_now < step.still_to_make) {
-    const why = step.cleared_before === null
+    const why = step.cleared_before == null
       ? `this order is for ${qty(entry.ordered)} pieces in total, and `
         + `${qty(entry.ordered - step.can_enter_now)} are already recorded at this step`
       : `only ${qty(step.cleared_before)} pieces have cleared the step before this one`;
@@ -1795,6 +1795,10 @@ async function wireActualsForm() {
       if (choice === "switch") {
         body.so_no = _wrongSo.matches[0].so_no;
         $("a-so").value = body.so_no;      // keep the form honest about what was saved
+        // Setting .value fires no change event, so the panel would keep describing
+        // the order we just switched away from -- and the save below can still fail
+        // (e.g. the server's precedence cap), leaving that stale panel on screen.
+        renderOutstanding();
       }
     }
     // Guard against re-saving the exact same entry (the #1 cause of duplicates).
