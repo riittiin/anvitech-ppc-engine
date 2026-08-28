@@ -2,6 +2,41 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-11)
 >
+> - **THE DAILY ENTRY FORM NOW SHOWS WHAT A STEP STILL OWES, BEFORE THE PUNCH
+>   (2026-08-28, owner report).** `26-27SO149` (400) and `26-27SO150` (23) share an
+>   item code, so Rule 1 clubs them and the floor sees one pile of identical parts.
+>   SO150's 23 finished; the 23 were punched against **SO149**. The book then told
+>   the directors the opposite of the truth — SO149 377 outstanding when none were
+>   made, SO150 open forever when it was done. **The PLAN was never wrong** (the batch
+>   owes the same total either way); the BOOKS were, and the books are what the
+>   directors read. The operator was not careless: attribution is knowable, but only
+>   by leaving Daily Entry, opening the **Orders tab**, and working out by hand which
+>   SO a counted quantity belongs to — slow, and skipped when he is rushing.
+>   **Fix, display only:** under the Process dropdown, `Ordered / Done at this step /
+>   Still to make`, plus a separate **"you can enter up to"** line that appears only
+>   when the previous step caps it lower (the rule `precedence_cap_error` already
+>   enforces on Save, turned from a red error after the click into a number before
+>   it). When the item sits on **2+ open SO lines** the comparison he used to make by
+>   hand is drawn above it, soonest delivery first, each other row clickable to
+>   switch. On Save, a three-way confirm fires when the typed qty does **not** fit the
+>   picked order but **exactly** finishes another one — switch-and-save, save-as-typed,
+>   or cancel. Never blocks; a partial punch stays silent on purpose (warning on a
+>   normal entry trains the floor to click past the warnings that matter).
+>   **The one load-bearing decision:** `orderbook.entry_progress` is built on
+>   **`_process_totals`**, the same internal `precedence_cap_error` and
+>   `active_so_lines` count with, so what the panel offers as enterable is by
+>   construction what the server accepts — pinned by
+>   `test_can_enter_now_agrees_with_the_save_guard`. Served on **`GET /items`** (live
+>   read, already fetched per render, role-open); deliberately **NOT** on `/run`,
+>   whose response is cached by `_plan_fingerprint`. Mutation-checked: each clause of
+>   the cross-check, reverted on its own, fails a test. **Not one scheduled date
+>   moves** — golden trace unchanged. Regression: `tests/test_daily_entry_guard.py`.
+>   **Deliberately NOT built (owner's call, prevention first):** no way to move a past
+>   mis-punch to the right SO. Undo is still latest-day only, so the 23 already on
+>   SO149 need a direct database correction.
+>   **Rule: when the software makes an operator leave the screen to look something
+>   up, that lookup is the bug. Put the answer where he already is.**
+>
 > - **🔴 PIECES OF A CLUBBED ORDER WERE IN NO PLAN AT ALL (2026-08-11, live, director
 >   escalation).** A director opened the Gantt for `26-27SO120` + `26-27SO122` — same
 >   item, clubbed into one batch by Rule 1 — and found **CNC FIRST SIDE running 88
