@@ -1411,7 +1411,8 @@ function actualsFormHtml() {
     fr("SO No <span class=auto>(step 1: pick from orders)</span>", `<select id="a-so"><option value="">Select SO No</option></select>`) +
     fr("Item Code <span class=auto>(step 2: pick this SO's item)</span>", `<select id="a-item"><option value="">Select SO No first</option></select>`) +
     fr("Item Name <span class=auto>(auto)</span>", `<input id="a-itemname" readonly />`) +
-    fr("Process <span class=auto>(dropdown)</span>", `<select id="a-process"></select>`);
+    fr("Process <span class=auto>(dropdown)</span>", `<select id="a-process"></select>`) +
+    `<div id="a-outstanding" class="a-outstanding"></div>`;
   const right =
     fy("Qty Produced (good pieces)", `<input id="a-prod" type="number" min="0" value="" />`) +
     fy("Qty Rejected (bad pieces)", `<input id="a-rej" type="number" min="0" value="" />`) +
@@ -1516,6 +1517,109 @@ function fillItemMeta() {
   }
 }
 
+// ---- What this step still owes (2026-08-28 spec) --------------------------
+// Two SO lines on the same item code are clubbed into one batch, so the floor sees
+// one pile of identical parts. The operator used to leave this tab and work out on
+// the Orders tab which SO a counted quantity belonged to; that lookup is slow and
+// gets skipped when he is rushing. These functions put the answer on the screen he
+// is already on.
+
+// MUST mirror engine/orderbook.entry_key exactly: same separator, same order.
+// The separator is written as the \u001f ESCAPE, never as a literal invisible
+// character, so it survives copy-paste and stays visible in review.
+function jsEntryKey(soNo, itemCode) { return soNo + "\u001f" + itemCode; }
+
+function progressEntry(soNo, itemCode) {
+  const p = ITEMS && ITEMS.progress ? ITEMS.progress[jsEntryKey(soNo, itemCode)] : null;
+  return p || null;
+}
+
+function stepOf(entry, processName) {
+  if (!entry || !entry.steps) return null;
+  return entry.steps.find((s) => s.process === processName) || null;
+}
+
+// Every open SO carrying this item code, soonest delivery first. One entry means
+// there is nothing to confuse and the comparison table is not drawn at all.
+function sosForItem(itemCode) {
+  const list = (ITEMS && ITEMS.item_to_sos && ITEMS.item_to_sos[itemCode]) || [];
+  return list
+    .map((so) => progressEntry(so, itemCode))
+    .filter(Boolean)
+    .sort((a, b) => (a.delivery_date < b.delivery_date ? -1
+                   : a.delivery_date > b.delivery_date ? 1
+                   : a.so_no < b.so_no ? -1 : 1));
+}
+
+function qty(n) { return Number(n).toLocaleString("en-IN"); }
+
+function renderOutstanding() {
+  const mount = $("a-outstanding");
+  if (!mount) return;
+  const so = $("a-so").value.trim();
+  const item = $("a-item").value.trim();
+  const proc = $("a-process").value;
+  const entry = so && item ? progressEntry(so, item) : null;
+  const step = stepOf(entry, proc);
+  if (!entry || !step) { mount.innerHTML = ""; return; }
+
+  const others = sosForItem(item);
+  let club = "";
+  if (others.length > 1) {
+    const rows = others.map((e) => {
+      const s = stepOf(e, proc);
+      const picked = e.so_no === so;
+      const cells = `<td>${escapeHtml(e.so_no)}</td>`
+        + `<td>${escapeHtml(isoToDdmmyyyy(e.delivery_date))}</td>`
+        + `<td class="num">${qty(e.ordered)}</td>`
+        + `<td class="num">${s ? qty(s.done) : "-"}</td>`
+        + `<td class="num">${s ? qty(s.still_to_make) : "-"}</td>`;
+      return picked
+        ? `<tr class="ao-picked">${cells}<td>you picked this</td></tr>`
+        : `<tr class="ao-other" data-so="${escapeHtml(e.so_no)}" title="Switch to this order">`
+          + `${cells}<td class="ao-switch">use this one</td></tr>`;
+    }).join("");
+    club = `<div class="ao-club">
+        <div class="ao-warn">This part is on ${others.length} open orders. Check you have the right one.</div>
+        <table><thead><tr><th>SO No</th><th>Due</th><th class="num">Ordered</th>
+          <th class="num">Done</th><th class="num">Still to make</th><th></th></tr></thead>
+          <tbody>${rows}</tbody></table>
+      </div>`;
+  }
+
+  // "Still to make" is what the order owes at this step. "You can enter up to" is
+  // capped by what cleared the step before it, the rule the server already enforces
+  // on Save. When they are the same number the second line says nothing, so it is
+  // hidden; it appears only when it is telling the operator something.
+  const capLine = step.can_enter_now < step.still_to_make
+    ? `<div class="ao-cap">You can enter up to <b>${qty(step.can_enter_now)}</b> today`
+      + `<span class="ao-why">only ${qty(step.can_enter_now + step.done)} pieces have cleared the step before this one</span></div>`
+    : "";
+
+  mount.innerHTML = club + `
+    <div class="ao-block">
+      <div class="ao-head">${escapeHtml(entry.so_no)} &middot; ${escapeHtml(entry.item_code)}
+        &middot; ${escapeHtml(step.process)}
+        <span class="ao-due">due ${escapeHtml(isoToDdmmyyyy(entry.delivery_date))}</span></div>
+      <div class="ao-line"><span>Ordered</span><b>${qty(entry.ordered)}</b></div>
+      <div class="ao-line"><span>Done at this step</span><b>${qty(step.done)}</b></div>
+      <div class="ao-line ao-main"><span>Still to make</span><b>${qty(step.still_to_make)}</b></div>
+      ${capLine}
+    </div>`;
+
+  // Clicking another order's row switches the form to it: the whole Orders-tab trip
+  // in one click.
+  mount.querySelectorAll("tr.ao-other").forEach((tr) => {
+    tr.onclick = () => {
+      $("a-so").value = tr.getAttribute("data-so");
+      fillItemFromSO();
+      if ($("a-item").value !== item) { $("a-item").value = item; fillItemMeta(); }
+      $("a-process").value = proc;
+      renderOutstanding();
+    };
+  });
+}
+
 // True if an identical entry (same date / SO / item / process / produced / rejected)
 // is already on record — used to warn before saving an accidental duplicate.
 function isoToDdmmyyyy(iso) {            // "2025-08-01" -> "01-08-2025" (display format)
@@ -1541,9 +1645,11 @@ async function wireActualsForm() {
   fillShiftDropdown();
   fillSoDropdown();
   await fillOperatorDropdown();
-  $("a-so").addEventListener("change", fillItemFromSO);   // step 1: pick SO No -> fill Item dropdown
-  $("a-item").addEventListener("change", fillItemMeta);   // step 2: pick Item -> name + processes
+  $("a-so").addEventListener("change", () => { fillItemFromSO(); renderOutstanding(); });
+  $("a-item").addEventListener("change", () => { fillItemMeta(); renderOutstanding(); });
+  $("a-process").addEventListener("change", renderOutstanding);
   fillItemMeta();
+  renderOutstanding();
   // The native date picker shows the browser locale (MM/DD/YYYY on US machines);
   // echo the chosen date in DD-MM-YYYY so it always matches the rest of the app.
   const dateEcho = () => {

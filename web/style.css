@@ -489,3 +489,26 @@ td.slip { color: var(--danger); background: rgba(248,81,73,.12); font-weight: 60
 .mach-chip.unknown .mach-x { color: var(--danger); }
 .mach-cell select { font-size: 12px; padding: 2px 4px; }
 .mach-none { color: var(--muted); font-size: 12px; }
+
+/* ---------------- Daily Entry: what this step still owes (2026-08-28) ---------- */
+/* Shown under the Process dropdown so the operator never has to leave the tab and
+   cross-reference the Orders tab by hand to find out what a step still needs. */
+.a-outstanding { margin: 6px 0 14px; }
+.ao-block { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: rgba(255,255,255,.02); }
+.ao-head { font-weight: 600; margin-bottom: 8px; }
+.ao-due { float: right; font-weight: 400; color: var(--muted); }
+.ao-line { display: flex; justify-content: space-between; padding: 2px 0; }
+.ao-line span { color: var(--muted); }
+.ao-main { border-top: 1px solid var(--border); margin-top: 4px; padding-top: 6px; font-size: 15px; }
+.ao-main b { color: var(--accent); }
+.ao-cap { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border); }
+.ao-why { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.ao-club { margin-bottom: 10px; border: 1px solid var(--danger); border-radius: 8px; padding: 10px 12px; }
+.ao-warn { font-weight: 600; color: var(--danger); margin-bottom: 8px; }
+.ao-club table { width: 100%; border-collapse: collapse; }
+.ao-club th, .ao-club td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+.ao-club th.num, .ao-club td.num { text-align: right; }
+.ao-picked { font-weight: 600; }
+.ao-other { cursor: pointer; }
+.ao-other:hover { background: rgba(255,255,255,.06); }
+.ao-switch { color: var(--accent); }
