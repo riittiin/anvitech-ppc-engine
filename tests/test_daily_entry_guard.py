@@ -131,3 +131,53 @@ def test_can_enter_now_agrees_with_the_save_guard():
         assert orderbook.precedence_cap_error(
             over, "SO1", "A", step["process"], _R, 400) is not None, \
             f"one more than {allowed} at {step['process']} should be refused"
+
+
+# --------------------------------------------------------------------------- #
+# GET /items carries the progress. It is the right home: it already feeds this
+# form, it is a LIVE store read (so the numbers refresh after every Save), and it
+# is role-open (the floor logs in as `user`). Deliberately NOT on POST /run —
+# that response is cached by _plan_fingerprint and live punch data inside it is
+# the 2026-08-08 stale-cache bug again.
+# --------------------------------------------------------------------------- #
+import pytest
+
+pytest.importorskip("fastapi")
+from fastapi.testclient import TestClient          # noqa: E402
+
+from api.main import app                            # noqa: E402
+from api import auth                                # noqa: E402
+from engine import book_store                       # noqa: E402
+from tests.sample_workbook import build_sample_bytes, ITEM_A   # noqa: E402
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_SAMPLE = build_sample_bytes()
+_ACCTS = auth._accounts()
+_ADMIN = next(u for u, a in _ACCTS.items() if a["role"] == auth.ADMIN)
+_ADMIN_PWD = _ACCTS[_ADMIN]["password"]
+
+
+@pytest.fixture
+def client():
+    c = TestClient(app)
+    assert c.post("/login", data={"username": _ADMIN, "password": _ADMIN_PWD}).status_code == 200
+    c.post("/upload", files={"file": ("sample.xlsx", _SAMPLE, XLSX_MIME)})
+    return c
+
+
+def test_items_carries_progress_for_each_open_order(client):
+    data = client.get("/items").json()
+    assert "progress" in data and "item_to_sos" in data
+    entry = next(iter(data["progress"].values()))
+    assert {"so_no", "item_code", "ordered", "delivery_date", "steps"} <= set(entry)
+    step = entry["steps"][0]
+    assert {"seq", "process", "done", "still_to_make", "can_enter_now"} <= set(step)
+
+
+def test_item_to_sos_lists_both_orders_sharing_an_item_code(client):
+    """The clubbed case the whole feature exists for."""
+    book_store.add_orders([_order("SO-CLUB", ITEM_A, 23)])
+    data = client.get("/items").json()
+    sos = data["item_to_sos"][ITEM_A]
+    assert "SO-CLUB" in sos and len(sos) >= 2
+    assert orderbook.entry_key("SO-CLUB", ITEM_A) in data["progress"]

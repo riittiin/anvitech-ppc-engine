@@ -3102,12 +3102,26 @@ def items():
     for so in so_to_items:
         so_to_items[so].sort(key=lambda it: it["item_code"])
 
+    # Inverse of so_to_items: which open SO lines carry each item code. Two SO lines
+    # on one item are clubbed into one batch by Rule 1, so the floor sees one pile of
+    # identical parts — the Daily Entry form uses this to show the comparison the
+    # operator would otherwise make by hand on the Orders tab (2026-08-28 spec).
+    item_to_sos = defaultdict(list)
+    for o in active.values():
+        item_to_sos[o.item_code].append(o.so_no)
+    for code in item_to_sos:
+        item_to_sos[code].sort()
+
     return {
         "items": items_map,
         "shifts": ["1st shift", "2nd shift"],
         "so_to_items": dict(so_to_items),          # {so_no: [{item_code, item_name}, ...]}
         "so_nos": sorted({so for so, _ in all_orders}),      # all SO numbers (distinct)
         "open_so_nos": sorted(so_to_items.keys()),           # SO numbers with an open line
+        # What each routing step has done and still owes, per open (SO, item) — shown
+        # under the Process dropdown before the punch. Live read, never cached.
+        "progress": orderbook.entry_progress(active, book_store.load_actuals(), masters),
+        "item_to_sos": dict(item_to_sos),          # {item_code: [so_no, ...]}
     }
 
 
