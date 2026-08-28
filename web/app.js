@@ -1587,14 +1587,19 @@ function renderOutstanding() {
       </div>`;
   }
 
-  // "Still to make" is what the order owes at this step. "You can enter up to" is
-  // capped by what cleared the step before it, the rule the server already enforces
-  // on Save. When they are the same number the second line says nothing, so it is
-  // hidden; it appears only when it is telling the operator something.
-  const capLine = step.can_enter_now < step.still_to_make
-    ? `<div class="ao-cap">You can enter up to <b>${qty(step.can_enter_now)}</b> today`
-      + `<span class="ao-why">only ${qty(step.can_enter_now + step.done)} pieces have cleared the step before this one</span></div>`
-    : "";
+  // "Still to make" is what the order owes at this step. "You can enter up to" is a
+  // different number: what the step before this one has actually cleared. It is shown
+  // only when it is lower, so it never states the obvious — and on the first step,
+  // where nothing upstream exists, the limit is the order's own total instead.
+  let capLine = "";
+  if (step.can_enter_now < step.still_to_make) {
+    const why = step.cleared_before === null
+      ? `this order is for ${qty(entry.ordered)} pieces in total, and `
+        + `${qty(entry.ordered - step.can_enter_now)} are already recorded at this step`
+      : `only ${qty(step.cleared_before)} pieces have cleared the step before this one`;
+    capLine = `<div class="ao-cap">You can enter up to <b>${qty(step.can_enter_now)}</b> today`
+      + `<span class="ao-why">${why}</span></div>`;
+  }
 
   mount.innerHTML = club + `
     <div class="ao-block">

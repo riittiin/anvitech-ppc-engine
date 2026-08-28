@@ -414,6 +414,14 @@ def entry_progress(active_orders: dict, actuals, masters=None) -> dict:
       cap is the good qty that cleared the PREVIOUS step (or the ordered qty at the
       first step). This is exactly what ``precedence_cap_error`` enforces on Save.
 
+    A third field, ``cleared_before``, is the raw upstream cap itself (the good qty
+    that cleared the previous step), separate from ``can_enter_now`` — which already
+    has this step's own recorded pieces subtracted out. ``None`` on the first step,
+    where there is no previous step to name: the UI must never derive a fake
+    "pieces cleared before this one" number from ``can_enter_now`` + this step's own
+    done count, because that sum is only right when nothing was rejected at this
+    step, and on the first step it names a step that does not exist at all.
+
     Built on ``_process_totals`` — the same accounting ``precedence_cap_error`` and
     ``active_so_lines`` use — so what this offers as enterable is by construction what
     the server accepts. Pure; reporting only; the scheduler never reads it.
@@ -439,6 +447,7 @@ def entry_progress(active_orders: dict, actuals, masters=None) -> dict:
                 "done": done_here,
                 "still_to_make": max(o.ordered_qty - done_here, 0.0),
                 "can_enter_now": max(cap - produced.get(n, 0.0), 0.0),
+                "cleared_before": None if i == 0 else cap,
             })
         out[entry_key(o.so_no, o.item_code)] = {
             "so_no": o.so_no,

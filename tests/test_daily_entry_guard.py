@@ -94,6 +94,49 @@ def test_can_enter_now_shrinks_by_what_is_already_recorded_here():
     assert s["VMC FIRST SIDE"]["can_enter_now"] == 66      # 166 cleared - 100 done here
 
 
+def test_cleared_before_is_none_on_first_step_and_upstream_good_after():
+    """``cleared_before`` is the number the UI is allowed to name as "the step before
+    this one cleared". First step: nothing is before it, so it must be None, never a
+    number that reads as a real step."""
+    active = {("SO1", "A"): _order("SO1", "A", 400)}
+    acts = [_act("SO1", "A", "CNC FIRST SIDE", 166)]
+    s = _steps(orderbook.entry_progress(active, acts, _masters(_R)), "SO1", "A")
+    assert s["CNC FIRST SIDE"]["cleared_before"] is None
+    assert s["VMC FIRST SIDE"]["cleared_before"] == 166
+
+
+def test_first_step_never_claims_an_upstream_step_when_rejects_exist():
+    """Reproduction of the live bug: 400 ordered, 100 produced / 20 rejected at the
+    FIRST routing step. There is no step before this one. ``can_enter_now +
+    done`` (the old, wrong formula the UI used) equals 380 here — a number that
+    looks like a real upstream clearance but names a step that does not exist.
+    ``cleared_before`` must say None, so the UI can never invent one."""
+    active = {("SO1", "A"): _order("SO1", "A", 400)}
+    acts = [_act("SO1", "A", "CNC FIRST SIDE", 100, rej=20)]
+    s = _steps(orderbook.entry_progress(active, acts, _masters(_R)), "SO1", "A")
+    step = s["CNC FIRST SIDE"]
+    assert step["done"] == 80
+    assert step["still_to_make"] == 320
+    assert step["can_enter_now"] == 300
+    assert step["cleared_before"] is None
+
+
+def test_cleared_before_is_true_upstream_good_not_can_enter_now_plus_done_when_rejects_exist():
+    """A later step where rejects happen at THAT step. ``cleared_before`` must stay
+    the true upstream good qty (166) — not ``can_enter_now + done`` (66 + 80 = 146),
+    which is what the old, wrong UI formula computed and is off by the reject
+    count."""
+    active = {("SO1", "A"): _order("SO1", "A", 400)}
+    acts = [_act("SO1", "A", "CNC FIRST SIDE", 166),
+            _act("SO1", "A", "VMC FIRST SIDE", 100, rej=20)]
+    s = _steps(orderbook.entry_progress(active, acts, _masters(_R)), "SO1", "A")
+    step = s["VMC FIRST SIDE"]
+    assert step["done"] == 80          # 100 produced - 20 rejected at this step
+    assert step["can_enter_now"] == 66  # 166 cleared upstream - 100 produced here
+    assert step["cleared_before"] == 166
+    assert step["can_enter_now"] + step["done"] != step["cleared_before"]
+
+
 def test_completed_and_unrouted_orders_are_absent():
     active = {
         ("SO1", "A"): _order("SO1", "A", 400, completed=True),
