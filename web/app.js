@@ -1625,6 +1625,60 @@ function renderOutstanding() {
   });
 }
 
+// Returns null when there is nothing to say, else {picked, pickedStep, matches}.
+// Fires only when the typed quantity does NOT fit the picked order but EXACTLY
+// finishes another open order for the same part (the owner's 2026-08-28 case). A
+// partial punch matches nothing and stays silent on purpose: warning on a perfectly
+// normal entry would train the floor to click through the warnings that matter.
+function quantityFitsAnotherSo(typed, pickedSo, itemCode, processName) {
+  if (!(typed > 0)) return null;
+  const others = sosForItem(itemCode);
+  if (others.length < 2) return null;
+  const pickedEntry = progressEntry(pickedSo, itemCode);
+  const pickedStep = stepOf(pickedEntry, processName);
+  if (!pickedStep) return null;
+  if (typed === pickedStep.still_to_make) return null;   // fits the one he picked
+  const matches = others.filter((e) => {
+    if (e.so_no === pickedSo) return false;
+    const s = stepOf(e, processName);
+    return s && typed === s.still_to_make;
+  });
+  if (!matches.length) return null;
+  return { picked: pickedEntry, pickedStep: pickedStep, matches: matches };
+}
+
+// Three-way confirm. Resolves "switch" (re-point to the single matching order and
+// save), "save" (save exactly as typed) or "cancel". With several matches there is
+// no single right answer, so no switch button is offered.
+function confirmWrongSo(check, typed, processName) {
+  return new Promise((resolve) => {
+    const one = check.matches.length === 1 ? check.matches[0] : null;
+    const names = check.matches.map((m) => m.so_no).join(", ");
+    const ov = document.createElement("div");
+    ov.className = "modal-overlay";
+    ov.innerHTML = `
+      <div class="modal">
+        <h3>Check this before saving</h3>
+        <p>You entered <b>${qty(typed)}</b> pieces against
+           <b>${escapeHtml(check.picked.so_no)}</b>, which still needs
+           <b>${qty(check.pickedStep.still_to_make)}</b> at
+           ${escapeHtml(processName)}.</p>
+        <p>${qty(typed)} is exactly what <b>${escapeHtml(names)}</b> still
+           needs${one ? " (due " + escapeHtml(isoToDdmmyyyy(one.delivery_date)) + ")" : ""}.</p>
+        <div class="modal-actions">
+          <button id="ws-cancel">Cancel</button>
+          <button id="ws-save">Save as ${escapeHtml(check.picked.so_no)}</button>
+          ${one ? `<button id="ws-switch" class="primary">Switch to ${escapeHtml(one.so_no)} and save</button>` : ""}
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    const done = (v) => { ov.remove(); resolve(v); };
+    ov.querySelector("#ws-cancel").onclick = () => done("cancel");
+    ov.querySelector("#ws-save").onclick = () => done("save");
+    if (one) ov.querySelector("#ws-switch").onclick = () => done("switch");
+  });
+}
+
 // True if an identical entry (same date / SO / item / process / produced / rejected)
 // is already on record — used to warn before saving an accidental duplicate.
 function isoToDdmmyyyy(iso) {            // "2025-08-01" -> "01-08-2025" (display format)
@@ -1727,6 +1781,21 @@ async function wireActualsForm() {
     if (negFields.length) {
       setStatus("⚠ " + negFields.map((f) => f[1]).join(", ") + " cannot be negative.", true);
       return;
+    }
+    // Wrong-SO guard (2026-08-28): the typed quantity does not fit the picked order
+    // but exactly finishes another open order for the same part. Never blocks, since
+    // the operator is the one who can see the parts. "Switch and save" re-points the
+    // entry in one action rather than leaving a half-switched form on screen, which
+    // would be its own new way to get this wrong.
+    const _wrongSo = quantityFitsAnotherSo(
+      body.qty_produced, body.so_no, body.item_code, body.process);
+    if (_wrongSo) {
+      const choice = await confirmWrongSo(_wrongSo, body.qty_produced, body.process);
+      if (choice === "cancel") return;
+      if (choice === "switch") {
+        body.so_no = _wrongSo.matches[0].so_no;
+        $("a-so").value = body.so_no;      // keep the form honest about what was saved
+      }
     }
     // Guard against re-saving the exact same entry (the #1 cause of duplicates).
     if (actualIsDuplicate(body) && !confirm(

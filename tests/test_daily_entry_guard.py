@@ -224,3 +224,106 @@ def test_item_to_sos_lists_both_orders_sharing_an_item_code(client):
     sos = data["item_to_sos"][ITEM_A]
     assert "SO-CLUB" in sos and len(sos) >= 2
     assert orderbook.entry_key("SO-CLUB", ITEM_A) in data["progress"]
+
+
+# --------------------------------------------------------------------------- #
+# The cross-check rule. web/app.js implements exactly this in
+# quantityFitsAnotherSo(); this pins the arithmetic against real entry_progress
+# output so the two cannot drift. It is the owner's actual case: 26-27SO149 x 400
+# and 26-27SO150 x 23 on one item code, 23 typed against SO149.
+# --------------------------------------------------------------------------- #
+def _fits_another_so(progress, item_to_sos, typed, picked_so, item, process):
+    """Mirror of quantityFitsAnotherSo() in web/app.js. Returns the other open SOs
+    whose remaining at this step is exactly the typed quantity."""
+    if typed <= 0:
+        return []
+    sos = item_to_sos.get(item, [])
+    if len(sos) < 2:
+        return []
+    steps = {s["process"]: s
+             for s in progress[orderbook.entry_key(picked_so, item)]["steps"]}
+    if typed == steps[process]["still_to_make"]:
+        return []                      # fits the order he picked, stay silent
+    out = []
+    for so in sos:
+        if so == picked_so:
+            continue
+        other = progress.get(orderbook.entry_key(so, item))
+        if not other:
+            continue
+        st = next((s for s in other["steps"] if s["process"] == process), None)
+        if st and typed == st["still_to_make"]:
+            out.append(so)
+    return out
+
+
+_CLUB_ACTIVE = {("SO149", "A"): _order("SO149", "A", 400, date(2025, 9, 20)),
+                ("SO150", "A"): _order("SO150", "A", 23, date(2025, 9, 12))}
+_CLUB_MAP = {"A": ["SO149", "SO150"]}
+_STEP = "CNC FIRST SIDE"
+
+
+def _club_progress(acts=()):
+    return orderbook.entry_progress(_CLUB_ACTIVE, list(acts), _masters(_R))
+
+
+def test_cross_check_fires_on_the_owners_actual_mistake():
+    """23 typed against SO149, which still needs 400. 23 is exactly SO150's whole
+    order. This is the entry that told the directors the opposite of the truth."""
+    assert _fits_another_so(_club_progress(), _CLUB_MAP, 23, "SO149", "A", _STEP) == ["SO150"]
+
+
+def test_cross_check_is_silent_when_the_right_order_is_picked():
+    assert _fits_another_so(_club_progress(), _CLUB_MAP, 23, "SO150", "A", _STEP) == []
+
+
+def test_cross_check_is_silent_on_a_partial_punch():
+    """20 of SO150's 23 matches nothing exactly. Warning on a normal partial entry
+    would train the floor to click straight through the warnings that matter."""
+    assert _fits_another_so(_club_progress(), _CLUB_MAP, 20, "SO149", "A", _STEP) == []
+    assert _fits_another_so(_club_progress(), _CLUB_MAP, 20, "SO150", "A", _STEP) == []
+
+
+def test_cross_check_is_silent_when_the_part_is_on_one_order_only():
+    active = {("SO1", "A"): _order("SO1", "A", 400)}
+    prog = orderbook.entry_progress(active, [], _masters(_R))
+    assert _fits_another_so(prog, {"A": ["SO1"]}, 400, "SO1", "A", _STEP) == []
+
+
+def test_cross_check_goes_quiet_once_so150_is_punched():
+    """Once SO150's 23 are recorded its remaining is 0, so a later 23 against SO149
+    no longer matches it and the warning correctly stops firing."""
+    acts = [_act("SO150", "A", _STEP, 23)]
+    assert _fits_another_so(_club_progress(acts), _CLUB_MAP, 23, "SO149", "A", _STEP) == []
+
+
+# --------------------------------------------------------------------------- #
+# Two extra tests, added during mutation-checking (task-4 Step 6). The five
+# tests above pass unchanged even with the "typed == picked's own still_to_make"
+# early return deleted, or with the "len(sos) < 2" early return deleted --
+# because the main loop already skips ``picked_so`` on its own, both guards
+# were unexercised by any fixture above. These two isolate each one.
+# --------------------------------------------------------------------------- #
+def test_cross_check_is_silent_when_typed_fits_picked_even_if_it_also_fits_another():
+    """Two SOs on one item happen to need the SAME remaining quantity (50 each).
+    Typed 50 against the one he picked: it fits what he picked, so stay silent --
+    even though it ALSO happens to fit the other order exactly. Without the
+    "fits picked" early return the loop still finds the other SO's match and
+    would wrongly warn."""
+    active = {("SO-TIE1", "A"): _order("SO-TIE1", "A", 50),
+              ("SO-TIE2", "A"): _order("SO-TIE2", "A", 50)}
+    prog = orderbook.entry_progress(active, [], _masters(_R))
+    tie_map = {"A": ["SO-TIE1", "SO-TIE2"]}
+    assert _fits_another_so(prog, tie_map, 50, "SO-TIE1", "A", _STEP) == []
+
+
+def test_cross_check_is_silent_when_the_picked_items_routing_is_missing():
+    """``item_to_sos`` is built from every active order regardless of routing, but
+    ``entry_progress`` has no entry for one with no routing at all -- so with only
+    one SO on this (unrouted) item code, ``progress`` has nothing to look up for
+    it. The ``len(sos) < 2`` guard must return before that lookup, or this raises
+    KeyError instead of staying silent."""
+    active = {("SO1", "ZZ"): _order("SO1", "ZZ", 10)}     # ZZ has no routing in _R
+    prog = orderbook.entry_progress(active, [], _masters(_R))
+    assert prog == {}
+    assert _fits_another_so(prog, {"ZZ": ["SO1"]}, 10, "SO1", "ZZ", _STEP) == []
