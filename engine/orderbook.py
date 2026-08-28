@@ -393,3 +393,59 @@ def order_rows(active_orders: dict, completed_orders: dict, actuals, masters=Non
              + [(o, COMPLETE) for o in completed_orders.values()])
     items.sort(key=lambda t: (t[1] == COMPLETE, t[0].delivery_date, t[0].so_no, t[0].item_code))
     return [row(o, status) for o, status in items]
+
+
+def entry_key(so_no: str, item_code: str) -> str:
+    """The (SO number, item code) pair as one JSON-safe string, so the per-order
+    progress below can travel to the browser as a plain object key. Same composite
+    shape ``book_store`` uses for its hashes."""
+    return f"{so_no}\x1f{item_code}"
+
+
+def entry_progress(active_orders: dict, actuals, masters=None) -> dict:
+    """Per open (SO, item): what each routing step has done and still owes — the
+    numbers the Daily Entry form shows BEFORE a punch, so the operator never has to
+    leave the tab and cross-reference the Orders tab by hand (2026-08-28 spec).
+
+    Two quantities per step, deliberately different:
+
+    * ``still_to_make`` = ordered - good recorded at THIS step. What the order owes here.
+    * ``can_enter_now`` = upstream cap - pieces already recorded at this step, where the
+      cap is the good qty that cleared the PREVIOUS step (or the ordered qty at the
+      first step). This is exactly what ``precedence_cap_error`` enforces on Save.
+
+    Built on ``_process_totals`` — the same accounting ``precedence_cap_error`` and
+    ``active_so_lines`` use — so what this offers as enterable is by construction what
+    the server accepts. Pure; reporting only; the scheduler never reads it.
+
+    Orders that are completed, or whose item has no routing, are omitted (there is no
+    step list to show)."""
+    routings = masters.routings if masters else {}
+    out = {}
+    for o in active_orders.values():
+        routing = routings.get(o.item_code)
+        if o.completed or routing is None:
+            continue
+        produced, good = _process_totals(actuals, o.so_no, o.item_code)
+        procs = sorted(routing.processes, key=lambda p: p.seq)
+        steps = []
+        for i, p in enumerate(procs):
+            n = _norm(p.name)
+            done_here = good.get(n, 0.0)
+            cap = o.ordered_qty if i == 0 else good.get(_norm(procs[i - 1].name), 0.0)
+            steps.append({
+                "seq": p.seq,
+                "process": p.name,
+                "done": done_here,
+                "still_to_make": max(o.ordered_qty - done_here, 0.0),
+                "can_enter_now": max(cap - produced.get(n, 0.0), 0.0),
+            })
+        out[entry_key(o.so_no, o.item_code)] = {
+            "so_no": o.so_no,
+            "item_code": o.item_code,
+            "item_name": o.item_name,
+            "ordered": o.ordered_qty,
+            "delivery_date": o.delivery_date.isoformat(),
+            "steps": steps,
+        }
+    return out
