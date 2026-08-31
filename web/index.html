@@ -261,8 +261,9 @@
       <div class="card-head">
         <h2>Machine maintenance</h2>
         <p class="explainer">Mark a machine out of service for a date range, for example a
-          service or a repair. The plan runs nothing on it for those days, on either shift,
-          and moves the work elsewhere if the item's process master allows another machine.</p>
+          service or a repair. The plan runs nothing on it for those days, on either shift.
+          If a job can also run on another machine, the plan may move it there; if it cannot,
+          the job waits until the machine is back.</p>
       </div>
       <div class="cfg-row admin-only">
         <select id="downtime-machine"></select>
