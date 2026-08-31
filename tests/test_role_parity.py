@@ -236,6 +236,8 @@ def test_every_write_endpoint_stays_admin_only():
         ("post", "/orders/clear", {"password": "1930rail"}),
         ("post", "/absences", {"operator": "X", "from_date": "2025-03-01",
                                "to_date": "2025-03-02"}),
+        ("post", "/machine-downtime", {"machine": "CNC1", "from_date": "2025-03-01",
+                                       "to_date": "2025-03-02"}),
         ("post", "/operators", {"name": "X", "machines_raw": "CNC1", "shift": "First shift"}),
         ("post", "/optimize", {"mode": "quick"}),
         ("post", "/optimize/apply", None),

@@ -471,7 +471,7 @@ def _absence_orphans(masters, absences=None) -> list:
 
 
 def _report_for_book(masters, so_lines, absences=None, config=None, schedule=None,
-                     batches=None):
+                     batches=None, downtime=None):
     """The validation report scoped to the CURRENT order book. Loader-level rows
     about the masters (pending machines, time coercions, …) pass through, but
     NO_ROUTING is re-derived from the live book: the stored workbook's own SO
@@ -495,6 +495,10 @@ def _report_for_book(masters, so_lines, absences=None, config=None, schedule=Non
         rows.append({"kind": "ABSENT_OPERATOR_UNKNOWN", "ref": name,
                      "message": f"absence entry for an operator not in the "
                                 f"current masters: ignored"})
+    for mid in _machine_downtime_orphans(masters, downtime=downtime):
+        rows.append({"kind": "MACHINE_DOWNTIME_UNKNOWN", "ref": mid,
+                     "message": f"maintenance break recorded for machine '{mid}', "
+                                f"which is not in the current Machine master: ignored"})
     # Cross-check the two sources of truth: the workbook's Machine master says which
     # machines exist, the Settings operator table says who can run them (`masters` has
     # already had the Settings table overlaid by `_current_masters`). A machine nobody
@@ -578,6 +582,13 @@ class AbsenceRequest(BaseModel):
     operator: str
     from_date: str
     to_date: str
+
+
+class MachineDowntimeRequest(BaseModel):
+    machine: str
+    from_date: str
+    to_date: str
+    reason: str = Field(default="", max_length=200)
 
 
 class OperatorRequest(BaseModel):
@@ -1004,7 +1015,8 @@ def _plan(config: Config):
     result = {"run_id": run_id, "trace": trace,
               "report": _report_for_book(masters, so_lines, absences=absences_raw,
                                          config=config, schedule=plan_run.schedule,
-                                         batches=plan_run.batches_prioritized),
+                                         batches=plan_run.batches_prioritized,
+                                         downtime=downtime_raw),
               "gantt": gantt, "orders": orders,
               # SAVED (unresolved) config — null plan_start_date = auto survives
               # the round-trip; the resolved start is a separate display key.
@@ -2492,6 +2504,67 @@ def delete_absence_ep(absence_id: str, request: Request):
     return {"deleted": True}
 
 
+@app.get("/machine-downtime")
+def get_machine_downtime():
+    """Machine maintenance breaks on file, any logged-in role (the list is
+    read-only for the user role; the add/remove controls are admin-only).
+    `machines` is the CNC/VMC picker list; `orphans` flags breaks whose machine is
+    no longer in the Machine master — also surfaced in the validation report as
+    MACHINE_DOWNTIME_UNKNOWN."""
+    masters = _current_masters()
+    downtime = book_store.load_machine_downtime()
+    return {"downtime": downtime,
+            "orphans": _machine_downtime_orphans(masters, downtime=downtime),
+            "machines": _machining_machine_options(masters)}
+
+
+@app.post("/machine-downtime")
+def create_machine_downtime(req: MachineDowntimeRequest, request: Request):
+    """Mark a machine out of service for a date range. Admin only. Dates must parse
+    (YYYY-MM-DD); a reversed range is accepted and normalized (swapped) rather than
+    rejected. The machine must exist in the current Machine master.
+
+    Deliberately validates EXISTENCE, not kind: the engine honours downtime on any
+    machine and only the picker is filtered to CNC/VMC, so widening the picker later
+    needs no change here. No optimize trigger — only the Done button starts a
+    contest (same rule as absences)."""
+    require_admin(request)
+    try:
+        d_from = date.fromisoformat(req.from_date)
+        d_to = date.fromisoformat(req.to_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="dates must be YYYY-MM-DD")
+    if d_to < d_from:
+        d_from, d_to = d_to, d_from
+    # Bound the span. A machine out for more than a year is not "on maintenance" —
+    # it should leave the Machine master. The cap also protects the engine: several
+    # places walk a break day by day, so an absurd stored to_date (a fat-fingered
+    # 9999-12-31) would mean millions of iterations per row on every plan. Validate
+    # where the input enters rather than hardening every consumer.
+    if (d_to - d_from).days > 366:
+        raise HTTPException(
+            status_code=400,
+            detail="a maintenance break cannot be longer than a year — if a machine "
+                   "is out for longer, remove it from the Machine master instead")
+    machine = req.machine.strip()
+    if machine not in _current_masters().machines:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown machine '{machine}'")
+    saved = book_store.save_machine_downtime({
+        "machine": machine, "from_date": d_from.isoformat(),
+        "to_date": d_to.isoformat(), "reason": req.reason.strip()})
+    return {"downtime": saved}
+
+
+@app.delete("/machine-downtime/{downtime_id}")
+def delete_machine_downtime_ep(downtime_id: str, request: Request):
+    """Remove a maintenance break. Admin only."""
+    require_admin(request)
+    if not book_store.delete_machine_downtime(downtime_id):
+        raise HTTPException(status_code=404, detail="maintenance break not found")
+    return {"deleted": True}
+
+
 _VALID_SHIFTS = {"First shift", "Second shift", ""}
 
 
@@ -2518,6 +2591,42 @@ def _machine_options(masters):
                             key=lambda m: (bool(m.provisional),
                                            (m.machine_type or "").lower(),
                                            m.machine_no))]
+
+
+def _machining_machine_options(masters):
+    """The CNC/VMC subset of the Machine master — the machines the maintenance
+    picker offers (owner decision, 2026-08-31).
+
+    Classified by the machine's TYPE using the same function the live engine uses
+    (`ppc_engine.loaders.normalize.machine_kind_from_type`), so there is one
+    definition of "is this a machining station" and a CNC8 added to the Excel
+    appears with no code change. A PROVISIONAL machine (referenced by a routing but
+    not in the Machine master) has no real type, so it falls back to the id prefix —
+    the same rule `ppc_engine…register_provisional_machines` applies. There are none
+    in the current workbooks; this keeps a future one from silently vanishing.
+
+    The ENGINE honours downtime on any machine; only this picker is filtered, so
+    widening it later is a one-line change here and nothing else."""
+    from ppc_engine.domain.resources import MachineKind
+    from ppc_engine.loaders.normalize import machine_kind_from_type
+
+    def _is_machining(m):
+        if m["provisional"]:
+            return m["id"].startswith("CNC") or m["id"].startswith("VMC")
+        return machine_kind_from_type(m["type"]) == MachineKind.MACHINING
+
+    return [m for m in _machine_options(masters) if _is_machining(m)]
+
+
+def _machine_downtime_orphans(masters, downtime=None) -> list:
+    """Machine ids on file in maintenance breaks that are no longer in the Machine
+    master (e.g. removed on a re-upload). Sorted for stable output. Mirror of
+    `_absence_orphans`: ignored by planning, reported, never fatal."""
+    if downtime is None:
+        downtime = book_store.load_machine_downtime()
+    known = set(masters.machines)
+    return sorted({d["machine"] for d in downtime
+                   if d.get("machine") and d["machine"] not in known})
 
 
 @app.get("/operators")

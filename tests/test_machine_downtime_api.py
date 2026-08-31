@@ -168,3 +168,140 @@ def test_removing_the_break_restores_the_original_plan():
     book_store.delete_machine_downtime(row["id"])
     after = m._plan(cfg)
     assert after["expected_end"] == before["expected_end"]
+
+
+# --------------------------------------------------------------------------- #
+# Endpoints
+# --------------------------------------------------------------------------- #
+def _client(m, role="admin"):
+    c = TestClient(m.app)
+    creds = ({"username": "anvitech", "password": "1930rail"} if role == "admin"
+             else {"username": "anvitech_user", "password": "anvitech12345678"})
+    c.post("/login", data=creds)
+    return c
+
+
+def test_get_is_open_to_both_roles_and_lists_only_cnc_and_vmc():
+    m = _api()
+    _seed(m)
+    for role in ("admin", "user"):
+        r = _client(m, role).get("/machine-downtime")
+        assert r.status_code == 200
+        body = r.json()
+        assert set(body) == {"downtime", "orphans", "machines"}
+        assert body["downtime"] == [] and body["orphans"] == []
+        ids = [x["id"] for x in body["machines"]]
+        assert ids, "the picker must offer something"
+        assert all(i.startswith(("CNC", "VMC")) for i in ids), ids
+
+
+def test_the_picker_excludes_manual_and_inspection_stations():
+    m = _api()
+    _seed(m)
+    ids = [x["id"] for x in _client(m).get("/machine-downtime").json()["machines"]]
+    masters = m._current_masters()
+    manual = [k for k in masters.machines if k.startswith(("MW", "MD", "MPK", "MI", "BS"))]
+    assert manual, "the sample book should have manual stations to exclude"
+    assert not (set(ids) & set(manual))
+
+
+def test_post_and_delete_are_admin_only():
+    m = _api()
+    _seed(m)
+    user = _client(m, "user")
+    body = {"machine": "CNC1", "from_date": "2025-03-05", "to_date": "2025-03-06"}
+    assert user.post("/machine-downtime", json=body).status_code == 403
+    assert user.delete("/machine-downtime/whatever").status_code == 403
+    assert book_store.load_machine_downtime() == []
+
+
+def test_admin_can_add_and_remove_a_break():
+    m = _api()
+    _seed(m)
+    admin = _client(m)
+    r = admin.post("/machine-downtime", json={
+        "machine": "CNC1", "from_date": "2025-03-05", "to_date": "2025-03-06",
+        "reason": "Spindle service"})
+    assert r.status_code == 200
+    row = r.json()["downtime"]
+    assert row["machine"] == "CNC1" and row["reason"] == "Spindle service"
+    assert len(admin.get("/machine-downtime").json()["downtime"]) == 1
+    assert admin.delete(f"/machine-downtime/{row['id']}").json() == {"deleted": True}
+    assert admin.get("/machine-downtime").json()["downtime"] == []
+
+
+def test_bad_input_is_rejected_with_a_clear_message():
+    m = _api()
+    _seed(m)
+    admin = _client(m)
+    bad_date = admin.post("/machine-downtime", json={
+        "machine": "CNC1", "from_date": "05-03-2025", "to_date": "2025-03-06"})
+    assert bad_date.status_code == 400
+    assert "YYYY-MM-DD" in bad_date.json()["detail"]
+    unknown = admin.post("/machine-downtime", json={
+        "machine": "NOPE9", "from_date": "2025-03-05", "to_date": "2025-03-06"})
+    assert unknown.status_code == 400 and "NOPE9" in unknown.json()["detail"]
+    assert admin.delete("/machine-downtime/nope").status_code == 404
+
+
+def test_a_reversed_range_is_swapped_not_rejected():
+    m = _api()
+    _seed(m)
+    r = _client(m).post("/machine-downtime", json={
+        "machine": "CNC1", "from_date": "2025-03-06", "to_date": "2025-03-05"})
+    assert r.status_code == 200
+    row = r.json()["downtime"]
+    assert (row["from_date"], row["to_date"]) == ("2025-03-05", "2025-03-06")
+
+
+def test_an_absurd_date_range_is_rejected():
+    """A fat-fingered to_date must not reach the store: several engine paths walk a
+    break day by day, so a year-9999 end date would be millions of iterations per row
+    on every plan. Validate at the boundary, where the input enters."""
+    m = _api()
+    _seed(m)
+    r = _client(m).post("/machine-downtime", json={
+        "machine": "CNC1", "from_date": "2025-03-05", "to_date": "9999-12-31"})
+    assert r.status_code == 400
+    assert "longer than a year" in r.json()["detail"]
+    assert book_store.load_machine_downtime() == []
+
+
+def test_a_long_but_plausible_break_is_accepted():
+    """The bound must not reject a real, if unusual, outage."""
+    m = _api()
+    _seed(m)
+    r = _client(m).post("/machine-downtime", json={
+        "machine": "CNC1", "from_date": "2025-03-05", "to_date": "2025-09-05"})
+    assert r.status_code == 200
+
+
+def test_a_break_on_a_machine_that_left_the_master_is_flagged_not_fatal():
+    m = _api()
+    _seed(m)
+    book_store.save_machine_downtime(
+        {"machine": "GHOST1", "from_date": "2025-03-05", "to_date": "2025-03-06"})
+    admin = _client(m)
+    assert admin.get("/machine-downtime").json()["orphans"] == ["GHOST1"]
+    rows = admin.post("/run", json={}).json()["report"]["rows"]
+    pairs = {(r[0], r[1]) for r in rows}
+    assert ("MACHINE_DOWNTIME_UNKNOWN", "GHOST1") in pairs
+    # Non-blocking: the plan still ran.
+    assert admin.post("/run", json={}).json()["gantt"] is not None
+
+
+def test_adding_a_break_never_starts_a_contest(monkeypatch):
+    """Only the Done button triggers a search — same rule as absences."""
+    monkeypatch.setenv("AUTO_OPTIMIZE", "1")
+    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "manual")
+    monkeypatch.setenv("OPTIMIZE_WORKER_SECRET", "s3")
+    m = _api()
+    _seed(m)
+    starts = []
+    monkeypatch.setattr(m, "_start_optimize",
+                        lambda *a, **k: starts.append(1))
+    admin = _client(m)
+    r = admin.post("/machine-downtime", json={
+        "machine": "CNC1", "from_date": "2025-03-05", "to_date": "2025-03-06"})
+    admin.delete(f"/machine-downtime/{r.json()['downtime']['id']}")
+    assert starts == []
