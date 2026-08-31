@@ -24,11 +24,16 @@ class ShopCalendar:
         holidays:           Dates the whole shop is closed.
         leaves:             Map of operator name → set of dates that person is on
                             leave (only that person is unavailable those days).
+        machine_downtime:   Map of machine id -> set of dates that machine is out of
+                            service for maintenance (only that machine stops; the shop
+                            keeps running). Empty by default, so a shop with no
+                            maintenance on file behaves exactly as before.
     """
 
     weekly_off_weekday: int = THURSDAY
     holidays: frozenset[date] = field(default_factory=frozenset)
     leaves: dict[str, frozenset[date]] = field(default_factory=dict)
+    machine_downtime: dict[str, frozenset[date]] = field(default_factory=dict)
 
     def is_working_day(self, day: date) -> bool:
         """True if the shop runs at all on ``day`` (not the weekly off, not a holiday)."""
@@ -47,3 +52,15 @@ class ShopCalendar:
         if not self.is_working_day(day):
             return False
         return day not in self.leaves.get(operator_name, frozenset())
+
+    def is_machine_available(self, machine_id: str, day: date) -> bool:
+        """True if ``machine_id`` can run on ``day``.
+
+        A machine runs when the shop is open that day AND it is not out of service
+        for maintenance. Mirror of ``is_operator_available`` — a person's leave and
+        a machine's maintenance are the same idea applied to the two resources an
+        operation needs.
+        """
+        if not self.is_working_day(day):
+            return False
+        return day not in self.machine_downtime.get(machine_id, frozenset())

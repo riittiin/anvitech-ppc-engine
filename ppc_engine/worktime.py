@@ -71,7 +71,9 @@ def iter_windows(
     """Yield ``machine``'s working windows in time order, on/after ``start_from``.
 
     Skips:
-      - non-working days (weekly off / holidays), and
+      - non-working days (weekly off / holidays),
+      - days this machine is out of service for maintenance (only this machine;
+        the rest of the shop runs), and
       - the second (night) shift for machines that don't run at night
         (manual/inspection stations — their helpers/inspectors are first-shift-only).
 
@@ -82,7 +84,7 @@ def iter_windows(
     """
     day = start_from.date()
     for _ in range(_MAX_DAYS_LOOKAHEAD):
-        if calendar.is_working_day(day):
+        if calendar.is_machine_available(machine.id, day):
             # First shift, then (if the machine runs at night) the second shift.
             first = shift_window(day, Shift.FIRST, config)
             if first.end > start_from:
