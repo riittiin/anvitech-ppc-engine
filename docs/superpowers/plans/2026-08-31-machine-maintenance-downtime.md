@@ -1473,6 +1473,28 @@ def test_a_reversed_range_is_swapped_not_rejected():
     assert (row["from_date"], row["to_date"]) == ("2025-03-05", "2025-03-06")
 
 
+def test_an_absurd_date_range_is_rejected():
+    """A fat-fingered to_date must not reach the store: several engine paths walk a
+    break day by day, so a year-9999 end date would be millions of iterations per row
+    on every plan. Validate at the boundary, where the input enters."""
+    m = _api()
+    _seed(m)
+    r = _client(m).post("/machine-downtime", json={
+        "machine": "CNC1", "from_date": "2025-03-05", "to_date": "9999-12-31"})
+    assert r.status_code == 400
+    assert "longer than a year" in r.json()["detail"]
+    assert book_store.load_machine_downtime() == []
+
+
+def test_a_long_but_plausible_break_is_accepted():
+    """The bound must not reject a real, if unusual, outage."""
+    m = _api()
+    _seed(m)
+    r = _client(m).post("/machine-downtime", json={
+        "machine": "CNC1", "from_date": "2025-03-05", "to_date": "2025-09-05"})
+    assert r.status_code == 200
+
+
 def test_a_break_on_a_machine_that_left_the_master_is_flagged_not_fatal():
     m = _api()
     _seed(m)
@@ -1626,6 +1648,16 @@ def create_machine_downtime(req: MachineDowntimeRequest, request: Request):
         raise HTTPException(status_code=400, detail="dates must be YYYY-MM-DD")
     if d_to < d_from:
         d_from, d_to = d_to, d_from
+    # Bound the span. A machine out for more than a year is not "on maintenance" —
+    # it should leave the Machine master. The cap also protects the engine: several
+    # places walk a break day by day, so an absurd stored to_date (a fat-fingered
+    # 9999-12-31) would mean millions of iterations per row on every plan. Validate
+    # where the input enters rather than hardening every consumer.
+    if (d_to - d_from).days > 366:
+        raise HTTPException(
+            status_code=400,
+            detail="a maintenance break cannot be longer than a year — if a machine "
+                   "is out for longer, remove it from the Machine master instead")
     machine = req.machine.strip()
     if machine not in _current_masters().machines:
         raise HTTPException(status_code=400,
@@ -1661,7 +1693,7 @@ Run: `python3.12 -m pytest tests/test_machine_downtime_api.py tests/test_role_pa
 Expected: PASS
 
 Run: `python3.12 -m pytest -q`
-Expected: `948 passed, 2 skipped`
+Expected: `950 passed, 2 skipped`
 
 - [ ] **Step 9: Commit**
 
@@ -1870,7 +1902,7 @@ Run: `python3.12 -m pytest tests/test_machine_downtime_reports.py tests/test_ana
 Expected: PASS — the appended parameter leaves every positional caller intact.
 
 Run: `python3.12 -m pytest -q`
-Expected: `953 passed, 2 skipped`
+Expected: `955 passed, 2 skipped`
 
 - [ ] **Step 7: Commit**
 
@@ -2145,7 +2177,7 @@ Run: `python3.12 -m pytest tests/test_machine_downtime_reports.py tests/test_del
 Expected: PASS — especially `test_every_hour_is_still_accounted_for` and the two `sheetnames` assertions.
 
 Run: `python3.12 -m pytest -q`
-Expected: `957 passed, 2 skipped`
+Expected: `959 passed, 2 skipped`
 
 - [ ] **Step 8: Commit**
 
@@ -2342,7 +2374,7 @@ Run: `python3.12 -m pytest tests/test_machine_downtime_api.py -v`
 Expected: PASS
 
 Run: `python3.12 -m pytest -q`
-Expected: `960 passed, 2 skipped`
+Expected: `962 passed, 2 skipped`
 
 - [ ] **Step 7: Commit**
 
@@ -2495,7 +2527,7 @@ report a step as passed that was not run.
 - [ ] **Step 5: Full suite + golden trace**
 
 Run: `python3.12 -m pytest -q`
-Expected: `960 passed, 2 skipped`
+Expected: `962 passed, 2 skipped`
 
 Run: `python3.12 -m pytest -k golden -v`
 Expected: PASS — the golden trace is byte-identical (it runs the classic engine on a
