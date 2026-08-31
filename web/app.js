@@ -2029,6 +2029,85 @@ async function removeAbsence(id) {
   } catch (e) { setStatus("Remove absence error: " + e.message, true); }
 }
 
+// ---- Machine maintenance (Settings-area block; the list is visible to both
+// roles, add/remove controls are admin-only via CSS and the server 403s them). ----
+function renderMachineDowntimeList(rows) {
+  const ul = $("downtime-list");
+  if (!ul) return;
+  if (!rows || rows.length === 0) {
+    ul.innerHTML = '<li class="muted">No machines are marked out of service.</li>';
+    return;
+  }
+  ul.innerHTML = rows.map((d) => `
+    <li>
+      <span>${escapeHtml(d.machine)}: ${isoToDdmmyyyy(d.from_date)} to ${isoToDdmmyyyy(d.to_date)}`
+      + `${d.reason ? " — " + escapeHtml(d.reason) : ""}</span>
+      <button type="button" class="ghost-btn downtime-remove admin-only" data-id="${escapeHtml(d.id)}">✕</button>
+    </li>`).join("");
+  ul.querySelectorAll(".downtime-remove").forEach((btn) => {
+    btn.onclick = () => removeMachineDowntime(btn.dataset.id);
+  });
+}
+
+async function loadMachineDowntime() {
+  try {
+    const res = await fetch("/machine-downtime");
+    if (!res.ok) return;
+    const data = await res.json();
+    const sel = $("downtime-machine");
+    if (sel) {
+      const prev = sel.value;
+      // Grouped by machine type, the same shape the operator machine picker uses.
+      const groups = new Map();
+      (data.machines || []).forEach((mo) => {
+        const label = mo.provisional ? "Not in Machine master yet" : (mo.type || "Other");
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push(mo);
+      });
+      sel.innerHTML = Array.from(groups).map(([label, rows]) =>
+        `<optgroup label="${escapeHtml(label)}">`
+        + rows.map((mo) => `<option value="${escapeHtml(mo.id)}">${escapeHtml(mo.name)}</option>`).join("")
+        + `</optgroup>`).join("");
+      if (prev) sel.value = prev;
+    }
+    renderMachineDowntimeList(data.downtime || []);
+  } catch (e) { /* a convenience view — a fetch hiccup shouldn't block the page */ }
+}
+
+async function addMachineDowntime() {
+  const mac = $("downtime-machine"), from = $("downtime-from"),
+        to = $("downtime-to"), why = $("downtime-reason");
+  if (!mac || !mac.value) { setStatus("Pick a machine to mark out of service.", true); return; }
+  if (!from.value || !to.value) { setStatus("Pick both maintenance dates.", true); return; }
+  if (new Date(to.value) < new Date(from.value)) {
+    setStatus("'To' date must be on or after 'From' date.", true);
+    return;
+  }
+  try {
+    const res = await fetch("/machine-downtime", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ machine: mac.value, from_date: from.value,
+                             to_date: to.value, reason: why ? why.value : "" }),
+    });
+    if (!res.ok) { setStatus("Could not mark it out of service: " + (await res.text()), true); return; }
+    setStatus(`${mac.value} marked out of service.`);
+    from.value = ""; to.value = ""; if (why) why.value = "";
+    await loadMachineDowntime();
+    await runPlan(false);
+  } catch (e) { setStatus("Maintenance error: " + e.message, true); }
+}
+
+async function removeMachineDowntime(id) {
+  if (!window.confirm("Remove this maintenance break? The machine will be planned as available again.")) return;
+  try {
+    const res = await fetch(`/machine-downtime/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) { setStatus("Could not remove it: " + (await res.text()), true); return; }
+    setStatus("Maintenance break removed.");
+    await loadMachineDowntime();
+    await runPlan(false);
+  } catch (e) { setStatus("Maintenance error: " + e.message, true); }
+}
+
 // ---- Operators & shifts (Settings-area block). The list is visible to both
 // roles, but rows render two different markups per role (rather than dual-DOM
 // + CSS-hiding as the absence row's single delete button does): admins get
@@ -2287,6 +2366,10 @@ if (_optStop) _optStop.onclick = stopOptimize;
 // but the handler is harmless to wire either way — the server enforces the role).
 const _absAdd = $("absence-add");
 if (_absAdd) _absAdd.onclick = addAbsence;
+// Machine maintenance: add is admin-only (the row is CSS-hidden for the user role;
+// the handler is harmless to wire either way — the server enforces the role).
+const _downAdd = $("downtime-add");
+if (_downAdd) _downAdd.onclick = addMachineDowntime;
 // Operators & shifts: add is admin-only (row wrapped in admin-only, so it's
 // CSS-hidden for the user role too; the handler is harmless to wire either
 // way — the server enforces the role).
@@ -2324,6 +2407,7 @@ if (_effDownloadBtn) _effDownloadBtn.onclick = downloadEfficiencyCsv;
   // Operators & shifts / Absences are read-only for the user role but still
   // visible (only their edit controls are admin-only) — load for both roles.
   loadAbsences();
+  loadMachineDowntime();
   loadOperators();
   await runPlan(false);
   // A search may still be running (or have finished) from before a page reload.

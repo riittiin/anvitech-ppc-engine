@@ -257,6 +257,23 @@
       <ul id="absence-list" class="absence-list"></ul>
     </div>
 
+    <div class="card">
+      <div class="card-head">
+        <h2>Machine maintenance</h2>
+        <p class="explainer">Mark a machine out of service for a date range, for example a
+          service or a repair. The plan runs nothing on it for those days, on either shift,
+          and moves the work elsewhere if the item's process master allows another machine.</p>
+      </div>
+      <div class="cfg-row admin-only">
+        <select id="downtime-machine"></select>
+        <input type="date" id="downtime-from" />
+        <input type="date" id="downtime-to" />
+        <input type="text" id="downtime-reason" placeholder="Reason (optional)" maxlength="200" />
+        <button id="downtime-add" class="ghost-btn" type="button">Mark out of service</button>
+      </div>
+      <ul id="downtime-list" class="absence-list"></ul>
+    </div>
+
     <div class="card admin-only">
       <div class="card-head">
         <h2>Efficiency report</h2>

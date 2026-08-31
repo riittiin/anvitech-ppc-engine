@@ -305,3 +305,37 @@ def test_adding_a_break_never_starts_a_contest(monkeypatch):
         "machine": "CNC1", "from_date": "2025-03-05", "to_date": "2025-03-06"})
     admin.delete(f"/machine-downtime/{r.json()['downtime']['id']}")
     assert starts == []
+
+
+# --------------------------------------------------------------------------- #
+# The Settings panel (markup + role gating, checked the way test_role_parity does)
+# --------------------------------------------------------------------------- #
+import pathlib
+import re
+
+WEB = pathlib.Path(__file__).resolve().parent.parent / "web"
+
+
+def test_the_settings_panel_exists_with_the_expected_controls():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    for el_id in ("downtime-machine", "downtime-from", "downtime-to",
+                  "downtime-reason", "downtime-add", "downtime-list"):
+        assert f'id="{el_id}"' in html, el_id
+    assert "Machine maintenance" in html
+
+
+def test_the_add_row_is_admin_only_but_the_list_is_not():
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    block = html.split("Machine maintenance", 1)[1].split("</div>\n\n", 1)[0]
+    add = block.split('id="downtime-add"')[0]
+    assert "admin-only" in add, "the add controls must be admin-only"
+    lst = block.split('id="downtime-list"')[0].rsplit("<ul", 1)[-1]
+    assert "admin-only" not in lst, "the list itself must be visible to both roles"
+
+
+def test_the_client_calls_the_right_endpoints():
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert 'fetch("/machine-downtime"' in js
+    assert re.search(r'fetch\(`/machine-downtime/\$\{[^}]+\}`', js)
+    assert "loadMachineDowntime" in js and "addMachineDowntime" in js
+    assert "removeMachineDowntime" in js
