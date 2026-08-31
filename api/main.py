@@ -829,7 +829,13 @@ def _plan(config: Config):
     # reserved in the single plan pass. Lanes never reserve time. Loaded once
     # and reused below for the validation report (ABSENT_OPERATOR_UNKNOWN).
     absences_raw = book_store.load_absences()
-    ab = optimize_service.absence_reservations(absences_raw)
+    # Machine maintenance breaks reserve the MACHINE, operator absences reserve the
+    # PERSON — one merged dict, the same one every engine already reads. Loaded once
+    # and reused below for the reports.
+    downtime_raw = book_store.load_machine_downtime()
+    ab = optimize_service.merge_reservations(
+        optimize_service.absence_reservations(absences_raw),
+        optimize_service.downtime_reservations(downtime_raw))
 
     so_lines = orderbook.active_so_lines(active, actuals, masters)   # remaining = ordered − finished good
 
@@ -1265,7 +1271,9 @@ def _current_book_sig() -> str:
     lines = orderbook.active_so_lines(book_store.load_active_orders(),
                                       actuals, masters)
     absences = book_store.load_absences()
-    return optimize_service.book_signature(lines, absences=absences)
+    downtimes = book_store.load_machine_downtime()
+    return optimize_service.book_signature(lines, absences=absences,
+                                           downtimes=downtimes)
 
 
 def _delivery_dates() -> dict:
@@ -1516,6 +1524,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()
         absences = book_store.load_absences()
+        machine_downtime = book_store.load_machine_downtime()
         operator_table = book_store.load_operator_table()
         # The frozen (in-progress) set now restricts BOTH paths — the Done/auto
         # button and the admin's manual "Start deep search" (owner decision,
@@ -1528,7 +1537,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             setup = optimize_service.prepare_contest(orders, actuals, masters, config,
                                                      absences=absences,
                                                      operator_table=operator_table,
-                                                     frozen=frozen)
+                                                     frozen=frozen,
+                                                     machine_downtime=machine_downtime)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
@@ -1547,7 +1557,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             payload = optimize_service.build_payload(
                 orders, actuals, book_store.load_masters_bytes(), config,
                 seed=_OPT_SEED, candidates=_cands, budget_per_candidate=_bpc,
-                absences=absences, operator_table=operator_table, frozen=frozen)
+                absences=absences, operator_table=operator_table, frozen=frozen,
+                machine_downtime=machine_downtime)
             # Use contest_jobs (not sweep_contenders) for the true candidate
             # count: under the new engine the contest also sweeps the
             # machine-set dimension (Allotted-only vs Allotted+Suggested), so
@@ -2067,7 +2078,8 @@ def _movement_note(new_ranks):
         book_store.load_active_orders(), book_store.load_actuals(), masters, config,
         absences=book_store.load_absences(),
         operator_table=book_store.load_operator_table(),
-        frozen=book_store.load_frozen_ops())
+        frozen=book_store.load_frozen_ops(),
+        machine_downtime=book_store.load_machine_downtime())
     prio = book_store.load_plan_priority()
     old_ranks = (prio or {}).get("ranks") or None
     old_sched, _ = _all_lines_schedule(setup, setup.masters, old_ranks)
@@ -2099,7 +2111,8 @@ def _metrics_for_ranks(ranks, overlap=None, flexible=None, *, with_distribution=
         setup = optimize_service.prepare_contest(
             orders, actuals, masters, config, absences=absences,
             operator_table=book_store.load_operator_table(),
-            frozen=book_store.load_frozen_ops())
+            frozen=book_store.load_frozen_ops(),
+            machine_downtime=book_store.load_machine_downtime())
         schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks or None)
         return optimizer.plan_metrics(
             schedule, all_lines, setup.config.plan_start_date,
@@ -2129,7 +2142,8 @@ def _incumbent_metrics(*, with_distribution=False):
     setup = optimize_service.prepare_contest(orders, actuals, masters, config,
                                              absences=absences,
                                              operator_table=book_store.load_operator_table(),
-                                             frozen=book_store.load_frozen_ops())
+                                             frozen=book_store.load_frozen_ops(),
+                                             machine_downtime=book_store.load_machine_downtime())
     prio = book_store.load_plan_priority()
     ranks = (prio or {}).get("ranks") or None
     schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks)
@@ -2229,7 +2243,8 @@ def _optimize_apply():
                 _current_masters(), _resolve_config(_load_plan_config()),
                 absences=book_store.load_absences(),
                 operator_table=book_store.load_operator_table(),
-                frozen=book_store.load_frozen_ops())
+                frozen=book_store.load_frozen_ops(),
+                machine_downtime=book_store.load_machine_downtime())
             sched, _ = _all_lines_schedule(setup, setup.masters, res["ranks"])
             book_store.save_last_applied_schedule(freeze.schedule_projection(sched))
         except Exception:
@@ -2753,7 +2768,9 @@ def _plan_run_for_report(config: Config):
     config = _resolve_config(config)
     active = book_store.load_active_orders()
     actuals = book_store.load_actuals()
-    ab = optimize_service.absence_reservations(book_store.load_absences())
+    ab = optimize_service.merge_reservations(
+        optimize_service.absence_reservations(book_store.load_absences()),
+        optimize_service.downtime_reservations(book_store.load_machine_downtime()))
     so_lines = orderbook.active_so_lines(active, actuals, masters)
     eff_start = orderbook.effective_plan_start_date(actuals, config.plan_start_date,
                                                     masters.calendar)

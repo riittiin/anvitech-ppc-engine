@@ -92,3 +92,79 @@ def test_prepare_contest_with_no_breaks_reserves_nothing():
     setup = svc.prepare_contest(orders, [], masters, cfg)
     assert setup.unavailable_reserved is None
     assert setup.machine_downtime == []
+
+
+# --------------------------------------------------------------------------- #
+# The plan itself
+# --------------------------------------------------------------------------- #
+import importlib
+from datetime import timedelta
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+def _api():
+    import api.main
+    return importlib.reload(api.main)
+
+
+def _seed(m):
+    wb = build_sample_bytes()
+    book_store.save_masters_bytes(wb)
+    book_store.add_orders([Order("SO1", ITEM_A, "A", 20, date(2025, 3, 20))])
+    m._current_masters()          # trigger the one-time operator seed
+
+
+def test_a_break_changes_the_book_signature_the_cache_keys_on():
+    m = _api()
+    _seed(m)
+    before = m._current_book_sig()
+    book_store.save_machine_downtime(
+        {"machine": "CNC1", "from_date": "2025-03-05", "to_date": "2025-03-06"})
+    assert m._current_book_sig() != before
+
+
+def test_adding_a_break_invalidates_the_plan_cache():
+    """Mirrors test_plan_cache.py::test_absence_invalidates. Without this the
+    Settings panel would add a break and the screen would show the old plan."""
+    m = _api()
+    _seed(m)
+    cfg = m._load_plan_config()
+    first = m._plan(cfg)
+    assert m._plan(cfg)["run_id"] == first["run_id"]        # cache hit
+    book_store.save_machine_downtime(
+        {"machine": "CNC1", "from_date": "2025-03-05", "to_date": "2025-03-06"})
+    assert m._plan(cfg)["run_id"] != first["run_id"]        # recomputed
+
+
+def test_the_plan_schedules_nothing_on_a_machine_that_is_out_of_service():
+    m = _api()
+    _seed(m)
+    plain = m._plan(m._load_plan_config())
+    used = {e.machine for e in m._PLAN_CACHE["artifacts"]["plan_run"].schedule}
+    if "CNC1" not in used:
+        pytest.skip("this sample book does not use CNC1; nothing to prove")
+    start = m._resolve_config(m._load_plan_config()).plan_start_date
+    book_store.save_machine_downtime(
+        {"machine": "CNC1", "from_date": start.isoformat(),
+         "to_date": (start + timedelta(days=3)).isoformat()})
+    m._plan(m._load_plan_config())
+    sched = m._PLAN_CACHE["artifacts"]["plan_run"].schedule
+    clash = [e for e in sched
+             if e.machine == "CNC1"
+             and e.start.date() <= start + timedelta(days=3)]
+    assert clash == [], f"work planned on an out-of-service machine: {clash[:3]}"
+
+
+def test_removing_the_break_restores_the_original_plan():
+    m = _api()
+    _seed(m)
+    cfg = m._load_plan_config()
+    before = m._plan(cfg)
+    row = book_store.save_machine_downtime(
+        {"machine": "CNC1", "from_date": "2025-03-05", "to_date": "2025-03-06"})
+    m._plan(cfg)
+    book_store.delete_machine_downtime(row["id"])
+    after = m._plan(cfg)
+    assert after["expected_end"] == before["expected_end"]
