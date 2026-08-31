@@ -8,7 +8,7 @@ clock, so it matches exactly how the plan was scheduled.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, time, timedelta
+from datetime import timedelta
 
 from .models import fmt_date
 from .operator_coverage import eligible_window
