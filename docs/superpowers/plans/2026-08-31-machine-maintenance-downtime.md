@@ -1320,11 +1320,22 @@ and in the cloud payload build in the same function:
                 machine_downtime=machine_downtime)
 ```
 
-`_movement_note` (~line 2060), `_metrics_for_ranks` (~line 2090) and
-`_incumbent_metrics` (~line 2115) each call `prepare_contest`; add to each:
+`_movement_note` (~line 2066), `_metrics_for_ranks` (~line 2099),
+`_incumbent_metrics` (~line 2129) and **`_optimize_apply` (~line 2227)** each call
+`prepare_contest`; add to each:
 ```python
             machine_downtime=book_store.load_machine_downtime(),
 ```
+
+> **`_optimize_apply` is the one that matters most, and the plan's first draft missed
+> it** (found by a repo-wide call-site grep before dispatch). It builds the schedule
+> that `book_store.save_last_applied_schedule` stores as "the plan the floor is
+> following" — and that stored record is exactly what `engine/freeze.compute_frozen_set`
+> reads to decide which operation is pinned to which machine. Build it without knowing
+> about a maintenance break and it places work on an out-of-service machine, so the
+> frozen set derived from it pins operations to a machine that was never running them.
+> That is the 2026-08-11 failure shape: a stored artifact quietly disagreeing with the
+> plan everyone else sees.
 
 `_plan_run_for_report`'s fallback branch (~line 2800):
 ```python
@@ -1339,8 +1350,11 @@ and in the cloud payload build in the same function:
 grep -n "prepare_contest(" api/main.py
 grep -c "machine_downtime" api/main.py
 ```
-Expected: four `prepare_contest(` call sites in `api/main.py`, each with
-`machine_downtime=`; the count is at least 8.
+Expected: **five** `prepare_contest(` call sites in `api/main.py`
+(`_start_optimize`, `_movement_note`, `_metrics_for_ranks`, `_incumbent_metrics`,
+`_optimize_apply`), **each** with `machine_downtime=`; the `machine_downtime` count is
+at least 10. If you find a different number of call sites, stop and report it — a
+missed one means some path plans against a shop that still has the machine.
 
 - [ ] **Step 7: Run the tests**
 
