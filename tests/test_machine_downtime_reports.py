@@ -114,3 +114,79 @@ def test_a_break_spanning_the_weekly_off_day_only_subtracts_working_days():
     # Exactly 2 working days' worth (Wed + Fri), not 3 -- if Thursday were wrongly
     # subtracted too this would read 63.0, not 42.0.
     assert base - down == 42.0
+
+
+# --------------------------------------------------------------------------- #
+# Delay report
+# --------------------------------------------------------------------------- #
+from engine.delay_report import build_delay_report
+from engine.models import Batch, SOLine
+
+DR_CFG = Config(plan_start_date=date(2025, 3, 3), apply_operator_logic=True)
+
+
+def _line(so="SO1", item="X", due=date(2025, 3, 20)):
+    return SOLine(so_no=so, item_code=item, item_name="X", qty=10, delivery_date=due)
+
+
+def _batch():
+    return Batch(batch_id="B001", item_code="X", item_name="X", qty=10,
+                 so_delivery_date=date(2025, 3, 20), source_so_refs=["SO1"])
+
+
+def _dr_masters():
+    from engine.models import Operator
+    return Masters(
+        machines={"CNC1": Machine("CNC1", "CNC 1", "CNC lathe",
+                                  available_hrs_per_day=19.5)},
+        operators=[Operator("Anil", "CNC1", ["CNC1"], "First shift")],
+        routings={"X": Routing("X", "", "", "", None, processes=[
+            Process(1, "CNC first side", 1.0, 1.0, "CNC1", "CNC1")])},
+        calendar=WorkCalendar())
+
+
+def test_a_gap_on_a_down_day_is_called_maintenance_not_crew():
+    """The machine is free and every operator is free, but the machine is in
+    pieces. Without this the hours land in WAITING (crew) or IDLE — the report
+    would blame the crew for a spindle service."""
+    m = _dr_masters()
+    e1 = _entry(datetime(2025, 3, 3, 8), datetime(2025, 3, 3, 10))
+    e2 = _entry(datetime(2025, 3, 7, 8), datetime(2025, 3, 7, 10))
+    down = [{"machine": "CNC1", "from_date": "2025-03-04", "to_date": "2025-03-05"}]
+    rep = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m, down)
+    states = {r["State"] for r in rep["detail"]}
+    assert "MAINTENANCE (machine down)" in states
+    maint = [r for r in rep["detail"] if r["State"] == "MAINTENANCE (machine down)"]
+    assert all("maintenance" in r["Why"].lower() for r in maint)
+    assert all(r["Machine"] == "CNC1" for r in maint)
+
+
+def test_without_downtime_the_same_plan_reports_no_maintenance():
+    m = _dr_masters()
+    e1 = _entry(datetime(2025, 3, 3, 8), datetime(2025, 3, 3, 10))
+    e2 = _entry(datetime(2025, 3, 7, 8), datetime(2025, 3, 7, 10))
+    rep = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m)
+    assert not [r for r in rep["detail"]
+                if r["State"] == "MAINTENANCE (machine down)"]
+
+
+def test_every_hour_is_still_accounted_for_with_maintenance():
+    """The invariant that must never break: work + every wait == the order's span."""
+    m = _dr_masters()
+    e1 = _entry(datetime(2025, 3, 3, 8), datetime(2025, 3, 3, 10))
+    e2 = _entry(datetime(2025, 3, 7, 8), datetime(2025, 3, 7, 10))
+    down = [{"machine": "CNC1", "from_date": "2025-03-04", "to_date": "2025-03-05"}]
+    rep = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m, down)
+    total = sum(r["Hours"] for r in rep["detail"])
+    span = (datetime(2025, 3, 7, 10) - datetime(2025, 3, 3, 8)).total_seconds() / 3600
+    assert abs(total - span) < 1e-6
+
+
+def test_the_summary_reports_maintenance_as_its_own_cause():
+    m = _dr_masters()
+    e1 = _entry(datetime(2025, 3, 3, 8), datetime(2025, 3, 3, 10))
+    e2 = _entry(datetime(2025, 3, 7, 8), datetime(2025, 3, 7, 10))
+    down = [{"machine": "CNC1", "from_date": "2025-03-04", "to_date": "2025-03-05"}]
+    s = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m, down)["summary"][0]
+    assert "Maintenance (days)" in s
+    assert s["Maintenance (days)"] > 0

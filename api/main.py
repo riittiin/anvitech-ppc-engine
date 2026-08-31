@@ -2795,12 +2795,13 @@ _DELAY_FILLS = {
     "OUTSOURCED": "BDD7EE",              # blue — away at a vendor, not our capacity
     "OFF-MACHINE": "BDD7EE",
     "IDLE (capacity free)": "FFC7CE",    # red — machine AND operator free, work waiting
+    "MAINTENANCE (machine down)": "D9C2E9",  # purple — the machine was out of service
 }
 _DELAY_SUMMARY_COLS = ["SO No", "Item Code", "Item Name", "Ordered Qty", "SO Delivery Date",
                        "Expected Completion", "Days Late", "Working (days)",
                        "Waiting: machine (days)", "Waiting: off-hours (days)",
                        "Waiting: crew (days)", "Outsourced (days)",
-                       "Idle: capacity free (days)", "Why"]
+                       "Idle: capacity free (days)", "Maintenance (days)", "Why"]
 _DELAY_DETAIL_COLS = ["SO No", "Item Code", "State", "Process", "Machine", "Operator",
                       "From", "To", "Hours", "Why"]
 
@@ -2912,7 +2913,8 @@ def delay_report_xlsx(request: Request):
     from engine import delay_report as _dr
     plan_run, so_lines, masters, cfg = _plan_run_for_report(_load_plan_config())
     report = _dr.build_delay_report(plan_run.schedule, so_lines,
-                                    plan_run.batches_prioritized, cfg, masters)
+                                    plan_run.batches_prioritized, cfg, masters,
+                                    book_store.load_machine_downtime())
     data = _delay_report_xlsx(report)
     fname = f"delay-justification-{_ist_today().isoformat()}.xlsx"
     return Response(

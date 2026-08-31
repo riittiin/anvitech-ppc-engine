@@ -33,7 +33,7 @@ export before being fixed:
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from .operator_coverage import eligible_window, qualified_operators
 from .optimizer import expected_completion
@@ -169,21 +169,36 @@ def _staffing_split(a, b, machine, masters, config, op_busy):
     return sorted(out)
 
 
-def _classify_free(a, b, clock, machine=None, masters=None, config=None, op_busy=None):
+def _classify_free(a, b, clock, machine=None, masters=None, config=None, op_busy=None,
+                   down_days=None):
     """Split a machine-free interval into off-hours (outside the machine's working
-    window) and, inside it, either a genuine crew shortage or plain idle capacity."""
+    window) and, inside it, maintenance, a genuine crew shortage, or plain idle
+    capacity.
+
+    Windows are bucketed by the day they are ANCHORED on, which is how the engine
+    blocks a maintenance day: a two-shift machine's night window opens 19:00 on D and
+    closes 05:00 on D+1, and the whole of it belongs to D. Bucketing by anchor day
+    (rather than splitting at midnight) is what makes the report agree with the plan
+    to the minute."""
+    down_days = down_days or set()
     # Start a day early: a two-shift machine's night window (e.g. 19:00→05:00) belongs to
     # the PREVIOUS day but overflows into this one, so it can cover the early morning of `a`.
-    work, d = [], a.date() - timedelta(days=1)
+    up, down, d = [], [], a.date() - timedelta(days=1)
     while datetime.combine(d, datetime.min.time()) < b:
         for ws, we in clock._windows_for_day(d):
             s, e = max(ws, a), min(we, b)
             if e > s:
-                work.append((s, e))
+                (down if d in down_days else up).append((s, e))
         d = d + timedelta(days=1)
-    work = _merge(work)
+    up, down = _merge(up), _merge(down)
     rows = []
-    for s, e in work:
+    for s, e in down:
+        rows.append({
+            "State": "MAINTENANCE (machine down)", "Process": "",
+            "Machine": machine or "", "Operator": "", "From": s, "To": e,
+            "Hours": round(_hours(s, e), 2),
+            "Why": "Machine out of service for maintenance"})
+    for s, e in up:
         if masters is None or config is None:
             pieces = [(s, e, False)]        # no staffing data — keep the old behaviour
         else:
@@ -203,7 +218,7 @@ def _classify_free(a, b, clock, machine=None, masters=None, config=None, op_busy
                     "State": "WAITING (crew)", "Process": "", "Machine": "", "Operator": "",
                     "From": ps, "To": pe, "Hours": round(_hours(ps, pe), 2),
                     "Why": "Machine free — every qualified operator was busy elsewhere"})
-    for s, e in _gaps(a, b, work):
+    for s, e in _gaps(a, b, up + down):
         rows.append({"State": "WAITING (off-hours)", "Process": "", "Machine": "", "Operator": "",
                      "From": s, "To": e, "Hours": round(_hours(s, e), 2),
                      "Why": "Outside working hours (night / weekly off / holiday)"})
@@ -224,10 +239,13 @@ def _why_summary(days_late, buckets):
         parts.append(f"{buckets['outsourced']}d outsourced (at a vendor)")
     if buckets.get("idle", 0) > 0:
         parts.append(f"{buckets['idle']}d machine and operator both free")
+    if buckets.get("maintenance", 0) > 0:
+        parts.append(f"{buckets['maintenance']}d machine out for maintenance")
     return f"{days_late} days late — " + ", ".join(parts) if parts else f"{days_late} days late"
 
 
-def build_delay_report(schedule, so_lines, batches_prioritized, config, masters):
+def build_delay_report(schedule, so_lines, batches_prioritized, config, masters,
+                       downtime=None):
     """See module docstring. Returns {'summary': [row], 'detail': [row]}."""
     # The plan's FIRST SCHEDULED MOMENT, not midnight. The engine starts at the
     # plan-start floor (the next full hour after an optimization lands), so measuring
@@ -238,6 +256,23 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters)
     rank = _rank_by_key(batches_prioritized)
     op_busy = _operator_bookings(schedule)
     clock_cache = {}
+
+    # Maintenance days per machine, as dates — so a machine-free window on a day the
+    # machine was out of service is attributed to maintenance, never to the crew.
+    down_by_machine: dict = {}
+    for d in downtime or []:
+        try:
+            f = date.fromisoformat(d["from_date"]); t = date.fromisoformat(d["to_date"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if t < f:
+            f, t = t, f
+        days = down_by_machine.setdefault(d.get("machine", ""), set())
+        cur = f
+        while cur <= t:
+            days.add(cur)
+            cur += timedelta(days=1)
+    down_by_machine.pop("", None)
 
     def clock_for(mid):
         if mid not in clock_cache:
@@ -293,7 +328,8 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters)
             rows.extend(busy)
             for (fa, fb) in free:
                 rows.extend(_classify_free(fa, fb, clock_for(machine), machine,
-                                           masters, config, op_busy))
+                                           masters, config, op_busy,
+                                           down_by_machine.get(machine)))
         rows.sort(key=lambda r: r["From"])
         for r in rows:
             r["SO No"], r["Item Code"] = so, item
@@ -302,7 +338,8 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters)
         # parallel split / overlap — so summing each RUNNING row would double-count).
         # Waits are the complement of the merged running, so work + waits == span exactly.
         buckets = {"machine": 0.0, "off": 0.0, "crew": 0.0, "outsourced": 0.0,
-                   "idle": 0.0, "work": sum(_hours(s, e) for s, e in running)}
+                   "idle": 0.0, "maintenance": 0.0,
+                   "work": sum(_hours(s, e) for s, e in running)}
         for r in rows:
             if r["State"] == "WAITING (machine busy)":
                 buckets["machine"] += r["Hours"]
@@ -314,6 +351,8 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters)
                 buckets["outsourced"] += r["Hours"]
             elif r["State"] == "IDLE (capacity free)":
                 buckets["idle"] += r["Hours"]
+            elif r["State"] == "MAINTENANCE (machine down)":
+                buckets["maintenance"] += r["Hours"]
         days = {k: round(v / 24.0, 1) for k, v in buckets.items()}
         completion_date = completion_by_key.get((so, item), completion.date())
         days_late = (completion_date - line.delivery_date).days
@@ -325,6 +364,7 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters)
             "Waiting: off-hours (days)": days["off"], "Waiting: crew (days)": days["crew"],
             "Outsourced (days)": days["outsourced"],
             "Idle: capacity free (days)": days["idle"],
+            "Maintenance (days)": days["maintenance"],
             "Why": _why_summary(days_late, days)})
         detail.extend(rows)
 
