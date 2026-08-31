@@ -25,6 +25,7 @@ PLAN_PRIORITY_KEY = "anvitech:plan_priority"  # kv: json {ranks, meta} of the ap
 AUTO_NOTE_KEY = "anvitech:auto_note"        # kv: json note from the self-tuning trigger (informational)
 LAST_SEARCHED_KEY = "anvitech:last_searched"  # kv: json {book_sig, inputs_sig} of the last completed contest
 ABSENCES_KEY = "anvitech:absences"          # kv: json list of operator absences
+MACHINE_DOWNTIME_KEY = "anvitech:machine_downtime"   # kv: json list of machine maintenance breaks
 OPERATORS_KEY = "anvitech:operators"        # kv: json {week_anchor, operators:[...]}
 LAST_APPLIED_SCHEDULE_KEY = "anvitech:last_applied_schedule"  # kv: json list of applied-schedule op rows
 FROZEN_OPS_KEY = "anvitech:frozen_ops"       # kv: json list of frozen (in-progress) op rows for today
@@ -302,6 +303,32 @@ def delete_absence(absence_id: str) -> bool:
     if len(keep) == len(rows):
         return False
     get_store().kv_set(ABSENCES_KEY, json.dumps(keep))
+    return True
+
+
+# --- machine maintenance breaks (a machine out of service for a date range) --- #
+def load_machine_downtime() -> list:
+    raw = get_store().kv_get(MACHINE_DOWNTIME_KEY)
+    return json.loads(raw) if raw else []
+
+
+def save_machine_downtime(d: dict) -> dict:
+    """Record one break. Mirrors ``save_absence``: the id is assigned here so the
+    caller never invents one, and only the known fields are persisted."""
+    d = {"id": uuid.uuid4().hex, "machine": d["machine"],
+         "from_date": d["from_date"], "to_date": d["to_date"],
+         "reason": d.get("reason", "") or ""}
+    rows = load_machine_downtime() + [d]
+    get_store().kv_set(MACHINE_DOWNTIME_KEY, json.dumps(rows))
+    return d
+
+
+def delete_machine_downtime(downtime_id: str) -> bool:
+    rows = load_machine_downtime()
+    keep = [r for r in rows if r.get("id") != downtime_id]
+    if len(keep) == len(rows):
+        return False
+    get_store().kv_set(MACHINE_DOWNTIME_KEY, json.dumps(keep))
     return True
 
 

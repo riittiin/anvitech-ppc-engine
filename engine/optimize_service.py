@@ -99,6 +99,32 @@ def absence_reservations(absences):
     return res
 
 
+
+def downtime_reservations(rows):
+    """Machine maintenance rows -> MACHINE reservations, keyed by machine id: the
+    machine is 'busy' from 00:00 of from_date to 00:00 of the day AFTER to_date
+    (inclusive), exactly like ``absence_reservations`` does for a person.
+
+    The result is merged into the SAME ``reserved`` dict operator absences use.
+    That is deliberate: ``rule6_allocate._lay_segments`` and
+    ``flow_scheduler._mac_next_window`` already look machine ids up in it, so the
+    retired engines honour a maintenance break with no change at all."""
+    from datetime import datetime, date, timedelta
+    res = {}
+    for d in rows or []:
+        try:
+            f = date.fromisoformat(d["from_date"])
+            t = date.fromisoformat(d["to_date"])
+        except (KeyError, ValueError, TypeError):
+            continue                                   # malformed row — skip
+        if t < f:
+            f, t = t, f
+        interval = (datetime.combine(f, datetime.min.time()),
+                    datetime.combine(t + timedelta(days=1), datetime.min.time()))
+        res.setdefault(d.get("machine", ""), []).append(interval)
+    res.pop("", None)
+    return res
+
 def merge_reservations(a, b):
     out = {k: list(v) for k, v in (a or {}).items()}
     for k, v in (b or {}).items():
