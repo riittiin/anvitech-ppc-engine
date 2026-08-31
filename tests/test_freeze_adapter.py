@@ -38,7 +38,7 @@ def test_ppc_frozen_maps_so_and_process_to_frozenop():
     row = {"so_no": batch.source_so_refs[0], "item_code": o0.item_code,
            "process": mop.name, "op_seq": mop.seq, "machine": mop.machine_options[0],
            "operator": "Alpha", "remaining_qty": 7, "prev_start": "2025-03-03T08:00:00"}
-    fos = _ppc_frozen([row], orders, batch_by_key, nm)
+    fos = _ppc_frozen([row], orders, batch_by_key, nm, _CONF.plan_start_date)
     assert len(fos) == 1
     fo = fos[0]
     assert isinstance(fo, FrozenOp)
@@ -57,7 +57,7 @@ def test_ppc_frozen_drops_unmappable_rows():
     rows = [{"so_no": "GHOST", "item_code": "NOPE", "process": "x", "op_seq": 1,
              "machine": "CNC1", "operator": "Alpha", "remaining_qty": 5,
              "prev_start": "2025-03-03T08:00:00"}]
-    assert _ppc_frozen(rows, orders, batch_by_key, nm) == []
+    assert _ppc_frozen(rows, orders, batch_by_key, nm, _CONF.plan_start_date) == []
 
 
 def test_ppc_frozen_drops_malformed_rows_without_raising():
@@ -82,11 +82,11 @@ def test_ppc_frozen_drops_malformed_rows_without_raising():
     bad_qty_str = dict(base, remaining_qty="abc")
     bad_prev_start = dict(base, prev_start=None)
 
-    assert _ppc_frozen([bad_qty], orders, batch_by_key, nm) == []
-    assert _ppc_frozen([bad_qty_str], orders, batch_by_key, nm) == []
-    assert _ppc_frozen([bad_prev_start], orders, batch_by_key, nm) == []
+    assert _ppc_frozen([bad_qty], orders, batch_by_key, nm, _CONF.plan_start_date) == []
+    assert _ppc_frozen([bad_qty_str], orders, batch_by_key, nm, _CONF.plan_start_date) == []
+    assert _ppc_frozen([bad_prev_start], orders, batch_by_key, nm, _CONF.plan_start_date) == []
     # The well-formed row still maps normally (valid path unaffected).
-    assert len(_ppc_frozen([base], orders, batch_by_key, nm)) == 1
+    assert len(_ppc_frozen([base], orders, batch_by_key, nm, _CONF.plan_start_date)) == 1
 
 
 def test_new_engine_run_pins_frozen_step():

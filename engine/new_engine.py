@@ -290,7 +290,21 @@ def _orders_from_batches(batches, masters):
     return orders, batch_by_key
 
 
-def _ppc_frozen(rows, orders, batch_by_key, masters):
+def _machine_down_in_window(masters, mid, start_date, end_date) -> bool:
+    """True if machine ``mid`` has a maintenance day in [start_date, end_date]."""
+    days = getattr(masters.calendar, "machine_downtime", None) or {}
+    days = days.get(mid)
+    if not days:
+        return False
+    d = start_date
+    while d <= end_date:
+        if d in days:
+            return True
+        d += timedelta(days=1)
+    return False
+
+
+def _ppc_frozen(rows, orders, batch_by_key, masters, plan_start_date):
     """Map app-level frozen rows -> ppc FrozenOp[] for decode. Each row is
     {so_no, item_code, process, op_seq, machine, operator, remaining_qty, prev_start-iso}.
     A row maps to the scheduled batch whose source SOs include ``so_no`` (batch_id ==
@@ -310,7 +324,16 @@ def _ppc_frozen(rows, orders, batch_by_key, masters):
     So the qty comes from the BATCH -- ``Order.process_remaining``, the exact
     expression the main decode loop uses (``flow_scheduler._place_operation``) -- and
     the rows are collapsed to ONE FrozenOp per (batch, op): an operation runs once, on
-    one machine. Machine/operator/prev_start come from the row that started earliest."""
+    one machine. Machine/operator/prev_start come from the row that started earliest.
+
+    **A machine that is OUT OF SERVICE releases its pins** (2026-08-31). If the
+    pinned machine has a maintenance day anywhere in [plan_start_date .. the date
+    this step was due to finish in the applied plan], the row is dropped and the
+    step goes back to normal scheduling -- where the routing's own machine options
+    decide where it MAY go and the objective decides whether moving beats waiting.
+    Evaluated HERE, at plan time, rather than in freeze.compute_frozen_set: that
+    runs only on "Done entering", so a build-time rule would leave every ordinary
+    re-plan showing a stale pin."""
     from datetime import datetime
     from ppc_engine.scheduler import FrozenOp
     # Reverse index: (so_no, item_code) -> order_key of the batch that covers it.
@@ -326,6 +349,16 @@ def _ppc_frozen(rows, orders, batch_by_key, masters):
             continue
         mid = r.get("machine")
         if not mid or mid not in masters.machines:   # unknown / OS / off-lane
+            continue
+        # A machine out of service for maintenance cannot hold a pin. Judge the
+        # break against the window this step was due to occupy, so a break months
+        # away never unfreezes today's work.
+        try:
+            _end = datetime.fromisoformat(r.get("prev_end") or r["prev_start"]).date()
+        except (KeyError, ValueError, TypeError):
+            _end = plan_start_date
+        if _machine_down_in_window(masters, mid, plan_start_date,
+                                   max(_end, plan_start_date)):
             continue
         try:
             if int(round(float(r.get("remaining_qty", 0)))) <= 0:
@@ -651,8 +684,10 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     # Sequence from the ROUTED orders only (unrouted batches were skipped above), preserving
     # the incoming priority order.
     sequence = [o.key for o in orders]
-    ppc_frozen = _ppc_frozen(frozen, orders, batch_by_key, new_masters) if frozen else None
-    sched = decode(orders, sequence, new_masters, _plan_config(config), frozen=ppc_frozen)
+    sched_cfg = _plan_config(config)
+    ppc_frozen = (_ppc_frozen(frozen, orders, batch_by_key, new_masters,
+                              sched_cfg.plan_start.date()) if frozen else None)
+    sched = decode(orders, sequence, new_masters, sched_cfg, frozen=ppc_frozen)
     return _entries_from_schedule(sched, batch_by_key)
 
 
@@ -677,7 +712,8 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     if not batches:
         return OptimizeResult()
     orders, batch_by_key = _orders_from_batches(batches, nm)
-    ppc_frozen = _ppc_frozen(frozen, orders, batch_by_key, nm) if frozen else None
+    ppc_frozen = (_ppc_frozen(frozen, orders, batch_by_key, nm,
+                              cfg.plan_start.date()) if frozen else None)
     # Report EVERY plan (on_eval), not just improvements, so the live counter climbs steadily.
     prog = (lambda evals, _sc: on_progress(evals, None)) if on_progress else None
     res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_eval=prog,
@@ -726,7 +762,8 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     if not batches:
         return {}, int(round(base.overlap * 100)), {}, 0
     orders, batch_by_key = _orders_from_batches(batches, new_masters)
-    ppc_frozen = _ppc_frozen(frozen, orders, batch_by_key, new_masters) if frozen else None
+    ppc_frozen = (_ppc_frozen(frozen, orders, batch_by_key, new_masters,
+                              base.plan_start.date()) if frozen else None)
 
     tr = tune_overlap(orders, new_masters, base, lo=0.5, hi=0.95, seeds=(int(seed),),
                       budget_per_eval=int(budget_per_eval), tol=0.01, coarse=5, on_step=on_step,

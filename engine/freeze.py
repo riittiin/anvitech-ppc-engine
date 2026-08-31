@@ -74,5 +74,9 @@ def compute_frozen_set(applied_rows, so_lines, good_by_step, masters) -> list[di
                 "process": op.name, "op_seq": op.seq,
                 "machine": row["machine"], "operator": row.get("operator", "") or "",
                 "remaining_qty": remaining, "prev_start": row["start"],
+                # When this step was due to FINISH in the applied plan. Read by
+                # new_engine._ppc_frozen to decide whether a maintenance break on the
+                # pinned machine overlaps this step's window (2026-08-31 spec).
+                "prev_end": row["end"],
             })
     return out
