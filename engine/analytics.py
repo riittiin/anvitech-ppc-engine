@@ -8,7 +8,7 @@ clock, so it matches exactly how the plan was scheduled.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 from .models import fmt_date
 from .operator_coverage import eligible_window
@@ -128,6 +128,29 @@ def _absent_days(operator, absences, calendar, win_start_d, win_end_d):
     return out
 
 
+def _down_days(machine_id, downtime, calendar, win_start_d, win_end_d):
+    """The SET of dates ``machine_id`` is out of service on a WORKING day inside the
+    window. Mirror of ``_absent_days`` for the other resource an operation needs.
+    Tolerates malformed rows (skip), exactly as absences do."""
+    from datetime import date as _date
+    out = set()
+    for d in downtime or []:
+        if d.get("machine") != machine_id:
+            continue
+        try:
+            f = _date.fromisoformat(d["from_date"]); t = _date.fromisoformat(d["to_date"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if t < f:
+            f, t = t, f
+        cur = max(f, win_start_d)
+        while cur <= min(t, win_end_d):
+            if calendar.is_working_day(cur):
+                out.add(cur)
+            cur += timedelta(days=1)
+    return out
+
+
 def _operator_available_hours(nominal, calendar, win_start, win_end, plan_start, config,
                               absent, rotate):
     """The operator's available hours in the window = sum over each working day (not
@@ -144,7 +167,8 @@ def _operator_available_hours(nominal, calendar, win_start, win_end, plan_start,
     return total
 
 
-def build_analytics(schedule, masters, config, batches=None, absences=None):
+def build_analytics(schedule, masters, config, batches=None, absences=None,
+                    downtime=None):
     """Utilization analytics for one plan. Returns a JSON-able dict with keys:
     ``window``, ``machines``, ``machine_groups``, ``operators``, ``processes``, ``headline``."""
     if not schedule:
@@ -162,14 +186,27 @@ def build_analytics(schedule, masters, config, batches=None, absences=None):
         an uncovered-but-used station would get a 0-capacity clock and show '-' ("no
         capacity") for a machine the plan actually uses (live 2026-07-24 report). When
         the gated clock is empty, fall back to the machine's PHYSICAL window so
-        utilization stays honest; a covered machine is unchanged (byte-identical)."""
-        mins = clock_for(mid).working_minutes_between(win_start, win_end)
+        utilization stays honest; a covered machine is unchanged (byte-identical).
+
+        Maintenance breaks are then subtracted: a machine that was in pieces was not
+        available, and reporting it as idle-but-available would be a lie about
+        capacity. The subtraction uses the machine's own windows ANCHORED on each down
+        day (`_windows_for_day`), which is exactly how the engine blocks them — a
+        night shift anchored on D runs to 05:00 on D+1 and is removed with D."""
+        clock = clock_for(mid)
+        mins = clock.working_minutes_between(win_start, win_end)
         if mins == 0:
             mac = masters.machines.get(mid)
             if mac is not None:
-                mins = WorkClock(masters.calendar, eligible_window(mac, config)) \
-                    .working_minutes_between(win_start, win_end)
-        return mins / 60.0
+                clock = WorkClock(masters.calendar, eligible_window(mac, config))
+                mins = clock.working_minutes_between(win_start, win_end)
+        for d in _down_days(mid, downtime, masters.calendar,
+                            win_start.date(), win_end.date()):
+            for ws, we in clock._windows_for_day(d):
+                s, e = max(ws, win_start), min(we, win_end)
+                if e > s:
+                    mins -= (e - s).total_seconds() / 60.0
+        return max(mins, 0.0) / 60.0
 
     def disp(mid):
         m = masters.machines.get(mid)
