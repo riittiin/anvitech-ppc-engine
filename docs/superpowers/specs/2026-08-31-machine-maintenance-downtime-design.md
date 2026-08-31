@@ -516,6 +516,7 @@ Modelled on `tests/test_absences_api.py`, including its
 | `tests/test_absences_engine.py:66-68` | 7-tuple → 8 | `parse_payload` contract change |
 | `tests/test_optimize_service.py:45` | 7-name unpack → 8 | same |
 | `tests/test_freeze_contest.py:26` | `parsed[-1]` → `parsed[-2]` | same |
+| `tests/test_operator_wiring.py:209` | `len(parsed) == 7` → `== 8` | same — a FOURTH arity assertion, found by a repo-wide caller grep during execution |
 
 ### Beyond unit tests
 

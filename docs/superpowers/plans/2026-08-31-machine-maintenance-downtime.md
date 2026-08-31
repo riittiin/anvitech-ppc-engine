@@ -871,7 +871,7 @@ git commit -m "feat(maintenance): release a frozen op when its machine is out of
 **Files:**
 - Modify: `engine/optimize_service.py` — `book_signature`, `build_payload`, `parse_payload`, `ContestSetup`, `prepare_contest`, `run_candidate`
 - Modify: `api/main.py:1607`, `:2021` (the two `absence_reserved` readers)
-- Modify (rebase): `tests/test_absences_engine.py:49,66-68,98,110-113`, `tests/test_optimize_service.py:45`, `tests/test_freeze_contest.py:26`
+- Modify (rebase): `tests/test_absences_engine.py:49,66-68,98,110-113`, `tests/test_optimize_service.py:45`, `tests/test_freeze_contest.py:26`, `tests/test_operator_wiring.py:209`
 - Test: `tests/test_machine_downtime_api.py` (create — the plumbing half)
 
 **Interfaces:**
@@ -884,7 +884,7 @@ git commit -m "feat(maintenance): release a frozen op when its machine is out of
   - `ContestSetup.unavailable_reserved` (renamed from `absence_reserved`) and `ContestSetup.machine_downtime`
 
 > ⚠ **Two deliberate contract changes, both listed in the spec.** `parse_payload`
-> becomes an 8-tuple (three assertions rebase), and `ContestSetup.absence_reserved`
+> becomes an 8-tuple (FOUR assertions rebase), and `ContestSetup.absence_reserved`
 > is renamed (nine references move). Neither is a fudge — the field now holds
 > machine downtime too, so the old name would lie.
 
@@ -1142,6 +1142,15 @@ s = s.replace(
     "    # (2026-08-31: the payload carries maintenance breaks too).\n"
     "    assert parsed[-2] == frozen\n"
     "    assert parsed[-1] == []")
+p.write_text(s)
+
+# A FOURTH arity assertion, found by a repo-wide caller grep rather than by the
+# plan's original file list. `parsed[5] == table` stays valid -- operator_table is
+# still the sixth element; only the length changes.
+p = pathlib.Path("tests/test_operator_wiring.py")
+s = p.read_text()
+assert s.count("assert len(parsed) == 7") == 1
+s = s.replace("assert len(parsed) == 7", "assert len(parsed) == 8")
 p.write_text(s)
 print("rebased")
 PY
