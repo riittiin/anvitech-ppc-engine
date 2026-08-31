@@ -291,22 +291,25 @@ def _orders_from_batches(batches, masters):
 
 
 def _machine_down_in_window(masters, mid, start_date, end_date) -> bool:
-    """True if machine ``mid`` has a maintenance day in [start_date, end_date]."""
+    """True if machine ``mid`` has a maintenance day in [start_date, end_date].
+
+    Iterates the (small) downtime SET, never the window -- a window built from a
+    malformed-but-parseable stored date (e.g. year 9999) would otherwise walk millions
+    of days per row, and a plan carries hundreds of frozen rows (review finding,
+    2026-08-31: O(len(days)) instead of O(window length))."""
     days = getattr(masters.calendar, "machine_downtime", None) or {}
     days = days.get(mid)
     if not days:
         return False
-    d = start_date
-    while d <= end_date:
-        if d in days:
-            return True
-        d += timedelta(days=1)
-    return False
+    return any(start_date <= d <= end_date for d in days)
 
 
 def _ppc_frozen(rows, orders, batch_by_key, masters, plan_start_date):
     """Map app-level frozen rows -> ppc FrozenOp[] for decode. Each row is
-    {so_no, item_code, process, op_seq, machine, operator, remaining_qty, prev_start-iso}.
+    {so_no, item_code, process, op_seq, machine, operator, remaining_qty, prev_start-iso,
+    prev_end-iso}. ``prev_end`` (added 2026-08-31, ``freeze.compute_frozen_set``) is when
+    the step was due to FINISH in the applied plan -- the maintenance-release check below
+    depends on it, falling back to ``prev_start`` for a row stored before this change.
     A row maps to the scheduled batch whose source SOs include ``so_no`` (batch_id ==
     ppc order_key[0]); its op_seq is taken from the row (or resolved via the routing by
     normalised process name). Rows that don't map to a scheduled order, have an unknown/
