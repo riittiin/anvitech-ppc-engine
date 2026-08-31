@@ -6,8 +6,6 @@ covered by construction.
 """
 from datetime import date, datetime
 
-import pytest
-
 from ppc_engine.config import PlanConfig
 from ppc_engine.domain.calendar import ShopCalendar
 from ppc_engine.domain.resources import Machine, MachineKind, Shift
@@ -92,3 +90,57 @@ def test_is_machine_available_still_respects_the_shop_calendar():
 def test_a_holiday_still_closes_every_machine():
     cal = ShopCalendar(holidays=frozenset({date(2026, 9, 4)}))
     assert cal.is_machine_available("CNC3", date(2026, 9, 4)) is False
+
+
+# --------------------------------------------------------------------------- #
+# The reserved-dict split: one dict carries both operator absences and machine
+# downtime, and the new engine sorts them apart by asking the machine master.
+# --------------------------------------------------------------------------- #
+def test_with_unavailability_splits_machines_from_operators():
+    from engine import new_engine
+    from ppc_engine.domain.masters import Masters
+    from ppc_engine.domain.resources import Operator, Role
+
+    masters = Masters(
+        machines={"CNC3": CNC},
+        operators=(Operator("Anil", Role.OPERATOR, frozenset({"CNC3"}), Shift.FIRST),),
+        calendar=ShopCalendar())
+    reserved = {
+        "CNC3": [(datetime(2026, 9, 5), datetime(2026, 9, 7))],   # a machine id
+        "Anil": [(datetime(2026, 9, 8), datetime(2026, 9, 9))],   # a person
+    }
+    out = new_engine._with_unavailability(masters, reserved)
+
+    assert out.calendar.machine_downtime == {
+        "CNC3": frozenset({date(2026, 9, 5), date(2026, 9, 6)})}
+    assert out.calendar.leaves == {"Anil": frozenset({date(2026, 9, 8)})}
+    # The cached masters object is never mutated.
+    assert masters.calendar.machine_downtime == {}
+    assert masters.calendar.leaves == {}
+
+
+def test_with_unavailability_is_a_no_op_for_an_empty_reserved():
+    from engine import new_engine
+    from ppc_engine.domain.masters import Masters
+    masters = Masters(machines={"CNC3": CNC}, calendar=ShopCalendar())
+    assert new_engine._with_unavailability(masters, None) is masters
+    assert new_engine._with_unavailability(masters, {}) is masters
+
+
+def test_an_unknown_key_is_treated_as_an_operator():
+    """A key that is neither a known machine nor a known operator falls to the
+    operator branch — today's behaviour for a stale absence, unchanged."""
+    from engine import new_engine
+    from ppc_engine.domain.masters import Masters
+    masters = Masters(machines={"CNC3": CNC}, calendar=ShopCalendar())
+    out = new_engine._with_unavailability(
+        masters, {"Ghost": [(datetime(2026, 9, 8), datetime(2026, 9, 9))]})
+    assert out.calendar.machine_downtime == {}
+    assert "Ghost" in out.calendar.leaves
+
+
+def test_the_scheduler_fingerprint_records_the_new_semantics():
+    """Real work moves when a break is on file, so saved optimizer ranks were
+    scored under different semantics and must be flagged stale."""
+    from engine import new_engine
+    assert new_engine.SCHEDULER_FINGERPRINT == "new-engine-v6-machine-downtime"

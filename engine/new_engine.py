@@ -140,31 +140,45 @@ def _friday_on_or_before(d: date) -> date:
     return d - timedelta(days=(d.weekday() - 4) % 7)
 
 
-def _with_absences(masters, reserved):
-    """Return a per-plan copy of the new-engine Masters with the app's operator absences
-    folded into the calendar's per-operator leave, so an absent operator is never assigned.
-    ``reserved`` is the old ``{operator -> [(start_dt, end_dt), ...]}`` from
-    optimize_service.absence_reservations. Cached masters are never mutated."""
+def _with_unavailability(masters, reserved):
+    """Return a per-plan copy of the new-engine Masters with everything that is
+    UNAVAILABLE folded into the calendar: operator absences become per-operator
+    leave, machine maintenance breaks become per-machine downtime.
+
+    ``reserved`` is the one ``{key -> [(start_dt, end_dt), ...]}`` dict the whole
+    app already threads through — ``optimize_service.absence_reservations`` keys it
+    by operator NAME and ``downtime_reservations`` keys it by MACHINE ID, merged by
+    ``merge_reservations``. A key is a machine when the machine master knows it;
+    anything else is a person (so a stale absence for a departed operator behaves
+    exactly as it does today). Cached masters are never mutated.
+    """
     from dataclasses import replace as _replace
     if not reserved:
         return masters
-    extra: dict[str, set] = {}
-    for op, intervals in reserved.items():
+    op_days: dict[str, set] = {}
+    mac_days: dict[str, set] = {}
+    for key, intervals in reserved.items():
         days: set = set()
         for start, end in intervals:
             d = start.date()
             while d < end.date():
                 days.add(d)
                 d += timedelta(days=1)
-        if days:
-            extra[op] = days
-    if not extra:
+        if not days:
+            continue
+        bucket = mac_days if key in masters.machines else op_days
+        bucket.setdefault(key, set()).update(days)
+    if not op_days and not mac_days:
         return masters
     cal = masters.calendar
-    merged = dict(getattr(cal, "leaves", {}) or {})
-    for op, days in extra.items():
-        merged[op] = frozenset(merged.get(op, frozenset()) | days)
-    return _replace(masters, calendar=_replace(cal, leaves=merged))
+    leaves = dict(getattr(cal, "leaves", {}) or {})
+    for op, days in op_days.items():
+        leaves[op] = frozenset(leaves.get(op, frozenset()) | days)
+    downtime = dict(getattr(cal, "machine_downtime", {}) or {})
+    for mid, days in mac_days.items():
+        downtime[mid] = frozenset(downtime.get(mid, frozenset()) | days)
+    return _replace(masters, calendar=_replace(
+        cal, leaves=leaves, machine_downtime=downtime))
 
 
 def _plan_config(config) -> PlanConfig:
@@ -609,7 +623,11 @@ def _entries_from_schedule(sched, batch_by_key):
 # v5 (2026-08-11) = a frozen op runs the WHOLE clubbed batch's remaining pieces, not
 # just the punched SO line's (`_ppc_frozen`) — real work moved, so ranks scored under
 # the old semantics are stale.
-SCHEDULER_FINGERPRINT = "new-engine-v5-frozen-batch-qty"
+# v6 (2026-08-31) = a machine can be marked out of service for maintenance, so the
+# engine no longer offers its windows on those days (`ppc_engine.worktime.iter_windows`)
+# and a frozen op pinned to a machine that is down during its window is released back
+# to normal scheduling (`_ppc_frozen`). Real work moves.
+SCHEDULER_FINGERPRINT = "new-engine-v6-machine-downtime"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
@@ -625,7 +643,7 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
         return []
     # Operators are APP-OWNED — overlay them onto the workbook masters (the sheet is a
     # fossil), so a delete/edit/rotation in Settings is what actually schedules.
-    new_masters = _with_absences(_apply_app_operators(
+    new_masters = _with_unavailability(_apply_app_operators(
         _new_masters(bool(getattr(config, "flexible_machines", False))), masters), reserved)
     orders, batch_by_key = _orders_from_batches(batches, new_masters)
     if not orders:
@@ -651,7 +669,7 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     from ppc_engine.optimize import optimize as new_optimize
 
     # App-owned operators (the search must optimize against the SAME crew the plan runs).
-    nm = _with_absences(_apply_app_operators(
+    nm = _with_unavailability(_apply_app_operators(
         _new_masters(bool(getattr(config, "flexible_machines", False))), masters), reserved)
     cfg = _plan_config(config)
     plan_start = getattr(config, "plan_start_date", None) or date.today()
@@ -699,7 +717,7 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     from ppc_engine.scheduler import decode
 
     # App-owned operators — same overlay as run()/optimize_sequence().
-    new_masters = _with_absences(_apply_app_operators(
+    new_masters = _with_unavailability(_apply_app_operators(
         _new_masters(bool(getattr(config, "flexible_machines", False))), masters), reserved)
     base = _plan_config(config)
     plan_start = getattr(config, "plan_start_date", None) or date.today()
