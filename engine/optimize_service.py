@@ -149,16 +149,16 @@ def reservations_from_schedule(schedule):
     return res
 
 
-def book_signature(so_lines, absences=None, frozen=None):
+def book_signature(so_lines, absences=None, frozen=None, downtimes=None):
     """Fingerprint of the BOOK state an optimization was computed on: which
     orders, how much work each still needs (headline + per-process), their
-    lanes/promises, the operator absences, and any frozen (in-progress)
-    operations. When production moves any of these, an applied optimization
-    is stale — the auto trigger compares this signature. (Masters + settings
-    are covered by api._inputs_signature.) ``frozen=None``/``[]`` produces the
-    SAME signature as before frozen existed — the third element is only
-    added to the blob when frozen is non-empty, so every pre-existing caller
-    is byte-identical.
+    lanes/promises, the operator absences, any machine maintenance breaks, and
+    any frozen (in-progress) operations. When production moves any of these,
+    an applied optimization is stale — the auto trigger compares this
+    signature. (Masters + settings are covered by api._inputs_signature.)
+    ``frozen=None``/``[]`` produces the SAME signature as before frozen
+    existed — the third element is only added to the blob when frozen is
+    non-empty, so every pre-existing caller is byte-identical.
 
     Note: adding ``delivery_date`` (2026-08-04) changed the hash for every book,
     so the first auto-optimize after that deploy runs one contest it would
@@ -180,6 +180,13 @@ def book_signature(so_lines, absences=None, frozen=None):
             (f.get("so_no", ""), f.get("item_code", ""), f.get("op_seq"),
              f.get("machine", ""), round(float(f.get("remaining_qty", 0) or 0), 3))
             for f in frozen))
+    if downtimes:
+        # Tagged, not a bare list: a downtime-only book must never be structurally
+        # confusable with a frozen-only one. Appended ONLY when non-empty, so every
+        # pre-existing caller's hash is byte-identical (same rule `frozen` follows).
+        parts.append({"machine_downtime": sorted(
+            (d.get("machine", ""), d.get("from_date", ""), d.get("to_date", ""))
+            for d in downtimes)})
     blob = json.dumps(parts, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 
@@ -190,13 +197,15 @@ def book_signature(so_lines, absences=None, frozen=None):
 def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
                   seed: int, candidates=CLOUD_OVERLAP_CANDIDATES,
                   budget_per_candidate=CLOUD_BUDGET_PER_CANDIDATE,
-                  absences=None, operator_table=None, frozen=None) -> dict:
+                  absences=None, operator_table=None, frozen=None,
+                  machine_downtime=None) -> dict:
     """Snapshot everything one contest depends on. JSON-safe. ``operator_table``
     (the app-owned {week_anchor, operators} dict) is carried verbatim — the
     worker applies the SAME as-of-effective-start rotation the API does, so a
     cloud run is byte-identical to a local one. ``frozen`` (a plain list of
     dict rows, same JSON-safe shape as ``absences``) carries the in-progress
-    operations that must not be rescheduled."""
+    operations that must not be rescheduled. ``machine_downtime`` (same shape
+    again) carries the maintenance breaks a contest must also honour."""
     return {
         "orders": [o.to_json() for o in orders.values()],
         "actuals": [a.to_json() for a in actuals],
@@ -209,15 +218,17 @@ def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
         "absences": list(absences or []),
         "operator_table": operator_table,
         "frozen": list(frozen or []),
+        "machine_downtime": list(machine_downtime or []),
     }
 
 
 def parse_payload(payload: dict):
     """Rebuild (orders, actuals, masters, config, absences, operator_table,
-    frozen) — the exact objects the API planned with, via the models' own
-    from_json and the normal loader. ``operator_table`` is the raw stored
-    dict (or None); the contest applies the as-of-effective-start rotation
-    onto masters.operators. ``frozen`` is the last element."""
+    frozen, machine_downtime) — the exact objects the API planned with, via
+    the models' own from_json and the normal loader. ``operator_table`` is
+    the raw stored dict (or None); the contest applies the as-of-effective-
+    start rotation onto masters.operators. ``machine_downtime`` is the last
+    element."""
     orders = {}
     for d in payload["orders"]:
         o = Order.from_json(d)
@@ -233,7 +244,10 @@ def parse_payload(payload: dict):
     absences = list(payload.get("absences") or [])
     operator_table = payload.get("operator_table")
     frozen = list(payload.get("frozen") or [])
-    return orders, actuals, masters, config, absences, operator_table, frozen
+    # Read with .get so a job dispatched before this key existed still parses.
+    machine_downtime = list(payload.get("machine_downtime") or [])
+    return (orders, actuals, masters, config, absences, operator_table, frozen,
+            machine_downtime)
 
 
 # --------------------------------------------------------------------------- #
@@ -246,9 +260,13 @@ class ContestSetup:
     search_config: Config = None                 # effective, expedite forced off
     # Operator absences: physical unavailability (not a promise reservation).
     # Lanes (open/committed) are pure status labels — they never reserve
-    # time. ``absence_reserved`` is the raw ``absence_reservations(absences)`` dict.
+    # time.
     absences: list = field(default_factory=list)
-    absence_reserved: object = None
+    # Everything that is UNAVAILABLE, in the one dict the whole app threads through:
+    # operator absences keyed by NAME, machine maintenance breaks keyed by MACHINE ID.
+    # Named for what it holds — it used to be `absence_reserved`, which stopped being
+    # true when machine downtime joined it (2026-08-31).
+    unavailable_reserved: object = None
     # The masters the contest must schedule against. Identical to the object
     # handed in UNLESS an operator table was supplied — then it is a shallow
     # copy carrying the app-owned operator table's shifts (rotation removed
@@ -258,21 +276,26 @@ class ContestSetup:
     # In-progress operations that must not be rescheduled (a plain list of
     # dict rows, same JSON-safe shape as ``absences``).
     frozen: list = field(default_factory=list)
+    # The raw maintenance rows, carried so reporting surfaces can reuse them.
+    machine_downtime: list = field(default_factory=list)
 
 
 def prepare_contest(orders: dict, actuals, masters, config: Config,
-                    absences=None, operator_table=None, frozen=None) -> ContestSetup:
+                    absences=None, operator_table=None, frozen=None,
+                    machine_downtime=None) -> ContestSetup:
     """Everything the sweep needs, from the raw book. Every active line competes
-    in ONE pool — lanes (open/committed) have no scheduling effect. Only
-    operator absences reserve time. Raises ValueError when there is nothing to
-    optimize (no active orders with work remaining).
+    in ONE pool — lanes (open/committed) have no scheduling effect. Operator
+    absences and machine maintenance breaks both reserve time. Raises
+    ValueError when there is nothing to optimize (no active orders with work
+    remaining).
 
     ``operator_table`` (the app-owned {week_anchor, operators} dict) overrides
     ``masters.operators`` with the shifts on file for each operator — every
     operator's shift holds every week until an admin changes it in Settings
     (automatic rotation was removed 2026-08-05) — applied onto a SHALLOW COPY
     so the caller's (cached) masters object is never mutated."""
-    ab = absence_reservations(absences)
+    ab = merge_reservations(absence_reservations(absences),
+                            downtime_reservations(machine_downtime))
     so_lines = orderbook.active_so_lines(orders, actuals, masters)
     eff = orderbook.effective_plan_start_date(actuals, config.plan_start_date,
                                               masters.calendar)
@@ -292,8 +315,10 @@ def prepare_contest(orders: dict, actuals, masters, config: Config,
     search_config = replace(config, expedite_window_min=0)
 
     return ContestSetup(target=target, config=config, search_config=search_config,
-                        absences=list(absences or []), absence_reserved=(ab or None),
-                        masters=masters, frozen=list(frozen or []))
+                        absences=list(absences or []),
+                        unavailable_reserved=(ab or None),
+                        masters=masters, frozen=list(frozen or []),
+                        machine_downtime=list(machine_downtime or []))
 
 
 # --------------------------------------------------------------------------- #
@@ -321,7 +346,8 @@ def run_candidate(payload: dict, overlap: int, flexible: bool = False, *, on_pro
     absences (physical unavailability). ``flexible`` selects the machine set
     (Allotted-only vs Allotted+Suggested — see ``Config.flexible_machines``).
     Returns a sweep-table row (+ ranks for the winner)."""
-    orders, actuals, masters, config, absences, operator_table, frozen = parse_payload(payload)
+    (orders, actuals, masters, config, absences, operator_table, frozen,
+     machine_downtime) = parse_payload(payload)
     # The new engine loads its masters from the workbook; the cloud worker has no store, so
     # feed it the payload's workbook bytes directly (harmless for classic/flow).
     if getattr(config, "scheduler", "classic") == "new":
@@ -329,11 +355,12 @@ def run_candidate(payload: dict, overlap: int, flexible: bool = False, *, on_pro
         _raw = payload.get("masters_xlsx_b64")
         new_engine.set_masters_bytes(base64.b64decode(_raw) if _raw else None)
     setup = prepare_contest(orders, actuals, masters, config, absences=absences,
-                            operator_table=operator_table, frozen=frozen)
+                            operator_table=operator_table, frozen=frozen,
+                            machine_downtime=machine_downtime)
     knob, _cands = optimizer.knob_for(setup.search_config)
     cfg = replace(setup.search_config, flexible_machines=bool(flexible), **{knob: int(overlap)})
     res = optimizer.optimize(setup.target, cfg, setup.masters,
-                             reserved=setup.absence_reserved,
+                             reserved=setup.unavailable_reserved,
                              frozen=setup.frozen,
                              budget_evals=int(payload["budget_per_candidate"]),
                              seed=int(payload["seed"]),

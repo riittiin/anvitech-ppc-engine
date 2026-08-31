@@ -46,7 +46,7 @@ def test_absent_operator_gets_no_work_in_window():
 
     setup = svc.prepare_contest(orders, [], masters, cfg, absences=absence)
     pr = PlanRun(so_lines=list(setup.target))
-    run_forward(pr, setup.config, masters, reserved=setup.absence_reserved)
+    run_forward(pr, setup.config, masters, reserved=setup.unavailable_reserved)
 
     assert any(e.operator == op for e in baseline.schedule if getattr(e, "operator", ""))
     # No entry that OVERLAPS the absence window may name the absent operator —
@@ -64,8 +64,8 @@ def test_payload_round_trips_absences():
                                 absences=absences)
     payload = json.loads(json.dumps(payload))
     result = svc.parse_payload(payload)
-    assert len(result) == 7
-    _, _, _, _, absences2, _, _ = result
+    assert len(result) == 8
+    _, _, _, _, absences2, _, _, _ = result
     assert absences2 == absences
 
 
@@ -95,7 +95,7 @@ def test_absence_reservations_shapes():
 def test_prepare_contest_reserves_only_absences():
     """Post-pivot (2026-07-15): the promise rule is gone — lanes have no
     scheduling effect, so ``reserved`` is EXACTLY the operator absences
-    (== ``absence_reserved``). A committed lane no longer adds a pass-1 wall."""
+    (== ``unavailable_reserved``). A committed lane no longer adds a pass-1 wall."""
     orders, cfg, masters = _book()
     committed_order = next(iter(orders.values()))
     committed_order.commitment = "committed"          # lane is now just a label
@@ -107,7 +107,7 @@ def test_prepare_contest_reserves_only_absences():
     setup = svc.prepare_contest(orders, [], masters, cfg, absences=absence)
 
     # Only physical unavailability reserves time — a committed lane adds no wall.
-    assert "Nobody-Else" in setup.absence_reserved
-    interval = setup.absence_reserved["Nobody-Else"][0]
+    assert "Nobody-Else" in setup.unavailable_reserved
+    interval = setup.unavailable_reserved["Nobody-Else"][0]
     assert interval == (datetime(2025, 3, 5), datetime(2025, 3, 7))
-    assert set(setup.absence_reserved) == {"Nobody-Else"}   # nothing else reserves time
+    assert set(setup.unavailable_reserved) == {"Nobody-Else"}   # nothing else reserves time

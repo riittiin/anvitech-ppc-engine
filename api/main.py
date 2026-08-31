@@ -1604,7 +1604,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                                           setup.masters, budget_evals=budget_evals,
                                           seed=_OPT_SEED, on_progress=on_progress,
                                           should_cancel=lambda: _OPTIMIZE.get("cancel"),
-                                          base_reserved=setup.absence_reserved,
+                                          base_reserved=setup.unavailable_reserved,
                                           frozen=setup.frozen)
             res = sw.result
             _finalize_optimize(job_id, base_config, real_baseline, label,
@@ -2018,7 +2018,7 @@ def _all_lines_schedule(setup, masters, ranks):
     all_lines = list(setup.target)
     ranked_config = replace(setup.config, expedite_window_min=0) if ranks else setup.config
     pr = PlanRun(so_lines=list(all_lines))
-    run_forward(pr, ranked_config, masters, reserved=setup.absence_reserved,
+    run_forward(pr, ranked_config, masters, reserved=setup.unavailable_reserved,
                 priority_rank=ranks, frozen=getattr(setup, "frozen", None) or None)
     return pr.schedule, all_lines
 

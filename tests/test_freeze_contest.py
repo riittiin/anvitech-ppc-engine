@@ -23,7 +23,10 @@ def test_payload_round_trips_frozen():
     payload = optimize_service.build_payload(orders, [], wb, cfg, seed=1, frozen=frozen)
     assert payload["frozen"] == frozen
     parsed = optimize_service.parse_payload(payload)
-    assert parsed[-1] == frozen  # frozen is the last element of the parse tuple
+    # machine_downtime is now the last element; frozen is second-to-last
+    # (2026-08-31: the payload carries maintenance breaks too).
+    assert parsed[-2] == frozen
+    assert parsed[-1] == []
 
 
 def test_book_signature_changes_with_frozen():
