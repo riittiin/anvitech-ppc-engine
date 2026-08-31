@@ -99,7 +99,6 @@ def absence_reservations(absences):
     return res
 
 
-
 def downtime_reservations(rows):
     """Machine maintenance rows -> MACHINE reservations, keyed by machine id: the
     machine is 'busy' from 00:00 of from_date to 00:00 of the day AFTER to_date
@@ -124,6 +123,7 @@ def downtime_reservations(rows):
         res.setdefault(d.get("machine", ""), []).append(interval)
     res.pop("", None)
     return res
+
 
 def merge_reservations(a, b):
     out = {k: list(v) for k, v in (a or {}).items()}
@@ -342,10 +342,12 @@ def run_candidate(payload: dict, overlap: int, flexible: bool = False, *, on_pro
                   should_cancel=None) -> dict:
     """One contender, fully self-contained (safe to run in a subprocess): it
     rebuilds the book from the payload and searches every active line as one
-    pool (lanes have no scheduling effect). ``reserved=`` is only the operator
-    absences (physical unavailability). ``flexible`` selects the machine set
-    (Allotted-only vs Allotted+Suggested — see ``Config.flexible_machines``).
-    Returns a sweep-table row (+ ranks for the winner)."""
+    pool (lanes have no scheduling effect). ``reserved=`` carries every kind
+    of physical unavailability: operator absences, keyed by operator name, and
+    machine maintenance breaks, keyed by machine id. ``flexible`` selects the
+    machine set (Allotted-only vs Allotted+Suggested — see
+    ``Config.flexible_machines``). Returns a sweep-table row (+ ranks for the
+    winner)."""
     (orders, actuals, masters, config, absences, operator_table, frozen,
      machine_downtime) = parse_payload(payload)
     # The new engine loads its masters from the workbook; the cloud worker has no store, so

@@ -568,6 +568,17 @@ Modelled on `tests/test_absences_api.py`, including its
   the same cost the 2026-08-11 v5 bump carried.
 * **A break entered for a *past* date is accepted** (like an absence) and simply has no
   effect on a plan that starts today. Not worth a validation error.
+* **Nothing caps how many breaks one machine can carry.** Each break is bounded at 366
+  days, but a machine can hold any number of them. `ppc_engine/worktime.py`'s window
+  walk is itself bounded at `_MAX_DAYS_LOOKAHEAD = 366 * 3` days — four stacked
+  366-day breaks from the plan start would exhaust that lookahead, and if the
+  down machine is the only option for an operation, `flow_scheduler._place_operation`
+  raises `RuntimeError` and `POST /run` returns 500. This needs deliberately absurd
+  input (over three years of continuous downtime entered by hand) and it is
+  recoverable: `GET`/`DELETE /machine-downtime` never plan, so the Settings panel
+  still works and the offending rows can simply be deleted. The 366-day cap's stated
+  rationale — several engine paths walk a break day by day — does not reach this
+  second failure mode, so it is recorded here rather than fixed.
 
 ---
 

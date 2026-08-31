@@ -2545,7 +2545,7 @@ def create_machine_downtime(req: MachineDowntimeRequest, request: Request):
     if (d_to - d_from).days > 366:
         raise HTTPException(
             status_code=400,
-            detail="a maintenance break cannot be longer than a year — if a machine "
+            detail="a maintenance break cannot be longer than a year. If a machine "
                    "is out for longer, remove it from the Machine master instead")
     machine = req.machine.strip()
     if machine not in _current_masters().machines:

@@ -2041,7 +2041,7 @@ function renderMachineDowntimeList(rows) {
   ul.innerHTML = rows.map((d) => `
     <li>
       <span>${escapeHtml(d.machine)}: ${isoToDdmmyyyy(d.from_date)} to ${isoToDdmmyyyy(d.to_date)}`
-      + `${d.reason ? " — " + escapeHtml(d.reason) : ""}</span>
+      + `${d.reason ? " (" + escapeHtml(d.reason) + ")" : ""}</span>
       <button type="button" class="ghost-btn downtime-remove admin-only" data-id="${escapeHtml(d.id)}">✕</button>
     </li>`).join("");
   ul.querySelectorAll(".downtime-remove").forEach((btn) => {
