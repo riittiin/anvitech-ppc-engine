@@ -190,3 +190,42 @@ def test_the_summary_reports_maintenance_as_its_own_cause():
     s = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m, down)["summary"][0]
     assert "Maintenance (days)" in s
     assert s["Maintenance (days)"] > 0
+
+
+def test_malformed_downtime_rows_are_skipped_and_a_reversed_range_still_applies():
+    """A malformed row (bad date), a machine-less row, and a reversed from/to range
+    must not crash the report. The malformed and machine-less rows must have ZERO
+    effect (report identical to no downtime at all); the reversed range must have the
+    SAME effect as its properly-ordered twin -- proving the from/to swap actually
+    runs, not merely that the row was silently dropped like the other two."""
+    m = _dr_masters()
+    e1 = _entry(datetime(2025, 3, 3, 8), datetime(2025, 3, 3, 10))
+    e2 = _entry(datetime(2025, 3, 7, 8), datetime(2025, 3, 7, 10))
+    malformed = {"machine": "CNC1", "from_date": "oops", "to_date": "2025-03-05"}
+    machineless = {"from_date": "2025-03-04", "to_date": "2025-03-04"}
+    baseline = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m, None)
+    only_noise = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m,
+                                    [malformed, machineless])
+    assert only_noise == baseline
+
+    reversed_range = {"machine": "CNC1", "from_date": "2025-03-05", "to_date": "2025-03-04"}
+    normal_range = {"machine": "CNC1", "from_date": "2025-03-04", "to_date": "2025-03-05"}
+    with_reversed = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m,
+                                       [malformed, machineless, reversed_range])
+    with_normal = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m,
+                                     [normal_range])
+    assert with_reversed == with_normal
+    assert with_reversed != baseline    # the reversed row genuinely did something
+
+
+def test_a_maintenance_break_on_a_machine_the_order_never_touches_has_no_effect():
+    """The order only ever runs on CNC1. A break on a different machine must change
+    nothing about this order's report -- down_by_machine.get(machine) must miss."""
+    m = _dr_masters()
+    e1 = _entry(datetime(2025, 3, 3, 8), datetime(2025, 3, 3, 10))
+    e2 = _entry(datetime(2025, 3, 7, 8), datetime(2025, 3, 7, 10))
+    baseline = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m, None)
+    elsewhere = build_delay_report([e1, e2], [_line()], [_batch()], DR_CFG, m,
+                                   [{"machine": "VMC9", "from_date": "2025-03-04",
+                                     "to_date": "2025-03-05"}])
+    assert elsewhere == baseline
