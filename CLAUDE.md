@@ -1,6 +1,95 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-11)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-31)
+>
+> - **AN OPERATION NEEDS A MACHINE, NOT JUST A PERSON — MACHINE MAINTENANCE
+>   DOWNTIME (2026-08-31, owner request).** An admin can now mark a CNC/VMC
+>   machine out of service for a date range (whole days, both shifts) — a
+>   planned service, a broken spindle, whatever keeps it off the floor. The plan,
+>   both reports, the optimizer and the cloud contest all route around it.
+>   **The one load-bearing decision: downtime is enforced in exactly ONE place —
+>   `ppc_engine.worktime.iter_windows`**, the single window source the main
+>   decode loop (`_lay_on_machine`) and both frozen-op paths (`_lay_frozen`,
+>   `_preplace_frozen`) already shared for calendar/shift availability. No new
+>   placement path was added; `_preplace_frozen` reaches the gate via
+>   `_lay_frozen`, so all three paths are covered by construction — independently
+>   confirmed in review.
+>   **The second decision, which the owner's own question forced** ("what
+>   happens to a job already sitting on the machine when it goes down for
+>   service?"): a frozen (part-done) operation whose pinned machine is out of
+>   service has its pin **RELEASED** — the routing's own machine options decide
+>   where it may go, and the objective decides whether moving beats waiting.
+>   That release is evaluated at **PLAN time** (`new_engine._ppc_frozen`), never
+>   when the frozen list is BUILT (`freeze.compute_frozen_set`) — the stored
+>   list is only rebuilt on "Done entering," so a build-time rule would answer
+>   the same question two different ways: "the job waits" on the immediate
+>   re-plan (built before the break existed) and "the job moved" only after the
+>   next Done — two answers to one question, a staleness hole nobody would have
+>   noticed until it happened. `compute_frozen_set` only gained a `prev_end`
+>   field per row; its signature is unchanged, so all four positional callers
+>   were untouched.
+>   **Consequences of a released pin, both physically correct:** the step pays
+>   its 90-minute setup again (the machine was stripped down), and takes whoever
+>   is qualified and on shift rather than the original operator. The quantity
+>   still comes from the clubbed batch (`Order.process_remaining`), never the
+>   punched SO line — the 2026-08-11 batch-quantity rule survives the release
+>   path, pinned by its own test.
+>   **`SCHEDULER_FINGERPRINT` is now `"new-engine-v6-machine-downtime"`** — real
+>   work moves, so a saved optimizer rank set was scored under different
+>   semantics and a stale one is now correctly discarded.
+>   **Contract changes:** `parse_payload` returns an **8-tuple**
+>   (`machine_downtime` last) — a repo-wide grep found FOUR callers asserting the
+>   old 7-tuple arity, not three; the fourth
+>   (`tests/test_operator_wiring.py:209`) was found only by the grep, never by
+>   running the plan. `ContestSetup.absence_reserved` is renamed
+>   `unavailable_reserved` because it now holds machine downtime too — the old
+>   name had stopped being true.
+>   **The picker is filtered, the engine is not.** `GET /machine-downtime`'s
+>   `machines` list is the Machine master filtered to machining stations via
+>   `ppc_engine.loaders.normalize.machine_kind_from_type` — verified against
+>   Test5 and Test9 it yields exactly `CNC1, CNC3, CNC4, CNC5, CNC6, CNC7, VMC1,
+>   VMC2, VMC3`. The `POST` validates machine EXISTENCE only, not kind, so
+>   widening the picker later is a one-line change, never an engine change. A
+>   break longer than 366 days is rejected at the API — several engine paths
+>   walk a break day by day and an absurd stored `to_date` would stall a plan;
+>   validate where input enters.
+>   **Measured — mutation testing, 9 mutations, each reverted individually: 8 of
+>   9 are load-bearing.** The ninth — the provisional-machine id-prefix fallback
+>   in the picker — fails NO test when removed and is genuine belt-and-braces:
+>   both real workbooks (Test5/8/9) currently register zero provisional
+>   machines, so the fallback is dead code today, kept only for the day a
+>   routing first references a CNC8 that hasn't yet been added to the Machine
+>   master. Said plainly, not dressed up as covered.
+>   **Measured — the owner's real books (Test5/8/9, 24 book-size runs + 3
+>   genuine in-progress runs, CNC3 down 3 days):** every invariant held on every
+>   run — no operation on a down machine, zero routing-order, qualification or
+>   batch-quantity violations, and a byte-identical plan whenever no break is on
+>   file. Late-days: **7 rows rise, 1 unchanged, 1 FALLS.** Test9 full book
+>   3217→3332, Test8 full 4651→4720, Test5 full 3921→3968. The falling row is
+>   Test5 at book size 10: 2753→2724, **−29 late-days when capacity was
+>   removed.** Per-order analysis found 22 orders moved (17 better by up to 8
+>   days, 5 worse by up to 4) — the greedy dispatcher's tie-breaks land on a
+>   different sequence once a machine disappears, and a different sequence can
+>   serve delivery dates better even with less total capacity. Same
+>   non-monotonicity the 2026-08-09 gap-backfill feature hit before it was
+>   reverted the same day (see that bullet below) — recorded here as evidenced,
+>   not proven.
+>   **Verified live through the HTTP API on Test9:** CNC3 had work on 08-09 and
+>   09-09; after marking it down 07-09→09-09 zero work remained on those dates,
+>   and deleting the break restored the plan exactly.
+>   **Deliberately NOT built:** partial-day breaks; an informational "machine is
+>   down" row in the data-gaps banner (that banner is for problems, not schedule
+>   status); a new nav tab; a new contest dimension; automatic re-optimize on
+>   entering a break (same as absences — the next "Done entering" re-sequences
+>   it).
+>   **Known limitation, pre-existing, not a regression:** the maintenance and
+>   operator machine pickers don't repopulate after an in-session upload — only
+>   after a page reload (`uploadExcel()` refreshes the plan but never re-calls
+>   `loadMachineDowntime()`/`loadOperators()`); the new panel simply mirrors
+>   behaviour the operator picker already had.
+>   **Rule: an operation needs a machine AND a person. Anything that can make a
+>   PERSON unavailable needs the mirror for the MACHINE — in the same dict,
+>   through the same gate.**
 >
 > - **THE DAILY ENTRY FORM NOW SHOWS WHAT A STEP STILL OWES, BEFORE THE PUNCH
 >   (2026-08-28, owner report).** `26-27SO149` (400) and `26-27SO150` (23) share an
@@ -565,7 +654,7 @@
 >   `sweep_optimize`). `optimizer.optimize` / `sweep_optimize` **delegate to `new_engine`** for
 >   `scheduler=="new"`. Progress is per-plan (`ppc_engine` `on_eval`).
 > - **Recent audit fixes (keep — regression tests exist):** unrouted orders are skipped not crashed;
->   operator absences are honoured (`new_engine._with_absences`); the optimizer's before/after is
+>   operator absences are honoured (`new_engine._with_unavailability`); the optimizer's before/after is
 >   reported at the applied overlap.
 > - **Piece-flow guard (2026-07-25, `docs/superpowers/specs/2026-07-25-piece-flow-no-premature-work-design.md`):**
 >   `ppc_engine/scheduler/flow_scheduler.py::decode` RE-LAYS a starved fast op later (batch-at-end)
@@ -633,8 +722,9 @@
 >   (https://anvitech-ppc.onrender.com). Env: `DEFAULT_SCHEDULER=new`, `GITHUB_DISPATCH_TOKEN`,
 >   `OPTIMIZE_WORKER_SECRET`, `MONGODB_URI`, `APP_USERNAME`/`APP_PASSWORD`. **Render auto-deploy is
 >   ON (owner confirmed 2026-08-05): pushing to `main` deploys to the live site.** Treat every
->   push as a production release. Tests: `pytest`
->   (508 passing).
+>   push as a production release. Tests: `python3.12 -m pytest` (967 passed, 2
+>   skipped). NOTE: the system `python3` is 3.14, where the installed openpyxl
+>   crashes on import (`numpy.short` was removed) — always use python3.12.
 
 Guidance for any Claude session working in this repository. Read this first.
 **Taking over a fresh?** Start with [`HANDOFF.md`](HANDOFF.md) — current deployed
@@ -743,11 +833,12 @@ Rule 7 actual ─▶ recorded vs (SO#, item code) (+ optional complete)┘
   loader will silently miss sheets.
 - **Counts:** ~18 machines in `Machine master` (sheet has ~24 rows incl. blanks);
   ~85 distinct item codes in `Item's process Master` (across ~500 rows).
-- **Machines not yet in the master (expected, not errors):** routings reference
-  resources like `CNC7`, `VMC3`, `CNC6` that are not yet in `Machine master` (which
-  today lists only CNC 1–5, VMC 1–2). **The master data is incomplete and will be
-  completed in the future** — treat any such reference as a *pending placeholder*,
-  not a failure. The loader must:
+- **A routing may reference a machine not yet in the master (expected, not an
+  error — the forgiving-master principle this section illustrates still stands,
+  even though the original example is stale):** as of Test5/Test9, `CNC7`,
+  `VMC3` and `CNC6` are now real `Machine master` rows — both real workbooks
+  today register **zero provisional machines**. The mechanism below remains live
+  for whatever the *next* unlisted machine turns out to be. The loader must:
   - register it as a **provisional machine** so allocation can still proceed,
   - record it in a non-blocking `PENDING_MASTER_DATA` report (informational), and
   - **never drop the row or stop the pipeline.**
