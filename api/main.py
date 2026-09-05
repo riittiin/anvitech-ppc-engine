@@ -1546,6 +1546,12 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
         # nothing in progress yet — manual deep-search stays fully unrestricted
         # then, which is correct.
         frozen = book_store.load_frozen_ops()
+        # The plan currently in force. Every candidate seeds its search with it, so a
+        # contest can never hand back something worse than what the floor is running
+        # (2026-09-05). None when nothing is applied yet -- a fresh import searches
+        # from the dispatch rules exactly as before.
+        _applied = book_store.load_plan_priority()
+        seed_ranks = (_applied or {}).get("ranks") or None
         try:
             setup = optimize_service.prepare_contest(orders, actuals, masters, config,
                                                      absences=absences,
@@ -1571,7 +1577,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                 orders, actuals, book_store.load_masters_bytes(), config,
                 seed=_OPT_SEED, candidates=_cands, budget_per_candidate=_bpc,
                 absences=absences, operator_table=operator_table, frozen=frozen,
-                machine_downtime=machine_downtime)
+                machine_downtime=machine_downtime, seed_ranks=seed_ranks)
             # Use contest_jobs (not sweep_contenders) for the true candidate
             # count: under the new engine the contest also sweeps the
             # machine-set dimension (Allotted-only vs Allotted+Suggested), so
@@ -1629,7 +1635,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                                           seed=_OPT_SEED, on_progress=on_progress,
                                           should_cancel=lambda: _OPTIMIZE.get("cancel"),
                                           base_reserved=setup.unavailable_reserved,
-                                          frozen=setup.frozen)
+                                          frozen=setup.frozen, seed_ranks=seed_ranks)
             res = sw.result
             _finalize_optimize(job_id, base_config, real_baseline, label,
                                winner_overlap=sw.overlap_percent,

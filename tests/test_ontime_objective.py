@@ -1,8 +1,15 @@
-"""Symmetric on-time objective, engine side (spec 2026-08-06).
+"""On-time objective, engine side (spec 2026-08-06, REVISED 2026-09-05).
 
-The owner's rule, in full: deliver on time; +/-4 days either side is fine; beyond
-that early and late are equally bad; and misses must be SPREAD across orders rather
-than concentrated on a few. Squaring the overage is what delivers the spreading.
+The owner's rule, in full: deliver on time; NO late day is free; finishing early is
+a quarter as bad as finishing late (early is an inventory cost, not a customer one);
+and misses must be SPREAD across orders rather than concentrated on a few.
+
+2026-09-05 replaced the original "+/-4 days either side is free, early == late" rule.
+Measured on five days of the live book: the 4-day band let the search move orders
+into it at zero cost and inverted the ranking against total late-days in 17.0% of
+pairs. Band 4 -> 0, early weighted 0.25, plus a flat 10 per late day so lateness is
+never free anywhere. The spreading requirement is UNCHANGED and still binding — it
+is what caps the linear weight at 18 (see ppc_engine/config.py).
 """
 from datetime import date, datetime, timedelta
 
@@ -35,37 +42,49 @@ def _breach_for(days_off):
     return optimizer.plan_metrics(sched, lines, PS)["ontime_breach"]
 
 
-def test_early_and_late_are_penalised_identically():
-    """The core of the owner's rule: 30 days early is exactly as bad as 30 late."""
-    assert _breach_for([30]) == _breach_for([-30])
-    assert _breach_for([30]) > 0
+def test_finishing_early_costs_a_quarter_of_finishing_late():
+    """Early is an inventory cost, not a customer one. 30 days early must cost far
+    less than 30 days late — but still something, so the plan is not pulled absurdly
+    early. late = 30^2 + 10*30 = 1200; early = (0.25*30)^2 = 56.25."""
+    assert _breach_for([30]) == 1200.0
+    assert _breach_for([-30]) == 56.25
+    assert _breach_for([-30]) < _breach_for([30])
+    assert _breach_for([-30]) > 0
 
 
-def test_inside_the_band_costs_nothing_either_direction():
-    for d in (0, 4, -4, 3, -1):
-        assert _breach_for([d]) == 0.0, f"{d} days off should be free"
+def test_no_late_day_is_free():
+    """The 2026-09-05 change. Every late day costs something, however small the miss.
+    This is what stopped the search parking 26 orders inside a free band."""
+    for d in (1, 2, 3, 4):
+        assert _breach_for([d]) > 0.0, f"{d} days late must not be free"
+    assert _breach_for([0]) == 0.0          # exactly on time is still free
 
 
-def test_one_day_past_the_band_costs_one():
-    """5 days off -> overage 1 -> 1 squared -> 1.0. Pins band=4 exactly."""
-    assert _breach_for([5]) == 1.0
-    assert _breach_for([-5]) == 1.0
+def test_one_day_late_costs_the_square_plus_the_linear_term():
+    """Pins band=0 and the linear weight: 1^2 + 10*1 = 11."""
+    assert _breach_for([1]) == 11.0
+    assert _breach_for([-1]) == 0.0625      # (0.25 * 1)^2, no linear term when early
 
 
-def test_squaring_spreads_the_misses():
-    """The owner's stated requirement: ten orders slightly off must beat one order
-    badly off. 30 days out -> (30-4)^2 = 676; ten at 6 days -> 10 * (6-4)^2 = 40."""
+def test_squaring_still_spreads_the_misses():
+    """UNCHANGED owner requirement, and the reason the linear weight is capped at 18:
+    ten orders 6 days out must still beat one order 30 days out.
+    spread = 10 * (36 + 60) = 960;  concentrated = 900 + 300 = 1200."""
     concentrated = _breach_for([30])
     spread = _breach_for([6] * 10)
-    assert concentrated == 676.0
-    assert spread == 40.0
+    assert spread == 960.0
+    assert concentrated == 1200.0
     assert spread < concentrated
 
 
-def test_cap_stops_one_hopeless_order_dominating():
-    """Overage is capped at 60 before squaring, so 100 days out scores the same as
-    64 days out. Without this a single doomed order swamps the whole plan."""
-    assert _breach_for([100]) == _breach_for([64]) == 60.0 ** 2
+def test_cap_limits_the_squared_term_but_not_the_linear_one():
+    """The 60-day cap still stops a doomed order swamping the SQUARED term, so 100
+    and 64 days late square to the same 3600. The linear term is deliberately NOT
+    capped — capping it would recreate exactly the free zone this change removed,
+    just at the far end instead of the near end."""
+    assert _breach_for([100]) == 60.0 ** 2 + 10 * 100
+    assert _breach_for([64]) == 60.0 ** 2 + 10 * 64
+    assert _breach_for([100]) > _breach_for([64])
 
 
 def test_score_uses_ontime_breach_and_a_makespan_tiebreak():

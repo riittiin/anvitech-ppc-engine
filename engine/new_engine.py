@@ -242,6 +242,30 @@ def _op_has_no_runnable_machine(op, op_qty, masters) -> bool:
                    for mid in op.machine_options)
 
 
+def _incumbent_sequence(batches, batch_by_key, seed_ranks, config, masters):
+    """The order keys of the plan CURRENTLY IN FORCE, for seeding the search.
+
+    Built the same way ``pipeline.run_forward`` builds the live plan — Rule 2, Rule 3,
+    then ``apply_priority_rank`` over the saved rank map — so the seed IS the incumbent
+    rather than an approximation of it. Returns None when there are no ranks, which
+    leaves the search byte-identical to before (2026-09-05).
+    """
+    if not seed_ranks:
+        return None
+    from engine.pipeline import apply_priority_rank
+    from engine.rules import rule2_sort_by_date, rule3_tiebreak_process_time
+    try:
+        ordered = rule3_tiebreak_process_time.run(
+            rule2_sort_by_date.run(list(batches), config=config, masters=masters),
+            config=config, masters=masters)
+        ordered, _n = apply_priority_rank(ordered, seed_ranks)
+    except Exception:  # noqa: BLE001 - a seed is an optimisation, never a reason to fail a contest
+        return None
+    seq = [(b.batch_id, b.item_code) for b in ordered
+           if (b.batch_id, b.item_code) in batch_by_key]
+    return seq or None
+
+
 def _orders_from_batches(batches, masters):
     """Old Batch[] -> new Order[], plus an order-key -> batch index for mapping back.
 
@@ -663,7 +687,7 @@ def _entries_from_schedule(sched, batch_by_key):
 # engine no longer offers its windows on those days (`ppc_engine.worktime.iter_windows`)
 # and a frozen op pinned to a machine that is down during its window is released back
 # to normal scheduling (`_ppc_frozen`). Real work moves.
-SCHEDULER_FINGERPRINT = "new-engine-v6-machine-downtime"
+SCHEDULER_FINGERPRINT = "new-engine-v7-ontime-linear-tardiness"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
@@ -695,7 +719,8 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
 
 
 def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=150,
-                      seed=42, on_progress=None, should_cancel=None, frozen=None):
+                      seed=42, on_progress=None, should_cancel=None, frozen=None,
+                      seed_ranks=None):
     """Sequence-only search for the NEW engine at the config's overlap. The cloud contest
     sweeps overlaps EXTERNALLY (one candidate per overlap) and calls this per candidate, so
     across candidates it becomes the full overlap × sequence contest — just distributed and
@@ -720,7 +745,9 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     # Report EVERY plan (on_eval), not just improvements, so the live counter climbs steadily.
     prog = (lambda evals, _sc: on_progress(evals, None)) if on_progress else None
     res = new_optimize(orders, nm, cfg, budget=int(budget_evals), seed=int(seed), on_eval=prog,
-                       frozen=ppc_frozen, should_cancel=should_cancel)
+                       frozen=ppc_frozen, should_cancel=should_cancel,
+                       seed_sequence=_incumbent_sequence(batches, batch_by_key, seed_ranks,
+                                                         config, masters))
     best_batches = [batch_by_key[k] for k in res.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
     # Measure the winner against the SAME crew + reservations the plan actually runs.
@@ -736,7 +763,7 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
                           improved=True, cancelled=res.cancelled)
 
 
-def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=None, reserved=None, frozen=None, should_cancel=None):
+def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=None, reserved=None, frozen=None, should_cancel=None, seed_ranks=None):
     """The CONTINUOUS overlap optimizer + sequence search (the 'atom optimizer').
 
     Golden-section search over the overlap value: it treats "best plan score achievable at
@@ -770,7 +797,9 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
 
     tr = tune_overlap(orders, new_masters, base, lo=0.5, hi=0.95, seeds=(int(seed),),
                       budget_per_eval=int(budget_per_eval), tol=0.01, coarse=5, on_step=on_step,
-                      frozen=ppc_frozen, should_cancel=should_cancel)
+                      frozen=ppc_frozen, should_cancel=should_cancel,
+                      seed_sequence=_incumbent_sequence(batches, batch_by_key, seed_ranks,
+                                                        config, masters))
 
     best_batches = [batch_by_key[k] for k in tr.best_sequence if k in batch_by_key]
     ranks = ranks_for(best_batches)
@@ -787,7 +816,8 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
 
 
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
-                   on_progress=None, should_cancel=None, base_reserved=None, frozen=None, **kw):
+                   on_progress=None, should_cancel=None, base_reserved=None, frozen=None,
+                   seed_ranks=None, **kw):
     """Local fallback for 'Start deep search'. Runs the golden-section tune once per
     machine-set (Allotted-only, then Allotted+Suggested) and keeps the better plan by
     score — the third Optimize dimension. Returns the old SweepResult shape."""
@@ -807,7 +837,8 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
         ranks, overlap_pct, metrics, plans = tune(so_lines, cfg, masters,
                                                   budget_per_eval=per, seed=seed, on_step=_step,
                                                   reserved=base_reserved, frozen=frozen,
-                                                  should_cancel=should_cancel)
+                                                  should_cancel=should_cancel,
+                                                  seed_ranks=seed_ranks)
         offset["n"] += plans
         if ranks and (best is None or score(metrics) < score(best[2])):
             best = (ranks, overlap_pct, metrics, plans, flex)

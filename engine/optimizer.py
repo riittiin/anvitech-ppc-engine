@@ -52,9 +52,14 @@ MAKESPAN_WEIGHT = 0.1           # == ppc_engine makespan_weight
 # pull toward the exact date; anywhere inside +/-4 days is equally on time.
 #
 # Must stay numerically EQUAL to ppc_engine/config.py ontime_* .
-ONTIME_BAND_DAYS = 4.0          # == ppc_engine ontime_band_days
+# 2026-09-05: band 4.0 -> 0.0 plus an early discount and a linear late term. See the
+# matching note in ppc_engine/config.py for the measurement (105 optimizer runs over
+# five days of the live book; summed best-of-3 late-days OLD 773 -> 690 at weight 20).
+ONTIME_BAND_DAYS = 0.0          # == ppc_engine ontime_band_days
 ONTIME_CAP_DAYS = 60.0          # == ppc_engine ontime_cap_days
 ONTIME_WEIGHT = 1.0             # == ppc_engine ontime_weight
+ONTIME_EARLY_WEIGHT = 0.25      # == ppc_engine ontime_early_weight
+ONTIME_LATE_LINEAR_WEIGHT = 10.0  # == ppc_engine ontime_late_linear_weight (cap 18: see ppc config)
 
 # REPORTING ONLY since 2026-08-06. `score()` no longer reads slip_severity — the
 # on-time term above subsumes it (same squared shape, tolerance 2 -> 4, now
@@ -207,15 +212,21 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
                 over = slip - promise_slack_days
                 if over > 0:
                     committed_promise_breach += float(over * over)
-    # The on-time objective (spec 2026-08-06). `gaps` is SIGNED — negative is early —
-    # and abs() is what makes early and late count the same, which is the owner's rule.
+    # The on-time objective. `gaps` is SIGNED — negative is early. Early is discounted
+    # to ONTIME_EARLY_WEIGHT (an inventory cost, not a customer one) and every late DAY
+    # also carries a flat ONTIME_LATE_LINEAR_WEIGHT so it is never free. This is the
+    # exact mirror of ppc_engine/objective/objective.py::_ontime_breach — the two must
+    # stay identical (tests/test_scorer_mirror.py).
     ontime_breach = 0.0
     for g in gaps:
-        over = abs(g) - ONTIME_BAND_DAYS
+        d = abs(g) if g > 0 else abs(g) * ONTIME_EARLY_WEIGHT
+        over = d - ONTIME_BAND_DAYS
         if over > 0:
             if over > ONTIME_CAP_DAYS:
                 over = ONTIME_CAP_DAYS
             ontime_breach += float(over * over)
+        if g > 0:
+            ontime_breach += float(ONTIME_LATE_LINEAR_WEIGHT * g)
     result = {
         "makespan_days": makespan_days(schedule, plan_start),
         "late_orders": len(late),
@@ -226,7 +237,11 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
         "committed_promise_breach": round(committed_promise_breach, 2),
         "max_committed_slip": int(max_committed_slip),
         "orders": len(gaps),
-        "ontime_breach": round(ontime_breach, 2),
+        # 4dp, not 2: the early discount makes breaches multiples of 1/16, and 2dp
+        # rounding made this copy differ from ppc_engine's unrounded one in the third
+        # decimal (13131.06 vs 13131.0625). 4dp is EXACT for every reachable value, so
+        # tests/test_scorer_mirror.py stays a strict equality rather than a tolerance.
+        "ontime_breach": round(ontime_breach, 4),
     }
     if with_distribution:
         per = sorted(((k[0], k[1], (expected[k] - due[k]).days)
@@ -269,7 +284,8 @@ def ranks_for(seq) -> dict:
 
 
 def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
-             seed=42, on_progress=None, should_cancel=None, frozen=None) -> OptimizeResult:
+             seed=42, on_progress=None, should_cancel=None, frozen=None,
+             seed_ranks=None) -> OptimizeResult:
     """Search for a better batch sequence for THIS book (rolling: call it on
     whatever the order book holds today; the result is disposable and re-computable).
 
@@ -288,7 +304,8 @@ def optimize(so_lines, config, masters, *, reserved=None, budget_evals=150,
         from engine import new_engine
         return new_engine.optimize_sequence(
             so_lines, config, masters, reserved=reserved, budget_evals=budget_evals,
-            seed=seed, on_progress=on_progress, should_cancel=should_cancel, frozen=frozen)
+            seed=seed, on_progress=on_progress, should_cancel=should_cancel, frozen=frozen,
+            seed_ranks=seed_ranks)
     config.validate()
 
     batches = rule1_consolidate.run(list(so_lines), config=config, masters=masters)
@@ -480,7 +497,8 @@ class SweepResult:
 
 def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
                    on_progress=None, should_cancel=None,
-                   candidates=OVERLAP_CANDIDATES, base_reserved=None, frozen=None) -> SweepResult:
+                   candidates=OVERLAP_CANDIDATES, base_reserved=None, frozen=None,
+                   seed_ranks=None) -> SweepResult:
     """Search batch sequence AND overlap %. ``budget_evals`` is the TOTAL"""
     # The new engine owns its own search + objective; delegate there when it is the
     # selected scheduler (see engine/new_engine.py). The old sweep below runs only for the
@@ -489,7 +507,8 @@ def sweep_optimize(so_lines, config, masters, *, budget_evals=150, seed=42,
         from engine import new_engine
         return new_engine.sweep_optimize(
             so_lines, config, masters, budget_evals=budget_evals, seed=seed,
-            on_progress=on_progress, should_cancel=should_cancel, base_reserved=base_reserved, frozen=frozen)
+            on_progress=on_progress, should_cancel=should_cancel, base_reserved=base_reserved,
+            frozen=frozen, seed_ranks=seed_ranks)
     return _sweep_optimize_classic(
         so_lines, config, masters, budget_evals=budget_evals, seed=seed,
         on_progress=on_progress, should_cancel=should_cancel,

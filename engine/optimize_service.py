@@ -198,7 +198,7 @@ def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
                   seed: int, candidates=CLOUD_OVERLAP_CANDIDATES,
                   budget_per_candidate=CLOUD_BUDGET_PER_CANDIDATE,
                   absences=None, operator_table=None, frozen=None,
-                  machine_downtime=None) -> dict:
+                  machine_downtime=None, seed_ranks=None) -> dict:
     """Snapshot everything one contest depends on. JSON-safe. ``operator_table``
     (the app-owned {week_anchor, operators} dict) is carried verbatim — the
     worker applies the SAME as-of-effective-start rotation the API does, so a
@@ -219,6 +219,11 @@ def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
         "operator_table": operator_table,
         "frozen": list(frozen or []),
         "machine_downtime": list(machine_downtime or []),
+        # The plan CURRENTLY IN FORCE, as a rank map, so every cloud candidate seeds its
+        # search with it (2026-09-05). Deliberately NOT part of parse_payload's return
+        # tuple: that is an 8-tuple whose arity four callers assert, and widening it has
+        # broken them before (2026-08-31). run_candidate reads this key directly.
+        "seed_ranks": dict(seed_ranks or {}),
     }
 
 
@@ -366,7 +371,9 @@ def run_candidate(payload: dict, overlap: int, flexible: bool = False, *, on_pro
                              frozen=setup.frozen,
                              budget_evals=int(payload["budget_per_candidate"]),
                              seed=int(payload["seed"]),
-                             on_progress=on_progress, should_cancel=should_cancel)
+                             on_progress=on_progress, should_cancel=should_cancel,
+                             # .get: a job dispatched before this key existed still runs.
+                             seed_ranks=payload.get("seed_ranks") or None)
     return {"overlap": int(overlap), "flexible": bool(flexible), "eligible": True,
             "best": res.best, "evals": res.evals, "ranks": res.ranks, "cancelled": res.cancelled}
 

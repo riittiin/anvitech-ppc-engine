@@ -141,6 +141,12 @@ def test_an_unknown_key_is_treated_as_an_operator():
 
 def test_the_scheduler_fingerprint_records_the_new_semantics():
     """Real work moves when a break is on file, so saved optimizer ranks were
-    scored under different semantics and must be flagged stale."""
+    scored under different semantics and must be flagged stale.
+
+    The exact string is pinned on purpose: any change to plan-affecting semantics
+    must bump it, and breaking this test is how a future change is forced to notice.
+    Last bumped 2026-09-05 for the revised on-time objective (band 4 -> 0, early
+    discounted, linear tardiness term) — ranks saved under the old objective were
+    chosen by a different rule and must be re-searched."""
     from engine import new_engine
-    assert new_engine.SCHEDULER_FINGERPRINT == "new-engine-v6-machine-downtime"
+    assert new_engine.SCHEDULER_FINGERPRINT == "new-engine-v7-ontime-linear-tardiness"

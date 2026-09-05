@@ -180,6 +180,7 @@ def tune_overlap(
     on_step: Callable[[int, float], None] | None = None,
     frozen: list | None = None,
     should_cancel=None,
+    seed_sequence=None,
 ) -> TuneResult:
     """Smart 1-D optimizer for the overlap value — homes in on the true optimum.
 
@@ -224,7 +225,7 @@ def tune_overlap(
 
             res = optimize(orders, masters, replace(config, overlap=x),
                            budget=budget_per_eval, seed=sd, on_eval=_step, frozen=frozen,
-                           should_cancel=should_cancel)
+                           should_cancel=should_cancel, seed_sequence=seed_sequence)
             total_evals += res.evaluations
             if best is None or res.best_score < best.best_score:
                 best = res

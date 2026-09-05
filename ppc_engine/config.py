@@ -92,9 +92,31 @@ class PlanConfig:
     # Squaring spreads misses across orders instead of concentrating them, which is
     # the owner's stated requirement. The band is FLAT — no pull toward the exact
     # date. Must equal engine/optimizer.py ONTIME_* .
-    ontime_band_days: float = 4.0
+    # 2026-09-05: the band went 4.0 -> 0.0 and two terms were added. Measured across
+    # five days of the live book (105 optimizer runs): the old rule ranked a plan with
+    # MORE late-days above one with fewer in 17.0% of pairs, and removing the band
+    # corrected 10 of the 10 largest inversions. Summed best-of-3 late-days across the
+    # five books: OLD 773, linear-weight 0 -> 749, 5 -> 738, 10 -> 700, 20 -> 690,
+    # 40 -> 689. Three quarters of the gain comes from the linear term, not the band.
+    #
+    # The weight is 10, NOT the 20 that scored best, because of the spreading rule this
+    # objective exists to honour: "ten orders 6 days out must beat one order 30 days out".
+    #   spread  10 x (36 + 6w) = 360 + 60w      concentrated  900 + 30w
+    # Spread only wins while w < 18, so w=20 would INVERT the rule and let the search
+    # dump all the lateness on one customer. w=10 keeps it (960 vs 1200) and costs only
+    # 10 late-days of the ~700 total (1.4%). Do not raise this above 18.
+    ontime_band_days: float = 0.0
     ontime_cap_days: float = 60.0
     ontime_weight: float = 1.0
+    # An order that finishes EARLY costs a quarter of what the same miss costs late.
+    # Early is an inventory cost, not a customer one. Measured as the single biggest
+    # lever on ranking inversions -- bigger than the band itself.
+    ontime_early_weight: float = 0.25
+    # Every late DAY costs this much on top of the square. The squared term alone is
+    # almost flat near zero (1 day late = 1, 2 days = 4), so the search could spread
+    # lateness thinly across the book for free. This prices every late day the same
+    # wherever it sits. Must equal engine/optimizer.py ONTIME_LATE_LINEAR_WEIGHT.
+    ontime_late_linear_weight: float = 10.0
 
     # Reputation guard. RETAINED BUT UNUSED since 2026-08-06 (see the fairness_weight/
     # makespan_weight note above) — the on-time term now subsumes it, `score()` no

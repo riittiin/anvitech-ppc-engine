@@ -152,6 +152,7 @@ def optimize(
     on_eval=None,
     frozen=None,
     should_cancel=None,
+    seed_sequence=None,
 ) -> OptimizeResult:
     """Search for the order sequence that minimises the objective.
 
@@ -174,7 +175,26 @@ def optimize(
     _stop = should_cancel or (lambda: False)
 
     # Seed with the dispatch rules; the best of them is our starting incumbent.
-    seeds: list[Sequence] = [
+    #
+    # `seed_sequence` (2026-09-05) is THE PLAN CURRENTLY IN FORCE, and it goes first.
+    # Without it the search rebuilds a plan from four textbook rules and can hand back
+    # something worse than what the floor is already running -- measured on the live
+    # book: 21 of 21 runs came back worse than the applied plan (255 late-days) because
+    # the applied plan scored 4.56 while the best dispatch-rule seed scored 184.46, and
+    # 200 evaluations is not enough to climb back. Seeding it makes the search
+    # monotonic: the worst outcome is that it returns the plan you already had.
+    #
+    # It is accepted ONLY as a complete permutation of the order keys -- a partial or
+    # stale rank map (orders completed or added since the ranks were saved) is skipped
+    # rather than repaired, because a half-applied sequence is not the incumbent and a
+    # live contest must never fail on it. None/invalid = byte-identical to before.
+    seeds: list[Sequence] = []
+    if seed_sequence:
+        keys = {o.key for o in orders}
+        cand = [k for k in seed_sequence if k in keys]
+        if len(cand) == len(keys) and len(set(cand)) == len(cand):
+            seeds.append(cand)
+    seeds += [
         edd_sequence(orders),
         spt_sequence(orders, masters, config),
         slack_sequence(orders, masters, config),

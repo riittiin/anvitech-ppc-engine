@@ -52,13 +52,20 @@ def _ontime_breach(metrics: PlanMetrics, config: PlanConfig) -> float:
     """
     band = config.ontime_band_days
     cap = config.ontime_cap_days
+    early_w = config.ontime_early_weight
+    lin_w = config.ontime_late_linear_weight
     total = 0.0
     for late in metrics.lateness_by_order.values():
-        over = abs(late) - band
+        # Early misses are discounted: finishing early costs inventory, not a customer.
+        d = abs(late) if late > 0 else abs(late) * early_w
+        over = d - band
         if over > 0:
             if over > cap:
                 over = cap
             total += over * over
+        # Linear term, LATE only: a late day is never free, wherever it sits.
+        if late > 0:
+            total += lin_w * late
     return total
 
 
