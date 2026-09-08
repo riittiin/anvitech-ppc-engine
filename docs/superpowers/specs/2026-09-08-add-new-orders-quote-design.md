@@ -142,13 +142,19 @@ people are already partly occupied.
 
 **Occupancy enters through the gates that already exist:**
 
-* **Machines** — through `ppc_engine.worktime.iter_windows`, the single window source
-  the main decode loop and both frozen-op paths already share, and the same gate the
-  2026-08-31 maintenance feature used. No new placement path is created, so all three
-  paths are covered by construction.
-* **Operators** — through `StaffingBoard`'s existing per-operator busy-interval list.
-  `free_during` and `candidate_operator` already read it; seeding it changes no logic,
-  so qualification, shift and scarce-first picking are untouched.
+* **Machines** — through `_place_operation`, the single function that decides where an
+  in-house operation goes. It is the only placement path a *new* order can ever reach:
+  the other one, `_lay_frozen`, exists solely for in-progress work, and stage 2 has
+  none by construction (a brand-new order cannot be half-finished). Stage 2 asserts
+  that its frozen set is empty rather than assuming it.
+* **Operators** — through `StaffingBoard`'s existing per-operator busy-interval list
+  and its per-(machine, shift) assignment record. `free_during`, `candidate_operator`
+  and `operator_for` already read both; seeding them changes no logic, so
+  qualification, shift, scarce-first picking **and Rule 1's one-operator-per-machine-
+  per-shift stability** all carry across the two stages untouched. Seeding the
+  assignment record is what makes stage 2 prefer the person already manning that
+  machine that shift, falling back to another qualified person exactly as the engine
+  does today when the first is busy (the documented short-job exception).
 
 ### The gap rule
 
@@ -159,9 +165,21 @@ enough, and in the worst case runs after CNC3's last existing job. A job is **ne
 split across two chunks, so it never pays the setup twice. Running through a night or
 across the weekly off is not a split.
 
-Mechanically: the placement helpers gain a stop line ("do not run past the next
-existing job") and the placement step tries each free chunk in turn. Both are inert
-when there is no occupancy, which is every existing path.
+Mechanically, and deliberately as small as it can be:
+
+* The machine's occupied intervals are merged into **free runs** — the stretches
+  between existing jobs, the last one unbounded.
+* `_lay_on_machine` gains an optional **stop line**: lay the work, but never past this
+  moment; if it does not fit, report that rather than overrun.
+* `_place_operation` tries each free run in turn, from the earliest one that could
+  hold the work.
+
+Because every attempt is bounded by the run it is in, no segment can ever land on
+occupied time — so **`ppc_engine.worktime.iter_windows` is not touched at all**. That
+matters: it is the single window source the whole engine shares, and the less it moves
+the better. The stop line is `None` and the free-run list is empty on every existing
+path, which is what makes the byte-identical guarantee in §8 provable rather than
+hopeful.
 
 ### The quick search
 
@@ -246,23 +264,24 @@ equal by definition.
   only in CSS (2026-08-09 rule: role gating belongs on the control, and JS-built markup
   needs its own check).
 
-### Engine changes — four, each inert by default
+### Engine changes — three, each inert by default
 
 1. **`ppc_engine/domain/calendar.py`** — `ShopCalendar` gains two optional interval
-   maps: machine-busy and operator-busy. Empty by default, so every existing plan is
-   byte-identical.
-2. **`ppc_engine/worktime.py::iter_windows`** — subtracts the machine's busy intervals
-   from the windows it yields. The one gate (see §4).
-3. **`ppc_engine/scheduler/staffing.py`** — `StaffingBoard` seeds its existing
-   per-operator interval list from the calendar. No logic change.
-4. **`ppc_engine/scheduler/flow_scheduler.py`** — `_lay_on_machine` / `_lay_frozen`
-   gain an optional stop line; `_place_operation` walks free chunks when a machine has
-   busy intervals; `decode` seeds the staffing board. All `None`/empty on every
-   existing path.
+   maps: machine-busy and operator-busy, both `{id: ((start, end), ...)}`. Empty by
+   default, so every existing plan is byte-identical. Occupancy lives here because the
+   calendar is already the one place that says when a resource is unavailable —
+   holidays, operator leave, machine maintenance — and it already reaches every
+   function that needs it without a new parameter.
+2. **`ppc_engine/scheduler/staffing.py`** — `StaffingBoard` accepts pre-existing
+   bookings and assignments and seeds them. No logic change (see §4).
+3. **`ppc_engine/scheduler/flow_scheduler.py`** — `_lay_on_machine` gains an optional
+   stop line; `_place_operation` walks free runs when a machine has occupied
+   intervals; `decode` seeds the staffing board from the calendar. All `None`/empty on
+   every existing path. **`iter_windows` and `_lay_frozen` are not touched.**
 
-`engine/new_engine.py` gains the translation from a finished plan's entries to that
-occupancy picture, and passes it through `_with_unavailability` the way absences and
-maintenance already flow.
+`engine/new_engine.py` gains the translation from a finished plan's entries into that
+occupancy picture, alongside `_with_unavailability` where absences and maintenance
+already fold into the calendar.
 
 ### App changes
 
@@ -342,10 +361,10 @@ bug, and the byte-identical check below is designed to catch it.
 
 ## 9. Risks
 
-**The riskiest edits are `iter_windows` and the placement step** — the most
-load-bearing code in the application. Mitigation: every new input is optional and empty
-on every existing path, and acceptance criterion 1 (byte-identical on three real books)
-is the first gate, not the last.
+**The riskiest edit is the placement step** (`_place_operation` / `_lay_on_machine`) —
+the most load-bearing code in the application. Mitigation: every new input is optional
+and empty on every existing path, `iter_windows` is left alone entirely, and acceptance
+criterion 1 (byte-identical on three real books) is the first gate, not the last.
 
 **Second risk: the two-stage integration in `_plan`.** Every downstream surface must
 read one merged schedule. The cross-surface audit (criterion 9) is what proves it.
