@@ -487,7 +487,7 @@ def validate_new_order_line(so_no, item_code, qty, active, completed, masters):
         for order in book.values():
             if (order.so_no.strip().lower() == so.lower()
                     and order.item_code.strip().lower() == item.lower()):
-                return (f"{order.so_no} / {order.item_code} is already in the book — "
+                return (f"{order.so_no} / {order.item_code} is already in the book: "
                         f"{int(order.ordered_qty)} pieces, delivery "
                         f"{order.delivery_date.strftime('%d-%b')}.")
     return None

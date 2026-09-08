@@ -32,6 +32,18 @@ class RuleError(Exception):
         super().__init__(f"[{rule}] record {record_id}: {message}")
 
 
+class OccupancyRequiresNewEngineError(ValueError):
+    """Raised when ``run_forward`` is called with ``occupancy`` set on a scheduler
+    other than the new engine (2026-09-08, Add New Orders quote).
+
+    Occupancy (an earlier planning stage's committed placements) only reaches
+    ``engine/new_engine.py``. ``engine/rules/rule6_allocate.run`` (classic) and
+    ``engine/flow_scheduler.py`` (flow) both declare ``**kw`` and would silently
+    swallow it, so a two-stage quote would appear to protect the existing plan
+    while doing nothing at all. This is the ONE place that gate lives; do not add
+    a second check in a caller."""
+
+
 # --------------------------------------------------------------------------- #
 # Trace serialization
 # --------------------------------------------------------------------------- #
@@ -217,6 +229,15 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
     New Orders quote's stage-2 plan is the only caller today).
     """
     config.validate()
+    if occupancy and getattr(config, "scheduler", "classic") != "new":
+        raise OccupancyRequiresNewEngineError(
+            f"occupancy was passed to run_forward, but config.scheduler is "
+            f"{config.scheduler!r}, not 'new'. Only the new engine honours "
+            f"occupancy; the {config.scheduler!r} scheduler accepts it and "
+            f"silently ignores it, so a caller relying on it would think an "
+            f"earlier plan's placements are protected when they are not. Set "
+            f"config.scheduler to 'new' before calling run_forward with "
+            f"occupancy.")
     trace: dict = {}
 
     try:
@@ -246,8 +267,9 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
                          machine_lost_min=machine_lost_min,
                          reserved=reserved, frozen=frozen)
         if occupancy:
-            # New engine only. The retired classic/flow schedulers do not accept it,
-            # and never receive it: occupancy is set only by the two-stage plan.
+            # New engine only, enforced above (OccupancyRequiresNewEngineError):
+            # the retired classic/flow schedulers accept **kw and would silently
+            # discard it, so this branch is only ever reached with scheduler="new".
             _sched_kw["occupancy"] = occupancy
         plan_run.schedule = run_rule(
             trace, "rule6", scheduler_for(config), plan_run.batches_prioritized,

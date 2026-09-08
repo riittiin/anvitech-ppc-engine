@@ -631,6 +631,16 @@ class ActualRequest(BaseModel):
     mark_complete: bool = False
 
 
+class DraftLine(BaseModel):
+    so_no: str
+    item_code: str
+    qty: float
+
+
+class DraftsRequest(BaseModel):
+    drafts: list[DraftLine] = []
+
+
 # --------------------------------------------------------------------------- #
 # Helper-tab augmentation (Rules 3/4/5/7 + Rule 6 machine view)
 # --------------------------------------------------------------------------- #
@@ -2570,6 +2580,113 @@ def delete_machine_downtime_ep(downtime_id: str, request: Request):
     if not book_store.delete_machine_downtime(downtime_id):
         raise HTTPException(status_code=404, detail="maintenance break not found")
     return {"deleted": True}
+
+
+# --------------------------------------------------------------------------- #
+# Add New Orders: typed draft lines + a read-only quote against the plan in
+# force (2026-09-08 spec, Task 10). Nothing here writes to the order book or
+# the optimize queue, and nothing here starts an optimization: quoting a new
+# order must be safe to click as many times as the director likes.
+# --------------------------------------------------------------------------- #
+def _quote_item_options(masters):
+    """Every item that can actually be scheduled, for the entry form's dropdown."""
+    return [{"item_code": code, "item_name": routing.description}
+            for code, routing in sorted(masters.routings.items())]
+
+
+def _draft_quote_lines(drafts, masters):
+    """Stored draft rows -> QuoteLine list (item name filled in from the master)."""
+    from engine.quote import QuoteLine
+    out = []
+    for row in drafts:
+        code = row.get("item_code", "")
+        routing = masters.routings.get(code)
+        out.append(QuoteLine(
+            so_no=row.get("so_no", ""), item_code=code,
+            item_name=routing.description if routing else row.get("item_name", ""),
+            qty=float(row.get("qty") or 0),
+            target_date=(date.fromisoformat(row["target_date"])
+                        if row.get("target_date") else None)))
+    return out
+
+
+@app.get("/new-orders/drafts")
+def new_order_drafts(request: Request):
+    """The director's typed-but-not-added lines, plus the item dropdown they can
+    pick from. Admin only (Add New Orders is a planning tool, not a floor view)."""
+    require_admin(request)
+    masters = _current_masters()
+    drafts = book_store.load_new_order_drafts()
+    for row in drafts:
+        routing = masters.routings.get(row.get("item_code", ""))
+        row["item_name"] = routing.description if routing else ""
+    return {"drafts": drafts, "items": _quote_item_options(masters),
+            "queued": book_store.load_new_order_queue()}
+
+
+@app.put("/new-orders/drafts")
+def save_new_order_drafts_ep(req: DraftsRequest, request: Request):
+    """Replace the whole draft list. Every line is validated the same way the
+    server would validate it if it were added for real (same message either
+    way), so a director never sees a line accepted here and refused later."""
+    require_admin(request)
+    masters = _current_masters()
+    active = book_store.load_active_orders()
+    completed = book_store.load_completed_orders()
+    rows = []
+    for line in req.drafts:
+        err = orderbook.validate_new_order_line(line.so_no, line.item_code, line.qty,
+                                                active, completed, masters)
+        if err:
+            raise HTTPException(status_code=400, detail=err)
+        rows.append({"so_no": line.so_no.strip(), "item_code": line.item_code.strip(),
+                     "qty": int(line.qty)})
+    seen = set()
+    for row in rows:
+        key = (row["so_no"].lower(), row["item_code"].lower())
+        if key in seen:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{row['so_no']} / {row['item_code']} is entered twice.")
+        seen.add(key)
+    book_store.save_new_order_drafts(rows)
+    return {"drafts": rows}
+
+
+@app.post("/new-orders/quote")
+def new_order_quote(request: Request):
+    """Quote each draft line's completion date against the plan already in
+    force. Read-only: nothing is saved to the order book or the queue, and no
+    optimization is started, so this is safe to press as many times as needed
+    while a director is still typing."""
+    require_admin(request)
+    from engine import quote as quote_mod
+    drafts = book_store.load_new_order_drafts()
+    if not drafts:
+        raise HTTPException(status_code=400, detail="There are no new orders to quote.")
+    config = _load_plan_config()
+    _plan(config)                                  # ensures the artifacts are fresh
+    art = _PLAN_CACHE.get("artifacts") or {}
+    plan_run = art.get("plan_run")
+    if plan_run is None:
+        raise HTTPException(status_code=503,
+                            detail="The plan is not available right now. Try again.")
+    masters = art.get("masters") or _current_masters()
+    cfg = art.get("config") or _resolve_config(config)
+    existing_expected = optimizer.expected_completion(plan_run.schedule)
+    res = quote_mod.quote(plan_run.schedule, existing_expected,
+                          _draft_quote_lines(drafts, masters), cfg, masters)
+    return {
+        "lines": [{**row,
+                   "completion": row["completion"].isoformat() if row["completion"] else None,
+                   "target_date": row["target_date"].isoformat() if row["target_date"] else None}
+                  for row in res.lines],
+        "moved": [{**m, "before": m["before"].isoformat(), "after": m["after"].isoformat()}
+                  for m in res.moved],
+        "verified": res.verified,
+        "existing_count": res.existing_count,
+        "stamp": _plan_fingerprint(config),
+    }
 
 
 _VALID_SHIFTS = {"First shift", "Second shift", ""}
