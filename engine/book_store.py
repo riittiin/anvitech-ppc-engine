@@ -30,6 +30,8 @@ OPERATORS_KEY = "anvitech:operators"        # kv: json {week_anchor, operators:[
 LAST_APPLIED_SCHEDULE_KEY = "anvitech:last_applied_schedule"  # kv: json list of applied-schedule op rows
 FROZEN_OPS_KEY = "anvitech:frozen_ops"       # kv: json list of frozen (in-progress) op rows for today
 PLAN_START_FLOOR_KEY = "anvitech:plan_start_floor"  # kv: json {date, floor} — today's pinned auto start
+DRAFT_ORDERS_KEY = "anvitech:new_order_drafts"  # kv: json list of typed (not yet added) order lines
+NEW_ORDER_QUEUE_KEY = "anvitech:new_order_queue"  # kv: json list of [(so_no, item_code)] planned behind the book
 
 _SEP = "\x1f"   # ASCII unit separator — never appears in an SO# or item code
 
@@ -341,3 +343,33 @@ def load_operator_table():
 
 def save_operator_table(table: dict) -> None:
     get_store().kv_set(OPERATORS_KEY, json.dumps(table))
+
+
+# --- add new orders: drafts and arrival queue --- #
+def load_new_order_drafts() -> list:
+    """The order lines a director has typed into Add New Orders but not yet added.
+    Server-side so a refresh or a sleeping instance never loses half-typed work."""
+    raw = get_store().kv_get(DRAFT_ORDERS_KEY)
+    return json.loads(raw) if raw else []
+
+
+def save_new_order_drafts(rows) -> None:
+    """Store the director's typed lines, or an empty list to clear them."""
+    get_store().kv_set(DRAFT_ORDERS_KEY, json.dumps(list(rows)))
+
+
+def load_new_order_queue() -> list:
+    """(SO number, item code) pairs planned BEHIND the existing book — the arrival
+    queue (first come, first served). Cleared by the next full optimization."""
+    raw = get_store().kv_get(NEW_ORDER_QUEUE_KEY)
+    return json.loads(raw) if raw else []
+
+
+def save_new_order_queue(keys) -> None:
+    """Store the arrival queue as a list of (so_no, item_code) pairs."""
+    get_store().kv_set(NEW_ORDER_QUEUE_KEY, json.dumps([list(k) for k in keys]))
+
+
+def clear_new_order_queue() -> None:
+    """Clear the arrival queue (e.g. when optimization completes)."""
+    get_store().delete_key(NEW_ORDER_QUEUE_KEY)
