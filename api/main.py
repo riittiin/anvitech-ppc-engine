@@ -801,6 +801,28 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
 # --------------------------------------------------------------------------- #
 # Core: plan the active order book
 # --------------------------------------------------------------------------- #
+def _current_reservations(absences_raw=None, downtime_raw=None) -> dict:
+    """Physical unavailability merged into ONE reserved dict — operator absences
+    plus machine maintenance downtime. Pass already-loaded raw rows when the
+    caller has them (`_plan`'s main pass); otherwise they are loaded fresh
+    (cheap: reads are deduped by the per-request store cache).
+
+    THE one definition every planning call must build this the same way:
+    `_plan`'s own two-stage plan, and the Add New Orders quote's own two-stage
+    plan (`/new-orders/quote`, `/new-orders/add`) — a quote that ignored a
+    machine being down or an operator being absent would return a date the
+    plan itself cannot honour (2026-09-08 review finding: three machines
+    down, quote said 2026-09-11, the plan's own expected completion for that
+    order was 2026-09-22)."""
+    if absences_raw is None:
+        absences_raw = book_store.load_absences()
+    if downtime_raw is None:
+        downtime_raw = book_store.load_machine_downtime()
+    return optimize_service.merge_reservations(
+        optimize_service.absence_reservations(absences_raw),
+        optimize_service.downtime_reservations(downtime_raw))
+
+
 def _orders_table():
     """The Orders tab table, read live from the store.
 
@@ -850,16 +872,21 @@ def _split_queue(so_lines, scheduler):
     return stage1, queued_lines, note
 
 
-def _queue_note_for_display(config: Config) -> str:
-    """The arrival-queue banner text, rebuilt fresh on a cache hit — belt-and-
-    braces alongside the queue's own entry in `_plan_fingerprint`, the same
-    reasoning as `_orders_table()`/`_auto_note_for_display()` above."""
-    resolved = _resolve_config(config)
-    masters = _current_masters()
-    so_lines = orderbook.active_so_lines(
-        book_store.load_active_orders(), book_store.load_actuals(), masters)
-    _, _, note = _split_queue(so_lines, resolved.scheduler)
-    return note
+def _queue_priority_rank(queued_lines) -> dict:
+    """A 1-based rank per queued key, in the arrival queue's OWN stored order —
+    the single record of "who arrived first" (2026-09-08 review finding 2).
+    ``/new-orders/add`` appends each accept's winning arrangement (``QuoteResult
+    .order``) to the queue, so replaying stage 2 with this rank reproduces the
+    exact date the quote promised, instead of an unranked plan silently
+    re-sequencing queued lines (and moving an already-accepted order) the next
+    time a new one is added.
+
+    Only keys that still match an active line (i.e. survived `_split_queue`)
+    get a rank; a key that dropped out contributes nothing here either — same
+    "it clears itself" rule."""
+    matched = {l.key for l in queued_lines}
+    order = [tuple(k) for k in book_store.load_new_order_queue() if tuple(k) in matched]
+    return {f"{so}{KEY_SEP}{item}": i for i, (so, item) in enumerate(order, start=1)}
 
 
 def _plan(config: Config):
@@ -876,9 +903,13 @@ def _plan(config: Config):
         # running). Cost is three store reads, deduped by the per-request cache.
         # Same reasoning for `auto_note`: it reports whether a search is running
         # RIGHT NOW, which has nothing to do with the plan being served.
+        # `queue_note` is NOT rebuilt here (2026-09-08 review) — unlike `orders`/
+        # `auto_note`, its only inputs are the queue and the scheduler, and both
+        # are already in `_plan_fingerprint`; a cache hit means neither changed,
+        # so the cached value can never be stale. Recomputing it would cost a
+        # masters read + `active_so_lines` on every plain refresh for no payoff.
         return {**_cached, "orders": _orders_table(),
-                "auto_note": _auto_note_for_display(),
-                "queue_note": _queue_note_for_display(config)}
+                "auto_note": _auto_note_for_display()}
 
     masters = _current_masters()
     # Fingerprint of the plan-shaping inputs as REQUESTED (base config, before the
@@ -906,9 +937,7 @@ def _plan(config: Config):
     # PERSON — one merged dict, the same one every engine already reads. Loaded once
     # and reused below for the reports.
     downtime_raw = book_store.load_machine_downtime()
-    ab = optimize_service.merge_reservations(
-        optimize_service.absence_reservations(absences_raw),
-        optimize_service.downtime_reservations(downtime_raw))
+    ab = _current_reservations(absences_raw, downtime_raw)
 
     so_lines = orderbook.active_so_lines(active, actuals, masters)   # remaining = ordered − finished good
 
@@ -967,15 +996,22 @@ def _plan(config: Config):
         from engine import new_engine as _ne_stage2
         stage2 = PlanRun(so_lines=queued_lines)
         occupancy = _ne_stage2.occupancy_from_entries(plan_run.schedule, config)
+        # The rank comes from the queue's own stored order (the winning
+        # arrangement each accept recorded) — without it, stage 2 would
+        # re-sequence queued lines by Rule 3's own tie-break every plan, which
+        # can silently move an already-accepted order once a second one is
+        # queued (2026-09-08 review finding 2).
         run_forward(stage2, ranked_config, masters, reserved=ab or None,
-                    frozen=None, occupancy=occupancy)
+                    frozen=None, occupancy=occupancy,
+                    priority_rank=_queue_priority_rank(queued_lines))
         plan_run.schedule = list(plan_run.schedule) + list(stage2.schedule)
-        # `trace["rule6"]` may be an unreached placeholder (no "output" key) when
-        # stage 1 itself raised a RuleError — only write the merged schedule back
-        # into a rule6 entry that actually reached and succeeded, or a failing
-        # plan would turn into a KeyError here instead of showing its own error.
+        # `trace["rule6"]` may be an unreached placeholder (``reached: False``,
+        # ``error: None``) when an EARLIER rule raised a RuleError — checking
+        # only `error` would pass on that placeholder and write a bogus merged
+        # table + a "planned behind" note into a tab marked not reached, so
+        # both are checked before touching it.
         r6_trace = trace.get("rule6")
-        if r6_trace and not r6_trace.get("error"):
+        if r6_trace and r6_trace.get("reached", True) and not r6_trace.get("error"):
             r6_trace["output"] = to_table(plan_run.schedule)
             r6_trace["notes"].append(
                 f"{len(queued_lines)} newly added order(s) are planned behind the "
@@ -2763,7 +2799,8 @@ def new_order_quote(request: Request):
     cfg = art.get("config") or _resolve_config(config)
     existing_expected = optimizer.expected_completion(plan_run.schedule)
     res = quote_mod.quote(plan_run.schedule, existing_expected,
-                          _draft_quote_lines(drafts, masters), cfg, masters)
+                          _draft_quote_lines(drafts, masters), cfg, masters,
+                          reserved=_current_reservations())
     return {
         "lines": [{**row,
                    "completion": row["completion"].isoformat() if row["completion"] else None,
@@ -2810,7 +2847,8 @@ def add_new_orders(req: AddNewOrdersRequest, request: Request):
     cfg = art.get("config") or _resolve_config(config)
     res = quote_mod.quote(plan_run.schedule,
                           optimizer.expected_completion(plan_run.schedule),
-                          _draft_quote_lines(drafts, masters), cfg, masters)
+                          _draft_quote_lines(drafts, masters), cfg, masters,
+                          reserved=_current_reservations())
     if not res.verified:
         raise HTTPException(
             status_code=409,
@@ -2821,14 +2859,19 @@ def add_new_orders(req: AddNewOrdersRequest, request: Request):
         raise HTTPException(status_code=400, detail=bad[0]["error"])
 
     today = _ist_today().isoformat()
+    by_key = {(r["so_no"], r["item_code"]): r for r in res.lines}
     orders = [Order(so_no=r["so_no"], item_code=r["item_code"],
                     item_name=r["item_name"], ordered_qty=float(r["qty"]),
                     delivery_date=r["completion"], first_seen=today)
               for r in res.lines]
     book_store.add_orders(orders)
+    # Appended in the WINNING arrangement's order, not draft order (2026-09-08
+    # review finding 2) — `res.order` is the one place that sequence is
+    # recorded, so the queue stays the single record of arrival order and
+    # `_plan`'s stage 2 can reproduce this exact quoted date by construction.
     book_store.save_new_order_queue(
         [tuple(k) for k in book_store.load_new_order_queue()]
-        + [(o.so_no, o.item_code) for o in orders])
+        + [tuple(k) for k in res.order if tuple(k) in by_key])
     book_store.save_new_order_drafts([])
     _PLAN_CACHE["key"] = None      # the book changed; never serve the old response
     return {"added": len(orders),
@@ -3149,9 +3192,7 @@ def _plan_run_for_report(config: Config):
     config = _resolve_config(config)
     active = book_store.load_active_orders()
     actuals = book_store.load_actuals()
-    ab = optimize_service.merge_reservations(
-        optimize_service.absence_reservations(book_store.load_absences()),
-        optimize_service.downtime_reservations(book_store.load_machine_downtime()))
+    ab = _current_reservations()
     so_lines = orderbook.active_so_lines(active, actuals, masters)
     eff_start = orderbook.effective_plan_start_date(actuals, config.plan_start_date,
                                                     masters.calendar)
@@ -3449,9 +3490,15 @@ def optimize_done_ep(request: Request):
     contest starts; the winner auto-applies if strictly better."""
     # No require_admin: the gatekeeper already verified a valid session for any
     # non-public path, and this must be reachable by the user role.
-    # A full re-optimization treats every order equally, so arrival positions end here.
-    book_store.clear_new_order_queue()
     started = _try_start_auto(by=getattr(request.state, "user", "") or "")
+    if started:
+        # A full re-optimization treats every order equally, so arrival positions
+        # end here — but only when one actually STARTS. `_try_start_auto` also
+        # returns False when a contest is already running or nothing material
+        # changed; clearing the queue on those skips would drop the arrival
+        # positions with no re-optimization ever having happened to earn it
+        # (2026-09-08 review).
+        book_store.clear_new_order_queue()
     return {"started": started, "reason": ("started" if started else "skipped"),
             "state": _optimize_status()["state"]}
 

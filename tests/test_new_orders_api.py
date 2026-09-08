@@ -1,7 +1,7 @@
 """Add New Orders: storage, endpoints, role gating (2026-09-08 spec)."""
 import importlib
 import io
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -241,6 +241,36 @@ def test_quoting_with_no_drafts_is_a_clear_400(admin_client, uploaded_masters):
     assert "no new orders" in r.json()["detail"].lower()
 
 
+def test_the_quote_honours_machine_downtime(admin_client, uploaded_masters):
+    """2026-09-08 review, Finding 1 (CRITICAL): neither `/new-orders/quote` nor
+    `/new-orders/add` passed `reserved=` into `quote_mod.quote`, so the quote
+    could promise a date inside a machine's maintenance window while the
+    plan's own two-stage pass (which already honours downtime) computed a
+    later one for the very same order once it was added. CNC1 is Item A's
+    Allotted machine for its first step (new_sample_workbook.py) with no
+    Suggested fallback, so taking it out of service for a few days can only
+    delay the order, never make it unschedulable — the discriminating case
+    the review asked for. The quoted date must equal what `/run` then reports
+    for the very order that was just added."""
+    today = date.today()
+    book_store.save_machine_downtime({
+        "machine": "CNC1", "from_date": today.isoformat(),
+        "to_date": (today + timedelta(days=5)).isoformat(), "reason": "test"})
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    quote = admin_client.post("/new-orders/quote").json()
+    quoted = quote["lines"][0]["completion"]
+    assert quoted, "the order should still be schedulable around a 5-day break"
+    r = admin_client.post("/new-orders/add", json={"stamp": quote["stamp"]})
+    assert r.status_code == 200, r.text
+    body = admin_client.post("/run").json()
+    actual = body["expected_end"][f"NEW-1\x1f{uploaded_masters}"]
+    assert actual == quoted, (
+        f"the quote promised {quoted} but the plan's own completion is "
+        f"{actual}: the quote ignored machine downtime")
+
+
 # --- Task 10 review fix: the intra-payload dedup + no-partial-persistence, --- #
 # --- both correct but untested before (2026-09-08) --- #
 
@@ -306,19 +336,105 @@ def test_a_stale_quote_is_refused_and_says_to_requote(admin_client, uploaded_mas
     assert "Finish and Optimize" in r.json()["detail"]
 
 
+def test_add_is_refused_when_the_quote_could_not_be_confirmed(admin_client,
+                                                              uploaded_masters,
+                                                              monkeypatch):
+    """2026-09-08 review, minor item: the ``not res.verified`` branch had no
+    test. ``quote_mod.quote`` is stubbed directly — under normal operation
+    the endpoint recomputes ``existing_expected`` from the SAME schedule it
+    passes as ``existing_entries``, so ``verify_unmoved`` can never actually
+    see a move by construction; this exercises the branch in isolation."""
+    from engine.quote import QuoteResult
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    quote = admin_client.post("/new-orders/quote").json()
+    monkeypatch.setattr(
+        "engine.quote.quote",
+        lambda *a, **kw: QuoteResult(
+            lines=[], moved=[{"so_no": "X", "item_code": "Y",
+                             "before": date(2025, 1, 1), "after": date(2025, 1, 2),
+                             "days": 1}],
+            violations=[], verified=False, existing_count=0, order=[]))
+    r = admin_client.post("/new-orders/add", json={"stamp": quote["stamp"]})
+    assert r.status_code == 409
+    assert "could not be confirmed" in r.json()["detail"]
+
+
+def test_add_surfaces_the_error_when_a_line_could_not_be_scheduled(admin_client,
+                                                                   uploaded_masters,
+                                                                   monkeypatch):
+    """2026-09-08 review, minor item: the ``completion is None`` branch had
+    no test. Stubbed the same way as the verified=False test above."""
+    from engine.quote import QuoteResult
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    quote = admin_client.post("/new-orders/quote").json()
+    monkeypatch.setattr(
+        "engine.quote.quote",
+        lambda *a, **kw: QuoteResult(
+            lines=[{"so_no": "NEW-1", "item_code": uploaded_masters, "item_name": "x",
+                    "qty": 25, "target_date": None, "completion": None,
+                    "error": "could not be scheduled: no machine with a qualified "
+                             "operator is available for one of its steps"}],
+            moved=[], violations=[], verified=True, existing_count=0, order=[]))
+    r = admin_client.post("/new-orders/add", json={"stamp": quote["stamp"]})
+    assert r.status_code == 400
+    assert "could not be scheduled" in r.json()["detail"]
+
+
 def test_adding_is_admin_only(user_client):
     assert user_client.post("/new-orders/add", json={"stamp": "x"}).status_code == 403
 
 
-def test_done_entering_clears_the_queue(admin_client, uploaded_masters, add_new_order):
+def test_done_entering_clears_the_queue_when_a_contest_actually_starts(
+        admin_client, uploaded_masters, add_new_order, monkeypatch):
+    """Clearing the queue is only correct when Done actually launches a
+    re-optimization: `_try_start_auto` returning True means a background
+    contest was launched (see test_auto_optimize.py's own pattern for
+    stubbing `_start_optimize` rather than waiting on a real search)."""
     add_new_order("NEW-1", uploaded_masters, 25)
     assert book_store.load_new_order_queue()
-    admin_client.post("/optimize/done")
+    import api.main as m
+    monkeypatch.setenv("AUTO_OPTIMIZE", "1")
+    monkeypatch.setattr(
+        m, "_start_optimize",
+        lambda budget_evals, label, background=True, auto=False: None)
+    r = admin_client.post("/optimize/done")
+    assert r.json()["started"] is True
     assert book_store.load_new_order_queue() == []
+
+
+def test_done_entering_does_not_clear_the_queue_when_it_skips(
+        admin_client, uploaded_masters, add_new_order):
+    """AUTO_OPTIMIZE is off by default in the test environment, so Done always
+    skips here — clearing the queue on a skip would drop the arrival
+    positions with no re-optimization ever having happened (2026-09-08
+    review finding: the minor item about the early clear)."""
+    add_new_order("NEW-1", uploaded_masters, 25)
+    r = admin_client.post("/optimize/done")
+    assert r.json()["started"] is False
+    assert book_store.load_new_order_queue() == [["NEW-1", uploaded_masters]]
 
 
 def test_an_upload_clears_the_queue(admin_client, uploaded_masters, add_new_order,
                                     upload_sample):
     add_new_order("NEW-1", uploaded_masters, 25)
     upload_sample()
+    assert book_store.load_new_order_queue() == []
+
+
+def test_applying_an_optimization_clears_the_queue(admin_client, uploaded_masters,
+                                                   add_new_order):
+    """2026-09-08 review finding 4: `_optimize_apply()` is the canonical
+    "full optimization" of the three clearing sites (Done entering, an
+    applied deep search, an upload) and was untested — deleting the clear
+    there left the whole suite green."""
+    add_new_order("NEW-1", uploaded_masters, 25)
+    assert book_store.load_new_order_queue()
+    import api.main as m
+    st = m._start_optimize(budget_evals=15, label="quick", background=False)
+    assert st["state"] == "done", st
+    m._optimize_apply()
     assert book_store.load_new_order_queue() == []

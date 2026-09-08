@@ -16,7 +16,11 @@ The fixtures that drive the new-engine API (``admin_client``, ``user_client``,
 ``uploaded_masters``, ``add_new_order``) are defined once in
 ``tests.test_new_orders_api`` and imported here rather than duplicated.
 """
+from dataclasses import replace
+from datetime import date, timedelta
+
 from engine import book_store
+from tests.new_sample_workbook import ITEM_B, SO1, ITEM_A
 
 from tests.test_new_orders_api import (   # noqa: F401 -- fixtures, used by name
     _api_module, admin_client, user_client, uploaded_masters, add_new_order,
@@ -66,6 +70,67 @@ def test_orders_added_one_at_a_time_never_disturb_each_other(admin_client,
     body = admin_client.post("/run").json()
     key = f"NEW-1\x1f{uploaded_masters}"
     assert body["expected_end"].get(key) == first
+
+
+def test_two_queued_lines_each_reproduce_their_own_quoted_date(admin_client,
+                                                               uploaded_masters,
+                                                               add_new_order):
+    """2026-09-08 review finding 2: `_plan`'s stage 2 must replay the queue's
+    OWN recorded arrival order (each accept's winning arrangement), or it can
+    silently re-sequence two-or-more queued lines differently from what each
+    was quoted against, moving an already-accepted order. Checks BOTH dates,
+    not just the first — the first alone does not exercise the sequencing
+    between the two queued lines the way this finding is about.
+
+    Uses two DIFFERENT items (Item A, Item B) deliberately: same-item queued
+    lines get CONSOLIDATED by Rule 1 once they are planned TOGETHER in one
+    stage-2 pass, which is a genuinely different physical batch than the two
+    separate single-line batches each was quoted as — no priority_rank fix
+    can make a consolidated run reproduce two unconsolidated quotes, because
+    consolidation is a joint decision over the whole queued set, not a
+    per-line one. That is a real, separate limitation (see the task report),
+    not the bug this finding is about; different items sidestep it entirely
+    and isolate the sequencing question finding 2 actually raises."""
+    first = add_new_order("NEW-1", uploaded_masters, 25)
+    second = add_new_order("NEW-2", ITEM_B, 25)
+    body = admin_client.post("/run").json()
+    assert body["expected_end"].get(f"NEW-1\x1f{uploaded_masters}") == first
+    assert body["expected_end"].get(f"NEW-2\x1f{ITEM_B}") == second
+
+
+def test_a_contended_book_proves_stage_two_protects_existing_orders(
+        admin_client, uploaded_masters, add_new_order):
+    """2026-09-08 review, finding 3: the sample book is normally so
+    uncontended that one-stage and two-stage planning land on the same date
+    for every existing order, so `test_a_queued_order_does_not_move_any_
+    existing_order` above still passes with stage 2 deleted entirely (proven
+    by mutation below). This builds a fixture that genuinely contends:
+
+      * CNC2 is taken out of service, forcing every Item A step onto the one
+        remaining CNC1 (both the existing order and the new one need it).
+      * SO1 is re-dated to be due SOON rather than already overdue, so it is
+        not automatically the most urgent order in the book regardless of
+        stage (an overdue order always sorts first by Rule 2's date order,
+        which would mask the effect this test needs to show).
+
+    A large new order competing for CNC1 then measurably displaces SO1 once
+    the two are planned in ONE pool — proving the two-stage split, not a
+    lucky uncontended fixture, is what protects it. Measured directly before
+    writing this test: without the re-date, or without the downtime, the
+    one-stage mutation below does NOT move SO1 either (both conditions are
+    load-bearing for the fixture to contend at all)."""
+    today = date.today()
+    active = book_store.load_active_orders()
+    so1 = replace(active[(SO1, ITEM_A)], delivery_date=today + timedelta(days=3))
+    book_store.add_orders([so1])
+    admin_client.post("/machine-downtime", json={
+        "machine": "CNC2", "from_date": today.isoformat(),
+        "to_date": (today + timedelta(days=60)).isoformat(), "reason": "test"})
+
+    before = admin_client.post("/run").json()["expected_end"].get(f"{SO1}\x1f{ITEM_A}")
+    add_new_order("NEW-1", uploaded_masters, 500)
+    after = admin_client.post("/run").json()["expected_end"].get(f"{SO1}\x1f{ITEM_A}")
+    assert after == before, f"SO1 moved from {before} to {after}"
 
 
 def test_the_plan_cache_notices_the_queue(admin_client, uploaded_masters,

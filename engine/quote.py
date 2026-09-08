@@ -78,6 +78,13 @@ class QuoteResult:
     violations: list = field(default_factory=list)
     verified: bool = True
     existing_count: int = 0
+    # The (so_no, item_code) sequence of the arrangement that WON the search
+    # (2026-09-08 review finding 2) — never the same thing as ``lines``, which
+    # stays in the caller's INPUT order. A caller that later plans these same
+    # lines again (the arrival queue, replayed as a ``priority_rank``) must use
+    # THIS order, or the plan it produces can silently stop matching the date
+    # this quote just promised.
+    order: list = field(default_factory=list)
 
 
 def _rank_key(so_no: str, item_code: str) -> str:
@@ -281,7 +288,7 @@ def quote(existing_entries, existing_expected, new_lines,
              "error": "no routing found for this item, it cannot be scheduled"}
             for l in unroutable}
 
-    best_score = best_expected = best_entries = failure = None
+    best_score = best_expected = best_entries = best_rank = failure = None
     if routable:
         occupancy = new_engine.occupancy_from_entries(existing_entries, config)
         for rank in _rank_orderings(routable):
@@ -293,7 +300,8 @@ def quote(existing_entries, existing_expected, new_lines,
                 continue
             score = _score(routable, expected)
             if best_score is None or score < best_score:
-                best_score, best_expected, best_entries = score, expected, entries
+                best_score, best_expected, best_entries, best_rank = \
+                    score, expected, entries, rank
         for line in routable:
             got = best_expected.get((line.so_no, line.item_code)) if best_expected else None
             rows[_rank_key(line.so_no, line.item_code)] = {
@@ -309,6 +317,17 @@ def quote(existing_entries, existing_expected, new_lines,
                            optimizer.expected_completion(existing_entries))
     violations = structural_violations(existing_entries, best_entries or [], config)
     ordered = [rows[_rank_key(l.so_no, l.item_code)] for l in new_lines]
+    # The arrangement that won, as a (so_no, item_code) sequence — routable
+    # lines in the winning rank's order (or their own list order when there was
+    # nothing to search: 0 or 1 routable line), then any unroutable line (it
+    # was never part of the search) in its own list order.
+    if best_rank:
+        order_routable = sorted(
+            ((l.so_no, l.item_code) for l in routable),
+            key=lambda k: best_rank[_rank_key(*k)])
+    else:
+        order_routable = [(l.so_no, l.item_code) for l in routable]
+    order = order_routable + [(l.so_no, l.item_code) for l in unroutable]
     return QuoteResult(lines=ordered, moved=moved, violations=violations,
                        verified=not moved and not violations,
-                       existing_count=len(existing_expected))
+                       existing_count=len(existing_expected), order=order)
