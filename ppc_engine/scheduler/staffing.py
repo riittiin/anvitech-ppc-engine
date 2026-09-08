@@ -58,14 +58,25 @@ class StaffingBoard:
     busy all shift (one-operator-per-machine-per-shift stability is preserved by
     construction — they can't be anywhere else), while a SHORT job frees the operator to
     man another idle machine later that shift. Availability is an interval-overlap check.
+
+    ``booked`` / ``assigned`` seed the board with what an EARLIER planning stage
+    already committed (the Add New Orders quote, 2026-09-08 spec). Both default to
+    empty, which is every ordinary plan. Nothing else changes: the availability and
+    picking rules below read these two structures either way, so a second stage
+    inherits qualification, shift, scarce-first picking and the
+    one-operator-per-machine-per-shift preference without a second copy of any rule.
     """
 
-    def __init__(self, pools: dict[str, tuple[Operator, ...]] | None = None) -> None:
+    def __init__(self, pools: dict[str, tuple[Operator, ...]] | None = None,
+                 booked: dict[str, tuple[tuple[datetime, datetime], ...]] | None = None,
+                 assigned: dict[tuple[str, date, Shift], str] | None = None) -> None:
         # (machine_id, shift_date, shift) -> operator name that (last) manned it — a soft
         # preference for machine stability, not a hard lock (short jobs may share).
-        self._assign: dict[tuple[str, date, Shift], str] = {}
+        self._assign: dict[tuple[str, date, Shift], str] = dict(assigned or {})
         # operator name -> list of committed busy (start, end) intervals.
-        self._intervals: dict[str, list[tuple[datetime, datetime]]] = {}
+        self._intervals: dict[str, list[tuple[datetime, datetime]]] = {
+            name: list(ivs) for name, ivs in (booked or {}).items()
+        }
         # machine id -> pre-sorted eligible operators (scarce-first). See build_machine_pools.
         self._pools: dict[str, tuple[Operator, ...]] = pools or {}
         # operator name -> cumulative committed busy minutes (for the "balanced" pick).

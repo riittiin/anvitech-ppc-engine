@@ -78,3 +78,49 @@ def test_shift_key_for_after_midnight_belongs_to_the_previous_days_night_shift()
 
 def test_shift_key_for_a_moment_in_no_shift_is_none():
     assert shift_key_for(D(2025, 3, 4, 6), _CFG) is None
+
+
+from ppc_engine.domain.resources import Machine, MachineKind, Operator, Role
+from ppc_engine.scheduler.staffing import StaffingBoard
+
+
+def _two_operator_board():
+    m = Machine(id="CNC3", type_text="CNC lathe", kind=MachineKind.MACHINING,
+                available_hrs_per_day=19.5)
+    ops = (
+        Operator(name="Alpha", role=Role.OPERATOR, base_shift=Shift.FIRST,
+                 qualified_machines=frozenset({"CNC3"})),
+        Operator(name="Bravo", role=Role.OPERATOR, base_shift=Shift.FIRST,
+                 qualified_machines=frozenset({"CNC3"})),
+    )
+    return m, ops
+
+
+def test_a_seeded_booking_makes_that_person_unavailable():
+    board = StaffingBoard(booked={"Alpha": ((D(2025, 3, 3, 8), D(2025, 3, 3, 12)),)})
+    assert board.free_during("Alpha", D(2025, 3, 3, 9), D(2025, 3, 3, 10)) is False
+    assert board.free_during("Alpha", D(2025, 3, 3, 13), D(2025, 3, 3, 14)) is True
+    assert board.free_during("Bravo", D(2025, 3, 3, 9), D(2025, 3, 3, 10)) is True
+
+
+def test_a_seeded_booking_is_skipped_when_picking_an_operator():
+    from ppc_engine.domain.masters import Masters
+    m, ops = _two_operator_board()
+    masters = Masters(machines={"CNC3": m}, operators=ops, routings={},
+                      calendar=ShopCalendar())
+    board = StaffingBoard({"CNC3": ops},
+                          booked={"Alpha": ((D(2025, 3, 3, 8), D(2025, 3, 3, 12)),)})
+    pick = board.candidate_operator(m, date(2025, 3, 3), Shift.FIRST,
+                                    D(2025, 3, 3, 9), D(2025, 3, 3, 10), masters, _CFG)
+    assert pick == "Bravo"
+
+
+def test_a_seeded_assignment_is_the_machines_shift_operator():
+    board = StaffingBoard(assigned={("CNC3", date(2025, 3, 3), Shift.FIRST): "Alpha"})
+    assert board.operator_for("CNC3", date(2025, 3, 3), Shift.FIRST) == "Alpha"
+
+
+def test_an_unseeded_board_is_unchanged():
+    board = StaffingBoard()
+    assert board.free_during("Alpha", D(2025, 3, 3, 9), D(2025, 3, 3, 10)) is True
+    assert board.operator_for("CNC3", date(2025, 3, 3), Shift.FIRST) is None
