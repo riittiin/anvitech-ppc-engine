@@ -46,12 +46,11 @@ h1, h2, h3 { margin: 0; }
    hide while the role is still being resolved (role-pending, the body's default
    class) so an admin control never flashes visible before /me resolves. */
 body.role-pending .admin-only, body.role-user .admin-only { display: none !important; }
-
-/* The Add New Orders nav link is gated by id, not by .admin-only (that class is
-   reserved by tests/test_role_parity.py's whole-nav invariant, which pins that no
-   EXISTING read-only tab is ever hidden from the user role). This tab genuinely
-   is admin-only, so it gets its own rule, same fail-closed shape. */
-body.role-pending #nav-neworders, body.role-user #nav-neworders { display: none !important; }
+/* Add New Orders (#nav-neworders) is hidden by this same .admin-only rule on its
+   nav anchor — a deliberate exception to "every tab is open to both roles"
+   (owner, 2026-09-08), pinned by name in tests/test_role_parity.py so a SECOND
+   tab going admin-only would still fail that test loudly. No separate rule
+   needed; the id is kept on the anchor only in case a future hook wants it. */
 
 /* The mirror of the above, for the handful of places where the two roles need
    DIFFERENT wording rather than one of them seeing nothing (e.g. the Optimize

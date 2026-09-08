@@ -18,12 +18,17 @@
     </div>
     <nav id="nav" class="nav" aria-label="Main">
       <a class="nav-item" data-view="orders" href="#orders">Orders</a>
-      <!-- Add New Orders is admin-only, but NOT via the .admin-only class (that
-           class is reserved by tests/test_role_parity.py's whole-nav invariant for
-           "no tab may be hidden from the user role" — every existing tab is read-only
-           for the user role, this one genuinely is not). Gated instead by an id-scoped
-           CSS rule (see style.css) plus the JS role check in showView()/newOrdersAllowed(). -->
-      <a class="nav-item" data-view="neworders" href="#neworders" id="nav-neworders">Add New Orders</a>
+      <!-- Add New Orders is admin-only, and unlike every other tab it is meant to
+           be (owner decision, 2026-09-08: adding orders and accepting delivery
+           dates is a director's decision, the floor shares one login). It is
+           gated the ORDINARY way, with .admin-only, same as every other
+           admin-only control in this app. tests/test_role_parity.py's whole-nav
+           invariant carries a narrow, named exception for exactly "neworders" so
+           it still fails loudly if a SECOND tab is ever hidden this way. The
+           id-scoped CSS rule below is belt-and-braces (extra specificity, no
+           behaviour change); the real gate is the class plus the JS checks in
+           showView()/newOrdersAllowed(). -->
+      <a class="nav-item admin-only" data-view="neworders" href="#neworders" id="nav-neworders">Add New Orders</a>
       <a class="nav-item" data-view="schedule" href="#schedule">Schedule</a>
       <a class="nav-item" data-view="gantt" href="#gantt">Gantt</a>
       <a class="nav-item" data-view="entry" href="#entry">Daily Entry</a>

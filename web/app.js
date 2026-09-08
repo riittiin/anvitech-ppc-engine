@@ -100,9 +100,9 @@ function showView(v, push) {
   if (!VIEWS.includes(v)) v = "orders";
   // Add New Orders is genuinely admin-only (a director's decision, like uploading
   // the Excel) — unlike every other tab, it must not be reachable by URL hash
-  // either. The nav link is already CSS-hidden (see #nav-neworders in style.css);
-  // this closes the other door (2026-08-09 lesson: a role gate belongs on every
-  // entry point, not just the one a mouse click goes through).
+  // either. The nav link is already .admin-only CSS-hidden (see style.css); this
+  // closes the other door (2026-08-09 lesson: a role gate belongs on every entry
+  // point, not just the one a mouse click goes through).
   if (v === "neworders" && !newOrdersAllowed()) v = "orders";
   // Every OTHER tab is open to every role (2026-08-09 role-parity fix). Analytics
   // used to be admin-only (owner rule, 2026-07-27) — nav link CSS-hidden AND a
@@ -819,10 +819,10 @@ async function stopOptimize() {
 }
 
 // ---- Add New Orders (2026-09-08 spec) ----
-// Admin only, end to end: the nav link is CSS-hidden (#nav-neworders in style.css)
-// and showView() bounces a non-admin off the hash, but neither of those reaches
-// markup this file builds at runtime, so every function below checks the role
-// itself too (2026-08-09 lesson — CSS cannot reach JS-built markup).
+// Admin only, end to end: the nav link is .admin-only CSS-hidden and showView()
+// bounces a non-admin off the hash, but neither of those reaches markup this
+// file builds at runtime, so every function below checks the role itself too
+// (2026-08-09 lesson — CSS cannot reach JS-built markup).
 function newOrdersAllowed() {
   return currentRole === "admin";
 }

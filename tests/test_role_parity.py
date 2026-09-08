@@ -206,10 +206,24 @@ def test_the_delay_download_button_is_offered_to_the_user_role():
 
 
 def test_no_tab_is_hidden_from_the_user_role():
-    """Whole-nav invariant: a future tab must not quietly become admin-only."""
+    """Whole-nav invariant: a future tab must not quietly become admin-only.
+
+    One named, narrow exception: "neworders" (Add New Orders). The owner
+    decided on 2026-09-08 that this tab is genuinely admin-only — adding
+    orders and accepting delivery dates is a director's decision, and the
+    floor shares one login (see docs/superpowers/specs/
+    2026-09-08-add-new-orders-quote-design.md). Every other tab stays open to
+    both roles. This allowlist must stay this narrow: it exists to say
+    precisely which tab is hidden and why, not to make the invariant vague.
+    If anyone hides a SECOND tab, this assertion must still fail loudly.
+    """
+    ALLOWED_ADMIN_ONLY_TABS = {"neworders"}
     hidden = [m.group(1) for m in
               re.finditer(r'<a class="[^"]*admin-only[^"]*" data-view="([^"]+)"', INDEX_HTML)]
-    assert hidden == [], f"these tabs are hidden from the user role: {hidden}"
+    unexpected = [v for v in hidden if v not in ALLOWED_ADMIN_ONLY_TABS]
+    assert unexpected == [], f"these tabs are hidden from the user role: {unexpected}"
+    assert set(hidden) == ALLOWED_ADMIN_ONLY_TABS, (
+        f"expected exactly {ALLOWED_ADMIN_ONLY_TABS} to be admin-only, got {hidden}")
 
 
 # ---- Deliberately NOT equalized (pin the asymmetries the owner chose to keep) ---- #
