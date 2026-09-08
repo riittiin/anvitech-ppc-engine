@@ -18,6 +18,12 @@
     </div>
     <nav id="nav" class="nav" aria-label="Main">
       <a class="nav-item" data-view="orders" href="#orders">Orders</a>
+      <!-- Add New Orders is admin-only, but NOT via the .admin-only class (that
+           class is reserved by tests/test_role_parity.py's whole-nav invariant for
+           "no tab may be hidden from the user role" — every existing tab is read-only
+           for the user role, this one genuinely is not). Gated instead by an id-scoped
+           CSS rule (see style.css) plus the JS role check in showView()/newOrdersAllowed(). -->
+      <a class="nav-item" data-view="neworders" href="#neworders" id="nav-neworders">Add New Orders</a>
       <a class="nav-item" data-view="schedule" href="#schedule">Schedule</a>
       <a class="nav-item" data-view="gantt" href="#gantt">Gantt</a>
       <a class="nav-item" data-view="entry" href="#entry">Daily Entry</a>
@@ -69,6 +75,32 @@
           make. Current expected is the date the plan expects the order to finish.</p>
       </div>
       <div id="orders-mount"></div>
+    </div>
+  </section>
+
+  <!-- ===================== ADD NEW ORDERS ===================== -->
+  <section class="view" id="view-neworders">
+    <div class="card admin-only" id="neworders-card">
+      <div class="card-head">
+        <h2>Add new orders</h2>
+        <p class="explainer">Type in the new orders below. Nothing is added to the plan until you
+          press Finish and Optimize, see the dates, and choose to add them.</p>
+      </div>
+      <datalist id="no-items-list"></datalist>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>SO number</th><th>Item</th><th>Quantity</th><th></th></tr>
+          </thead>
+          <tbody id="no-lines"></tbody>
+        </table>
+      </div>
+      <div class="cfg-row">
+        <button id="no-add-line" class="ghost-btn" type="button">Add another line</button>
+        <button id="no-quote-btn" class="primary" type="button">Finish and Optimize</button>
+      </div>
+      <div id="no-result" class="no-result"></div>
+      <div id="no-prepone" class="no-prepone hidden"></div>
     </div>
   </section>
 

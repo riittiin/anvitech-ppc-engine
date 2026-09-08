@@ -47,6 +47,12 @@ h1, h2, h3 { margin: 0; }
    class) so an admin control never flashes visible before /me resolves. */
 body.role-pending .admin-only, body.role-user .admin-only { display: none !important; }
 
+/* The Add New Orders nav link is gated by id, not by .admin-only (that class is
+   reserved by tests/test_role_parity.py's whole-nav invariant, which pins that no
+   EXISTING read-only tab is ever hidden from the user role). This tab genuinely
+   is admin-only, so it gets its own rule, same fail-closed shape. */
+body.role-pending #nav-neworders, body.role-user #nav-neworders { display: none !important; }
+
 /* The mirror of the above, for the handful of places where the two roles need
    DIFFERENT wording rather than one of them seeing nothing (e.g. the Optimize
    panel: an admin is told to press Apply, a user is told their admin decides).
@@ -355,6 +361,32 @@ td.slip { color: var(--danger); background: rgba(248,81,73,.12); font-weight: 60
   background: rgba(240, 173, 78, 0.12); border: 1px solid rgba(240, 173, 78, 0.4); }
 .optimize-impossible ul { margin: 6px 0 0; padding-left: 20px; }
 .optimize-impossible li { margin: 2px 0; }
+
+/* Small inline-message colours, shared by any panel that needs to say
+   "this is a problem" or "this is fine" in one word's worth of colour. */
+.warn { color: var(--danger); font-weight: 600; }
+.ok { color: var(--ok); font-weight: 600; }
+
+/* ---------------- Add New Orders ---------------- */
+#no-lines input.no-input,
+.no-prepone input.no-input {
+  background: var(--card); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; font-size: 13px; width: 100%;
+}
+#no-lines input.no-input:focus, .no-prepone input.no-input:focus { outline: none; border-color: var(--accent); }
+#no-lines td { vertical-align: top; }
+.no-error-row td { padding-top: 0; border-top: none; }
+.no-result { margin-top: 14px; max-width: 780px; }
+.no-result p { margin: 0 0 10px; font-size: 13px; }
+.no-prepone {
+  margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); max-width: 780px;
+}
+.no-prepone h3, .no-prepone h4 { margin: 14px 0 8px; font-size: 15px; }
+.no-prepone h3:first-child, .no-prepone h4:first-child { margin-top: 0; }
+.no-prepone-warning {
+  margin: 4px 0 12px; padding: 10px 14px; border-radius: 8px; font-size: 13px;
+  background: rgba(210,153,34,.10); border: 1px solid var(--warn); color: var(--ink);
+}
 .optimize-banner {
   padding: 10px 14px; font-size: 13px; color: var(--ink);
   background: rgba(59,130,246,.10); border: 1px solid rgba(59,130,246,.35);

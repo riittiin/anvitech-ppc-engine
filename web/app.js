@@ -36,11 +36,17 @@ let bootLoadingTimer = null;
 let optimizePollFailures = 0;   // consecutive failed /optimize/status polls
 let commitmentEnabled = false;  // from /me — are the Committed/Open lanes shown at all?
 
+// ---- Add New Orders (2026-09-08) ----
+let noLines = [];      // local editable rows: [{so_no, item_code, qty, error}]
+let noItems = [];      // [{item_code, item_name}] — every item with a routing, for the dropdown
+let noQuote = null;    // the last /new-orders/quote response (for "I need one earlier")
+let quoteStamp = null; // the quote's plan fingerprint — required by /new-orders/add
+
 // ---- View router ----
 // Six destinations, one visible at a time. Each maps to an existing render call
 // (the old per-rule tab machinery, absorbed into a fixed nav). `mountFor` returns
 // the per-view content div so the unchanged render functions write to the right spot.
-const VIEWS = ["orders", "schedule", "gantt", "entry", "analytics", "settings"];
+const VIEWS = ["orders", "neworders", "schedule", "gantt", "entry", "analytics", "settings"];
 let activeView = "orders";
 
 const $ = (id) => document.getElementById(id);
@@ -82,6 +88,7 @@ function mountFor(key) {
 // Render the content for a view using the existing render functions.
 function renderView(v) {
   if (v === "orders") renderOrders();
+  else if (v === "neworders") renderNewOrders();
   else if (v === "schedule") renderTab("rule6");
   else if (v === "gantt") renderGantt();
   else if (v === "entry") renderTab("rule7");
@@ -91,13 +98,19 @@ function renderView(v) {
 
 function showView(v, push) {
   if (!VIEWS.includes(v)) v = "orders";
-  // Every tab is open to every role (2026-08-09 role-parity fix). Analytics used
-  // to be admin-only (owner rule, 2026-07-27) — nav link CSS-hidden AND a redirect
-  // here — but a director compared the two logins and asked for them to match. It
-  // is a read-only view of the plan both roles already hold, so nothing new is
-  // exposed by showing it. Settings likewise shows Operators & shifts / Absences
-  // read-only to the user role (the truly admin-only sections inside it — Plan
-  // settings, the efficiency report — are their own admin-only cards).
+  // Add New Orders is genuinely admin-only (a director's decision, like uploading
+  // the Excel) — unlike every other tab, it must not be reachable by URL hash
+  // either. The nav link is already CSS-hidden (see #nav-neworders in style.css);
+  // this closes the other door (2026-08-09 lesson: a role gate belongs on every
+  // entry point, not just the one a mouse click goes through).
+  if (v === "neworders" && !newOrdersAllowed()) v = "orders";
+  // Every OTHER tab is open to every role (2026-08-09 role-parity fix). Analytics
+  // used to be admin-only (owner rule, 2026-07-27) — nav link CSS-hidden AND a
+  // redirect here — but a director compared the two logins and asked for them to
+  // match. It is a read-only view of the plan both roles already hold, so nothing
+  // new is exposed by showing it. Settings likewise shows Operators & shifts /
+  // Absences read-only to the user role (the truly admin-only sections inside it —
+  // Plan settings, the efficiency report — are their own admin-only cards).
   activeView = v;
   try { localStorage.setItem("anvitech-view", v); } catch (e) { /* private mode */ }
   document.querySelectorAll(".view").forEach((s) => s.classList.toggle("active", s.id === "view-" + v));
@@ -574,6 +587,15 @@ async function pollOptimizeStatus() {
 function renderOptimizeResult(st) {
   const box = $("optimize-result");
   if (!box) return;
+  // A preponed-date search from Add New Orders shares this same search slot and
+  // this same status endpoint (2026-09-08), but never this panel and never the
+  // ordinary Apply button — that button applies unconditionally, with no idea a
+  // "quote" search even exists, so it must never be handed one to look at.
+  if (st.kind && st.kind !== "plan") {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
   if (st.auto) {
     // An auto-triggered contest already applied itself (or found nothing better) —
     // never show a stale Apply/Discard panel for a decision that's already made.
@@ -794,6 +816,403 @@ async function stopOptimize() {
   } catch (e) { /* the poll will still pick up the done state */ }
   if (stopBtn) stopBtn.disabled = false;
   pollOptimizeStatus();   // reflect "stopping…" / result promptly
+}
+
+// ---- Add New Orders (2026-09-08 spec) ----
+// Admin only, end to end: the nav link is CSS-hidden (#nav-neworders in style.css)
+// and showView() bounces a non-admin off the hash, but neither of those reaches
+// markup this file builds at runtime, so every function below checks the role
+// itself too (2026-08-09 lesson — CSS cannot reach JS-built markup).
+function newOrdersAllowed() {
+  return currentRole === "admin";
+}
+
+function renderNewOrders() {
+  if (!newOrdersAllowed()) return;
+  loadNewOrders();
+}
+
+async function loadNewOrders() {
+  if (!newOrdersAllowed()) return;
+  try {
+    const res = await fetch("/new-orders/drafts");
+    if (!res.ok) { setStatus("Could not load new orders: " + (await res.text()), true); return; }
+    const body = await res.json();
+    noItems = body.items || [];
+    noLines = (body.drafts || []).map((d) => (
+      { so_no: d.so_no, item_code: d.item_code, qty: d.qty, error: "" }));
+    renderNewOrderLines();
+  } catch (e) {
+    setStatus("Could not load new orders: " + e.message, true);
+  }
+}
+
+function renderNewOrderLines() {
+  const list = $("no-items-list");
+  if (list) {
+    list.innerHTML = noItems.map((it) =>
+      `<option value="${escapeHtml(it.item_code)}">${escapeHtml(it.item_code)} — ${escapeHtml(it.item_name)}</option>`
+    ).join("");
+  }
+  const tbody = $("no-lines");
+  if (!tbody) return;
+  if (!noLines.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No lines yet. Press "Add another line" to start.</td></tr>';
+    return;
+  }
+  let h = "";
+  noLines.forEach((l, i) => {
+    h += `<tr>
+      <td><input type="text" class="no-input no-so" data-i="${i}" value="${escapeHtml(l.so_no || "")}" placeholder="SO number" /></td>
+      <td><input type="text" class="no-input no-item" list="no-items-list" data-i="${i}" value="${escapeHtml(l.item_code || "")}" placeholder="Type to search an item" /></td>
+      <td><input type="number" min="1" step="1" class="no-input no-qty" data-i="${i}" value="${l.qty || ""}" placeholder="Qty" /></td>
+      <td><button type="button" class="ghost-btn small no-remove" data-i="${i}">✕</button></td>
+    </tr>`;
+    if (l.error) {
+      h += `<tr class="no-error-row"><td colspan="4" class="warn">${escapeHtml(l.error)}</td></tr>`;
+    }
+  });
+  tbody.innerHTML = h;
+  tbody.querySelectorAll(".no-so, .no-item, .no-qty").forEach((el) => {
+    el.onchange = () => onNoLineChanged(Number(el.dataset.i));
+  });
+  tbody.querySelectorAll(".no-remove").forEach((el) => {
+    el.onclick = () => removeNewOrderLine(Number(el.dataset.i));
+  });
+}
+
+function onNoLineChanged(i) {
+  if (!newOrdersAllowed() || !noLines[i]) return;
+  const so = document.querySelector(`.no-so[data-i="${i}"]`);
+  const item = document.querySelector(`.no-item[data-i="${i}"]`);
+  const qty = document.querySelector(`.no-qty[data-i="${i}"]`);
+  noLines[i].so_no = so ? so.value : noLines[i].so_no;
+  noLines[i].item_code = item ? item.value : noLines[i].item_code;
+  noLines[i].qty = qty ? qty.value : noLines[i].qty;
+  saveNewOrderDrafts(i);
+}
+
+function addNewOrderLine() {
+  if (!newOrdersAllowed()) return;
+  noLines.push({ so_no: "", item_code: "", qty: "", error: "" });
+  renderNewOrderLines();
+}
+
+function removeNewOrderLine(i) {
+  if (!newOrdersAllowed()) return;
+  noLines.splice(i, 1);
+  renderNewOrderLines();
+  saveNewOrderDrafts();
+}
+
+// Save the whole draft list on every edit — the same shape the server would
+// accept for real, so a line is never accepted here and refused later (see the
+// task brief). A rejection is shown against the row that was just edited and
+// keeps what he typed; nothing is cleared.
+async function saveNewOrderDrafts(editedIndex) {
+  if (!newOrdersAllowed()) return;
+  const payload = {
+    drafts: noLines.map((l) => ({
+      so_no: l.so_no || "", item_code: l.item_code || "", qty: Number(l.qty) || 0 })),
+  };
+  try {
+    const res = await fetch("/new-orders/drafts", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (res.status === 400) {
+      const body = await res.json();
+      noLines.forEach((l) => { l.error = ""; });
+      if (editedIndex !== undefined && noLines[editedIndex]) noLines[editedIndex].error = body.detail;
+      renderNewOrderLines();
+      return;
+    }
+    if (!res.ok) { setStatus("Could not save: " + (await res.text()), true); return; }
+    noLines.forEach((l) => { l.error = ""; });
+    renderNewOrderLines();
+  } catch (e) {
+    setStatus("Could not save: " + e.message, true);
+  }
+}
+
+async function quoteNewOrders() {
+  if (!newOrdersAllowed()) return;
+  const btn = $("no-quote-btn");
+  const label = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = "Optimizing…"; }
+  const result = $("no-result");
+  if (result) result.innerHTML = "";
+  const prepone = $("no-prepone");
+  if (prepone) { prepone.classList.add("hidden"); prepone.innerHTML = ""; }
+  try {
+    const res = await fetch("/new-orders/quote", { method: "POST" });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      if (result) result.innerHTML =
+        `<p class="warn">${escapeHtml((body && body.detail) || "Could not quote these orders.")}</p>`;
+      return;
+    }
+    noQuote = body;
+    renderQuote(body);
+  } catch (e) {
+    if (result) result.innerHTML = `<p class="warn">${escapeHtml(e.message)}</p>`;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
+}
+
+// The refusal path is not decoration — it is the promise the whole feature
+// makes: if the quote could not be confirmed against the plan in force, no
+// date is shown, full stop.
+function renderQuote(body) {
+  const el = $("no-result");
+  if (!el) return;
+  if (!body.verified) {
+    el.innerHTML = '<p class="warn">This quote could not be confirmed: '
+      + body.moved.length + ' existing order(s) moved. No date is shown. '
+      + 'Press Finish and Optimize again.</p>';
+    return;
+  }
+  const rows = body.lines.map((l) => {
+    if (!l.completion) {
+      return `<tr><td>${escapeHtml(l.so_no)}</td><td>${escapeHtml(l.item_code)}</td>`
+        + `<td colspan="2" class="warn">${escapeHtml(l.error || "Could not be scheduled.")}</td></tr>`;
+    }
+    return `<tr><td>${escapeHtml(l.so_no)}</td>`
+      + `<td>${escapeHtml(l.item_code)} ${escapeHtml(l.item_name || "")}</td>`
+      + `<td>${escapeHtml(String(l.qty))}</td>`
+      + `<td><strong>${isoToDdmmyyyy(l.completion)}</strong></td></tr>`;
+  }).join("");
+  el.innerHTML = '<div class="table-wrap"><table><thead><tr>'
+    + '<th>SO number</th><th>Item</th><th>Qty</th><th>Finishes</th></tr></thead><tbody>'
+    + rows + '</tbody></table></div>'
+    + `<p class="ok">All ${body.existing_count} existing orders keep the completion date they have today.</p>`
+    + '<div class="cfg-row">'
+    + '<button id="no-add-btn" class="primary" type="button">Add these orders</button>'
+    + '<button id="no-earlier-btn" class="ghost-btn" type="button">I need one earlier</button>'
+    + '<button id="no-discard-btn" class="ghost-btn" type="button">Discard</button>'
+    + '</div>';
+  quoteStamp = body.stamp;
+  const addBtn = $("no-add-btn");
+  if (addBtn) addBtn.onclick = addNewOrders;
+  const earlierBtn = $("no-earlier-btn");
+  if (earlierBtn) earlierBtn.onclick = showPreponePanel;
+  const discardBtn = $("no-discard-btn");
+  if (discardBtn) discardBtn.onclick = () => { el.innerHTML = ""; quoteStamp = null; noQuote = null; };
+}
+
+// The stale quote is a normal outcome, not an error to swallow: the plan moved
+// since the quote was taken, so the date it promised may no longer be true. The
+// fix is simply to press Finish and Optimize again — Finish and Optimize itself
+// is untouched and stays ready.
+async function addNewOrders() {
+  if (!newOrdersAllowed()) return;
+  const btn = $("no-add-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "Adding…"; }
+  try {
+    const res = await fetch("/new-orders/add", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stamp: quoteStamp }),
+    });
+    if (res.status === 409) {
+      const body = await res.json();
+      $("no-result").innerHTML = `<p class="warn">${escapeHtml(body.detail)}</p>`;
+      return;
+    }
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      setStatus("Could not add these orders: " + ((body && body.detail) || res.status), true);
+      return;
+    }
+    const body = await res.json();
+    $("no-result").innerHTML = `<p class="ok">${body.added} order(s) added to the plan.</p>`;
+    noQuote = null; quoteStamp = null;
+    await loadNewOrders();
+    await runPlan(false);
+  } catch (e) {
+    setStatus("Could not add these orders: " + e.message, true);
+  }
+}
+
+// A date box per line, pre-filled with its quoted completion (or the date
+// already typed on an earlier pass), and the confirmation warning this can
+// never skip.
+function showPreponePanel() {
+  if (!newOrdersAllowed() || !noQuote) return;
+  const el = $("no-prepone");
+  if (!el) return;
+  el.classList.remove("hidden");
+  const rows = noQuote.lines.map((l) => {
+    const key = l.so_no + "\x1f" + l.item_code;
+    const val = l.completion || l.target_date || "";
+    return `<tr><td>${escapeHtml(l.so_no)}</td>`
+      + `<td>${escapeHtml(l.item_code)} ${escapeHtml(l.item_name || "")}</td>`
+      + `<td><input type="date" class="no-input no-target-date" data-key="${escapeHtml(key)}" value="${escapeHtml(val)}" /></td></tr>`;
+  }).join("");
+  el.innerHTML = '<h3>Ask for an earlier date</h3>'
+    + '<p class="explainer">Pick the date you need for each line, then start the search.</p>'
+    + '<div class="table-wrap"><table><thead><tr><th>SO number</th><th>Item</th><th>Needed by</th></tr></thead><tbody>'
+    + rows + '</tbody></table></div>'
+    + '<div class="cfg-row">'
+    + '<button id="no-prepone-search" class="primary" type="button">Search a preponed date</button>'
+    + '<button id="no-prepone-cancel" class="ghost-btn" type="button">Cancel</button>'
+    + '</div>'
+    + '<div id="no-prepone-progress" class="status"></div>'
+    + '<div id="no-prepone-result"></div>';
+  const searchBtn = $("no-prepone-search");
+  if (searchBtn) searchBtn.onclick = startPrepone;
+  const cancelBtn = $("no-prepone-cancel");
+  if (cancelBtn) cancelBtn.onclick = () => { el.classList.add("hidden"); el.innerHTML = ""; };
+}
+
+async function startPrepone() {
+  if (!newOrdersAllowed()) return;
+  // This can never be a silent click: it drops the protection that keeps
+  // every existing order in place, and takes 10 to 30 minutes.
+  if (!window.confirm(
+    "This drops the protection that keeps your existing orders in place.\n\n" +
+    "Existing orders can move earlier or later. The search takes 10 to 30 minutes.\n\n" +
+    "Continue?")) return;
+  const targets = {};
+  document.querySelectorAll(".no-target-date").forEach((inp) => {
+    if (inp.value) targets[inp.dataset.key] = inp.value;
+  });
+  const searchBtn = $("no-prepone-search");
+  if (searchBtn) searchBtn.disabled = true;
+  const prog = $("no-prepone-progress");
+  if (prog) prog.textContent = "starting…";
+  try {
+    const res = await fetch("/new-orders/prepone", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ targets }),
+    });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      if (prog) prog.textContent = (body && body.detail) || "Could not start the search.";
+      if (searchBtn) searchBtn.disabled = false;
+      return;
+    }
+    await pollPreponeStatus();
+  } catch (e) {
+    if (prog) prog.textContent = "Request failed: " + e.message;
+    if (searchBtn) searchBtn.disabled = false;
+  }
+}
+
+// Reuses the same GET /optimize/status the Settings deep search polls and the
+// same progress-line text (optimizeProgressLine) — one search slot, one status
+// endpoint, two different places that watch it. This one never touches
+// #optimize-progress / #optimize-result (the Settings panel), and
+// renderOptimizeResult() is guarded the other way (it ignores a "quote" kind)
+// so the two can never cross wires.
+async function pollPreponeStatus() {
+  const prog = $("no-prepone-progress");
+  for (;;) {
+    let st;
+    try {
+      const r = await fetch("/optimize/status");
+      if (!r.ok) { await _sleep(3000); continue; }
+      st = await r.json();
+    } catch (e) { await _sleep(3000); continue; }
+    if (st.state === "running") {
+      if (prog) prog.textContent = "Searching… " + optimizeProgressLine(st) + " (10 to 30 minutes)";
+      await _sleep(3000);
+      continue;
+    }
+    const searchBtn = $("no-prepone-search");
+    if (searchBtn) searchBtn.disabled = false;
+    if (st.state === "failed") {
+      if (prog) prog.textContent = "The search could not finish: " + (st.error || "unknown error");
+      return;
+    }
+    if (st.state === "done" && st.kind === "quote") {
+      if (prog) prog.textContent = st.cancelled
+        ? "Stopped early. Showing the best plan found so far."
+        : "Search finished.";
+      renderPreponeResult(st);
+      return;
+    }
+    if (prog) prog.textContent = "The search did not finish as expected. Try again.";
+    return;
+  }
+}
+
+// What was achieved per line, and every existing order that moved (worst
+// first), with the totals — then Accept or Cancel. Cancel changes nothing.
+function renderPreponeResult(st) {
+  const el = $("no-prepone-result");
+  if (!el) return;
+  const targets = {};
+  document.querySelectorAll(".no-target-date").forEach((inp) => { targets[inp.dataset.key] = inp.value; });
+  const achieved = (st.best && st.best.expected) || {};
+  const lines = (noQuote && noQuote.lines) || [];
+  let h = "<h4>New orders</h4><div class=\"table-wrap\"><table><thead><tr>"
+    + "<th>SO number</th><th>Item</th><th>Asked</th><th>Achieved</th></tr></thead><tbody>";
+  lines.forEach((l) => {
+    const key = l.so_no + "\x1f" + l.item_code;
+    const asked = targets[key];
+    const got = achieved[key];
+    const late = asked && got && got > asked;
+    h += `<tr><td>${escapeHtml(l.so_no)}</td><td>${escapeHtml(l.item_code)} ${escapeHtml(l.item_name || "")}</td>`
+      + `<td>${asked ? isoToDdmmyyyy(asked) : "-"}</td>`
+      + `<td class="${late ? "warn" : "ok"}"><strong>${got ? isoToDdmmyyyy(got) : "-"}</strong>`
+      + `${late ? " (late)" : ""}</td></tr>`;
+  });
+  h += "</tbody></table></div>";
+  const mv = st.quote_movement || { moved: [], late_days_before: null, late_days_after: null };
+  const moved = mv.moved || [];
+  h += `<h4>Existing orders that moved: ${moved.length}</h4>`;
+  if (moved.length) {
+    h += "<div class=\"table-wrap\"><table><thead><tr>"
+      + "<th>SO number</th><th>Item</th><th>Before</th><th>After</th><th></th></tr></thead><tbody>";
+    moved.forEach((m) => {
+      h += `<tr><td>${escapeHtml(m.so_no)}</td><td>${escapeHtml(m.item_code)}</td>`
+        + `<td>${isoToDdmmyyyy(m.before)}</td><td>${isoToDdmmyyyy(m.after)}</td>`
+        + `<td class="warn">${m.days} day${m.days === 1 ? "" : "s"} later</td></tr>`;
+    });
+    h += "</tbody></table></div>";
+  } else {
+    h += '<p class="ok">No existing order moved later.</p>';
+  }
+  h += `<p>Total days late across the plan: ${mv.late_days_before} → <strong>${mv.late_days_after}</strong></p>`;
+  h += '<div class="cfg-row">'
+    + '<button id="no-prepone-accept" class="primary" type="button">Accept this plan</button>'
+    + '<button id="no-prepone-cancel-result" class="ghost-btn" type="button">Cancel</button>'
+    + '</div>';
+  el.innerHTML = h;
+  const acceptBtn = $("no-prepone-accept");
+  if (acceptBtn) acceptBtn.onclick = acceptPrepone;
+  const cancelBtn = $("no-prepone-cancel-result");
+  if (cancelBtn) cancelBtn.onclick = () => {
+    const panel = $("no-prepone");
+    if (panel) { panel.classList.add("hidden"); panel.innerHTML = ""; }
+  };
+}
+
+async function acceptPrepone() {
+  if (!newOrdersAllowed()) return;
+  const btn = $("no-prepone-accept");
+  const label = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = "Adding…"; }
+  try {
+    const res = await fetch("/new-orders/prepone/accept", { method: "POST" });
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      setStatus("Could not accept this plan: " + ((body && body.detail) || res.status), true);
+      return;
+    }
+    const panel = $("no-prepone");
+    if (panel) { panel.classList.add("hidden"); panel.innerHTML = ""; }
+    const result = $("no-result");
+    if (result) result.innerHTML = `<p class="ok">${body.added} order(s) added, with this plan now in force.</p>`;
+    noQuote = null; quoteStamp = null;
+    await loadNewOrders();
+    await runPlan(false);
+  } catch (e) {
+    setStatus("Could not accept this plan: " + e.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+  }
 }
 
 // ---- Loader report (collapsible) ----
@@ -2384,6 +2803,13 @@ const _effPreviewBtn = $("eff-preview-btn");
 if (_effPreviewBtn) _effPreviewBtn.onclick = previewEfficiency;
 const _effDownloadBtn = $("eff-download-btn");
 if (_effDownloadBtn) _effDownloadBtn.onclick = downloadEfficiencyCsv;
+// Add New Orders: admin-only (the button is inside an admin-only card, CSS-hidden
+// for the user role; the handler is harmless to wire either way — every function
+// it calls checks the role itself, and the server enforces it too).
+const _noAddLine = $("no-add-line");
+if (_noAddLine) _noAddLine.onclick = addNewOrderLine;
+const _noQuoteBtn = $("no-quote-btn");
+if (_noQuoteBtn) _noQuoteBtn.onclick = quoteNewOrders;
 
 // Boot: learn the role, restore the last view, then auto-load the current plan (no
 // persist) so the schedule/Gantt/views populate without a Plan click.
@@ -2409,6 +2835,10 @@ if (_effDownloadBtn) _effDownloadBtn.onclick = downloadEfficiencyCsv;
   loadAbsences();
   loadMachineDowntime();
   loadOperators();
+  // Add New Orders is genuinely admin-only (GET /new-orders/drafts 403s for the
+  // user role), so only load it once the role is known and admin — unlike the
+  // three calls above, which are role-open and safe to fire for everyone.
+  if (newOrdersAllowed()) loadNewOrders();
   await runPlan(false);
   // A search may still be running (or have finished) from before a page reload.
   // Resume the progress display so a refresh mid-run never loses the work — the
