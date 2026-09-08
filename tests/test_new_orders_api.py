@@ -1,6 +1,7 @@
 """Add New Orders: storage, endpoints, role gating (2026-09-08 spec)."""
 import importlib
 import io
+import time
 from datetime import date, timedelta
 
 import pytest
@@ -438,3 +439,237 @@ def test_applying_an_optimization_clears_the_queue(admin_client, uploaded_master
     assert st["state"] == "done", st
     m._optimize_apply()
     assert book_store.load_new_order_queue() == []
+
+
+# --- Task 13: the preponed path --- #
+
+@pytest.fixture
+def running_optimize(_api_module):
+    """A contest already in flight, staged directly rather than run for real (the
+    same pattern tests/test_auto_optimize.py and tests/test_manual_apply_backstop.py
+    use for `_OPTIMIZE`)."""
+    with _api_module._OPTIMIZE_LOCK:
+        _api_module._OPTIMIZE["state"] = "running"
+    yield
+    with _api_module._OPTIMIZE_LOCK:
+        _api_module._OPTIMIZE["state"] = "idle"
+
+
+@pytest.fixture
+def finished_quote_optimize(_api_module, admin_client, uploaded_masters):
+    """A completed quote-kind search, staged directly the way
+    tests/test_manual_apply_backstop.py stages `_OPTIMIZE` for `_optimize_apply` —
+    never a real 10-30 minute contest. Also leaves behind the one draft line
+    `/new-orders/prepone` would have, with its typed target date already set (as
+    the endpoint would have left it)."""
+    r = admin_client.put("/new-orders/drafts",
+                         json={"drafts": [{"so_no": "NEW-1",
+                                           "item_code": uploaded_masters, "qty": 25}]})
+    assert r.status_code == 200, r.text
+    drafts = book_store.load_new_order_drafts()
+    for row in drafts:
+        row["target_date"] = "2025-03-20"
+    book_store.save_new_order_drafts(drafts)
+    with _api_module._OPTIMIZE_LOCK:
+        _api_module._OPTIMIZE.update(
+            state="done", kind="quote",
+            result={"ranks": {"NEW-1\x1f" + uploaded_masters: 1},
+                    "budget": "deep search (new orders)", "seed": 42,
+                    "baseline": {"total_late_days": 20, "makespan_days": 6.0},
+                    "best": {"total_late_days": 10, "makespan_days": 5.0,
+                             "max_committed_slip": 0},
+                    "cancelled": False, "improved": True,
+                    "best_overlap": None, "current_overlap": None,
+                    "flexible_machines": None, "current_flexible": None,
+                    "knob": None, "inputs_sig": None})
+    return _api_module
+
+
+def test_prepone_is_admin_only(user_client):
+    assert user_client.post("/new-orders/prepone", json={"targets": {}}).status_code == 403
+
+
+def test_prepone_accept_is_admin_only(user_client):
+    assert user_client.post("/new-orders/prepone/accept").status_code == 403
+
+
+def test_prepone_refuses_when_a_search_is_already_running(admin_client,
+                                                          uploaded_masters,
+                                                          running_optimize):
+    r = admin_client.post("/new-orders/prepone",
+                          json={"targets": {"NEW-1\x1f" + uploaded_masters: "2025-03-20"}})
+    assert r.status_code == 409
+
+
+def test_prepone_with_no_drafts_is_a_clear_400(admin_client, uploaded_masters):
+    admin_client.put("/new-orders/drafts", json={"drafts": []})
+    r = admin_client.post("/new-orders/prepone", json={"targets": {}})
+    assert r.status_code == 400
+    assert "no new orders" in r.json()["detail"].lower()
+
+
+def test_prepone_requires_a_date_for_every_draft_line(admin_client, uploaded_masters):
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    r = admin_client.post("/new-orders/prepone", json={"targets": {}})
+    assert r.status_code == 400
+    assert "NEW-1" in r.json()["detail"]
+
+
+def test_prepone_refuses_a_bad_date(admin_client, uploaded_masters):
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    r = admin_client.post("/new-orders/prepone",
+                          json={"targets": {"NEW-1\x1f" + uploaded_masters: "not-a-date"}})
+    assert r.status_code == 400
+
+
+def test_prepone_stores_the_typed_target_on_the_draft(admin_client, uploaded_masters,
+                                                      monkeypatch):
+    monkeypatch.setattr("api.main._start_optimize", lambda *a, **k: None)
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    r = admin_client.post("/new-orders/prepone",
+                          json={"targets": {"NEW-1\x1f" + uploaded_masters: "2025-03-20"}})
+    assert r.status_code == 200
+    assert r.json()["started"] is True
+    assert book_store.load_new_order_drafts()[0]["target_date"] == "2025-03-20"
+
+
+def test_prepone_starts_a_quote_kind_search(admin_client, uploaded_masters,
+                                            monkeypatch):
+    """The search `/new-orders/prepone` starts must be marked `kind="quote"` — the
+    Settings panel's ordinary Apply button, and auto-apply, must never touch it.
+    Runs the real (fast, 15-eval) search rather than stubbing `_start_optimize`,
+    so this also proves `extra_orders` actually reached the contest: the winning
+    ranks name the new order's own key, not just the two orders already in the
+    book — it competed for a slot like everything else."""
+    import api.main as m
+    monkeypatch.setitem(m._OPT_BUDGETS, "deep", 15)
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    r = admin_client.post(
+        "/new-orders/prepone",
+        json={"targets": {"NEW-1\x1f" + uploaded_masters: "2025-03-20"}})
+    assert r.status_code == 200, r.text
+    t0 = time.time()
+    st = admin_client.get("/optimize/status").json()
+    while st["state"] == "running" and time.time() - t0 < 20:
+        time.sleep(0.05)
+        st = admin_client.get("/optimize/status").json()
+    assert st["state"] == "done", st
+    assert st["kind"] == "quote"
+    with m._OPTIMIZE_LOCK:
+        ranks = m._OPTIMIZE["result"]["ranks"]
+    assert f"NEW-1\x1f{uploaded_masters}" in ranks
+
+
+def test_optimize_status_reports_plan_kind_for_an_ordinary_search(admin_client,
+                                                                  uploaded_masters):
+    """The ordinary "Start deep search" button must still report kind="plan", and
+    must not carry quote_movement — that field is quote-only."""
+    import api.main as m
+    st = m._start_optimize(budget_evals=15, label="quick", background=False)
+    assert st["state"] == "done", st
+    assert st["kind"] == "plan"
+    assert "quote_movement" not in st or st.get("quote_movement") is None
+
+
+def test_a_finished_quotes_status_reports_the_movement(admin_client, uploaded_masters,
+                                                        finished_quote_optimize):
+    """The exact shape the UI task will consume: `kind`, and — once the search is
+    `done` — `quote_movement` with `moved` (worst first) and the late-day totals
+    before/after, built from `_incumbent_metrics`/`_metrics_for_ranks`, never a
+    second comparison."""
+    st = admin_client.get("/optimize/status").json()
+    assert st["kind"] == "quote"
+    assert st["state"] == "done"
+    move = st["quote_movement"]
+    assert isinstance(move["moved"], list)
+    assert isinstance(move["late_days_before"], int)
+    assert isinstance(move["late_days_after"], int)
+
+
+def test_accepting_a_preponed_result_uses_the_typed_date_not_the_achieved_one(
+        admin_client, uploaded_masters, finished_quote_optimize):
+    r = admin_client.post("/new-orders/prepone/accept")
+    assert r.status_code == 200, r.text
+    rows = {(o["SO No"], o["Item Code"]): o
+            for o in _rows(admin_client.get("/orders").json()["orders"])}
+    row = rows[("NEW-1", uploaded_masters)]
+    assert row["SO Delivery Date"] == fmt_date(date(2025, 3, 20))
+
+
+def test_accepting_a_preponed_result_creates_no_queue(admin_client, uploaded_masters,
+                                                      finished_quote_optimize):
+    admin_client.post("/new-orders/prepone/accept")
+    assert book_store.load_new_order_queue() == []
+
+
+def test_accepting_a_preponed_result_applies_the_searched_plan(admin_client,
+                                                               uploaded_masters,
+                                                               finished_quote_optimize):
+    """Accepting must adopt the searched sequence (`_optimize_apply()`), not just
+    save the orders — the slip figures the director was shown come from that
+    sequence, so the applied plan priority must be exactly the ranks the finished
+    search staged."""
+    admin_client.post("/new-orders/prepone/accept")
+    saved = book_store.load_plan_priority()
+    assert saved is not None
+    assert saved["ranks"] == {"NEW-1\x1f" + uploaded_masters: 1}
+    # `_optimize_apply()` also clears the in-memory job so a page refresh can't
+    # re-show a stale Apply panel for a plan that is already applied.
+    assert admin_client.get("/optimize/status").json()["state"] == "idle"
+
+
+def test_accepting_clears_the_drafts(admin_client, uploaded_masters,
+                                     finished_quote_optimize):
+    admin_client.post("/new-orders/prepone/accept")
+    assert book_store.load_new_order_drafts() == []
+
+
+def test_accepting_with_no_drafts_is_a_clear_400(admin_client, uploaded_masters,
+                                                 finished_quote_optimize):
+    book_store.save_new_order_drafts([])
+    r = admin_client.post("/new-orders/prepone/accept")
+    assert r.status_code == 400
+
+
+def test_accepting_refuses_without_a_finished_search(admin_client, uploaded_masters):
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    r = admin_client.post("/new-orders/prepone/accept")
+    assert r.status_code == 409
+
+
+def test_accepting_refuses_an_ordinary_plan_kind_search(admin_client, uploaded_masters,
+                                                        _api_module):
+    """The Settings panel's ordinary "Start deep search" contest must never be
+    adoptable through the Add New Orders accept endpoint — only a `kind="quote"`
+    run may be."""
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25,
+                                       "target_date": "2025-03-20"}]})
+    drafts = book_store.load_new_order_drafts()
+    for row in drafts:
+        row["target_date"] = "2025-03-20"
+    book_store.save_new_order_drafts(drafts)
+    with _api_module._OPTIMIZE_LOCK:
+        _api_module._OPTIMIZE.update(
+            state="done", kind="plan",
+            result={"ranks": {}, "budget": "deep search", "seed": 42,
+                    "baseline": {"total_late_days": 20, "makespan_days": 6.0},
+                    "best": {"total_late_days": 10, "makespan_days": 5.0,
+                             "max_committed_slip": 0},
+                    "cancelled": False, "improved": True,
+                    "best_overlap": None, "current_overlap": None,
+                    "flexible_machines": None, "current_flexible": None,
+                    "knob": None, "inputs_sig": None})
+    r = admin_client.post("/new-orders/prepone/accept")
+    assert r.status_code == 409

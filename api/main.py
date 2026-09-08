@@ -645,6 +645,11 @@ class AddNewOrdersRequest(BaseModel):
     stamp: str
 
 
+class PreponeRequest(BaseModel):
+    # "<so_no>\x1f<item_code>" -> the ISO date the director typed for that draft line.
+    targets: dict[str, str] = {}
+
+
 # --------------------------------------------------------------------------- #
 # Helper-tab augmentation (Rules 3/4/5/7 + Rule 6 machine view)
 # --------------------------------------------------------------------------- #
@@ -1237,7 +1242,11 @@ _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              "mode": "local", "job_id": None, "cloud_payload": None,
              "cloud_failed": False, "base_config": None, "auto": False,
              "claimed": False, "shards": {}, "shard_total": None,
-             "shards_finalizing": False, "shard_evals": {}}
+             "shards_finalizing": False, "shard_evals": {},
+             # "plan" = the ordinary Settings-sweep contest; "quote" = a preponed
+             # Add New Orders search (2026-09-08) — never offered to the ordinary
+             # Apply button or to auto-apply. See `_start_optimize`'s extra_orders.
+             "kind": "plan"}
 _OPTIMIZE_LOCK = threading.Lock()
 
 # Identity of THIS server process. A contest lives only in `_OPTIMIZE` above, so a
@@ -1621,13 +1630,20 @@ def _try_start_auto(by: str = "") -> bool:
 
 
 def _start_optimize(budget_evals: int, label: str, background: bool = True,
-                    auto: bool = False):
+                    auto: bool = False, extra_orders=None):
     """Snapshot the book + config and run the settings-sweep contest. ONE pool
     over every active line — lanes (Open/Committed) are status labels
     with no scheduling effect. Operator absences are reserved as blocked
     machine/operator intervals, same as in a normal Plan. Cloud-configured →
     dispatch the full contest to GitHub Actions; otherwise (or on any cloud
-    failure) compute locally."""
+    failure) compute locally.
+
+    ``extra_orders`` (2026-09-08, the Add New Orders preponed path): draft
+    lines joined into the book IN MEMORY ONLY, for the length of this one
+    search — nothing is saved unless the director accepts the result
+    afterwards (``POST /new-orders/prepone/accept``). Marks the run
+    ``kind="quote"`` so the Settings panel's ordinary Apply button, and
+    auto-apply, can never apply it by accident."""
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["state"] == "running":
             raise HTTPException(status_code=409,
@@ -1666,6 +1682,11 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             config = replace(config, worst_ceiling_days=float(_ceiling))
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()
+        if extra_orders:
+            # Draft lines from Add New Orders, joined to the book IN MEMORY ONLY for
+            # the length of this search (2026-09-08 spec). Nothing is saved unless the
+            # director accepts the result.
+            orders = {**orders, **{o.key: o for o in extra_orders}}
         absences = book_store.load_absences()
         machine_downtime = book_store.load_machine_downtime()
         operator_table = book_store.load_operator_table()
@@ -1735,7 +1756,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                          searched_book_sig=searched_book_sig,
                          searched_inputs_sig=searched_inputs_sig,
                          shards={}, shard_total=None, shards_finalizing=False,
-                         shard_evals={})
+                         shard_evals={},
+                         kind=("quote" if extra_orders else "plan"))
 
     def local_job():
         try:
@@ -2065,7 +2087,9 @@ def _optimize_status():
         if _OPTIMIZE["state"] == "running" and _OPTIMIZE["started_mono"] is not None:
             elapsed = round(time.monotonic() - _OPTIMIZE["started_mono"], 1)
         res = _OPTIMIZE.get("result") or {}
-        return {"state": _OPTIMIZE["state"], "budget": _OPTIMIZE["label"],
+        state = _OPTIMIZE["state"]
+        kind = _OPTIMIZE.get("kind", "plan")
+        out = {"state": state, "budget": _OPTIMIZE["label"],
                 "budget_evals": _OPTIMIZE["budget_evals"], "evals": _OPTIMIZE["evals"],
                 "baseline": _OPTIMIZE["baseline"], "best": _OPTIMIZE["best"],
                 "error": _OPTIMIZE["error"], "elapsed_s": elapsed,
@@ -2083,10 +2107,24 @@ def _optimize_status():
                 # stale Apply/Discard panel after an auto contest has already applied
                 # (or discarded) itself.
                 "auto": bool(_OPTIMIZE.get("auto")),
+                # "plan" = the ordinary Settings-sweep contest; "quote" = a preponed
+                # Add New Orders search (2026-09-08) — the Settings panel's Apply
+                # button must never offer to apply a "quote" run.
+                "kind": kind,
                 # The job id is only useful together with the worker secret
                 # (manual-dispatch mode / debugging) — not sensitive by itself.
-                "job_id": _OPTIMIZE.get("job_id") if _OPTIMIZE["state"] == "running" else None,
-                "stopping": bool(_OPTIMIZE.get("cancel")) and _OPTIMIZE["state"] == "running"}
+                "job_id": _OPTIMIZE.get("job_id") if state == "running" else None,
+                "stopping": bool(_OPTIMIZE.get("cancel")) and state == "running"}
+    # Computed OUTSIDE the lock — a full plan replay is too slow to run while
+    # holding the global optimize lock (it would block Stop / a status poll from
+    # a concurrent request for the length of a plan). Only for a finished quote,
+    # so this never fires on the ordinary Settings-sweep polling path.
+    if kind == "quote" and state == "done" and res.get("ranks") is not None:
+        try:
+            out["quote_movement"] = _quote_movement(res["ranks"])
+        except Exception:  # noqa: BLE001 — a status poll must never 500
+            out["quote_movement"] = None
+    return out
 
 
 def _optimize_cancel():
@@ -2263,11 +2301,19 @@ def _metrics_for_ranks(ranks, overlap=None, flexible=None, *, with_distribution=
             frozen=book_store.load_frozen_ops(),
             machine_downtime=book_store.load_machine_downtime())
         schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks or None)
-        return optimizer.plan_metrics(
+        metrics = optimizer.plan_metrics(
             schedule, all_lines, setup.config.plan_start_date,
             ceiling_days=getattr(config, "worst_ceiling_days", None),
             with_distribution=with_distribution,
             promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
+        # Per-order expected completion, keyed "SO\x1fitem" (JSON-safe: this dict is
+        # stored verbatim as _OPTIMIZE["best"] and served by GET /optimize/status) —
+        # the ONE shared definition (optimizer.expected_completion via
+        # _expected_by_order), so the Add New Orders "what moved" screen
+        # (_quote_movement) can never disagree with the Orders tab or the Gantt.
+        metrics["expected"] = {f"{so}{KEY_SEP}{item}": d.isoformat()
+                               for (so, item), d in _expected_by_order(schedule).items()}
+        return metrics
     except Exception:  # noqa: BLE001 — a metrics recompute must never crash finalize
         return None
 
@@ -2296,10 +2342,48 @@ def _incumbent_metrics(*, with_distribution=False):
     prio = book_store.load_plan_priority()
     ranks = (prio or {}).get("ranks") or None
     schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks)
-    return optimizer.plan_metrics(
+    metrics = optimizer.plan_metrics(
         schedule, all_lines, setup.config.plan_start_date,
         with_distribution=with_distribution,
         promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
+    # See _metrics_for_ranks — same "expected" field, same JSON-safe shape, same
+    # shared definition, so the two sides of _quote_movement can never disagree.
+    metrics["expected"] = {f"{so}{KEY_SEP}{item}": d.isoformat()
+                           for (so, item), d in _expected_by_order(schedule).items()}
+    return metrics
+
+
+def _quote_movement(ranks):
+    """For a finished quote search (Add New Orders preponed path, 2026-09-08): what
+    the book looks like before and after, for the result screen the director sees
+    before deciding whether to accept.
+
+    'Before' is the plan actually in force (``_incumbent_metrics``'s own definition,
+    2026-08-07: never "the book with no optimization at all"); 'after' is the
+    searched ranks — which already include the new orders, joined in memory by
+    ``_start_optimize``'s ``extra_orders`` — replayed over the same book. Both sides
+    read their per-order dates from the "expected" field the two metrics functions
+    already compute (``optimizer.expected_completion`` underneath), and the actual
+    comparison is ``_movers`` — the same helper the Thursday auto-note uses — so this
+    is never a second definition of "what moved"."""
+    inc = _incumbent_metrics()
+    after = _metrics_for_ranks(ranks) or {}
+
+    def _parse(expected):
+        out = {}
+        for k, v in (expected or {}).items():
+            so, item = k.split(KEY_SEP, 1)
+            out[(so, item)] = date.fromisoformat(v)
+        return out
+
+    exp_old = _parse(inc.get("expected"))
+    exp_new = _parse(after.get("expected"))
+    moved = [{"so_no": k[0], "item_code": k[1],
+              "before": exp_old[k].isoformat(), "after": nd.isoformat(), "days": d}
+             for k, d, nd in _movers(exp_old, exp_new, 0)]
+    return {"moved": moved,
+            "late_days_before": inc.get("total_late_days"),
+            "late_days_after": after.get("total_late_days")}
 
 
 def _auto_apply_result():
@@ -2874,6 +2958,114 @@ def add_new_orders(req: AddNewOrdersRequest, request: Request):
         + [tuple(k) for k in res.order if tuple(k) in by_key])
     book_store.save_new_order_drafts([])
     _PLAN_CACHE["key"] = None      # the book changed; never serve the old response
+    return {"added": len(orders),
+            "orders": [{"so_no": o.so_no, "item_code": o.item_code,
+                        "delivery_date": o.delivery_date.isoformat()} for o in orders]}
+
+
+# --------------------------------------------------------------------------- #
+# Add New Orders, Task 13: the preponed path. The quote above never moves an
+# existing order — this is the escape hatch for when the quoted date is too
+# late: drop the freeze, re-optimize the WHOLE book with the new orders
+# carrying the dates the director typed, and show him every existing order
+# that moved before he decides whether to keep it.
+# --------------------------------------------------------------------------- #
+def _new_order_extras(drafts, masters, today):
+    """Draft rows (with a typed ``target_date``) as ``Order`` objects, the same
+    shape ``_start_optimize``'s ``extra_orders`` and ``accept_prepone`` both need.
+    The typed date becomes the order's SO delivery date — never a date the search
+    achieves — so it is judged the same way every other order in the book is: late
+    if the plan misses it, on time if not."""
+    return [Order(so_no=r["so_no"], item_code=r["item_code"],
+                  item_name=(masters.routings[r["item_code"]].description
+                            if r["item_code"] in masters.routings else ""),
+                  ordered_qty=float(r["qty"]),
+                  delivery_date=date.fromisoformat(r["target_date"]),
+                  first_seen=today)
+            for r in drafts]
+
+
+@app.post("/new-orders/prepone")
+def prepone_new_orders(req: PreponeRequest, request: Request):
+    """Drop the freeze: re-optimize the whole book with the new orders carrying the
+    dates the director typed. Existing orders may move; that is the point, and the
+    result screen (``GET /optimize/status``'s ``quote_movement``) reports every one
+    that does, worst first."""
+    require_admin(request)
+    # One search at a time. Checked BEFORE anything else so a caller who has not
+    # even typed a draft yet still gets a clear 409 rather than a "no new orders"
+    # 400 that hides the real reason the search cannot start.
+    with _OPTIMIZE_LOCK:
+        if _OPTIMIZE["state"] == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="An optimization is already running. Wait for it to finish, "
+                       "or stop it, before searching a preponed date.")
+    drafts = book_store.load_new_order_drafts()
+    if not drafts:
+        raise HTTPException(status_code=400, detail="There are no new orders.")
+    masters = _current_masters()
+    for row in drafts:
+        target = req.targets.get(row["so_no"] + KEY_SEP + row["item_code"])
+        if not target:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Give {row['so_no']} a date, or accept the quoted one.")
+        try:
+            date.fromisoformat(target)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"{target} is not a date.")
+        row["target_date"] = target
+    book_store.save_new_order_drafts(drafts)
+
+    extra = _new_order_extras(drafts, masters, _ist_today().isoformat())
+    # background=True: this is the same deep search "Start deep search" runs, just
+    # seeded with the draft lines. _start_optimize's own running-check (inside the
+    # lock) closes the race between the check above and this call.
+    _start_optimize(_OPT_BUDGETS["deep"], "deep search (new orders)",
+                    extra_orders=extra)
+    return {"started": True}
+
+
+@app.post("/new-orders/prepone/accept")
+def accept_prepone(request: Request):
+    """Save the new orders with the dates the director typed (never the date the
+    search achieved — see ``_new_order_extras``), and put the plan that was just
+    searched into force. Refuses if there is no finished quote-kind search to
+    accept, so the ordinary Apply button's contest can never be adopted here by
+    mistake, and a quote's own numbers can never be applied twice."""
+    require_admin(request)
+    drafts = book_store.load_new_order_drafts()
+    if not drafts:
+        raise HTTPException(status_code=400, detail="There are no new orders to add.")
+    with _OPTIMIZE_LOCK:
+        ready = (_OPTIMIZE.get("kind") == "quote" and _OPTIMIZE.get("state") == "done"
+                and bool(_OPTIMIZE.get("result")))
+    if not ready:
+        raise HTTPException(status_code=409,
+                            detail="There is no finished search to accept. "
+                                   "Press \"Search a preponed date\" first.")
+    missing = [r["so_no"] for r in drafts if not r.get("target_date")]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{missing[0]} has no typed date yet. Search a preponed date first.")
+
+    masters = _current_masters()
+    orders = _new_order_extras(drafts, masters, _ist_today().isoformat())
+    book_store.add_orders(orders)
+    book_store.save_new_order_drafts([])
+    # The numbers the director was just shown come from the searched plan, so
+    # accepting must adopt it — never leave the book planned by an older sequence
+    # while claiming these dates.
+    _optimize_apply()
+    # No queue: after a full re-optimization every order is equal by definition
+    # (unlike the quick quote's `/new-orders/add`, which queues behind the book
+    # that was already there). `_optimize_apply()` already clears this on every
+    # full optimization; repeated here so this endpoint's own guarantee does not
+    # depend on staying in sync with that function's internals.
+    book_store.clear_new_order_queue()
+    _PLAN_CACHE["key"] = None
     return {"added": len(orders),
             "orders": [{"so_no": o.so_no, "item_code": o.item_code,
                         "delivery_date": o.delivery_date.isoformat()} for o in orders]}
