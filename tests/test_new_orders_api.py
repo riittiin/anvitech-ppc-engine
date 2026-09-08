@@ -10,8 +10,14 @@ from fastapi.testclient import TestClient
 
 from engine import book_store, loaders, orderbook
 from engine.config import Config
-from engine.models import Order, PlanRun
+from engine.models import Order, PlanRun, fmt_date
 from tests.new_sample_workbook import build_new_sample_bytes, ITEM_A
+
+
+def _rows(table):
+    """``to_table()``'s rows are plain VALUE LISTS in ``table["columns"]``
+    order, not dicts — zip them back into dicts for readable assertions."""
+    return [dict(zip(table["columns"], row)) for row in table["rows"]]
 
 
 def test_drafts_round_trip():
@@ -162,10 +168,7 @@ def add_new_order(admin_client):
     """PUT a single-line draft, quote it, accept it, and return the quoted
     completion date (an ISO date string) — the whole "type it, quote it,
     accept it" flow a director drives by hand, in one call, for the tests
-    that only care about what ends up in the book (Task 11/12, 2026-09-08).
-
-    Depends on Task 12's ``POST /new-orders/add`` — Task 11's own tests that
-    use this fixture are expected red until that endpoint exists."""
+    that only care about what ends up in the book (Task 11/12, 2026-09-08)."""
     def _add(so_no, item_code, qty):
         r = admin_client.put("/new-orders/drafts",
                              json={"drafts": [{"so_no": so_no, "item_code": item_code,
@@ -176,6 +179,18 @@ def add_new_order(admin_client):
         assert added.status_code == 200, added.text
         return quote["lines"][0]["completion"]
     return _add
+
+
+@pytest.fixture
+def upload_sample(admin_client):
+    """Re-upload the new-engine sample workbook — a fresh upload, not the
+    original one `uploaded_masters` already did."""
+    def _upload():
+        r = admin_client.post("/upload", files={
+            "file": ("new2.xlsx", build_new_sample_bytes(), XLSX_MIME)})
+        assert r.status_code == 200, r.text
+        return r
+    return _upload
 
 
 def test_drafts_are_admin_only(user_client):
@@ -224,3 +239,86 @@ def test_quoting_with_no_drafts_is_a_clear_400(admin_client, uploaded_masters):
     r = admin_client.post("/new-orders/quote")
     assert r.status_code == 400
     assert "no new orders" in r.json()["detail"].lower()
+
+
+# --- Task 10 review fix: the intra-payload dedup + no-partial-persistence, --- #
+# --- both correct but untested before (2026-09-08) --- #
+
+def test_a_duplicate_line_within_the_same_payload_is_refused(admin_client,
+                                                              uploaded_masters):
+    r = admin_client.put("/new-orders/drafts",
+                         json={"drafts": [
+                             {"so_no": "NEW-1", "item_code": uploaded_masters, "qty": 10},
+                             {"so_no": "NEW-1", "item_code": uploaded_masters, "qty": 5}]})
+    assert r.status_code == 400
+    assert "twice" in r.json()["detail"]
+
+
+def test_a_bad_line_saves_no_line_from_the_same_payload(admin_client, uploaded_masters):
+    admin_client.put("/new-orders/drafts", json={"drafts": []})   # start clean
+    r = admin_client.put("/new-orders/drafts",
+                         json={"drafts": [
+                             {"so_no": "NEW-1", "item_code": uploaded_masters, "qty": 10},
+                             {"so_no": "", "item_code": uploaded_masters, "qty": 5}]})
+    assert r.status_code == 400
+    # The first (valid) line must NOT have been persisted just because it came
+    # before the bad one in the same payload — the whole PUT is all-or-nothing.
+    assert admin_client.get("/new-orders/drafts").json()["drafts"] == []
+
+
+# --- Task 12: accepting a quote, and clearing the queue --- #
+
+def test_adding_saves_the_orders_with_the_quoted_delivery_date(admin_client,
+                                                               uploaded_masters):
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    quote = admin_client.post("/new-orders/quote").json()
+    r = admin_client.post("/new-orders/add", json={"stamp": quote["stamp"]})
+    assert r.status_code == 200
+    # GET /orders returns the same to_table() shape as POST /run's "orders" key:
+    # {"columns": [...], "rows": [...]} — not a bare list of dicts — and the
+    # delivery date column is "SO Delivery Date", rendered DD-MM-YYYY (fmt_date),
+    # not the ISO string the quote returns.
+    rows = {(o["SO No"], o["Item Code"]): o
+            for o in _rows(admin_client.get("/orders").json()["orders"])}
+    row = rows[("NEW-1", uploaded_masters)]
+    quoted_date = date.fromisoformat(quote["lines"][0]["completion"])
+    assert row["SO Delivery Date"] == fmt_date(quoted_date)
+
+
+def test_adding_clears_the_drafts(admin_client, uploaded_masters):
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    quote = admin_client.post("/new-orders/quote").json()
+    admin_client.post("/new-orders/add", json={"stamp": quote["stamp"]})
+    assert admin_client.get("/new-orders/drafts").json()["drafts"] == []
+
+
+def test_a_stale_quote_is_refused_and_says_to_requote(admin_client, uploaded_masters):
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    admin_client.post("/new-orders/quote")
+    r = admin_client.post("/new-orders/add", json={"stamp": "not-the-real-stamp"})
+    assert r.status_code == 409
+    assert "Finish and Optimize" in r.json()["detail"]
+
+
+def test_adding_is_admin_only(user_client):
+    assert user_client.post("/new-orders/add", json={"stamp": "x"}).status_code == 403
+
+
+def test_done_entering_clears_the_queue(admin_client, uploaded_masters, add_new_order):
+    add_new_order("NEW-1", uploaded_masters, 25)
+    assert book_store.load_new_order_queue()
+    admin_client.post("/optimize/done")
+    assert book_store.load_new_order_queue() == []
+
+
+def test_an_upload_clears_the_queue(admin_client, uploaded_masters, add_new_order,
+                                    upload_sample):
+    add_new_order("NEW-1", uploaded_masters, 25)
+    upload_sample()
+    assert book_store.load_new_order_queue() == []

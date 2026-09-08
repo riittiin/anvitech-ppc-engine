@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 from engine.config import Config, OVERLAP_SEQUENTIAL, OVERLAP_PERCENT
 from engine.loaders import load_all
 from engine import loaders
-from engine.models import PlanRun, Actual, Masters, fmt_date
+from engine.models import PlanRun, Actual, Masters, Order, fmt_date
 from engine.pipeline import run_forward, to_table, KEY_SEP
 from engine import optimizer
 from engine import optimize_service
@@ -639,6 +639,10 @@ class DraftLine(BaseModel):
 
 class DraftsRequest(BaseModel):
     drafts: list[DraftLine] = []
+
+
+class AddNewOrdersRequest(BaseModel):
+    stamp: str
 
 
 # --------------------------------------------------------------------------- #
@@ -2375,6 +2379,8 @@ def _optimize_apply():
         # Clear the in-memory job so a later page refresh doesn't re-show the
         # "Apply" panel for a plan that's already applied.
         _OPTIMIZE.update(state="idle", result=None, best=None, baseline=None)
+        # A full re-optimization treats every order equally, so arrival positions end here.
+        book_store.clear_new_order_queue()
         return meta
 
 
@@ -2415,6 +2421,8 @@ async def upload(request: Request, file: UploadFile = File(...)):
     # `add_orders` writes by (SO#, item) with hset, so an updated order overwrites
     # in place — an update needs no separate storage path.
     book_store.add_orders(new_orders + updated_orders)
+    # A fresh upload changes the book the queue's positions referred to.
+    book_store.clear_new_order_queue()
 
     result = {
         "name": file.filename,
@@ -2767,6 +2775,65 @@ def new_order_quote(request: Request):
         "existing_count": res.existing_count,
         "stamp": _plan_fingerprint(config),
     }
+
+
+@app.post("/new-orders/add")
+def add_new_orders(req: AddNewOrdersRequest, request: Request):
+    """Save the quoted draft lines into the order book, with the quoted
+    completion date as each order's SO delivery date, and queue them behind
+    the book that was already there (see `_split_queue`). Admin only.
+
+    The stamp names the plan the quote was computed against
+    (`_plan_fingerprint`, the same value `/new-orders/quote` returns). If the
+    plan has moved since then — someone else planned, punched an actual, or
+    changed a setting — the quoted date may no longer be true, so this refuses
+    rather than silently saving a stale one; the director re-quotes."""
+    require_admin(request)
+    from engine import quote as quote_mod
+    config = _load_plan_config()
+    if req.stamp != _plan_fingerprint(config):
+        raise HTTPException(
+            status_code=409,
+            detail=("The plan has changed since this quote. "
+                    "Press Finish and Optimize again to get a fresh date."))
+    drafts = book_store.load_new_order_drafts()
+    if not drafts:
+        raise HTTPException(status_code=400, detail="There are no new orders to add.")
+
+    _plan(config)                                  # ensures the artifacts are fresh
+    art = _PLAN_CACHE.get("artifacts") or {}
+    plan_run = art.get("plan_run")
+    if plan_run is None:
+        raise HTTPException(status_code=503,
+                            detail="The plan is not available right now. Try again.")
+    masters = art.get("masters") or _current_masters()
+    cfg = art.get("config") or _resolve_config(config)
+    res = quote_mod.quote(plan_run.schedule,
+                          optimizer.expected_completion(plan_run.schedule),
+                          _draft_quote_lines(drafts, masters), cfg, masters)
+    if not res.verified:
+        raise HTTPException(
+            status_code=409,
+            detail="The quote could not be confirmed: existing orders moved. "
+                   "Press Finish and Optimize again.")
+    bad = [r for r in res.lines if r["completion"] is None]
+    if bad:
+        raise HTTPException(status_code=400, detail=bad[0]["error"])
+
+    today = _ist_today().isoformat()
+    orders = [Order(so_no=r["so_no"], item_code=r["item_code"],
+                    item_name=r["item_name"], ordered_qty=float(r["qty"]),
+                    delivery_date=r["completion"], first_seen=today)
+              for r in res.lines]
+    book_store.add_orders(orders)
+    book_store.save_new_order_queue(
+        [tuple(k) for k in book_store.load_new_order_queue()]
+        + [(o.so_no, o.item_code) for o in orders])
+    book_store.save_new_order_drafts([])
+    _PLAN_CACHE["key"] = None      # the book changed; never serve the old response
+    return {"added": len(orders),
+            "orders": [{"so_no": o.so_no, "item_code": o.item_code,
+                        "delivery_date": o.delivery_date.isoformat()} for o in orders]}
 
 
 _VALID_SHIFTS = {"First shift", "Second shift", ""}
@@ -3382,6 +3449,8 @@ def optimize_done_ep(request: Request):
     contest starts; the winner auto-applies if strictly better."""
     # No require_admin: the gatekeeper already verified a valid session for any
     # non-public path, and this must be reachable by the user role.
+    # A full re-optimization treats every order equally, so arrival positions end here.
+    book_store.clear_new_order_queue()
     started = _try_start_auto(by=getattr(request.state, "user", "") or "")
     return {"started": started, "reason": ("started" if started else "skipped"),
             "state": _optimize_status()["state"]}
