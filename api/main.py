@@ -812,6 +812,52 @@ def _orders_table():
                                          _current_masters()))
 
 
+def _split_queue(so_lines, scheduler):
+    """Split ``so_lines`` by the arrival queue (2026-09-08 spec): a queued key is
+    planned BEHIND the rest of the book in its own stage-2 pass, so accepting a
+    quote can never move an existing order's date — unless ``scheduler`` cannot
+    run a two-stage plan (``run_forward(occupancy=...)`` is new-engine only;
+    every other scheduler raises `OccupancyRequiresNewEngineError`), in which
+    case the queued lines stay INSIDE the returned stage-1 list — planned in one
+    stage, exactly like the rest of the book — rather than silently vanishing
+    from the plan (the silent-omission class this codebase has been bitten by
+    before), and the returned note says why.
+
+    A queued key that no longer names an active line (the order was deleted, or
+    produced and marked complete) simply does not match here and drops out with
+    no special handling — the spec's "it clears itself" behaviour, by
+    construction.
+
+    Returns ``(stage1_lines, queued_lines, note)``. ``queued_lines``/``note``
+    are both empty when nothing is queued or nothing queued still matches."""
+    queued_keys = {tuple(k) for k in book_store.load_new_order_queue()}
+    queued_lines = [l for l in so_lines if l.key in queued_keys]
+    if not queued_lines:
+        return so_lines, [], ""
+    if scheduler != "new":
+        note = (f"{len(queued_lines)} newly added order(s) could not be planned "
+                f"behind the existing book because the '{scheduler}' engine does "
+                "not support it; they were planned together with the rest of "
+                "the book instead.")
+        return so_lines, [], note
+    stage1 = [l for l in so_lines if l.key not in queued_keys]
+    note = (f"{len(queued_lines)} new order(s) are planned behind the existing "
+            f"book until the next plan update.")
+    return stage1, queued_lines, note
+
+
+def _queue_note_for_display(config: Config) -> str:
+    """The arrival-queue banner text, rebuilt fresh on a cache hit — belt-and-
+    braces alongside the queue's own entry in `_plan_fingerprint`, the same
+    reasoning as `_orders_table()`/`_auto_note_for_display()` above."""
+    resolved = _resolve_config(config)
+    masters = _current_masters()
+    so_lines = orderbook.active_so_lines(
+        book_store.load_active_orders(), book_store.load_actuals(), masters)
+    _, _, note = _split_queue(so_lines, resolved.scheduler)
+    return note
+
+
 def _plan(config: Config):
     # Serve the cached plan when EVERY input is unchanged (the common login/refresh
     # case) — the fingerprint is complete, so a hit is byte-identical to recomputing.
@@ -827,7 +873,8 @@ def _plan(config: Config):
         # Same reasoning for `auto_note`: it reports whether a search is running
         # RIGHT NOW, which has nothing to do with the plan being served.
         return {**_cached, "orders": _orders_table(),
-                "auto_note": _auto_note_for_display()}
+                "auto_note": _auto_note_for_display(),
+                "queue_note": _queue_note_for_display(config)}
 
     masters = _current_masters()
     # Fingerprint of the plan-shaping inputs as REQUESTED (base config, before the
@@ -860,6 +907,11 @@ def _plan(config: Config):
         optimize_service.downtime_reservations(downtime_raw))
 
     so_lines = orderbook.active_so_lines(active, actuals, masters)   # remaining = ordered − finished good
+
+    # First come, first served (2026-09-08 spec): lines added through Add New
+    # Orders are planned BEHIND the book that was already there, so accepting a
+    # quote can never move an existing order's date. See `_split_queue`.
+    so_lines, queued_lines, queue_note = _split_queue(so_lines, config.scheduler)
 
     # Advance the plan clock past days already worked: once a day's production is
     # punched, the re-plan starts from the NEXT working day's first shift, not the
@@ -902,6 +954,29 @@ def _plan(config: Config):
     plan_run = PlanRun(so_lines=so_lines)
     trace = run_forward(plan_run, ranked_config, masters, reserved=ab or None,
                         priority_rank=ranks, frozen=frozen or None)
+
+    # Stage 2: the arrival queue, planned around stage 1's own committed placements
+    # (never before it — occupancy is what makes "moves nothing" a guarantee rather
+    # than a hope). `frozen=None` is deliberate: a brand-new order cannot be
+    # half-finished, and the frozen set only ever describes in-progress work.
+    if queued_lines:
+        from engine import new_engine as _ne_stage2
+        stage2 = PlanRun(so_lines=queued_lines)
+        occupancy = _ne_stage2.occupancy_from_entries(plan_run.schedule, config)
+        run_forward(stage2, ranked_config, masters, reserved=ab or None,
+                    frozen=None, occupancy=occupancy)
+        plan_run.schedule = list(plan_run.schedule) + list(stage2.schedule)
+        # `trace["rule6"]` may be an unreached placeholder (no "output" key) when
+        # stage 1 itself raised a RuleError — only write the merged schedule back
+        # into a rule6 entry that actually reached and succeeded, or a failing
+        # plan would turn into a KeyError here instead of showing its own error.
+        r6_trace = trace.get("rule6")
+        if r6_trace and not r6_trace.get("error"):
+            r6_trace["output"] = to_table(plan_run.schedule)
+            r6_trace["notes"].append(
+                f"{len(queued_lines)} newly added order(s) are planned behind the "
+                f"existing book (first come, first served) until the next plan "
+                f"update.")
 
     _augment_helpers(trace, plan_run, config, masters, actuals=actuals)
 
@@ -1034,7 +1109,7 @@ def _plan(config: Config):
               "config": saved_config_dict,
               "resolved_plan_start": resolved_plan_start,
               "expected_end": exp_end, "optimize_meta": optimize_meta,
-              "auto_note": _auto_note_for_display()}
+              "auto_note": _auto_note_for_display(), "queue_note": queue_note}
     # The raw artifacts of THIS run, cached alongside the response under the same
     # fingerprint. Downloads that need the schedule itself (the delay justification
     # report) read these instead of planning again — a second plan is a second set of
@@ -1345,6 +1420,11 @@ def _plan_fingerprint(config: Config) -> str:
         # machine/operator — a freeze change must bust the cache, or a stale plan
         # (computed before the freeze) would keep being served.
         "frozen": book_store.load_frozen_ops(),
+        # The arrival queue changes which orders are planned in stage 1 vs behind
+        # it in stage 2 — a queue change must bust the cache exactly like `frozen`,
+        # or a plan computed before an Add New Orders accept would keep being
+        # served (the same class of bug the 2026-08-08 cache-freshness fix caught).
+        "queue": book_store.load_new_order_queue(),
         # NOT the Orders-tab note. It is DISPLAY, not a plan input, so it is rebuilt
         # on every cache hit by `_auto_note_for_display()` instead of being keyed on
         # here. Keying on it threw away a perfectly good plan every time a status

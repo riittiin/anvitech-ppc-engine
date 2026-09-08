@@ -157,6 +157,27 @@ def uploaded_masters(admin_client):
     return ITEM_A
 
 
+@pytest.fixture
+def add_new_order(admin_client):
+    """PUT a single-line draft, quote it, accept it, and return the quoted
+    completion date (an ISO date string) — the whole "type it, quote it,
+    accept it" flow a director drives by hand, in one call, for the tests
+    that only care about what ends up in the book (Task 11/12, 2026-09-08).
+
+    Depends on Task 12's ``POST /new-orders/add`` — Task 11's own tests that
+    use this fixture are expected red until that endpoint exists."""
+    def _add(so_no, item_code, qty):
+        r = admin_client.put("/new-orders/drafts",
+                             json={"drafts": [{"so_no": so_no, "item_code": item_code,
+                                               "qty": qty}]})
+        assert r.status_code == 200, r.text
+        quote = admin_client.post("/new-orders/quote").json()
+        added = admin_client.post("/new-orders/add", json={"stamp": quote["stamp"]})
+        assert added.status_code == 200, added.text
+        return quote["lines"][0]["completion"]
+    return _add
+
+
 def test_drafts_are_admin_only(user_client):
     assert user_client.get("/new-orders/drafts").status_code == 403
     assert user_client.put("/new-orders/drafts", json={"drafts": []}).status_code == 403
