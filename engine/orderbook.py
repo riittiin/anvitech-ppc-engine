@@ -458,3 +458,36 @@ def entry_progress(active_orders: dict, actuals, masters=None) -> dict:
             "steps": steps,
         }
     return out
+
+
+def validate_new_order_line(so_no, item_code, qty, active, completed, masters):
+    """The message to show the director for a line typed into Add New Orders, or
+    None when it is good. Pure (2026-09-08 spec).
+
+    A duplicate is refused rather than warned: (SO number, item code) is the identity
+    of an order everywhere in this system, so a second one would overwrite the first,
+    including its recorded production.
+    """
+    so = (so_no or "").strip()
+    item = (item_code or "").strip()
+    if not so:
+        return "Enter an SO number."
+    if not item:
+        return "Pick an item."
+    try:
+        q = float(qty)
+    except (TypeError, ValueError):
+        return "Enter a quantity."
+    if q <= 0 or q != int(q):
+        return "Enter a whole quantity greater than zero."
+    if item not in masters.routings:
+        return (f"Item {item} has no routing in the Item's Process Master, "
+                f"so it cannot be scheduled.")
+    for book in (active or {}), (completed or {}):
+        for order in book.values():
+            if (order.so_no.strip().lower() == so.lower()
+                    and order.item_code.strip().lower() == item.lower()):
+                return (f"{order.so_no} / {order.item_code} is already in the book — "
+                        f"{int(order.ordered_qty)} pieces, delivery "
+                        f"{order.delivery_date.strftime('%d-%b')}.")
+    return None
