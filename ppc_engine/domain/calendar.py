@@ -57,10 +57,14 @@ class ShopCalendar:
     # Private cache: each machine's ``machine_busy`` blocks, sorted and merged, once.
     # `free_runs` is called roughly once per candidate machine per dispatch decision
     # (~90,000 times over a plan), and stage 2 of the Add New Orders quote seeds one
-    # block per stage-1 segment — hundreds on a busy machine. Re-sorting and
-    # re-merging from scratch every call measured 118µs at 500 blocks; this cache
-    # makes it one-time work per machine. `compare=False`/`repr=False` so it never
-    # affects equality or `repr` — it is a memoization detail, not shop state.
+    # block per stage-1 segment — hundreds on a busy machine. Only the SORT+MERGE is
+    # amortized here — building the runs list from the merged blocks is still
+    # O(blocks) on every call, since it depends on the query's own `after` (see
+    # `free_runs` below). Measured at 500 blocks: 2.3x faster overall when `after`
+    # lands near the start of the range (most of the cost was runs-building anyway),
+    # 8.0x when it lands near the end (most of the cost WAS the now-skipped
+    # sort+merge). `compare=False`/`repr=False` so it never affects equality or
+    # `repr` — it is a memoization detail, not shop state.
     # `ShopCalendar` is frozen, so the FIELD is never rebound after construction —
     # only the dict's own contents are populated lazily, which a frozen dataclass
     # still allows. ``init=False`` is load-bearing, not cosmetic: `dataclasses.
