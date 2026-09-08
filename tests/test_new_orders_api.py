@@ -606,6 +606,12 @@ def test_accepting_a_preponed_result_uses_the_typed_date_not_the_achieved_one(
 
 def test_accepting_a_preponed_result_creates_no_queue(admin_client, uploaded_masters,
                                                       finished_quote_optimize):
+    """After accept, the queue is empty. This does NOT by itself prove
+    accept_prepone's own explicit `book_store.clear_new_order_queue()` line does
+    anything: `_optimize_apply()`, which accept always calls, already clears the
+    queue on every full optimization. Mutation-tested (2026-09-08 review round
+    1): removing accept's own clear line does not fail this or any other test —
+    it is honest belt-and-braces, not proof the explicit line is load-bearing."""
     admin_client.post("/new-orders/prepone/accept")
     assert book_store.load_new_order_queue() == []
 
@@ -673,3 +679,70 @@ def test_accepting_refuses_an_ordinary_plan_kind_search(admin_client, uploaded_m
                     "knob": None, "inputs_sig": None})
     r = admin_client.post("/new-orders/prepone/accept")
     assert r.status_code == 409
+
+
+# --- Task 13, review round 1 fixes --- #
+
+def test_accept_refuses_and_changes_nothing_when_the_apply_backstop_rejects(
+        admin_client, uploaded_masters):
+    """Finding 1 (critical, 2026-09-08 review round 1): `_optimize_apply()`
+    carries its own hard guard (the committed-promise backstop) that can reject
+    a plan the contest itself scored fine. Apply must run BEFORE any write, so
+    a refusal here leaves the book, the drafts and the queue exactly as they
+    were — no order added with no plan priority protecting it, no drafts
+    wiped, nothing to fix by hand."""
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    drafts = book_store.load_new_order_drafts()
+    for row in drafts:
+        row["target_date"] = "2025-03-20"
+    book_store.save_new_order_drafts(drafts)
+    import api.main as m
+    with m._OPTIMIZE_LOCK:
+        m._OPTIMIZE.update(
+            state="done", kind="quote",
+            result={"ranks": {"NEW-1\x1f" + uploaded_masters: 1},
+                    "budget": "deep search (new orders)", "seed": 42,
+                    "baseline": {"total_late_days": 20, "makespan_days": 6.0},
+                    # A committed slip far past any slack forces the apply-time
+                    # backstop in `_optimize_apply()` to raise 409, AFTER the
+                    # search itself already looked like a normal finished quote.
+                    "best": {"total_late_days": 10, "makespan_days": 5.0,
+                             "max_committed_slip": 999},
+                    "cancelled": False, "improved": True,
+                    "best_overlap": None, "current_overlap": None,
+                    "flexible_machines": None, "current_flexible": None,
+                    "knob": None, "inputs_sig": None})
+    r = admin_client.post("/new-orders/prepone/accept")
+    assert r.status_code == 409
+    rows = {(o["SO No"], o["Item Code"])
+            for o in _rows(admin_client.get("/orders").json()["orders"])}
+    assert ("NEW-1", uploaded_masters) not in rows
+    assert book_store.load_new_order_drafts() == drafts
+
+
+def test_optimize_apply_refuses_a_quote_kind_result(admin_client, uploaded_masters,
+                                                     _api_module):
+    """Finding 2 (2026-09-08 review round 1): the Settings panel's ordinary
+    "Apply this plan" button must never adopt a preponed Add New Orders search
+    — that result belongs to its own Accept button."""
+    with _api_module._OPTIMIZE_LOCK:
+        _api_module._OPTIMIZE.update(
+            state="done", kind="quote",
+            result={"ranks": {"NEW-1\x1f" + uploaded_masters: 1},
+                    "budget": "deep search (new orders)", "seed": 42,
+                    "baseline": {"total_late_days": 20, "makespan_days": 6.0},
+                    "best": {"total_late_days": 10, "makespan_days": 5.0,
+                             "max_committed_slip": 0},
+                    "cancelled": False, "improved": True,
+                    "best_overlap": None, "current_overlap": None,
+                    "flexible_machines": None, "current_flexible": None,
+                    "knob": None, "inputs_sig": None})
+    r = admin_client.post("/optimize/apply")
+    assert r.status_code == 409
+    assert "Add New Orders" in r.json()["detail"]
+    # Unaffected: an ordinary plan-kind result still applies normally.
+    with _api_module._OPTIMIZE_LOCK:
+        _api_module._OPTIMIZE["kind"] = "plan"
+    assert admin_client.post("/optimize/apply").status_code == 200

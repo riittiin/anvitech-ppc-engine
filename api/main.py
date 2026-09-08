@@ -3029,11 +3029,21 @@ def prepone_new_orders(req: PreponeRequest, request: Request):
 
 @app.post("/new-orders/prepone/accept")
 def accept_prepone(request: Request):
-    """Save the new orders with the dates the director typed (never the date the
-    search achieved — see ``_new_order_extras``), and put the plan that was just
-    searched into force. Refuses if there is no finished quote-kind search to
+    """Put the plan that was just searched into force, THEN save the new orders
+    with the dates the director typed (never the date the search achieved — see
+    ``_new_order_extras``). Refuses if there is no finished quote-kind search to
     accept, so the ordinary Apply button's contest can never be adopted here by
-    mistake, and a quote's own numbers can never be applied twice."""
+    mistake, and a quote's own numbers can never be applied twice.
+
+    Apply runs BEFORE any write, on purpose (2026-09-08 review, Finding 1,
+    critical): ``_optimize_apply()`` carries its own hard guard — the
+    committed-promise backstop — that can still refuse a plan that scored well
+    in the contest. If the order had already been added and the drafts already
+    cleared by the time that guard fires, the director would be left with the
+    new order permanently in the book, no plan priority protecting it, no queue
+    protection, and no drafts left to even retry with — a dead end fixable only
+    by a direct database correction. Applying first means a refusal here
+    changes nothing at all: the director can simply try again."""
     require_admin(request)
     drafts = book_store.load_new_order_drafts()
     if not drafts:
@@ -3053,17 +3063,20 @@ def accept_prepone(request: Request):
 
     masters = _current_masters()
     orders = _new_order_extras(drafts, masters, _ist_today().isoformat())
+    # The numbers the director was just shown come from the searched plan, so
+    # accepting must adopt it — never leave the book planned by an older
+    # sequence while claiming these dates. Called BEFORE any write: if its own
+    # committed-promise backstop raises, nothing below has happened yet.
+    _optimize_apply()
     book_store.add_orders(orders)
     book_store.save_new_order_drafts([])
-    # The numbers the director was just shown come from the searched plan, so
-    # accepting must adopt it — never leave the book planned by an older sequence
-    # while claiming these dates.
-    _optimize_apply()
     # No queue: after a full re-optimization every order is equal by definition
     # (unlike the quick quote's `/new-orders/add`, which queues behind the book
     # that was already there). `_optimize_apply()` already clears this on every
     # full optimization; repeated here so this endpoint's own guarantee does not
-    # depend on staying in sync with that function's internals.
+    # depend on staying in sync with that function's internals — see
+    # tests/test_new_orders_api.py::test_accepting_a_preponed_result_creates_no_queue,
+    # which cannot by itself tell the two clears apart.
     book_store.clear_new_order_queue()
     _PLAN_CACHE["key"] = None
     return {"added": len(orders),
@@ -3454,8 +3467,20 @@ def optimize_cancel_ep(request: Request):
 @app.post("/optimize/apply")
 def optimize_apply_ep(request: Request):
     """Persist the last completed run's optimized order — every Plan replays it.
-    Admin only."""
+    Admin only. Refuses a preponed Add New Orders search (2026-09-08 review,
+    Finding 2): a `kind="quote"` result was searched with draft orders the
+    admin may not know about, joined into the book only in memory, and this
+    button's usual "every Plan replays it" promise would apply a plan the admin
+    never asked for here. That result belongs to its own Accept button on the
+    Add New Orders tab."""
     require_admin(request)
+    with _OPTIMIZE_LOCK:
+        kind = _OPTIMIZE.get("kind", "plan")
+    if kind != "plan":
+        raise HTTPException(
+            status_code=409,
+            detail="This search was started from the Add New Orders tab. Go "
+                   "there to accept it, or start a new search from Settings.")
     return _optimize_apply()
 
 
