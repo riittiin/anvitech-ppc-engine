@@ -262,3 +262,194 @@ def test_a_deadline_strictly_inside_a_later_window_clamps_correctly(shop):
     assert loose["end"] == natural_end
     assert [(s.start, s.end) for s in loose["segments"]] == \
            [(s.start, s.end) for s in free["segments"]]
+
+
+from dataclasses import replace as _replace
+
+from ppc_engine.scheduler import decode
+
+
+def _decoded(nm, cfg, orders):
+    return decode(orders, [o.key for o in orders], nm, cfg)
+
+
+def _busy_machine_ivs(sched):
+    out = {}
+    for seg in sched.segments:
+        if seg.machine_id and seg.end > seg.start:
+            out.setdefault(seg.machine_id, []).append((seg.start, seg.end))
+    return {k: tuple(sorted(v)) for k, v in out.items()}
+
+
+@pytest.fixture()
+def book():
+    wb = build_new_sample_bytes()
+    book_store.save_masters_bytes(wb)
+    nm = new_load(io.BytesIO(wb)).masters
+    so_lines, _ = loaders.load_all(io.BytesIO(wb))
+    orders, _ = _orders_from_batches(rule1_consolidate.run(so_lines, _CONF), nm)
+    return nm, _plan_config(_CONF), orders
+
+
+def _machine_ids(sched):
+    """The set of machines that actually carry real (non-zero-duration) work."""
+    return {seg.machine_id for seg in sched.segments
+            if seg.machine_id and seg.end > seg.start}
+
+
+def _stage_split(orders):
+    """Split the sample book's two orders so each stage gets one, and confirm the
+    split is not degenerate: both stages must place real machine-bound work, and at
+    least one machine must be contended by both (the sample workbook's B001 and B002
+    both route through CNC1, so the natural half/half split already gives this —
+    checked here rather than assumed, so a future change to the sample workbook that
+    breaks the overlap fails LOUDLY instead of leaving these tests vacuous)."""
+    first, second = orders[: len(orders) // 2], orders[len(orders) // 2:]
+    assert first and second
+    return first, second
+
+
+def test_a_plan_with_no_occupancy_is_byte_identical(book):
+    """The guarantee the whole feature rests on: an empty calendar changes nothing."""
+    nm, cfg, orders = book
+    before = _decoded(nm, cfg, orders)
+    after = _decoded(_replace(nm, calendar=_replace(nm.calendar, machine_busy={},
+                                                    operator_busy={})), cfg, orders)
+    assert [(s.order_key, s.op_seq, s.machine_id, s.operator, s.start, s.end, s.qty)
+            for s in before.segments] == \
+           [(s.order_key, s.op_seq, s.machine_id, s.operator, s.start, s.end, s.qty)
+            for s in after.segments]
+    assert before.completion == after.completion
+
+
+def test_new_work_never_lands_on_occupied_machine_time(book):
+    """Stage 2 in miniature: plan half the orders, then plan the rest against them."""
+    nm, cfg, orders = book
+    first, second = _stage_split(orders)
+    stage1 = _decoded(nm, cfg, first)
+    busy = _busy_machine_ivs(stage1)
+    op_busy = {}
+    for seg in stage1.segments:
+        if seg.operator:
+            op_busy.setdefault(seg.operator, []).append((seg.start, seg.end))
+    nm2 = _replace(nm, calendar=_replace(
+        nm.calendar, machine_busy=busy,
+        operator_busy={k: tuple(sorted(v)) for k, v in op_busy.items()}))
+    stage2 = _decoded(nm2, cfg, second)
+
+    # Guard against a vacuous split (see _stage_split's docstring): both stages must
+    # produce real machine-bound work, and they must share at least one machine —
+    # otherwise the assertions below would pass by having nothing to check.
+    stage1_machines = _machine_ids(stage1)
+    stage2_machines = _machine_ids(stage2)
+    assert stage1_machines, "stage 1 produced no machine-bound work — split is degenerate"
+    assert stage2_machines, "stage 2 produced no machine-bound work — split is degenerate"
+    shared = stage1_machines & stage2_machines
+    assert shared, (
+        f"stage 1 ({stage1_machines}) and stage 2 ({stage2_machines}) never contend "
+        "for the same machine — split is degenerate")
+
+    for seg in stage2.segments:
+        if not seg.machine_id:
+            continue
+        for bs, be in busy.get(seg.machine_id, ()):
+            assert seg.end <= bs or seg.start >= be, (
+                f"{seg.order_key} op {seg.op_seq} overlaps existing work on "
+                f"{seg.machine_id}: {seg.start}-{seg.end} vs {bs}-{be}")
+
+
+def test_no_operator_is_double_booked_across_the_two_stages(book):
+    nm, cfg, orders = book
+    first, second = _stage_split(orders)
+    stage1 = _decoded(nm, cfg, first)
+    op_busy = {}
+    for seg in stage1.segments:
+        if seg.operator:
+            op_busy.setdefault(seg.operator, []).append((seg.start, seg.end))
+    nm2 = _replace(nm, calendar=_replace(
+        nm.calendar, machine_busy=_busy_machine_ivs(stage1),
+        operator_busy={k: tuple(sorted(v)) for k, v in op_busy.items()}))
+    stage2 = _decoded(nm2, cfg, second)
+
+    assert op_busy, "stage 1 booked no operator — split is degenerate"
+    stage2_ops = {seg.operator for seg in stage2.segments if seg.operator}
+    assert stage2_ops, "stage 2 booked no operator — split is degenerate"
+    assert op_busy.keys() & stage2_ops, (
+        f"stage 1 operators ({sorted(op_busy)}) and stage 2 operators "
+        f"({sorted(stage2_ops)}) never overlap — split is degenerate")
+
+    for seg in stage2.segments:
+        if not seg.operator:
+            continue
+        for bs, be in op_busy.get(seg.operator, ()):
+            assert seg.end <= bs or seg.start >= be, (
+                f"{seg.operator} is in two places at once: "
+                f"{seg.start}-{seg.end} vs {bs}-{be}")
+
+
+def test_a_job_is_never_split_across_two_occupied_blocks(book):
+    """The gap rule: one continuous engagement per operation, so the 90-minute
+    setup is never paid twice."""
+    nm, cfg, orders = book
+    first, second = _stage_split(orders)
+    stage1 = _decoded(nm, cfg, first)
+    busy = _busy_machine_ivs(stage1)
+    nm2 = _replace(nm, calendar=_replace(nm.calendar, machine_busy=busy))
+    stage2 = _decoded(nm2, cfg, second)
+
+    assert _machine_ids(stage1), "stage 1 produced no machine-bound work — split is degenerate"
+    assert _machine_ids(stage2), "stage 2 produced no machine-bound work — split is degenerate"
+    assert _machine_ids(stage1) & _machine_ids(stage2), (
+        "stage 1 and stage 2 never contend for the same machine — split is degenerate")
+
+    spans = {}
+    for seg in stage2.segments:
+        if not seg.machine_id:
+            continue
+        k = (seg.order_key, seg.op_seq)
+        lo, hi = spans.get(k, (seg.start, seg.end))
+        spans[k] = (min(lo, seg.start), max(hi, seg.end))
+    for (key, seq), (lo, hi) in spans.items():
+        for bs, be in busy.get(
+                next(s.machine_id for s in stage2.segments
+                     if (s.order_key, s.op_seq) == (key, seq)), ()):
+            assert not (lo < be and bs < hi), (
+                f"{key} op {seq} spans an existing job ({lo}-{hi} across {bs}-{be})")
+
+
+from ppc_engine.scheduler.flow_scheduler import _place_operation
+
+
+def test_place_operation_routes_through_free_runs_not_a_direct_lay(shop):
+    """Isolated proof that ``_place_operation``'s machine loop is wired to
+    ``_lay_in_free_run`` (and so consults ``ShopCalendar.free_runs``), independent of
+    the decode-level fixture's own trap: the sample workbook's routing timing and
+    single-operator-per-shift-per-machine structure mean two REAL orders never
+    actually contend for the same machine slot, so a decode()-level test can pass
+    unchanged whether or not this wiring exists (measured — confirmed by mutation).
+
+    This test calls ``_place_operation`` directly with a hand-built ``machine_busy``
+    block sitting exactly where the op would otherwise land, and a staffing board with
+    NO operator-busy time at all — so nothing but the machine-occupancy path can be
+    what moves the placement.
+    """
+    nm, cfg, order, op = shop
+    mid = op.machine_options[0]
+    machine_free = {mid: cfg.plan_start}
+    board = StaffingBoard(build_machine_pools(nm))
+    free = _place_operation(op, order, cfg.plan_start, machine_free, board, nm, cfg)
+    assert free["machine_id"] == mid
+
+    # Block exactly the window the op would naturally use. Operator-busy time is left
+    # completely empty, so an operator is always free — the only thing that can push
+    # this placement later is the machine occupancy itself.
+    nm2 = _replace(nm, calendar=_replace(
+        nm.calendar, machine_busy={mid: ((free["start"], free["end"]),)}))
+    board2 = StaffingBoard(build_machine_pools(nm2))
+    machine_free2 = {mid: cfg.plan_start}
+    laid = _place_operation(op, order, cfg.plan_start, machine_free2, board2, nm2, cfg)
+
+    assert laid["machine_id"] == mid
+    assert laid["start"] >= free["end"], (
+        "the op landed inside a block an earlier planning stage already committed — "
+        "_place_operation is not consulting ShopCalendar.free_runs")

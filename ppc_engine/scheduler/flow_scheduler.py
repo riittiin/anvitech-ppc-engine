@@ -95,7 +95,9 @@ def decode(
         prev_end_of[key] = config.plan_start
 
     machine_free: dict[str, datetime] = {mid: config.plan_start for mid in masters.machines}
-    staffing = StaffingBoard(build_machine_pools(masters))
+    staffing = StaffingBoard(build_machine_pools(masters),
+                             booked=masters.calendar.operator_busy,
+                             assigned=masters.calendar.machine_shift_operator)
     segments: list[Segment] = []
     completion: dict[tuple[str, str], datetime] = {}
 
@@ -280,7 +282,8 @@ def _place_operation(
         if machine is None:
             continue  # unknown machine id (provisional handling comes with the loader)
         earliest = max(ready, machine_free.get(mid, config.plan_start))
-        laid = _lay_on_machine(machine, earliest, dur, order, op, int(op_qty), staffing, masters, config)
+        laid = _lay_in_free_run(machine, earliest, dur, order, op, int(op_qty),
+                                staffing, masters, config)
         if laid is None:
             continue
         cand = (laid["end"], opt_idx)
@@ -379,6 +382,26 @@ def _lay_on_machine(
     if remaining > _EPS_MIN or first_start is None:
         return None  # unschedulable within the lookahead horizon
     return {"start": first_start, "end": segments[-1].end, "segments": segments, "assignments": assignments}
+
+
+def _lay_in_free_run(machine, earliest, dur_min, order, op, op_qty, staffing,
+                     masters, config):
+    """Lay the op in the first stretch of ``machine``'s time that can hold it WHOLE.
+
+    A "free run" is a stretch not already occupied by work an earlier planning stage
+    committed (Add New Orders quote, 2026-09-08 spec). With no occupancy on file there
+    is exactly ONE run — [earliest, forever) — and this is a single unbounded call to
+    _lay_on_machine, i.e. byte-identical to what every plan does today.
+
+    The op is never split across two runs: the machine would have been torn down for
+    another job in between, and the 90-minute setup is not paid twice (owner rule).
+    """
+    for run_start, run_end in masters.calendar.free_runs(machine.id, earliest):
+        laid = _lay_on_machine(machine, run_start, dur_min, order, op, op_qty,
+                               staffing, masters, config, deadline=run_end)
+        if laid is not None:
+            return laid
+    return None
 
 
 def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, planned_operator,
