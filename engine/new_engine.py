@@ -41,6 +41,11 @@ from ppc_engine.scheduler import decode
 _OS_LANE = "OS / Outsourced"
 _OFF_LANE = "Off-machine"
 
+# The two lanes that are not a machine: an outsourced step and an off-machine
+# milestone. They occupy no in-house capacity, so they never appear in occupancy or
+# in a frozen set. ONE definition — engine/freeze.py imports this one.
+OFF_LANES = frozenset({_OS_LANE, _OFF_LANE})
+
 # New masters parsed from the stored workbook, cached by content hash so the workbook is
 # parsed once per upload (the optimizer replays `run` many times).
 _MASTERS_CACHE: dict = {}
@@ -179,6 +184,40 @@ def _with_unavailability(masters, reserved):
         downtime[mid] = frozenset(downtime.get(mid, frozenset()) | days)
     return _replace(masters, calendar=_replace(
         cal, leaves=leaves, machine_downtime=downtime))
+
+
+def occupancy_from_entries(entries, config) -> dict:
+    """A finished plan's placements, as the occupancy the NEXT planning stage must
+    work around (Add New Orders quote, 2026-09-08 spec).
+
+    Returns ``{"machine": {...}, "operator": {...}, "assign": {...}}`` shaped exactly
+    like ShopCalendar's three occupancy fields. Outsourced and off-machine lanes are
+    skipped: they hold no in-house machine and no person, so they occupy nothing.
+
+    Reads the plan's own published output (machine, start, end and the per-shift
+    operator segments) — it never re-derives a placement.
+    """
+    from ppc_engine.worktime import shift_key_for
+    sched_cfg = _plan_config(config)
+    machine: dict[str, list] = {}
+    operator: dict[str, list] = {}
+    assign: dict[tuple, str] = {}
+    for e in entries or []:
+        if e.machine in OFF_LANES or e.end <= e.start:
+            continue
+        machine.setdefault(e.machine, []).append((e.start, e.end))
+        for seg_start, seg_end, name in (e.op_segments or []):
+            if not name or seg_end <= seg_start:
+                continue
+            operator.setdefault(name, []).append((seg_start, seg_end))
+            key = shift_key_for(seg_start, sched_cfg)
+            if key is not None:
+                assign[(e.machine, key[0], key[1])] = name
+    return {
+        "machine": {k: tuple(sorted(v)) for k, v in machine.items()},
+        "operator": {k: tuple(sorted(v)) for k, v in operator.items()},
+        "assign": assign,
+    }
 
 
 def _plan_config(config) -> PlanConfig:
@@ -691,13 +730,17 @@ SCHEDULER_FINGERPRINT = "new-engine-v7-ontime-linear-tardiness"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
-        reserved=None, frozen=None, **kw):
+        reserved=None, frozen=None, occupancy=None, **kw):
     """Scheduler seam contract: prioritized `batches` -> list[ScheduleEntry], via the new
     operator-stable engine.
 
     The batches arrive already in priority order (Rules 1-3, or a saved optimization's
     rank map), so that order IS the sequence handed to the new decoder — the new engine
     schedules them in exactly the priority the rest of the pipeline decided.
+
+    ``occupancy`` (optional) is what an EARLIER planning stage already committed —
+    see occupancy_from_entries. Present only on stage 2 of the Add New Orders quote;
+    ``None`` everywhere else, which is byte-identical to before.
     """
     if not batches:
         return []
@@ -705,6 +748,13 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     # fossil), so a delete/edit/rotation in Settings is what actually schedules.
     new_masters = _with_unavailability(_apply_app_operators(
         _new_masters(bool(getattr(config, "flexible_machines", False))), masters), reserved)
+    if occupancy:
+        from dataclasses import replace as _replace
+        new_masters = _replace(new_masters, calendar=_replace(
+            new_masters.calendar,
+            machine_busy=occupancy.get("machine") or {},
+            operator_busy=occupancy.get("operator") or {},
+            machine_shift_operator=occupancy.get("assign") or {}))
     orders, batch_by_key = _orders_from_batches(batches, new_masters)
     if not orders:
         return []

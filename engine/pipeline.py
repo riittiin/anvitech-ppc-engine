@@ -189,7 +189,8 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
                 machine_lost_min: dict | None = None,
                 reserved: dict | None = None,
                 priority_rank: dict | None = None,
-                frozen: dict | None = None) -> dict:
+                frozen: dict | None = None,
+                occupancy: dict | None = None) -> dict:
     """Run the forward planning chain 1 → 2 → 3 → 6, returning the trace.
 
     Rules 4/5 are consumed inside Rule 6 (their effect is logged in rule6's
@@ -209,6 +210,11 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
 
     ``frozen`` (optional) maps machine id → list of FrozenOp specs; passed to the
     scheduler to pre-place locked operations. ``None`` → no effect (new-engine only).
+
+    ``occupancy`` (optional) is an EARLIER planning stage's committed placements
+    (see ``new_engine.occupancy_from_entries``) — the new engine works around it
+    instead of scheduling over it. ``None`` → no effect (new-engine only; the Add
+    New Orders quote's stage-2 plan is the only caller today).
     """
     config.validate()
     trace: dict = {}
@@ -236,10 +242,16 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
                 f"{n_ranked} of {len(replayed)} batches follow the optimized order; "
                 f"unranked (new) batches keep their Rule-3 position."
             )
+        _sched_kw = dict(config=config, masters=masters,
+                         machine_lost_min=machine_lost_min,
+                         reserved=reserved, frozen=frozen)
+        if occupancy:
+            # New engine only. The retired classic/flow schedulers do not accept it,
+            # and never receive it: occupancy is set only by the two-stage plan.
+            _sched_kw["occupancy"] = occupancy
         plan_run.schedule = run_rule(
             trace, "rule6", scheduler_for(config), plan_run.batches_prioritized,
-            config=config, masters=masters, machine_lost_min=machine_lost_min,
-            reserved=reserved, frozen=frozen,
+            **_sched_kw,
         )
     except RuleError:
         # The failing rule's entry already holds the error; mark the rest unreached.

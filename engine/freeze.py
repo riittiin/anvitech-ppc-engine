@@ -9,8 +9,7 @@ Two pure functions:
 """
 from __future__ import annotations
 from engine.loaders import normalize_process_name as _norm
-
-_OS_LANES = {"OS / Outsourced", "Off-machine"}
+from engine.new_engine import OFF_LANES as _OS_LANES
 
 
 def schedule_projection(schedule) -> list[dict]:
