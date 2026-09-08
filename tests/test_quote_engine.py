@@ -174,16 +174,54 @@ def test_more_new_orders_never_pull_an_existing_order_earlier_or_later(loaded):
         assert res.violations == [], f"{n} new orders disturbed the book (structural)"
 
 
-def test_arrangement_counts_above_the_exhaustive_max():
-    """Documents the actual arrangement counts tried once the fixture is too big
-    for exhaustive permutations: rotations only, one per line, never more than
-    _SAMPLED_ARRANGEMENTS."""
+def test_rank_ordering_counts_above_the_exhaustive_max():
+    """Documents the actual priority_rank map counts tried once the fixture is
+    too big for exhaustive permutations: rotations only, one per line, never
+    more than _SAMPLED_ARRANGEMENTS. Each returned candidate is a rank dict
+    keyed "<so_no>\\x1fitem_code", never a reordered list (see the module
+    docstring: list order has no effect in this engine)."""
     def lines(n):
         return [quote_mod.QuoteLine(f"S{i}", "ITEM", "x", 1) for i in range(n)]
 
-    assert len(quote_mod._arrangements(lines(5))) == 5
-    assert len(quote_mod._arrangements(lines(10))) == 10
-    assert len(quote_mod._arrangements(lines(20))) == 20
+    import math
+    assert quote_mod._rank_orderings(lines(0)) == [None]
+    assert quote_mod._rank_orderings(lines(1)) == [None]
+
+    for n in (2, 3, 4):
+        maps = quote_mod._rank_orderings(lines(n))
+        assert len(maps) == math.factorial(n), f"n={n} should be exhaustive"
+        for m in maps:
+            assert isinstance(m, dict) and len(m) == n
+            assert sorted(m.values()) == list(range(1, n + 1))
+
+    for n, expected in ((5, 5), (10, 10), (20, 20)):
+        maps = quote_mod._rank_orderings(lines(n))
+        assert len(maps) == expected
+        for m in maps:
+            assert isinstance(m, dict) and len(m) == n
+            assert sorted(m.values()) == list(range(1, n + 1))
+
+
+def test_rank_search_actually_changes_the_schedule(loaded):
+    """The measurement behind Finding 1's fix: priority_rank, not list order, is
+    the real sequence lever in this engine. Two different rank maps over the
+    same two competing lines must be able to produce different schedules."""
+    so_lines, masters = loaded
+    stage1 = _plan(so_lines, masters)
+    occ = new_engine.occupancy_from_entries(stage1, _CONF)
+    itemA = so_lines[0].item_code
+    itemB = so_lines[-1].item_code
+    lineA = quote_mod.QuoteLine("NEW-1", itemA, "x", 50)
+    lineB = quote_mod.QuoteLine("NEW-2", itemB, "y", 50)
+
+    seen = set()
+    for rank in quote_mod._rank_orderings([lineA, lineB]):
+        entries, _expected = quote_mod._stage2([lineA, lineB], occ, _CONF, masters,
+                                               rank, None)
+        sig = tuple(sorted((e.batch_id, e.process_seq, e.machine, e.start, e.end)
+                            for e in entries))
+        seen.add(sig)
+    assert len(seen) > 1, "priority_rank had no effect: the sequence lever is a no-op"
 
 
 def test_moved_field_actually_catches_a_moved_order():
@@ -251,3 +289,95 @@ def test_when_stage2_cannot_schedule_it_reports_a_clear_error(loaded, monkeypatc
     assert res.lines[0]["completion"] is None
     assert res.lines[0]["error"] and "no machine free" in res.lines[0]["error"]
     assert res.existing_count == len(before)
+
+
+def test_the_rank_search_finds_a_better_arrangement_than_the_first_one_tried(loaded):
+    """Proves the search actually picks the best-scoring candidate, not just the
+    first one tried. Line B is only on time when it is scheduled FIRST (rank 1);
+    the natural, no-search order schedules line A first (matching the sample's
+    own delivery-date order), so this only passes if the loop explores and
+    keeps the better rank map. Reverting _score to a constant (the reviewer's
+    third mutation) makes this fail, since the first candidate is always kept."""
+    so_lines, masters = loaded
+    stage1 = _plan(so_lines, masters)
+    before = optimizer.expected_completion(stage1)
+    itemA = so_lines[0].item_code
+    itemB = so_lines[-1].item_code
+    lineA = quote_mod.QuoteLine("NEW-1", itemA, "x", 50)
+    lineB = quote_mod.QuoteLine("NEW-2", itemB, "y", 50, target_date=date(2025, 3, 4))
+
+    res = quote_mod.quote(stage1, before, [lineA, lineB], _CONF, masters)
+    rowB = next(r for r in res.lines if r["so_no"] == "NEW-2")
+    assert rowB["completion"] == date(2025, 3, 4), (
+        "the search kept a worse arrangement than one it actually tried")
+
+
+def test_score_prefers_fewer_unscheduled_lines_over_more():
+    """Finding 2: two arrangements that both leave something unscheduled must
+    not score identically. Before the fix both hit the same sentinel
+    (10**9, date.max, 10**9) regardless of how many lines failed, so the first
+    partially-failed arrangement tried was kept forever."""
+    lineA = quote_mod.QuoteLine("A", "ITEM", "n", 1)
+    lineB = quote_mod.QuoteLine("B", "ITEM", "n", 1)
+    lineC = quote_mod.QuoteLine("C", "ITEM", "n", 1)
+    lines = [lineA, lineB, lineC]
+
+    one_missing = {("A", "ITEM"): date(2025, 3, 1), ("B", "ITEM"): date(2025, 3, 2)}
+    two_missing = {("A", "ITEM"): date(2025, 3, 1)}
+
+    score_one_missing = quote_mod._score(lines, one_missing)
+    score_two_missing = quote_mod._score(lines, two_missing)
+    assert score_one_missing < score_two_missing, (
+        "an arrangement that schedules more lines must score better")
+    assert score_one_missing[0] == 1
+    assert score_two_missing[0] == 2
+
+
+def test_quote_never_varies_the_saved_flexible_machines_setting(loaded, monkeypatch):
+    """Finding 3: stage 2 must be pinned to config.flexible_machines, never
+    search (False, True), or the quoted date could depend on a machine set the
+    later real plan will not use."""
+    so_lines, masters = loaded
+    stage1 = _plan(so_lines, masters)
+    before = optimizer.expected_completion(stage1)
+    seen_flexible = []
+    real_run_forward = quote_mod.run_forward
+
+    def _spy(pr, cfg, masters, **kw):
+        seen_flexible.append(cfg.flexible_machines)
+        return real_run_forward(pr, cfg, masters, **kw)
+
+    monkeypatch.setattr(quote_mod, "run_forward", _spy)
+    new = [quote_mod.QuoteLine("NEW-1", so_lines[0].item_code, "x", 10)]
+    quote_mod.quote(stage1, before, new, _CONF, masters)
+    assert seen_flexible, "stage 2 never ran"
+    assert set(seen_flexible) == {_CONF.flexible_machines}
+
+
+def test_unresolved_plan_start_date_raises_a_clear_error(loaded):
+    """A None plan_start_date must never reach Rule 2's sort. quote() raises its
+    own clearly named error at the boundary instead."""
+    import dataclasses as dc
+    so_lines, masters = loaded
+    stage1 = _plan(so_lines, masters)
+    before = optimizer.expected_completion(stage1)
+    bad_conf = dc.replace(_CONF, plan_start_date=None)
+    new = [quote_mod.QuoteLine("NEW-1", so_lines[0].item_code, "x", 10)]
+    with pytest.raises(ValueError, match="plan_start_date"):
+        quote_mod.quote(stage1, before, new, bad_conf, masters)
+
+
+def test_structural_check_flags_a_stage2_entry_with_no_so_reference(loaded):
+    """A stage-2 entry with empty so_refs could otherwise slip past the
+    key-disjointness check unseen (it contributes nothing to either key set).
+    It must be flagged directly instead."""
+    so_lines, masters = loaded
+    stage1 = _plan(so_lines, masters)
+    some_entry = stage1[0]
+    fake_stage2 = [dataclasses.replace(some_entry, so_refs=[],
+                                       machine="A-MACHINE-NOBODY-USES",
+                                       operator="", op_segments=[],
+                                       start=some_entry.start + timedelta(days=365),
+                                       end=some_entry.end + timedelta(days=365))]
+    problems = quote_mod.structural_violations(stage1, fake_stage2, _CONF)
+    assert any("no SO reference" in p for p in problems)
