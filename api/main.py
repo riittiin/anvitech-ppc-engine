@@ -859,10 +859,14 @@ def _split_queue(so_lines, scheduler):
     no special handling — the spec's "it clears itself" behaviour, by
     construction.
 
-    Returns ``(stage1_lines, queued_lines, note)``. ``queued_lines``/``note``
-    are both empty when nothing is queued or nothing queued still matches."""
-    queued_keys = {tuple(k) for k in book_store.load_new_order_queue()}
-    queued_lines = [l for l in so_lines if l.key in queued_keys]
+    Returns ``(stage1_lines, queued_lines, note)``. ``queued_lines`` is in the
+    queue's OWN stored order (arrival order) — not `so_lines`' order — because
+    the caller now CHAINS stage 2 one queued line at a time in that exact
+    order (2026-09-11 review, finding B); ``queued_lines``/``note`` are both
+    empty when nothing is queued or nothing queued still matches."""
+    by_key = {l.key: l for l in so_lines}
+    queued_keys_ordered = [tuple(k) for k in book_store.load_new_order_queue()]
+    queued_lines = [by_key[k] for k in queued_keys_ordered if k in by_key]
     if not queued_lines:
         return so_lines, [], ""
     if scheduler != "new":
@@ -871,27 +875,31 @@ def _split_queue(so_lines, scheduler):
                 "not support it; they were planned together with the rest of "
                 "the book instead.")
         return so_lines, [], note
-    stage1 = [l for l in so_lines if l.key not in queued_keys]
+    queued_key_set = {l.key for l in queued_lines}
+    stage1 = [l for l in so_lines if l.key not in queued_key_set]
     note = (f"{len(queued_lines)} new order(s) are planned behind the existing "
             f"book until the next plan update.")
     return stage1, queued_lines, note
 
 
-def _queue_priority_rank(queued_lines) -> dict:
-    """A 1-based rank per queued key, in the arrival queue's OWN stored order —
-    the single record of "who arrived first" (2026-09-08 review finding 2).
-    ``/new-orders/add`` appends each accept's winning arrangement (``QuoteResult
-    .order``) to the queue, so replaying stage 2 with this rank reproduces the
-    exact date the quote promised, instead of an unranked plan silently
-    re-sequencing queued lines (and moving an already-accepted order) the next
-    time a new one is added.
-
-    Only keys that still match an active line (i.e. survived `_split_queue`)
-    get a rank; a key that dropped out contributes nothing here either — same
-    "it clears itself" rule."""
-    matched = {l.key for l in queued_lines}
-    order = [tuple(k) for k in book_store.load_new_order_queue() if tuple(k) in matched]
-    return {f"{so}{KEY_SEP}{item}": i for i, (so, item) in enumerate(order, start=1)}
+def _reid_batches(batches, schedule, prefix):
+    """Rewrite ``batch_id`` on every batch and the schedule entries carrying it,
+    prefixing with ``prefix``, so this pass's ids can never collide with
+    another pass's (2026-09-11 review, finding A). ``rule1_consolidate``
+    names batches ``B001, B002, ...`` from a counter that RESTARTS on every
+    call, so `_plan`'s stage 1 and every stage-2 chain step mint the same ids
+    independently — `build_gantt`, `rule6_allocate.build_machine_view` and
+    `build_shiftwise_timeline` all GROUP rows by `batch_id` and publish the
+    max end as the completion date, so a collision silently glues a new
+    order's bars onto an unrelated pre-existing order's row and republishes
+    that order's completion as the new order's end date. Mutates in place
+    (``Batch``/``ScheduleEntry`` are plain, non-frozen dataclasses)."""
+    id_map = {b.batch_id: f"{prefix}{b.batch_id}" for b in batches}
+    for e in schedule:
+        if e.batch_id in id_map:
+            e.batch_id = id_map[e.batch_id]
+    for b in batches:
+        b.batch_id = id_map[b.batch_id]
 
 
 def _plan(config: Config):
@@ -993,23 +1001,38 @@ def _plan(config: Config):
     trace = run_forward(plan_run, ranked_config, masters, reserved=ab or None,
                         priority_rank=ranks, frozen=frozen or None)
 
-    # Stage 2: the arrival queue, planned around stage 1's own committed placements
-    # (never before it — occupancy is what makes "moves nothing" a guarantee rather
-    # than a hope). `frozen=None` is deliberate: a brand-new order cannot be
-    # half-finished, and the frozen set only ever describes in-progress work.
+    # Stage 2: the arrival queue, CHAINED one queued order at a time, in arrival
+    # order — each is planned against the accumulated occupancy of stage 1 PLUS
+    # every queued order chained before it. That is exactly how
+    # /new-orders/quote plans a new accept (around whatever is already fixed
+    # ahead of it), so the plan and the quote are now the same computation by
+    # construction (2026-09-11 review, finding B). The prior design planned the
+    # whole queue TOGETHER in one pool with a `priority_rank` tie-break, which
+    # steers Rule 3's ordering but does not pin a placement — the greedy
+    # dispatcher could still displace an already-accepted order once a second
+    # one arrived, and the date `/new-orders/add` had just promised could stop
+    # matching what the very next plan showed. `frozen=None` is deliberate: a
+    # brand-new order cannot be half-finished, and the frozen set only ever
+    # describes in-progress work.
     if queued_lines:
         from engine import new_engine as _ne_stage2
-        stage2 = PlanRun(so_lines=queued_lines)
-        occupancy = _ne_stage2.occupancy_from_entries(plan_run.schedule, config)
-        # The rank comes from the queue's own stored order (the winning
-        # arrangement each accept recorded) — without it, stage 2 would
-        # re-sequence queued lines by Rule 3's own tie-break every plan, which
-        # can silently move an already-accepted order once a second one is
-        # queued (2026-09-08 review finding 2).
-        run_forward(stage2, ranked_config, masters, reserved=ab or None,
-                    frozen=None, occupancy=occupancy,
-                    priority_rank=_queue_priority_rank(queued_lines))
-        plan_run.schedule = list(plan_run.schedule) + list(stage2.schedule)
+        for i, line in enumerate(queued_lines, start=1):
+            occupancy = _ne_stage2.occupancy_from_entries(plan_run.schedule, config)
+            stage_i = PlanRun(so_lines=[line])
+            run_forward(stage_i, ranked_config, masters, reserved=ab or None,
+                        frozen=None, occupancy=occupancy)
+            # `rule1_consolidate` restarts its batch-id counter on every call, so
+            # every chain step (like stage 1) mints ids starting at B001 — left
+            # alone, this collides with stage 1's and every other step's ids,
+            # and `build_gantt` / `build_machine_view` / `build_shiftwise_
+            # timeline` all GROUP rows by `batch_id`, so a collision glues a new
+            # order's bars onto an unrelated pre-existing order's row and
+            # republishes THAT order's completion as the new order's end date
+            # (2026-09-11 review, finding A). Re-id before merging.
+            _reid_batches(stage_i.batches_prioritized, stage_i.schedule, f"Q{i}-")
+            plan_run.schedule = list(plan_run.schedule) + list(stage_i.schedule)
+            plan_run.batches_prioritized = (list(plan_run.batches_prioritized)
+                                            + list(stage_i.batches_prioritized))
         # `trace["rule6"]` may be an unreached placeholder (``reached: False``,
         # ``error: None``) when an EARLIER rule raised a RuleError — checking
         # only `error` would pass on that placeholder and write a bogus merged
@@ -2965,6 +2988,26 @@ def save_new_order_drafts_ep(req: DraftsRequest, request: Request):
     return {"drafts": rows}
 
 
+def _quote_refusal_reason(res) -> str:
+    """A plain-English reason the quote could not be confirmed, or "" when it
+    was (2026-09-11 review: a refusal caused by `structural_violations` alone
+    left `moved` empty, and the caller only ever read `moved`'s COUNT — not
+    just uninformative, an outright wrong "0 existing order(s) moved" with no
+    reason at all). `res.verified` is `not moved and not violations` by
+    construction, so at least one is non-empty on every refusal; the `else`
+    branch below is unreachable today and exists only so a refusal can never
+    again come back silent if that invariant ever changes."""
+    if res.verified:
+        return ""
+    parts = []
+    if res.moved:
+        parts.append(f"{len(res.moved)} existing order(s) would move")
+    if res.violations:
+        parts.append("; ".join(res.violations))
+    return " and ".join(parts) if parts else (
+        "the quote could not be confirmed against the plan in force")
+
+
 @app.post("/new-orders/quote")
 def new_order_quote(request: Request):
     """Quote each draft line's completion date against the plan already in
@@ -2996,6 +3039,8 @@ def new_order_quote(request: Request):
                   for row in res.lines],
         "moved": [{**m, "before": m["before"].isoformat(), "after": m["after"].isoformat()}
                   for m in res.moved],
+        "violations": res.violations,
+        "reason": _quote_refusal_reason(res),
         "verified": res.verified,
         "existing_count": res.existing_count,
         "stamp": _plan_fingerprint(config),
@@ -3040,7 +3085,7 @@ def add_new_orders(req: AddNewOrdersRequest, request: Request):
     if not res.verified:
         raise HTTPException(
             status_code=409,
-            detail="The quote could not be confirmed: existing orders moved. "
+            detail=f"The quote could not be confirmed: {_quote_refusal_reason(res)}. "
                    "Press Finish and Optimize again.")
     bad = [r for r in res.lines if r["completion"] is None]
     if bad:

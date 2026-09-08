@@ -218,3 +218,129 @@ def test_a_queue_on_a_non_new_engine_plans_in_one_stage_with_a_visible_note(
         assert "classic" in body["queue_note"]
     finally:
         book_store.clear_new_order_queue()
+
+
+def test_gantt_never_republishes_an_existing_orders_date_and_the_new_order_gets_its_own_row(
+        admin_client, uploaded_masters, add_new_order):
+    """2026-09-11 review, Defect A (Critical): `rule1_consolidate` restarts its
+    batch-id counter (B001, B002, ...) on every call, and `_plan` calls the
+    rule chain more than once (stage 1, then stage 2), so a queued order's
+    batch id collided with a pre-existing order's. `build_gantt` groups rows
+    by `batch_id` and publishes `completion = max(end)`, so a new order's
+    bars were glued onto the pre-existing order's Gantt row, republishing
+    that order's completion as the new order's end date -- and the new order
+    had no row of its own at all."""
+    before = admin_client.post("/run").json()
+    before_rows = {r["batch_id"]: r for r in before["gantt"]["rows"]}
+    assert before_rows, "test setup: the existing book should already have Gantt rows"
+
+    quoted = add_new_order("NEW-1", uploaded_masters, 25)
+
+    after = admin_client.post("/run").json()
+    after_rows = {r["batch_id"]: r for r in after["gantt"]["rows"]}
+
+    for bid, row in before_rows.items():
+        assert bid in after_rows, f"pre-existing batch {bid} ({row['so_no']}) vanished"
+        # Check identity, not only the date: a collision can glue a new order's
+        # bars onto this row WITHOUT moving the published date at all (a tiny
+        # fixture can have both orders finish on the same calendar day by pure
+        # coincidence) but still silently swaps whose row this is.
+        assert after_rows[bid]["so_no"] == row["so_no"], (
+            f"{bid} was {row['so_no']}'s row, now shows {after_rows[bid]['so_no']} "
+            f"just because a new order was added")
+        assert after_rows[bid]["completion"] == row["completion"], (
+            f"{bid} ({row['so_no']}) moved from {row['completion']} to "
+            f"{after_rows[bid]['completion']} just because a new order was added")
+
+    new_rows = [r for r in after["gantt"]["rows"]
+               if "NEW-1" in [s.strip() for s in r["so_no"].split(",")]]
+    assert len(new_rows) == 1, (
+        f"NEW-1 should have exactly one Gantt row of its own, found {len(new_rows)}")
+    # The Gantt renders DD-MM-YYYY; the quote returns an ISO date string.
+    assert new_rows[0]["completion"] == date.fromisoformat(quoted).strftime("%d-%m-%Y")
+
+
+def test_machine_timeline_never_republishes_an_existing_orders_dates(
+        admin_client, uploaded_masters, add_new_order):
+    """Same root cause as the Gantt test above, different consumer:
+    `rule6_allocate.build_machine_view` looks up both "Expected completion"
+    and "SO Del date" by `batch_id`, which can collide across stages — a
+    collision makes `batch_by_id.get(e.batch_id)` resolve to whichever
+    Batch object is LAST in the dict for that id, so every row sharing the
+    id (including the pre-existing order's) reads the wrong batch's SO
+    Delivery Date. Grouped by "SO No" (each schedule entry's OWN field,
+    never corrupted by a batch-id collision) so this checks the published
+    values for a known-correct identity, exactly what a director reads off
+    the row. "SO Del date" is the more reliable check of the two here — two
+    real orders' actual delivery dates are essentially never equal, where
+    two orders' newly-computed COMPLETION dates can coincidentally match on
+    a small fixture and mask the exact same corruption (measured directly:
+    the two orders in the sample book both land on the same completion date,
+    but their real SO Delivery Dates differ by about a year)."""
+    before = admin_client.post("/run").json()
+    before_rows = _rows(before["trace"]["rule6"]["tables"][0]["table"])
+    before_by_so = {r["SO No"]: (r["Expected completion"], r["SO Del date"])
+                    for r in before_rows if r.get("Expected completion")}
+    assert before_by_so, "test setup: the existing book should publish completions"
+
+    add_new_order("NEW-1", uploaded_masters, 25)
+
+    after = admin_client.post("/run").json()
+    after_rows = _rows(after["trace"]["rule6"]["tables"][0]["table"])
+    after_by_so = {r["SO No"]: (r["Expected completion"], r["SO Del date"])
+                   for r in after_rows if r.get("Expected completion")}
+
+    for so_no, (completion, delivery) in before_by_so.items():
+        got = after_by_so.get(so_no)
+        assert got == (completion, delivery), (
+            f"machine timeline {so_no} was (completion={completion}, "
+            f"delivery={delivery}), now shows {got} just because a new "
+            f"order was added")
+
+
+def test_five_sequential_adds_never_move_an_already_accepted_new_order(
+        admin_client, uploaded_masters, add_new_order):
+    """2026-09-11 review, Defect B (Critical): the plan re-planned ALL queued
+    lines together in one pool ordered by `priority_rank`, which steers
+    Rule 3's ordering but does not PIN a placement, so the greedy dispatcher
+    could displace an already-accepted new order once a later one arrived.
+    Chaining (each queued order planned against the accumulated occupancy of
+    stage 1 plus every queued order chained before it, exactly like
+    /new-orders/quote plans each accept) makes the plan and the quote the
+    same computation, and makes first come first served hold for new orders
+    too, not only for the pre-existing book."""
+    accepted = []
+    for i in range(1, 6):
+        so_no = f"NEW-{i}"
+        item = uploaded_masters if i % 2 else ITEM_B
+        quoted = add_new_order(so_no, item, 25)
+        body = admin_client.post("/run").json()
+        key = f"{so_no}\x1f{item}"
+        assert body["expected_end"].get(key) == quoted, (
+            f"{so_no}: quoted {quoted}, but /run shows "
+            f"{body['expected_end'].get(key)} on the very next screen")
+        for pso, pitem, pquoted in accepted:
+            pkey = f"{pso}\x1f{pitem}"
+            assert body["expected_end"].get(pkey) == pquoted, (
+                f"{pso} moved from {pquoted} to {body['expected_end'].get(pkey)} "
+                f"after {so_no} was added")
+        accepted.append((so_no, item, quoted))
+
+
+def test_the_merged_batch_list_covers_a_queued_orders_own_batch(
+        admin_client, uploaded_masters, add_new_order):
+    """Smaller finding from the same review: `_report_for_book` receives the
+    MERGED schedule but only stage 1's batches, so
+    `new_engine.batch_quantity_violations` silently skips every stage-2
+    entry ("an entry from a batch we weren't given") -- a queued order's own
+    quantity was never actually checked, and on the owner's real books this
+    produced 1 to 5 false BATCH_QTY_SHORT rows too. Proven at the source:
+    the merged batch list `_report_for_book` is handed must include the
+    queued order's own batch."""
+    add_new_order("NEW-1", uploaded_masters, 25)
+    admin_client.post("/run")
+    import api.main as m
+    art = m._PLAN_CACHE.get("artifacts")
+    covering = [b.batch_id for b in art["plan_run"].batches_prioritized
+               if "NEW-1" in (b.source_so_refs or [])]
+    assert covering, "NEW-1's own batch must be in the batches _report_for_book uses"

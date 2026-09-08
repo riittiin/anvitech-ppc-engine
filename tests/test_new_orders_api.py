@@ -235,6 +235,54 @@ def test_a_quote_returns_a_date_and_confirms_nothing_moved(admin_client,
     assert body["stamp"]
 
 
+def test_a_refused_quote_always_carries_a_plain_reason(admin_client, uploaded_masters,
+                                                        monkeypatch):
+    """2026-09-11 review, smaller finding: a refusal caused by
+    `structural_violations` alone left `moved` empty and the response never
+    even included `violations`, so a director reading `verified: false` had
+    no idea why. Stubbed directly since `verify_unmoved` can never actually
+    see a move through this endpoint's own natural flow (it recomputes
+    `existing_expected` from the same schedule it hands to `quote()` as
+    `existing_entries`)."""
+    from engine.quote import QuoteResult
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 10}]})
+    monkeypatch.setattr(
+        "engine.quote.quote",
+        lambda *a, **kw: QuoteResult(
+            lines=[], moved=[], violations=["machine CNC1 is double-booked"],
+            verified=False, existing_count=0, order=[]))
+    r = admin_client.post("/new-orders/quote")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["verified"] is False
+    assert body["violations"] == ["machine CNC1 is double-booked"]
+    assert body["reason"], "a refusal must always carry a reason"
+    assert "double-booked" in body["reason"]
+
+
+def test_a_refused_quote_reason_counts_moved_orders_too(admin_client, uploaded_masters,
+                                                        monkeypatch):
+    """The other half of the same fix: a refusal caused by `moved` (existing
+    orders that would move) still has to say so in plain English."""
+    from engine.quote import QuoteResult
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 10}]})
+    monkeypatch.setattr(
+        "engine.quote.quote",
+        lambda *a, **kw: QuoteResult(
+            lines=[], moved=[{"so_no": "X", "item_code": "Y",
+                             "before": date(2025, 1, 1), "after": date(2025, 1, 2),
+                             "days": 1}],
+            violations=[], verified=False, existing_count=0, order=[]))
+    r = admin_client.post("/new-orders/quote")
+    body = r.json()
+    assert body["verified"] is False
+    assert "1 existing order" in body["reason"]
+
+
 def test_quoting_with_no_drafts_is_a_clear_400(admin_client, uploaded_masters):
     admin_client.put("/new-orders/drafts", json={"drafts": []})
     r = admin_client.post("/new-orders/quote")
