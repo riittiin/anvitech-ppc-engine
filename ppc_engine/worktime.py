@@ -62,6 +62,21 @@ def shift_window(day: date, shift: Shift, config: PlanConfig) -> Window:
     return Window(start=start, end=end, shift_date=day, shift=shift)
 
 
+def shift_key_for(dt: datetime, config: PlanConfig) -> tuple[date, Shift] | None:
+    """The (shift_date, shift) whose window contains ``dt``, or None outside both.
+
+    The night shift is anchored to the day it STARTED, so 02:00 on the 4th belongs
+    to the 3rd's second shift. Asks ``shift_window`` rather than comparing clock
+    times here, so there is exactly one definition of a shift's hours.
+    """
+    for day in (dt.date(), dt.date() - timedelta(days=1)):
+        for shift in (Shift.FIRST, Shift.SECOND):
+            win = shift_window(day, shift, config)
+            if win.start <= dt < win.end:
+                return (day, shift)
+    return None
+
+
 def iter_windows(
     machine: Machine,
     start_from: datetime,
