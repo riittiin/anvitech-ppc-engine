@@ -34,10 +34,32 @@ def test_drafts_default_to_empty():
 
 
 def test_queue_round_trips_and_clears():
-    book_store.save_new_order_queue([("NEW-1", "X"), ("NEW-2", "Y")])
-    assert book_store.load_new_order_queue() == [["NEW-1", "X"], ["NEW-2", "Y"]]
+    """2026-09-11: the queue is a list of arrival GROUPS, not a flat list of
+    pairs — each group is the set of lines one accept added together, so
+    _plan can replan a group POOLED (see the module docstring)."""
+    book_store.save_new_order_queue([[("NEW-1", "X")], [("NEW-2", "Y")]])
+    assert book_store.load_new_order_queue() == [[["NEW-1", "X"]], [["NEW-2", "Y"]]]
     book_store.clear_new_order_queue()
     assert book_store.load_new_order_queue() == []
+
+
+def test_a_multi_line_group_round_trips_as_one_group():
+    """A group with more than one line (one accept, several lines) stays one
+    group, in the order it was written — not flattened or reordered."""
+    book_store.save_new_order_queue([[("NEW-1", "X"), ("NEW-2", "Y")]])
+    assert book_store.load_new_order_queue() == [[["NEW-1", "X"], ["NEW-2", "Y"]]]
+
+
+def test_a_queue_written_in_the_old_flat_shape_still_loads():
+    """Pre-2026-09-11 data: a flat list of pairs, one entry per (so_no,
+    item_code), with no record of which lines arrived together. Loading it
+    now must not crash, and must not silently invent clubbing that was never
+    recorded — each old entry becomes its own one-line group."""
+    old_shape = [["NEW-1", "X"], ["NEW-2", "Y"], ["NEW-3", "Z"]]
+    book_store.get_store().kv_set(
+        book_store.NEW_ORDER_QUEUE_KEY, book_store.json.dumps(old_shape))
+    assert book_store.load_new_order_queue() == [
+        [["NEW-1", "X"]], [["NEW-2", "Y"]], [["NEW-3", "Z"]]]
 
 
 # --- validation ---
@@ -464,7 +486,7 @@ def test_done_entering_does_not_clear_the_queue_when_it_skips(
     add_new_order("NEW-1", uploaded_masters, 25)
     r = admin_client.post("/optimize/done")
     assert r.json()["started"] is False
-    assert book_store.load_new_order_queue() == [["NEW-1", uploaded_masters]]
+    assert book_store.load_new_order_queue() == [[["NEW-1", uploaded_masters]]]
 
 
 def test_an_upload_clears_the_queue(admin_client, uploaded_masters, add_new_order,

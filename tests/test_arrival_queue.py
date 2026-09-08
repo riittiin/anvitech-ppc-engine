@@ -98,6 +98,106 @@ def test_two_queued_lines_each_reproduce_their_own_quoted_date(admin_client,
     assert body["expected_end"].get(f"NEW-2\x1f{ITEM_B}") == second
 
 
+def test_two_lines_in_one_accept_sharing_an_item_are_clubbed_into_one_batch(
+        admin_client, uploaded_masters):
+    """2026-09-11 review, finding B corrected: the reviewer's own instruction
+    was the reason Defect B stayed open — chaining "each queued order in
+    arrival order" fixed sequential SINGLE-LINE accepts, but `engine.quote.
+    quote` plans every draft line of ONE accept POOLED in a single `_stage2`
+    call, so two draft lines sharing an item code get CLUBBED by Rule 1 and
+    run as one batch, paying the CNC setup once. Planning one line per chain
+    step could never reproduce that: two lines of the same accept would run
+    as two separate batches, get two different (often much later) dates, and
+    pay the 90-minute setup twice. The chain unit has to be the ACCEPT, not
+    the order, for this to hold.
+
+    Proves both the date and the mechanism: one PUT with two draft lines
+    sharing an item code, one quote, one add -- the two lines quote the SAME
+    date (Rule 1 clubbed them at quote time), the Orders tab shows that same
+    date for both after accepting, and at the source there is exactly ONE
+    batch and exactly one CNC step scheduled for it, not two."""
+    r = admin_client.put("/new-orders/drafts",
+                         json={"drafts": [
+                             {"so_no": "NEW-1", "item_code": uploaded_masters, "qty": 25},
+                             {"so_no": "NEW-2", "item_code": uploaded_masters, "qty": 25}]})
+    assert r.status_code == 200, r.text
+    quote = admin_client.post("/new-orders/quote").json()
+    assert quote["verified"] is True, quote
+    quoted = {l["so_no"]: l["completion"] for l in quote["lines"]}
+    assert quoted["NEW-1"] == quoted["NEW-2"], (
+        "two lines pooled into one accept, sharing an item, should be clubbed "
+        "by Rule 1 and quote the same date")
+
+    r = admin_client.post("/new-orders/add", json={"stamp": quote["stamp"]})
+    assert r.status_code == 200, r.text
+
+    body = admin_client.post("/run").json()
+    key1, key2 = f"NEW-1\x1f{uploaded_masters}", f"NEW-2\x1f{uploaded_masters}"
+    assert body["expected_end"].get(key1) == quoted["NEW-1"]
+    assert body["expected_end"].get(key2) == quoted["NEW-2"]
+
+    # At the source: one clubbed batch, one CNC step (one setup), not two.
+    import api.main as m
+    art = m._PLAN_CACHE.get("artifacts")
+    covering_both = [b for b in art["plan_run"].batches_prioritized
+                     if {"NEW-1", "NEW-2"} <= set(b.source_so_refs or [])]
+    assert len(covering_both) == 1, (
+        f"NEW-1 and NEW-2 should be clubbed into exactly one batch, found "
+        f"{len(covering_both)} batches covering both")
+    bid = covering_both[0].batch_id
+    cnc_entries = [e for e in art["plan_run"].schedule
+                  if e.batch_id == bid and "CNC" in e.process_name.upper()]
+    assert len(cnc_entries) == 1, (
+        f"expected ONE CNC step for the clubbed batch (one setup), found "
+        f"{len(cnc_entries)} (paying the 90-minute setup more than once)")
+
+
+def test_a_contended_multi_item_accept_reproduces_its_own_quote(
+        admin_client, uploaded_masters):
+    """A genuinely contended two-item accept (CNC2 taken out of service, so
+    both items' CNC steps compete for the single remaining CNC1) must quote
+    a date each line then keeps on the very next screen. This is a real
+    regression pin, but it does NOT discriminate the specific mechanism
+    (`priority_rank` derived from the accept's own winning arrangement) on
+    this fixture, measured directly: it passes both with and without that
+    `priority_rank` here, because the sample workbook has only two distinct
+    items, so a pooled accept can only ever produce two distinct batches, and
+    `engine.quote.quote`'s exhaustive 2-permutation search over two items
+    happens to land on the same order Rule 3 already picks unranked for this
+    specific pair. The mechanism itself is proven load-bearing on the real
+    books instead (10-line accepts, mostly distinct items, so quote()'s
+    24-arrangement SAMPLED search can and does find an order Rule 3's own
+    unranked tie-break does not stumble onto): removing it there reintroduces
+    mismatches on 8, 7 and 3 of 10 lines on Test5/8/9 respectively (see the
+    task report for the exact numbers). Kept here anyway because "does the
+    quoted date survive a genuinely contended accept" is worth pinning even
+    without a fixture that also isolates the mechanism."""
+    today = date.today()
+    admin_client.post("/machine-downtime", json={
+        "machine": "CNC2", "from_date": today.isoformat(),
+        "to_date": (today + timedelta(days=60)).isoformat(), "reason": "test"})
+    r = admin_client.put("/new-orders/drafts",
+                         json={"drafts": [
+                             {"so_no": "NEW-1", "item_code": uploaded_masters, "qty": 400},
+                             {"so_no": "NEW-2", "item_code": ITEM_B, "qty": 400}]})
+    assert r.status_code == 200, r.text
+    quote = admin_client.post("/new-orders/quote").json()
+    assert quote["verified"] is True, quote
+    quoted = {l["so_no"]: l["completion"] for l in quote["lines"]}
+    assert quoted["NEW-1"] != quoted["NEW-2"], (
+        "test setup: the two items should genuinely contend and NOT quote "
+        "the same date (they are different items, never clubbed)")
+
+    r = admin_client.post("/new-orders/add", json={"stamp": quote["stamp"]})
+    assert r.status_code == 200, r.text
+
+    body = admin_client.post("/run").json()
+    shown1 = body["expected_end"].get(f"NEW-1\x1f{uploaded_masters}")
+    shown2 = body["expected_end"].get(f"NEW-2\x1f{ITEM_B}")
+    assert shown1 == quoted["NEW-1"], f"NEW-1: quoted {quoted['NEW-1']}, shown {shown1}"
+    assert shown2 == quoted["NEW-2"], f"NEW-2: quoted {quoted['NEW-2']}, shown {shown2}"
+
+
 def test_a_contended_book_proves_stage_two_protects_existing_orders(
         admin_client, uploaded_masters, add_new_order):
     """2026-09-08 review, finding 3: the sample book is normally so
@@ -209,7 +309,7 @@ def test_a_queue_on_a_non_new_engine_plans_in_one_stage_with_a_visible_note(
     # A queue can exist on a classic deployment only as leftover state — the
     # /new-orders/* endpoints themselves require the new engine to compute a
     # quote at all, so simulate the leftover directly rather than through them.
-    book_store.save_new_order_queue([[SO1, ITEM_A]])
+    book_store.save_new_order_queue([[[SO1, ITEM_A]]])  # one group, one line
     try:
         body = c.post("/run").json()
         rows = _rows(body["orders"])

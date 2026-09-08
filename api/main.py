@@ -844,42 +844,55 @@ def _orders_table():
 
 
 def _split_queue(so_lines, scheduler):
-    """Split ``so_lines`` by the arrival queue (2026-09-08 spec): a queued key is
-    planned BEHIND the rest of the book in its own stage-2 pass, so accepting a
-    quote can never move an existing order's date — unless ``scheduler`` cannot
-    run a two-stage plan (``run_forward(occupancy=...)`` is new-engine only;
-    every other scheduler raises `OccupancyRequiresNewEngineError`), in which
-    case the queued lines stay INSIDE the returned stage-1 list — planned in one
-    stage, exactly like the rest of the book — rather than silently vanishing
-    from the plan (the silent-omission class this codebase has been bitten by
-    before), and the returned note says why.
+    """Split ``so_lines`` by the arrival queue (2026-09-08 spec, chained per
+    ACCEPT since 2026-09-11): a queued key is planned BEHIND the rest of the
+    book in its own stage-2 pass, so accepting a quote can never move an
+    existing order's date — unless ``scheduler`` cannot run a two-stage plan
+    (``run_forward(occupancy=...)`` is new-engine only; every other scheduler
+    raises `OccupancyRequiresNewEngineError`), in which case the queued lines
+    stay INSIDE the returned stage-1 list — planned in one stage, exactly like
+    the rest of the book — rather than silently vanishing from the plan (the
+    silent-omission class this codebase has been bitten by before), and the
+    returned note says why.
 
     A queued key that no longer names an active line (the order was deleted, or
     produced and marked complete) simply does not match here and drops out with
     no special handling — the spec's "it clears itself" behaviour, by
-    construction.
+    construction. A group that loses every one of its lines this way drops out
+    entirely.
 
-    Returns ``(stage1_lines, queued_lines, note)``. ``queued_lines`` is in the
-    queue's OWN stored order (arrival order) — not `so_lines`' order — because
-    the caller now CHAINS stage 2 one queued line at a time in that exact
-    order (2026-09-11 review, finding B); ``queued_lines``/``note`` are both
-    empty when nothing is queued or nothing queued still matches."""
+    Returns ``(stage1_lines, queued_groups, note)``. ``queued_groups`` is a
+    list of GROUPS in the queue's OWN stored arrival order — each group the
+    list of SOLine objects one ``/new-orders/add`` call accepted TOGETHER
+    (`book_store.load_new_order_queue`) — because the caller now CHAINS stage
+    2 one GROUP at a time, POOLING each group's own lines in one
+    ``run_forward`` call so Rule 1 can club same-item lines within it exactly
+    as ``engine.quote.quote`` already does for one accept (2026-09-11 review,
+    finding B: chaining one LINE at a time regardless of which accept it came
+    from could not reproduce a multi-line quote — the chain unit has to be the
+    accept). ``queued_groups``/``note`` are both empty when nothing is queued
+    or nothing queued still matches."""
     by_key = {l.key: l for l in so_lines}
-    queued_keys_ordered = [tuple(k) for k in book_store.load_new_order_queue()]
-    queued_lines = [by_key[k] for k in queued_keys_ordered if k in by_key]
-    if not queued_lines:
+    raw_groups = book_store.load_new_order_queue()
+    queued_groups = []
+    for group in raw_groups:
+        lines = [by_key[tuple(k)] for k in group if tuple(k) in by_key]
+        if lines:
+            queued_groups.append(lines)
+    if not queued_groups:
         return so_lines, [], ""
+    n_queued = sum(len(g) for g in queued_groups)
     if scheduler != "new":
-        note = (f"{len(queued_lines)} newly added order(s) could not be planned "
+        note = (f"{n_queued} newly added order(s) could not be planned "
                 f"behind the existing book because the '{scheduler}' engine does "
                 "not support it; they were planned together with the rest of "
                 "the book instead.")
         return so_lines, [], note
-    queued_key_set = {l.key for l in queued_lines}
+    queued_key_set = {l.key for g in queued_groups for l in g}
     stage1 = [l for l in so_lines if l.key not in queued_key_set]
-    note = (f"{len(queued_lines)} new order(s) are planned behind the existing "
+    note = (f"{n_queued} new order(s) are planned behind the existing "
             f"book until the next plan update.")
-    return stage1, queued_lines, note
+    return stage1, queued_groups, note
 
 
 def _reid_batches(batches, schedule, prefix):
@@ -957,7 +970,7 @@ def _plan(config: Config):
     # First come, first served (2026-09-08 spec): lines added through Add New
     # Orders are planned BEHIND the book that was already there, so accepting a
     # quote can never move an existing order's date. See `_split_queue`.
-    so_lines, queued_lines, queue_note = _split_queue(so_lines, config.scheduler)
+    so_lines, queued_groups, queue_note = _split_queue(so_lines, config.scheduler)
 
     # Advance the plan clock past days already worked: once a day's production is
     # punched, the re-plan starts from the NEXT working day's first shift, not the
@@ -1001,26 +1014,53 @@ def _plan(config: Config):
     trace = run_forward(plan_run, ranked_config, masters, reserved=ab or None,
                         priority_rank=ranks, frozen=frozen or None)
 
-    # Stage 2: the arrival queue, CHAINED one queued order at a time, in arrival
-    # order — each is planned against the accumulated occupancy of stage 1 PLUS
-    # every queued order chained before it. That is exactly how
-    # /new-orders/quote plans a new accept (around whatever is already fixed
-    # ahead of it), so the plan and the quote are now the same computation by
-    # construction (2026-09-11 review, finding B). The prior design planned the
-    # whole queue TOGETHER in one pool with a `priority_rank` tie-break, which
-    # steers Rule 3's ordering but does not pin a placement — the greedy
-    # dispatcher could still displace an already-accepted order once a second
-    # one arrived, and the date `/new-orders/add` had just promised could stop
-    # matching what the very next plan showed. `frozen=None` is deliberate: a
-    # brand-new order cannot be half-finished, and the frozen set only ever
-    # describes in-progress work.
-    if queued_lines:
+    # Stage 2: the arrival queue, CHAINED one ARRIVAL GROUP at a time, in
+    # arrival order — each group is planned POOLED (all its own lines in one
+    # run_forward call) against the accumulated occupancy of stage 1 PLUS
+    # every group chained before it. That is exactly how /new-orders/quote
+    # plans one accept: its own lines together (so Rule 1 can club same-item
+    # lines within the accept, paying setup once, not once per line), around
+    # whatever is already fixed ahead of it — so the plan and the quote are
+    # now the same computation by construction, in BOTH directions (2026-09-11
+    # review, finding B, corrected): chaining one LINE at a time regardless of
+    # which accept it came from could not reproduce a multi-line quote at all
+    # (measured: 9 of 10 lines in one 10-line accept disagreed with the Orders
+    # tab, worst +33 days) — the chain unit has to be the ACCEPT, since that is
+    # the unit `quote()` itself pools. The even older design (planned the
+    # whole queue together in one pool with a `priority_rank` tie-break) could
+    # also displace an already-accepted order once a later accept arrived,
+    # since a tie-break steers Rule 3's ordering but does not pin a placement.
+    # `frozen=None` is deliberate: a brand-new order cannot be half-finished,
+    # and the frozen set only ever describes in-progress work.
+    if queued_groups:
         from engine import new_engine as _ne_stage2
-        for i, line in enumerate(queued_lines, start=1):
+        n_queued = sum(len(g) for g in queued_groups)
+        for i, group in enumerate(queued_groups, start=1):
             occupancy = _ne_stage2.occupancy_from_entries(plan_run.schedule, config)
-            stage_i = PlanRun(so_lines=[line])
+            # `group`'s own LIST ORDER is `res.order` — the winning arrangement
+            # `engine.quote.quote` searched over (for 2+ lines it tries several
+            # rotations, scores each, and keeps the best) and passed to its OWN
+            # run_forward as a `priority_rank`, never merely queue bookkeeping
+            # order (list order alone has no scheduling effect — see
+            # `engine.quote`'s own module docstring). Without re-deriving that
+            # same rank here, this group's lines fall to whatever ordering
+            # Rule 3 picks unranked, which is not necessarily quote()'s
+            # winning one — measured live on the real books: a 10-line accept
+            # at a production-like config (operator logic on, overlap 88)
+            # disagreed with the Orders tab on most of its lines, worst
+            # +42 days, even with the chain unit already fixed to be the
+            # accept. `apply_priority_rank` fully overrides Rule 2/3's own
+            # date-based ordering for every batch that IS ranked (every batch
+            # in this group is), so it makes the ACTUAL delivery dates on the
+            # lines below irrelevant to their relative order — deriving the
+            # rank fresh from `group`, scoped to just this group, reproduces
+            # quote()'s own winning arrangement exactly (never the whole
+            # queue at once, which was the earlier, wrong design).
+            group_rank = {f"{l.so_no}{KEY_SEP}{l.item_code}": rank
+                         for rank, l in enumerate(group, start=1)}
+            stage_i = PlanRun(so_lines=group)
             run_forward(stage_i, ranked_config, masters, reserved=ab or None,
-                        frozen=None, occupancy=occupancy)
+                        frozen=None, occupancy=occupancy, priority_rank=group_rank)
             # `rule1_consolidate` restarts its batch-id counter on every call, so
             # every chain step (like stage 1) mints ids starting at B001 — left
             # alone, this collides with stage 1's and every other step's ids,
@@ -1042,7 +1082,7 @@ def _plan(config: Config):
         if r6_trace and r6_trace.get("reached", True) and not r6_trace.get("error"):
             r6_trace["output"] = to_table(plan_run.schedule)
             r6_trace["notes"].append(
-                f"{len(queued_lines)} newly added order(s) are planned behind the "
+                f"{n_queued} newly added order(s) are planned behind the "
                 f"existing book (first come, first served) until the next plan "
                 f"update.")
 
@@ -1182,9 +1222,18 @@ def _plan(config: Config):
     # fingerprint. Downloads that need the schedule itself (the delay justification
     # report) read these instead of planning again — a second plan is a second set of
     # dates (live 2026-08-07: Gantt 07-Sep vs delay report 04-Sep for one order).
+    #
+    # `ranked_config`, not `config`: `ranked_config` is what actually produced
+    # `plan_run.schedule` above (it differs from `config` only in forcing
+    # `expedite_window_min` to 0 when applied optimizer ranks exist), so any
+    # reader of these artifacts sees the config that MATCHES the schedule it is
+    # also reading. Before this, `/new-orders/quote` and `/new-orders/add`
+    # read `config` here for their own stage-2 pass while `_plan`'s own stage
+    # 2 used `ranked_config` — two different config expressions computing
+    # what should be the same date (2026-09-11 review, second finding).
     _PLAN_CACHE.update(key=_fp, result=result,
                        artifacts={"plan_run": plan_run, "so_lines": so_lines,
-                                  "masters": masters, "config": config})
+                                  "masters": masters, "config": ranked_config})
     return result
 
 
@@ -3098,13 +3147,17 @@ def add_new_orders(req: AddNewOrdersRequest, request: Request):
                     delivery_date=r["completion"], first_seen=today)
               for r in res.lines]
     book_store.add_orders(orders)
-    # Appended in the WINNING arrangement's order, not draft order (2026-09-08
-    # review finding 2) — `res.order` is the one place that sequence is
-    # recorded, so the queue stays the single record of arrival order and
-    # `_plan`'s stage 2 can reproduce this exact quoted date by construction.
+    # Appended as ONE ARRIVAL GROUP, ordered by the WINNING arrangement
+    # (`res.order`) rather than draft order (2026-09-08 review finding 2,
+    # corrected 2026-09-11): a group is the unit `_plan`'s stage 2 replans
+    # POOLED, so lines accepted together (this whole accept) stay together
+    # and Rule 1 clubs same-item lines within it exactly as this quote just
+    # did — a group planned one line at a time could never reproduce a
+    # multi-line quote (Rule 1 would never see the lines together to club
+    # them). The group as a whole still chains behind every earlier accept.
+    new_group = [list(k) for k in res.order if tuple(k) in by_key]
     book_store.save_new_order_queue(
-        [tuple(k) for k in book_store.load_new_order_queue()]
-        + [tuple(k) for k in res.order if tuple(k) in by_key])
+        list(book_store.load_new_order_queue()) + [new_group])
     book_store.save_new_order_drafts([])
     _PLAN_CACHE["key"] = None      # the book changed; never serve the old response
     return {"added": len(orders),

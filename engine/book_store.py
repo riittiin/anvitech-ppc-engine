@@ -31,7 +31,7 @@ LAST_APPLIED_SCHEDULE_KEY = "anvitech:last_applied_schedule"  # kv: json list of
 FROZEN_OPS_KEY = "anvitech:frozen_ops"       # kv: json list of frozen (in-progress) op rows for today
 PLAN_START_FLOOR_KEY = "anvitech:plan_start_floor"  # kv: json {date, floor} — today's pinned auto start
 DRAFT_ORDERS_KEY = "anvitech:new_order_drafts"  # kv: json list of typed (not yet added) order lines
-NEW_ORDER_QUEUE_KEY = "anvitech:new_order_queue"  # kv: json list of [(so_no, item_code)] planned behind the book
+NEW_ORDER_QUEUE_KEY = "anvitech:new_order_queue"  # kv: json list of arrival GROUPS, each a list of [so_no, item_code] pairs accepted together, planned behind the book
 
 _SEP = "\x1f"   # ASCII unit separator — never appears in an SO# or item code
 
@@ -359,15 +359,43 @@ def save_new_order_drafts(rows) -> None:
 
 
 def load_new_order_queue() -> list:
-    """(SO number, item code) pairs planned BEHIND the existing book — the arrival
-    queue (first come, first served). Cleared by the next full optimization."""
+    """Arrival GROUPS planned BEHIND the existing book, in arrival order — the
+    arrival queue (first come, first served). Each group is the list of
+    (so_no, item_code) pairs one ``/new-orders/add`` call accepted TOGETHER,
+    so ``_plan`` can replan a group POOLED in one chain step (Rule 1 clubs
+    same-item lines within a group exactly as ``engine.quote.quote`` already
+    does when it plans one accept, so setup is paid once, not once per line),
+    while groups themselves chain against each other in arrival order
+    (2026-09-11 review: chaining one LINE at a time, regardless of which
+    accept it came from, could not reproduce a multi-line quote at all —
+    the chain unit has to be the accept). Cleared by the next full
+    optimization.
+
+    Handles a queue stored in the OLD flat shape (pre-2026-09-11: one entry
+    per pair, with no record of which lines arrived together) by treating
+    each old entry as its own one-line group, so data written before this
+    change still loads correctly instead of breaking."""
     raw = get_store().kv_get(NEW_ORDER_QUEUE_KEY)
-    return json.loads(raw) if raw else []
+    if not raw:
+        return []
+    data = json.loads(raw)
+    if not data:
+        return []
+    first = data[0]
+    # Old shape: a flat list of [so_no, item_code] pairs — `first` is a pair
+    # (two strings). New shape: a list of groups — `first` is a group (a list
+    # of pairs), so its own first element is itself a list, not a string.
+    if (isinstance(first, list) and len(first) == 2
+            and isinstance(first[0], str) and isinstance(first[1], str)):
+        return [[list(pair)] for pair in data]
+    return data
 
 
-def save_new_order_queue(keys) -> None:
-    """Store the arrival queue as a list of (so_no, item_code) pairs."""
-    get_store().kv_set(NEW_ORDER_QUEUE_KEY, json.dumps([list(k) for k in keys]))
+def save_new_order_queue(groups) -> None:
+    """Store the arrival queue as a list of GROUPS — each group the list of
+    (so_no, item_code) pairs one accept added together."""
+    get_store().kv_set(NEW_ORDER_QUEUE_KEY, json.dumps(
+        [[list(pair) for pair in group] for group in groups]))
 
 
 def clear_new_order_queue() -> None:
