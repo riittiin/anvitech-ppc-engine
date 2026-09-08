@@ -312,6 +312,7 @@ def _lay_on_machine(
     staffing: StaffingBoard,
     masters: Masters,
     config: PlanConfig,
+    deadline: datetime | None = None,
 ) -> dict | None:
     """Lay ``dur_min`` minutes of work for ``op`` onto ``machine`` from ``earliest``.
 
@@ -324,6 +325,12 @@ def _lay_on_machine(
     ``staffing`` is a working clone that may be mutated here. Returns the placement
     (start, end, segments, assignments) or None if the work can't be completed within
     the lookahead horizon.
+
+    ``deadline`` (optional) is a stop line: the work must finish on or before it, or
+    None is returned meaning "not in this stretch of time". It exists so a job can be
+    fitted into a gap between jobs an earlier planning stage already placed, without
+    ever running into them (Add New Orders quote, 2026-09-08 spec). ``None`` — every
+    ordinary plan — is exactly today's behaviour.
     """
     cursor = earliest
     remaining = dur_min
@@ -335,8 +342,12 @@ def _lay_on_machine(
         if remaining <= _EPS_MIN:
             break
 
+        if deadline is not None and win.start >= deadline:
+            return None  # out of room in this stretch; the caller tries the next one
+
         seg_start = max(cursor, win.start)
-        avail = (win.end - seg_start).total_seconds() / 60.0
+        win_end = win.end if deadline is None else min(win.end, deadline)
+        avail = (win_end - seg_start).total_seconds() / 60.0
         if avail <= 0:
             cursor = win.end
             continue

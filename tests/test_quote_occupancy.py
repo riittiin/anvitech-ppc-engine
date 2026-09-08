@@ -3,7 +3,7 @@
 Occupancy = what an earlier planning stage already committed. It must be able to
 reach the placement step without any existing plan changing by a single minute.
 """
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from ppc_engine.config import PlanConfig
 from ppc_engine.domain.calendar import ShopCalendar
@@ -124,3 +124,92 @@ def test_an_unseeded_board_is_unchanged():
     board = StaffingBoard()
     assert board.free_during("Alpha", D(2025, 3, 3, 9), D(2025, 3, 3, 10)) is True
     assert board.operator_for("CNC3", date(2025, 3, 3), Shift.FIRST) is None
+
+
+import io
+
+import pytest
+
+from engine import book_store, loaders
+from engine.config import Config
+from engine.new_engine import _orders_from_batches, _plan_config
+from engine.rules import rule1_consolidate
+from ppc_engine.domain.routing import OperationKind
+from ppc_engine.loaders import load_all as new_load
+from ppc_engine.scheduler.flow_scheduler import _lay_on_machine
+from ppc_engine.scheduler.staffing import StaffingBoard, build_machine_pools
+from tests.new_sample_workbook import build_new_sample_bytes
+
+_CONF = Config(scheduler="new", plan_start_date=date(2025, 3, 3),
+               apply_operator_logic=True)
+
+_IN_HOUSE = (OperationKind.MACHINING, OperationKind.MANUAL, OperationKind.INSPECTION)
+
+
+@pytest.fixture()
+def shop():
+    """The sample shop: (masters, plan config, first machining order + its first op).
+
+    Picks the first (order, operation) pair where the operation is an in-house kind
+    with at least one machine option that actually exists in the Machine master — a
+    routing's first step is not always safe to assume that about (it can be an
+    outsourced or off-machine step, or name a machine the master never registered).
+    """
+    wb = build_new_sample_bytes()
+    book_store.save_masters_bytes(wb)
+    nm = new_load(io.BytesIO(wb)).masters
+    so_lines, _ = loaders.load_all(io.BytesIO(wb))
+    orders, _ = _orders_from_batches(rule1_consolidate.run(so_lines, _CONF), nm)
+    cfg = _plan_config(_CONF)
+
+    found = None
+    for order in orders:
+        routing = nm.routings.get(order.item_code)
+        if routing is None:
+            continue
+        for op in routing.operations:
+            if op.kind not in _IN_HOUSE or not op.machine_options:
+                continue
+            if op.machine_options[0] in nm.machines:
+                found = (order, op)
+                break
+        if found is not None:
+            break
+    assert found is not None, "no in-house op with a real machine option in the sample book"
+    order, op = found
+    return nm, cfg, order, op
+
+
+def _lay(shop, deadline, minutes=600.0):
+    nm, cfg, order, op = shop
+    mid = op.machine_options[0]
+    board = StaffingBoard(build_machine_pools(nm))
+    return _lay_on_machine(nm.machines[mid], cfg.plan_start, minutes, order, op,
+                           int(order.qty), board, nm, cfg, deadline=deadline)
+
+
+def test_no_deadline_lays_the_work_exactly_as_before(shop):
+    assert _lay(shop, None) is not None
+
+
+def test_a_deadline_that_cannot_hold_the_work_returns_none(shop):
+    _nm, cfg, _o, _op = shop
+    assert _lay(shop, cfg.plan_start + timedelta(minutes=30)) is None
+
+
+def test_a_generous_deadline_gives_the_identical_placement(shop):
+    _nm, cfg, _o, _op = shop
+    loose = _lay(shop, cfg.plan_start + timedelta(days=90))
+    free = _lay(shop, None)
+    assert loose is not None
+    assert (loose["start"], loose["end"]) == (free["start"], free["end"])
+    assert [(s.start, s.end) for s in loose["segments"]] == \
+           [(s.start, s.end) for s in free["segments"]]
+
+
+def test_no_segment_ever_crosses_the_deadline(shop):
+    _nm, cfg, _o, _op = shop
+    deadline = cfg.plan_start + timedelta(days=2)
+    laid = _lay(shop, deadline, minutes=120.0)
+    assert laid is not None
+    assert all(seg.end <= deadline for seg in laid["segments"])
