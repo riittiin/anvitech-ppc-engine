@@ -213,3 +213,52 @@ def test_no_segment_ever_crosses_the_deadline(shop):
     laid = _lay(shop, deadline, minutes=120.0)
     assert laid is not None
     assert all(seg.end <= deadline for seg in laid["segments"])
+
+
+def _duration_spanning_into_a_later_window(nm, cfg, machine):
+    """A duration long enough that laying it walks past two whole working windows
+    and lands partway through a THIRD — so a deadline built off its natural finish
+    sits strictly inside a later window, never at a window boundary. Derived from
+    the fixture's own machine/config, not a hardcoded clock time, so this stays
+    correct if the sample workbook's shift lengths ever change."""
+    from ppc_engine.worktime import iter_windows
+    windows = []
+    for win in iter_windows(machine, cfg.plan_start, nm.calendar, cfg):
+        windows.append(win)
+        if len(windows) == 3:
+            break
+    assert len(windows) == 3, "the fixture machine needs at least 3 working windows"
+    full_two = sum((w.end - w.start).total_seconds() / 60.0 for w in windows[:2])
+    third_len = (windows[2].end - windows[2].start).total_seconds() / 60.0
+    return full_two + third_len / 2.0  # lands halfway through window 3
+
+
+def test_a_deadline_strictly_inside_a_later_window_clamps_correctly(shop):
+    """The vacuous-fixture trap this repo has been bitten by before: a deadline
+    that never actually engages the clamp passes identically whether the clamp
+    exists or not. This test spans at least two full windows and lands the
+    natural finish strictly inside a THIRD window (no boundary, no premature
+    finish), then checks both directions relative to that finish, computed from
+    a real deadline=None run rather than a hardcoded clock time — self-
+    calibrating, so it cannot go vacuous if the sample workbook changes.
+    """
+    nm, cfg, _order, op = shop
+    machine = nm.machines[op.machine_options[0]]
+    minutes = _duration_spanning_into_a_later_window(nm, cfg, machine)
+
+    free = _lay(shop, None, minutes=minutes)
+    assert free is not None
+    natural_end = free["end"]
+
+    # A deadline just before the natural finish (still inside the same window):
+    # the work cannot complete in time.
+    too_tight = _lay(shop, natural_end - timedelta(minutes=5), minutes=minutes)
+    assert too_tight is None
+
+    # A deadline just after the natural finish (still inside the same window,
+    # not beyond it): the clamp never had to bind, so the placement is identical.
+    loose = _lay(shop, natural_end + timedelta(minutes=5), minutes=minutes)
+    assert loose is not None
+    assert loose["end"] == natural_end
+    assert [(s.start, s.end) for s in loose["segments"]] == \
+           [(s.start, s.end) for s in free["segments"]]
