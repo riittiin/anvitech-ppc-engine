@@ -568,6 +568,47 @@ def test_prepone_starts_a_quote_kind_search(admin_client, uploaded_masters,
     assert f"NEW-1\x1f{uploaded_masters}" in ranks
 
 
+def test_a_finished_quote_searchs_achieved_date_for_the_new_order_is_not_blank(
+        admin_client, uploaded_masters, monkeypatch):
+    """Review round 2 finding (important): `_metrics_for_ranks` re-read the book
+    alone and dropped the in-memory draft line, so the new order's achieved
+    date came back blank in `best.expected` every time — the whole point of the
+    result screen is comparing what the director typed against what the search
+    actually achieved, and without this he would be choosing blind. Runs a
+    real (fast) search rather than a hand-staged `_OPTIMIZE`, since the bug
+    lived in `_finalize_optimize`'s real recompute path, which a stubbed
+    fixture never exercises."""
+    import api.main as m
+    monkeypatch.setitem(m._OPT_BUDGETS, "deep", 15)
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    r = admin_client.post(
+        "/new-orders/prepone",
+        json={"targets": {"NEW-1\x1f" + uploaded_masters: "2025-03-20"}})
+    assert r.status_code == 200, r.text
+    t0 = time.time()
+    st = admin_client.get("/optimize/status").json()
+    while st["state"] == "running" and time.time() - t0 < 20:
+        time.sleep(0.05)
+        st = admin_client.get("/optimize/status").json()
+    assert st["state"] == "done", st
+
+    key = f"NEW-1\x1f{uploaded_masters}"
+    assert st["best"] is not None
+    achieved = st["best"]["expected"].get(key)
+    assert achieved, f"achieved date for the new order was blank: {st['best']['expected']}"
+    date.fromisoformat(achieved)   # a real, parseable date, not a placeholder
+
+    # The status payload's own before/after summary must agree, and a
+    # brand-new order (no "before" to compare against) must never be reported
+    # as having "moved" — it was never in the book before this search.
+    move = st["quote_movement"]
+    assert isinstance(move["late_days_after"], int)
+    assert all((row["so_no"], row["item_code"]) != ("NEW-1", uploaded_masters)
+              for row in move["moved"])
+
+
 def test_optimize_status_reports_plan_kind_for_an_ordinary_search(admin_client,
                                                                   uploaded_masters):
     """The ordinary "Start deep search" button must still report kind="plan", and
@@ -746,3 +787,34 @@ def test_optimize_apply_refuses_a_quote_kind_result(admin_client, uploaded_maste
     with _api_module._OPTIMIZE_LOCK:
         _api_module._OPTIMIZE["kind"] = "plan"
     assert admin_client.post("/optimize/apply").status_code == 200
+
+
+def test_quote_movement_passes_the_draft_lines_to_the_after_side(admin_client,
+                                                                  uploaded_masters,
+                                                                  monkeypatch):
+    """Review round 2: `_quote_movement`'s 'after' side must be measured on the
+    SAME domain the contest searched (the book plus the draft lines), never the
+    saved book alone — that mismatch is what left a new order's achieved date
+    blank and could make an EXISTING order's recomputed date disagree with what
+    the contest actually found. Checked directly against the wiring rather than
+    a late-days total, which could coincidentally match either way."""
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    drafts = book_store.load_new_order_drafts()
+    for row in drafts:
+        row["target_date"] = "2025-03-20"
+    book_store.save_new_order_drafts(drafts)
+    import api.main as m
+    seen = {}
+    real = m._metrics_for_ranks
+
+    def _spy(ranks, *a, **kw):
+        seen["extra_orders"] = kw.get("extra_orders")
+        return real(ranks, *a, **kw)
+
+    monkeypatch.setattr(m, "_metrics_for_ranks", _spy)
+    m._quote_movement({})
+    assert seen.get("extra_orders"), (
+        "_quote_movement's after-side call did not receive the draft lines")
+    assert seen["extra_orders"][0].so_no == "NEW-1"

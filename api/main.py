@@ -1246,7 +1246,14 @@ _OPTIMIZE = {"state": "idle", "label": None, "budget_evals": 0, "evals": 0,
              # "plan" = the ordinary Settings-sweep contest; "quote" = a preponed
              # Add New Orders search (2026-09-08) — never offered to the ordinary
              # Apply button or to auto-apply. See `_start_optimize`'s extra_orders.
-             "kind": "plan"}
+             "kind": "plan",
+             # The draft-order Order objects a quote-kind search was scored with
+             # (None for an ordinary plan run) — internal only, never returned by
+             # `_optimize_status()`. `_finalize_optimize` reads this so its OWN
+             # recompute of `best` sees the same book the contest saw (2026-09-08
+             # review round 2: without it, a new order's achieved date came back
+             # blank because the recompute silently dropped it).
+             "extra_orders": None}
 _OPTIMIZE_LOCK = threading.Lock()
 
 # Identity of THIS server process. A contest lives only in `_OPTIMIZE` above, so a
@@ -1629,6 +1636,19 @@ def _try_start_auto(by: str = "") -> bool:
     return True
 
 
+def _with_extra_orders(orders: dict, extra_orders) -> dict:
+    """Merge Add New Orders draft lines into a loaded order-book dict, IN MEMORY
+    ONLY. The ONE definition of this join (2026-09-08, review round 2): every
+    planning pass that must see a not-yet-saved draft order the same way the
+    contest that scored it did uses this, so the search and any later metrics
+    recompute can never silently disagree about which orders exist — that
+    disagreement is exactly what left a preponed quote's achieved date blank
+    (`_metrics_for_ranks` re-read the book alone and dropped the draft)."""
+    if not extra_orders:
+        return orders
+    return {**orders, **{o.key: o for o in extra_orders}}
+
+
 def _start_optimize(budget_evals: int, label: str, background: bool = True,
                     auto: bool = False, extra_orders=None):
     """Snapshot the book + config and run the settings-sweep contest. ONE pool
@@ -1682,11 +1702,7 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
             config = replace(config, worst_ceiling_days=float(_ceiling))
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()
-        if extra_orders:
-            # Draft lines from Add New Orders, joined to the book IN MEMORY ONLY for
-            # the length of this search (2026-09-08 spec). Nothing is saved unless the
-            # director accepts the result.
-            orders = {**orders, **{o.key: o for o in extra_orders}}
+        orders = _with_extra_orders(orders, extra_orders)
         absences = book_store.load_absences()
         machine_downtime = book_store.load_machine_downtime()
         operator_table = book_store.load_operator_table()
@@ -1757,7 +1773,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                          searched_inputs_sig=searched_inputs_sig,
                          shards={}, shard_total=None, shards_finalizing=False,
                          shard_evals={},
-                         kind=("quote" if extra_orders else "plan"))
+                         kind=("quote" if extra_orders else "plan"),
+                         extra_orders=extra_orders)
 
     def local_job():
         try:
@@ -2026,8 +2043,20 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
     # 52.5-vs-55.6 gap). Recomputing here makes "shown" == "applied" by construction.
     # Both `best` and `real_baseline` (already local) are then on the same footing, so
     # `improved` is judged honestly. Keep the contest's number only if the replay fails.
+    #
+    # 2026-09-08 review round 2: a quote-kind run's `extra_orders` (the Add New
+    # Orders draft lines joined into the book for the length of the search — see
+    # `_start_optimize`) must reach THIS recompute too, or a new order's achieved
+    # date comes back blank in `best.expected` and the EXISTING orders get
+    # replayed on a domain the contest never actually searched. Read from
+    # `_OPTIMIZE` rather than a parameter: only the local-job path holds
+    # `extra_orders` directly in its own closure, but the cloud finalize paths
+    # (worker result / shard aggregation) call this same function and must see it
+    # too. `None` for an ordinary plan run, exactly like before.
+    extra_orders = _OPTIMIZE.get("extra_orders")
     if ranks:
-        _local_best = _metrics_for_ranks(ranks, winner_overlap, winner_flexible)
+        _local_best = _metrics_for_ranks(ranks, winner_overlap, winner_flexible,
+                                         extra_orders=extra_orders)
         if _local_best is not None:
             best = _local_best
     # `real_baseline` was measured when the contest STARTED, on the previous plan clock.
@@ -2276,14 +2305,25 @@ def _movement_note(new_ranks):
     return _format_movers(movers)
 
 
-def _metrics_for_ranks(ranks, overlap=None, flexible=None, *, with_distribution=True):
+def _metrics_for_ranks(ranks, overlap=None, flexible=None, *, with_distribution=True,
+                       extra_orders=None):
     """Metrics of the plan that replays ``ranks`` through the SAME local path ``_plan``
     uses (optionally at a given overlap). This is the ONE source of truth for "what
     this optimized plan achieves": the contest (cloud worker OR local sweep) can report
     a ``best`` computed a hair differently from how the app actually replays, so the
     number the Optimize panel shows and the plan the user gets on Apply could disagree
     (the 2026-07-25 52.5-promised / 55.6-applied gap). Recomputing here makes them one
-    number by construction. Returns None on any failure (caller keeps the contest's)."""
+    number by construction. Returns None on any failure (caller keeps the contest's).
+
+    ``extra_orders`` (2026-09-08, review round 2): the SAME in-memory join
+    ``_start_optimize`` used to score ``ranks`` in the first place. A quote-kind
+    ``ranks`` was searched over the book PLUS the draft lines — recomputing here
+    against the saved book alone would silently drop them from ``expected``
+    (their achieved date came back blank) and, worse, would replay the winning
+    ranks on a domain the contest never actually searched, so an EXISTING
+    order's recomputed date could disagree with what the contest itself
+    found (the new order's resource use is simply missing). The metrics pass
+    must see the same book the contest saw, or the comparison is meaningless."""
     try:
         config = _resolve_config(_load_plan_config())
         if overlap is not None:
@@ -2294,6 +2334,7 @@ def _metrics_for_ranks(ranks, overlap=None, flexible=None, *, with_distribution=
         masters = _current_masters()
         actuals = book_store.load_actuals()
         orders = book_store.load_active_orders()
+        orders = _with_extra_orders(orders, extra_orders)
         absences = book_store.load_absences()
         setup = optimize_service.prepare_contest(
             orders, actuals, masters, config, absences=absences,
@@ -2359,15 +2400,37 @@ def _quote_movement(ranks):
     before deciding whether to accept.
 
     'Before' is the plan actually in force (``_incumbent_metrics``'s own definition,
-    2026-08-07: never "the book with no optimization at all"); 'after' is the
-    searched ranks — which already include the new orders, joined in memory by
-    ``_start_optimize``'s ``extra_orders`` — replayed over the same book. Both sides
-    read their per-order dates from the "expected" field the two metrics functions
-    already compute (``optimizer.expected_completion`` underneath), and the actual
-    comparison is ``_movers`` — the same helper the Thursday auto-note uses — so this
-    is never a second definition of "what moved"."""
+    2026-08-07: never "the book with no optimization at all"), measured on the book
+    as it stands TODAY — deliberately WITHOUT the draft orders. They are not real
+    orders yet, so there is no "before" date for them to have; that is correct, not
+    a gap. 'After' is the searched ``ranks`` replayed over the book PLUS the same
+    draft lines the contest itself searched with (rebuilt here from the stored
+    drafts via ``_new_order_extras``, the identical construction
+    ``/new-orders/prepone`` used to build the ``extra_orders`` the contest scored).
+
+    Review round 2 (2026-09-08) fix: without the draft lines, ``_metrics_for_ranks``
+    silently dropped them, so a new order's achieved date came back blank AND the
+    recomputed schedule for the EXISTING orders was replayed on a domain the
+    contest never actually searched (their resource use, competing against an
+    order that quietly wasn't there). Both sides must be measured on the domain
+    each one actually represents, or the comparison is meaningless (2026-08-07).
+
+    Both sides read their per-order dates from the "expected" field the two metrics
+    functions already compute (``optimizer.expected_completion`` underneath), and
+    the actual comparison is ``_movers`` — the same helper the Thursday auto-note
+    uses — so this is never a second definition of "what moved". A brand-new
+    order can never appear in ``moved`` by construction: ``_movers`` only reports
+    keys present on BOTH sides, and a draft order has no "before" entry."""
     inc = _incumbent_metrics()
-    after = _metrics_for_ranks(ranks) or {}
+    extra = None
+    drafts = [r for r in book_store.load_new_order_drafts() if r.get("target_date")]
+    if drafts:
+        try:
+            masters = _current_masters()
+            extra = _new_order_extras(drafts, masters, _ist_today().isoformat())
+        except Exception:  # noqa: BLE001 — a malformed draft must never break status
+            extra = None
+    after = _metrics_for_ranks(ranks, extra_orders=extra) or {}
 
     def _parse(expected):
         out = {}
