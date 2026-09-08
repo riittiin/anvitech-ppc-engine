@@ -789,15 +789,19 @@ def test_optimize_apply_refuses_a_quote_kind_result(admin_client, uploaded_maste
     assert admin_client.post("/optimize/apply").status_code == 200
 
 
-def test_quote_movement_passes_the_draft_lines_to_the_after_side(admin_client,
-                                                                  uploaded_masters,
-                                                                  monkeypatch):
-    """Review round 2: `_quote_movement`'s 'after' side must be measured on the
-    SAME domain the contest searched (the book plus the draft lines), never the
-    saved book alone — that mismatch is what left a new order's achieved date
-    blank and could make an EXISTING order's recomputed date disagree with what
-    the contest actually found. Checked directly against the wiring rather than
-    a late-days total, which could coincidentally match either way."""
+def test_wiring_quote_movement_passes_the_draft_lines_to_the_after_side(
+        admin_client, uploaded_masters, monkeypatch):
+    """WIRING CHECK, not a behavioural test: it monkeypatches `_metrics_for_ranks`
+    and asserts the `extra_orders` kwarg was passed, so a late-days total
+    coincidentally matching either way can't hide a regression. The paired
+    BEHAVIOURAL test is
+    `test_a_finished_quote_searchs_achieved_date_for_the_new_order_is_not_blank`,
+    which checks the actual observable effect (a real achieved date, not a
+    call shape). Review round 2 background: `_quote_movement`'s 'after' side
+    must be measured on the SAME domain the contest searched (the book plus
+    the draft lines), never the saved book alone — that mismatch is what left
+    a new order's achieved date blank and could make an EXISTING order's
+    recomputed date disagree with what the contest actually found."""
     admin_client.put("/new-orders/drafts",
                      json={"drafts": [{"so_no": "NEW-1",
                                        "item_code": uploaded_masters, "qty": 25}]})
@@ -818,3 +822,62 @@ def test_quote_movement_passes_the_draft_lines_to_the_after_side(admin_client,
     assert seen.get("extra_orders"), (
         "_quote_movement's after-side call did not receive the draft lines")
     assert seen["extra_orders"][0].so_no == "NEW-1"
+
+
+def test_late_days_totals_are_measured_over_the_existing_book_only(
+        admin_client, uploaded_masters, monkeypatch):
+    """Review round 3 finding (important): `late_days_before`/`late_days_after`
+    must be measured over the SAME set of orders on both sides (the existing
+    book) — never each side's own raw total, which sums over whatever domain
+    that side happens to cover. "After" covers existing orders plus the new
+    draft; "before" covers existing orders only. If the new order is itself
+    late against the date the director typed but no existing order moved, the
+    two totals must come out EQUAL: the screen's headline number answers "did
+    the existing book get pushed", not "does the new order make its date" —
+    that second question already has its own per-line answer."""
+    import api.main as m
+    from engine.models import Order
+
+    key = f"NSO-001\x1f{uploaded_masters}"
+    unmoved_iso = "2025-03-15"   # 5 days EARLY against its own 2025-03-20 due date
+
+    monkeypatch.setattr(
+        m.book_store, "load_active_orders",
+        lambda: {("NSO-001", uploaded_masters): Order(
+            so_no="NSO-001", item_code=uploaded_masters, item_name="x",
+            ordered_qty=10, delivery_date=date(2025, 3, 20))})
+    monkeypatch.setattr(m, "_incumbent_metrics",
+                        lambda: {"total_late_days": 0, "expected": {key: unmoved_iso}})
+
+    new_key = f"NEW-1\x1f{uploaded_masters}"
+
+    def _fake_metrics_for_ranks(ranks, *a, **kw):
+        # The new order lands badly late against its typed target, and the
+        # RAW total (as optimizer.plan_metrics would report it) reflects that
+        # — this is exactly the inflated number the fix must not surface.
+        return {"total_late_days": 999,
+                "expected": {key: unmoved_iso, new_key: "2026-01-01"}}
+
+    monkeypatch.setattr(m, "_metrics_for_ranks", _fake_metrics_for_ranks)
+    m.book_store.save_new_order_drafts(
+        [{"so_no": "NEW-1", "item_code": uploaded_masters, "qty": 25,
+          "target_date": "2025-03-20"}])
+
+    move = m._quote_movement({})
+    assert move["moved"] == [], "the unmoved existing order must not appear in moved"
+    assert move["late_days_before"] == move["late_days_after"] == 0, move
+
+
+def test_with_extra_orders_refuses_a_colliding_key():
+    """Review round 3 minor item: a draft key colliding with a real order must
+    never silently overwrite it. Should be unreachable in practice (the
+    drafts endpoint already refuses a duplicate key), but the join itself
+    must guard it directly."""
+    import api.main as m
+    from engine.models import Order
+    existing = {("SO1", "X"): Order(so_no="SO1", item_code="X", item_name="real",
+                                    ordered_qty=1, delivery_date=date(2025, 1, 1))}
+    draft = [Order(so_no="SO1", item_code="X", item_name="draft",
+                   ordered_qty=2, delivery_date=date(2025, 2, 1))]
+    with pytest.raises(ValueError):
+        m._with_extra_orders(existing, draft)

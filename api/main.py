@@ -1643,9 +1643,21 @@ def _with_extra_orders(orders: dict, extra_orders) -> dict:
     contest that scored it did uses this, so the search and any later metrics
     recompute can never silently disagree about which orders exist — that
     disagreement is exactly what left a preponed quote's achieved date blank
-    (`_metrics_for_ranks` re-read the book alone and dropped the draft)."""
+    (`_metrics_for_ranks` re-read the book alone and dropped the draft).
+
+    Refuses rather than overwrites if a draft shares a (SO number, item code)
+    key with a real order already in the book (review round 3, 2026-09-08):
+    this should be unreachable — `PUT /new-orders/drafts` already refuses a
+    draft that collides with an active or completed order — but silently
+    letting the draft win here would replace a real order's row for the
+    length of the search with no trace of it happening."""
     if not extra_orders:
         return orders
+    collide = [o.key for o in extra_orders if o.key in orders]
+    if collide:
+        raise ValueError(
+            f"draft order {collide[0]} shares its (SO number, item code) key "
+            "with a real order already in the book; refusing to overwrite it")
     return {**orders, **{o.key: o for o in extra_orders}}
 
 
@@ -2420,16 +2432,28 @@ def _quote_movement(ranks):
     the actual comparison is ``_movers`` — the same helper the Thursday auto-note
     uses — so this is never a second definition of "what moved". A brand-new
     order can never appear in ``moved`` by construction: ``_movers`` only reports
-    keys present on BOTH sides, and a draft order has no "before" entry."""
+    keys present on BOTH sides, and a draft order has no "before" entry.
+
+    Review round 3 (2026-09-08) fix: ``late_days_before``/``late_days_after`` are
+    NOT the raw ``total_late_days`` field each metrics dict already carries —
+    those sum over whatever domain that ONE side covers, and "after" covers
+    existing + draft orders while "before" covers existing only, so a new order
+    late against the date the director typed would add a term to "after" with
+    no counterpart on "before" — reporting a jump in total late days even when
+    NOT ONE existing order moved. Both totals here are restricted to the
+    INTERSECTION of the two sides (the existing book), local to this function —
+    ``_incumbent_metrics``'s own ``total_late_days`` is untouched, since the
+    auto-note and the auto-apply gate both read it and expect the true
+    whole-book figure. The new order's own on-time performance is not lost: it
+    is exactly what its own "achieved" date (in ``after["expected"]``) is for."""
     inc = _incumbent_metrics()
-    extra = None
     drafts = [r for r in book_store.load_new_order_drafts() if r.get("target_date")]
-    if drafts:
-        try:
-            masters = _current_masters()
-            extra = _new_order_extras(drafts, masters, _ist_today().isoformat())
-        except Exception:  # noqa: BLE001 — a malformed draft must never break status
-            extra = None
+    # Let a genuine bug in _new_order_extras (e.g. a corrupted stored draft) raise
+    # rather than silently fall back to a no-draft "after" — the caller
+    # (_optimize_status) already guards this call and turns a real exception into
+    # a visible "quote_movement: None" instead of a subtly wrong result.
+    extra = (_new_order_extras(drafts, _current_masters(), _ist_today().isoformat())
+            if drafts else None)
     after = _metrics_for_ranks(ranks, extra_orders=extra) or {}
 
     def _parse(expected):
@@ -2444,9 +2468,26 @@ def _quote_movement(ranks):
     moved = [{"so_no": k[0], "item_code": k[1],
               "before": exp_old[k].isoformat(), "after": nd.isoformat(), "days": d}
              for k, d, nd in _movers(exp_old, exp_new, 0)]
+
+    # The existing book's own delivery dates (SOLine.delivery_date, which
+    # active_so_lines copies from Order.delivery_date verbatim), restricted to
+    # orders present on both sides — a draft order is never in `exp_old`, so it
+    # can never enter `common` or these totals.
+    common = set(exp_old) & set(exp_new)
+    existing = book_store.load_active_orders()
+    due = {k: existing[k].delivery_date for k in common if k in existing}
+
+    def _late_total(dates):
+        total = 0
+        for k, d in due.items():
+            got = dates.get(k)
+            if got is not None:
+                total += max(0, (got - d).days)
+        return total
+
     return {"moved": moved,
-            "late_days_before": inc.get("total_late_days"),
-            "late_days_after": after.get("total_late_days")}
+            "late_days_before": _late_total(exp_old),
+            "late_days_after": _late_total(exp_new)}
 
 
 def _auto_apply_result():
