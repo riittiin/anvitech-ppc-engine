@@ -310,7 +310,14 @@ def _stage_split(orders):
 
 
 def test_a_plan_with_no_occupancy_is_byte_identical(book):
-    """The guarantee the whole feature rests on: an empty calendar changes nothing."""
+    """Determinism check, NOT an inertness check (review-flagged, 2026-09-08 fix
+    round 1): a freshly loaded ``book`` already has an empty calendar, so ``nm``
+    below and the explicitly-re-emptied calendar are already equal — this proves
+    ``decode`` gives the same book the same plan twice, nothing about the
+    occupancy mechanism actually engaging. The real inertness guarantee — that
+    occupancy on one machine leaves an untouched order's plan byte-identical — is
+    `test_occupying_one_machine_leaves_untouched_orders_unchanged` below.
+    """
     nm, cfg, orders = book
     before = _decoded(nm, cfg, orders)
     after = _decoded(_replace(nm, calendar=_replace(nm.calendar, machine_busy={},
@@ -320,6 +327,43 @@ def test_a_plan_with_no_occupancy_is_byte_identical(book):
            [(s.order_key, s.op_seq, s.machine_id, s.operator, s.start, s.end, s.qty)
             for s in after.segments]
     assert before.completion == after.completion
+
+
+def _routes_through(nm, order, machine_id):
+    routing = nm.routings.get(order.item_code)
+    if routing is None:
+        return False
+    return any(machine_id in op.machine_options for op in routing.operations)
+
+
+def test_occupying_one_machine_leaves_untouched_orders_unchanged(book):
+    """The actual inertness guarantee: real occupancy on ONE machine must never
+    move an order whose routing never goes near that machine. MW1 is used only by
+    B002's routing in the sample book (confirmed below, not assumed) — B001's
+    segments must be byte-identical whether or not MW1 carries a busy block.
+    """
+    nm, cfg, orders = book
+    occupied_mid = "MW1"
+    touching = [o for o in orders if _routes_through(nm, o, occupied_mid)]
+    untouched = [o for o in orders if not _routes_through(nm, o, occupied_mid)]
+    assert touching, "fixture needs an order that DOES route through the occupied machine"
+    assert untouched, "fixture needs an order that does NOT route through it"
+
+    before = _decoded(nm, cfg, orders)
+    busy_block = (cfg.plan_start, cfg.plan_start + timedelta(hours=4))
+    nm2 = _replace(nm, calendar=_replace(
+        nm.calendar, machine_busy={occupied_mid: (busy_block,)}))
+    after = _decoded(nm2, cfg, orders)
+
+    untouched_keys = {o.key for o in untouched}
+
+    def _rows(sched):
+        return [(s.order_key, s.op_seq, s.machine_id, s.operator, s.start, s.end, s.qty)
+                for s in sched.segments if s.order_key in untouched_keys]
+
+    assert _rows(before) == _rows(after)
+    assert {k: v for k, v in before.completion.items() if k in untouched_keys} == \
+           {k: v for k, v in after.completion.items() if k in untouched_keys}
 
 
 def test_new_work_never_lands_on_occupied_machine_time(book):
@@ -453,3 +497,105 @@ def test_place_operation_routes_through_free_runs_not_a_direct_lay(shop):
     assert laid["start"] >= free["end"], (
         "the op landed inside a block an earlier planning stage already committed — "
         "_place_operation is not consulting ShopCalendar.free_runs")
+
+
+from ppc_engine.scheduler.flow_scheduler import _lay_in_free_run
+
+
+def test_a_four_hour_op_skips_a_one_hour_gap_and_lands_whole_in_the_next_run(shop):
+    """The gap rule itself, proven by a concrete case the review confirmed by hand:
+    CNC1 busy 09:00-10:00 and 15:00-16:00 leaves a one-hour run (10:00, 15:00) that
+    cannot hold a four-hour op whole, and a wide-open run (16:00, None) after it.
+    The op must skip the one-hour run entirely and land at 10:00-14:00 — inside the
+    (10:00, 15:00) run, never touching either block.
+
+    This is deliberately a case NEITHER of these two mutations survives (both
+    passed 25/25 before this test existed — see task-5-report.md fix round 1):
+      - `deadline=run_end` -> `deadline=None` in `_lay_in_free_run`: the op would
+        run straight across the 15:00-16:00 block instead of stopping at 14:00.
+      - `free_runs(...)` -> `free_runs(...)[-1:]` (only the LAST/open-ended run
+        ever tried): the op would jump to 16:00-20:00 instead of using the gap.
+    """
+    nm, cfg, order, op = shop
+    mid = op.machine_options[0]
+    machine = nm.machines[mid]
+    day = cfg.plan_start.date()
+    block_a = (D(day.year, day.month, day.day, 9), D(day.year, day.month, day.day, 10))
+    block_b = (D(day.year, day.month, day.day, 15), D(day.year, day.month, day.day, 16))
+    nm2 = _replace(nm, calendar=_replace(nm.calendar, machine_busy={mid: (block_a, block_b)}))
+    board = StaffingBoard(build_machine_pools(nm2))
+
+    laid = _lay_in_free_run(machine, cfg.plan_start, 240.0, order, op, int(order.qty),
+                            board, nm2, cfg)
+
+    assert laid is not None
+    assert laid["start"] == D(day.year, day.month, day.day, 10)
+    assert laid["end"] == D(day.year, day.month, day.day, 14)
+    for seg in laid["segments"]:
+        assert seg.start >= block_a[1] and seg.end <= block_b[0], (
+            f"segment {seg.start}-{seg.end} spills into a block "
+            f"({block_a} or {block_b})")
+
+
+def test_frozen_and_occupancy_together_is_rejected(book):
+    """Stage 2 never has frozen operations (a brand-new order can't be
+    half-finished), and neither `_lay_frozen` nor `_preplace_frozen` consult
+    `free_runs` — so the combination must be refused rather than silently letting
+    a frozen op land on occupied time."""
+    nm, cfg, orders = book
+    mid = next(iter(nm.machines))
+    nm2 = _replace(nm, calendar=_replace(
+        nm.calendar, machine_busy={mid: ((cfg.plan_start, cfg.plan_start + timedelta(hours=1)),)}))
+    fake_frozen = [{"order_key": orders[0].key, "op_seq": 1, "machine_id": mid,
+                    "operator": "Anyone", "remaining_qty": 1,
+                    "prev_start": cfg.plan_start, "prev_end": cfg.plan_start}]
+    with pytest.raises(ValueError, match="occupancy and frozen"):
+        decode(orders, [o.key for o in orders], nm2, cfg, frozen=fake_frozen)
+
+
+def test_free_runs_returns_identical_output_on_the_second_call(shop):
+    """The cache must never change what `free_runs` answers — same query, same
+    answer, whether or not the merge has already been cached."""
+    nm, cfg, _order, op = shop
+    mid = op.machine_options[0]
+    cal = ShopCalendar(machine_busy={mid: (
+        (D(2025, 3, 5, 8), D(2025, 3, 6, 8)),
+        (D(2025, 3, 6, 8), D(2025, 3, 7, 8)),
+        (D(2025, 3, 8, 9), D(2025, 3, 8, 12)),
+    )})
+    first = cal.free_runs(mid, D(2025, 3, 3, 8))
+    second = cal.free_runs(mid, D(2025, 3, 3, 8))
+    assert first == second
+    # A different `after` on the SAME (now-cached) calendar must still be correct.
+    third = cal.free_runs(mid, D(2025, 3, 6, 20))
+    assert third == [(D(2025, 3, 7, 8), D(2025, 3, 8, 9)), (D(2025, 3, 8, 12), None)]
+
+
+def test_free_runs_is_correct_and_cache_stable_for_unsorted_input():
+    """The cache stores MERGED blocks, computed from whatever order the blocks were
+    given in — unsorted input must merge correctly, and the cached (already-sorted)
+    result must still be returned identically on a repeat call."""
+    cal = ShopCalendar(machine_busy={"CNC3": (
+        (D(2025, 3, 6, 20), D(2025, 3, 8, 8)),      # given out of order
+        (D(2025, 3, 5, 8), D(2025, 3, 6, 8)),
+        (D(2025, 3, 6, 8), D(2025, 3, 7, 8)),
+    )})
+    expected = [(D(2025, 3, 3, 8), D(2025, 3, 5, 8)), (D(2025, 3, 8, 8), None)]
+    assert cal.free_runs("CNC3", D(2025, 3, 3, 8)) == expected
+    assert cal.free_runs("CNC3", D(2025, 3, 3, 8)) == expected  # cached, same answer
+
+
+def test_replacing_machine_busy_never_reuses_a_stale_cache():
+    """A `dataclasses.replace()` that changes `machine_busy` must never carry the
+    OLD calendar's cached merge along with it — the load-bearing reason
+    `_merged_busy_cache` is `init=False` (see calendar.py)."""
+    c1 = ShopCalendar(machine_busy={"CNC3": ((D(2025, 3, 3, 9), D(2025, 3, 3, 10)),)})
+    assert c1.free_runs("CNC3", D(2025, 3, 3, 8)) == [
+        (D(2025, 3, 3, 8), D(2025, 3, 3, 9)), (D(2025, 3, 3, 10), None)]
+
+    c2 = _replace(c1, machine_busy={"CNC3": ((D(2025, 3, 3, 14), D(2025, 3, 3, 15)),)})
+    assert c2.free_runs("CNC3", D(2025, 3, 3, 8)) == [
+        (D(2025, 3, 3, 8), D(2025, 3, 3, 14)), (D(2025, 3, 3, 15), None)]
+    # And the original calendar's own cache is untouched by having built c2.
+    assert c1.free_runs("CNC3", D(2025, 3, 3, 8)) == [
+        (D(2025, 3, 3, 8), D(2025, 3, 3, 9)), (D(2025, 3, 3, 10), None)]

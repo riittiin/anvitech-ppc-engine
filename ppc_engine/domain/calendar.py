@@ -54,6 +54,26 @@ class ShopCalendar:
     operator_busy: dict[str, tuple[tuple[datetime, datetime], ...]] = field(default_factory=dict)
     machine_shift_operator: dict[tuple[str, date, Shift], str] = field(default_factory=dict)
 
+    # Private cache: each machine's ``machine_busy`` blocks, sorted and merged, once.
+    # `free_runs` is called roughly once per candidate machine per dispatch decision
+    # (~90,000 times over a plan), and stage 2 of the Add New Orders quote seeds one
+    # block per stage-1 segment — hundreds on a busy machine. Re-sorting and
+    # re-merging from scratch every call measured 118µs at 500 blocks; this cache
+    # makes it one-time work per machine. `compare=False`/`repr=False` so it never
+    # affects equality or `repr` — it is a memoization detail, not shop state.
+    # `ShopCalendar` is frozen, so the FIELD is never rebound after construction —
+    # only the dict's own contents are populated lazily, which a frozen dataclass
+    # still allows. ``init=False`` is load-bearing, not cosmetic: `dataclasses.
+    # replace()` (used throughout this codebase to build a modified calendar) copies
+    # every INIT field's current value into the new instance — with `init=True` a
+    # `replace()` that changes `machine_busy` would carry the OLD cache along with
+    # it, serving stale merged blocks for any machine already cached. `init=False`
+    # means every new instance (constructed directly or via `replace()`) gets its
+    # own fresh, empty cache from `default_factory`, so a cache can never outlive
+    # the calendar whose blocks it was built from.
+    _merged_busy_cache: dict[str, tuple[tuple[datetime, datetime], ...]] = field(
+        default_factory=dict, compare=False, repr=False, init=False)
+
     def is_working_day(self, day: date) -> bool:
         """True if the shop runs at all on ``day`` (not the weekly off, not a holiday)."""
         if day.weekday() == self.weekly_off_weekday:
@@ -84,6 +104,27 @@ class ShopCalendar:
             return False
         return day not in self.machine_downtime.get(machine_id, frozenset())
 
+    def _merged_busy(self, machine_id: str) -> tuple[tuple[datetime, datetime], ...]:
+        """``machine_id``'s busy blocks, sorted and merged (overlapping/touching
+        blocks combined), computed once and cached. Independent of ``after`` —
+        `free_runs` applies the query's start point afterward — so the cached value
+        is reusable across every call for this machine regardless of where in time
+        each caller starts looking.
+        """
+        cached = self._merged_busy_cache.get(machine_id)
+        if cached is not None:
+            return cached
+        blocks = self.machine_busy.get(machine_id) or ()
+        merged: list[list[datetime]] = []
+        for start, end in sorted(blocks):
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        result = tuple((start, end) for start, end in merged)
+        self._merged_busy_cache[machine_id] = result
+        return result
+
     def free_runs(self, machine_id: str, after: datetime) -> list[tuple[datetime, datetime | None]]:
         """The stretches of time ``machine_id`` is NOT already occupied, on/after
         ``after``, in time order. The final run is open-ended (``end is None``).
@@ -96,20 +137,14 @@ class ShopCalendar:
         crossing a run boundary would mean the machine was torn down for another job
         in between, and the setup is not paid twice.
         """
-        blocks = self.machine_busy.get(machine_id) or ()
-        if not blocks:
+        merged = self._merged_busy(machine_id)
+        if not merged:
             return [(after, None)]
-        merged: list[list[datetime]] = []
-        for start, end in sorted(blocks):
-            if end <= after:
-                continue
-            if merged and start <= merged[-1][1]:
-                merged[-1][1] = max(merged[-1][1], end)
-            else:
-                merged.append([start, end])
         runs: list[tuple[datetime, datetime | None]] = []
         cursor = after
         for start, end in merged:
+            if end <= after:
+                continue
             if start > cursor:
                 runs.append((cursor, start))
             cursor = max(cursor, end)

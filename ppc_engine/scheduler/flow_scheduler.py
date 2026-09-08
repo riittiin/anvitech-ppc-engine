@@ -69,6 +69,18 @@ def decode(
     Returns:
         A Schedule with all segments and each order's completion datetime.
     """
+    # Occupancy (Add New Orders quote, 2026-09-08 spec) and a frozen set (in-progress
+    # work) must never be asked for together: occupancy models a SECOND planning
+    # stage, and a second stage never has anything in progress (a brand-new order
+    # can't be half-finished). Neither `_lay_frozen` nor `_preplace_frozen` consult
+    # `ShopCalendar.free_runs`, so a frozen op could be laid straight onto occupied
+    # time if the two ever coexisted — asserted here rather than assumed.
+    if frozen and (masters.calendar.machine_busy or masters.calendar.operator_busy):
+        raise ValueError(
+            "occupancy and frozen operations cannot be combined: a second-stage "
+            "plan never has in-progress work"
+        )
+
     # Consolidation (transparent): if a window is set, merge same-item nearby-due orders
     # into batches, schedule the batches, then map each batch's completion back onto its
     # original orders — so the caller still sees per-original-order completions.
@@ -325,9 +337,12 @@ def _lay_on_machine(
     operator is available for a shift, that shift is skipped (the machine idles) and
     work continues in the next staffable window.
 
-    ``staffing`` is a working clone that may be mutated here. Returns the placement
-    (start, end, segments, assignments) or None if the work can't be completed within
-    the lookahead horizon.
+    ``staffing`` is read here, never mutated — new assignments accumulate in a local
+    list and are committed only by the caller for the placement actually chosen, so
+    this function may be called repeatedly against the same board (as
+    ``_lay_in_free_run`` now does, once per candidate run) without one attempt
+    polluting the next. Returns the placement (start, end, segments, assignments) or
+    None if the work can't be completed within the lookahead horizon.
 
     ``deadline`` (optional) is a stop line: the work must finish on or before it, or
     None is returned meaning "not in this stretch of time". It exists so a job can be
