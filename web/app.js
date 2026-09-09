@@ -841,6 +841,27 @@ function newOrdersAllowed() {
   return currentRole === "admin";
 }
 
+// Turn a failed response into plain English instead of the raw JSON body
+// (2026-09-09 fix: a role change mid-session once showed
+// `Could not load new orders: {"detail":"admin only"}` on screen — a director
+// should never see that). `body` is the already-parsed JSON, or null when the
+// response was not JSON at all; `fallback` is shown when there is no usable
+// `detail` and the status is not a role error.
+function friendlyDetail(body, res, fallback) {
+  const detail = body && typeof body.detail === "string" ? body.detail.trim() : "";
+  if (detail) return detail;
+  if (res && (res.status === 401 || res.status === 403)) {
+    return "This is for admins only. Reload the page and sign in as an admin.";
+  }
+  return fallback || "Something went wrong. Reload the page and try again.";
+}
+// Plain-English message for a fetch() that never reached the server at all
+// (a dropped connection, a spun-down instance) rather than the raw browser
+// exception text.
+function friendlyNetworkError() {
+  return "Could not reach the server. Check your connection and try again.";
+}
+
 function renderNewOrders() {
   if (!newOrdersAllowed()) return;
   loadNewOrders();
@@ -850,14 +871,19 @@ async function loadNewOrders() {
   if (!newOrdersAllowed()) return;
   try {
     const res = await fetch("/new-orders/drafts");
-    if (!res.ok) { setStatus("Could not load new orders: " + (await res.text()), true); return; }
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      setStatus("Could not load new orders: "
+        + friendlyDetail(body, res, "Reload the page and try again."), true);
+      return;
+    }
     const body = await res.json();
     noItems = body.items || [];
     noLines = (body.drafts || []).map((d) => (
       { so_no: d.so_no, item_code: d.item_code, qty: d.qty, error: "" }));
     renderNewOrderLines();
   } catch (e) {
-    setStatus("Could not load new orders: " + e.message, true);
+    setStatus("Could not load new orders: " + friendlyNetworkError(), true);
   }
 }
 
@@ -935,17 +961,23 @@ async function saveNewOrderDrafts(editedIndex) {
       body: JSON.stringify(payload),
     });
     if (res.status === 400) {
-      const body = await res.json();
+      const body = await res.json().catch(() => null);
       noLines.forEach((l) => { l.error = ""; });
-      if (editedIndex !== undefined && noLines[editedIndex]) noLines[editedIndex].error = body.detail;
+      if (editedIndex !== undefined && noLines[editedIndex]) {
+        noLines[editedIndex].error = friendlyDetail(body, res, "This line could not be saved.");
+      }
       renderNewOrderLines();
       return;
     }
-    if (!res.ok) { setStatus("Could not save: " + (await res.text()), true); return; }
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      setStatus("Could not save: " + friendlyDetail(body, res, "Reload the page and try again."), true);
+      return;
+    }
     noLines.forEach((l) => { l.error = ""; });
     renderNewOrderLines();
   } catch (e) {
-    setStatus("Could not save: " + e.message, true);
+    setStatus("Could not save: " + friendlyNetworkError(), true);
   }
 }
 
@@ -963,13 +995,13 @@ async function quoteNewOrders() {
     const body = await res.json().catch(() => null);
     if (!res.ok) {
       if (result) result.innerHTML =
-        `<p class="warn">${escapeHtml((body && body.detail) || "Could not quote these orders.")}</p>`;
+        `<p class="warn">${escapeHtml(friendlyDetail(body, res, "Could not quote these orders."))}</p>`;
       return;
     }
     noQuote = body;
     renderQuote(body);
   } catch (e) {
-    if (result) result.innerHTML = `<p class="warn">${escapeHtml(e.message)}</p>`;
+    if (result) result.innerHTML = `<p class="warn">${escapeHtml(friendlyNetworkError())}</p>`;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = label; }
   }
@@ -1013,7 +1045,35 @@ function renderQuote(body) {
   const earlierBtn = $("no-earlier-btn");
   if (earlierBtn) earlierBtn.onclick = showPreponePanel;
   const discardBtn = $("no-discard-btn");
-  if (discardBtn) discardBtn.onclick = () => { el.innerHTML = ""; quoteStamp = null; noQuote = null; };
+  if (discardBtn) discardBtn.onclick = discardQuote;
+}
+
+// Discard means discard: the typed lines are cleared server-side too (PUT an
+// empty draft list), not just the quote on screen — otherwise a director who
+// presses Discard finds the same line waiting for him tomorrow (2026-09-09
+// fix). Nothing is in the book yet and re-typing a line is cheap, so this
+// does not confirm first.
+async function discardQuote() {
+  if (!newOrdersAllowed()) return;
+  const el = $("no-result");
+  quoteStamp = null; noQuote = null;
+  try {
+    const res = await fetch("/new-orders/drafts", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drafts: [] }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      setStatus("Could not discard: " + friendlyDetail(body, res, "Reload the page and try again."), true);
+      return;
+    }
+  } catch (e) {
+    setStatus("Could not discard: " + friendlyNetworkError(), true);
+    return;
+  }
+  if (el) el.innerHTML = "";
+  noLines = [];
+  renderNewOrderLines();
 }
 
 // The stale quote is a normal outcome, not an error to swallow: the plan moved
@@ -1030,13 +1090,15 @@ async function addNewOrders() {
       body: JSON.stringify({ stamp: quoteStamp }),
     });
     if (res.status === 409) {
-      const body = await res.json();
-      $("no-result").innerHTML = `<p class="warn">${escapeHtml(body.detail)}</p>`;
+      const body = await res.json().catch(() => null);
+      $("no-result").innerHTML = `<p class="warn">${escapeHtml(
+        friendlyDetail(body, res, "The plan has changed since this quote. Press Finish and Optimize again."))}</p>`;
       return;
     }
     if (!res.ok) {
       const body = await res.json().catch(() => null);
-      setStatus("Could not add these orders: " + ((body && body.detail) || res.status), true);
+      setStatus("Could not add these orders: "
+        + friendlyDetail(body, res, "Reload the page and try again."), true);
       return;
     }
     const body = await res.json();
@@ -1045,7 +1107,7 @@ async function addNewOrders() {
     await loadNewOrders();
     await runPlan(false);
   } catch (e) {
-    setStatus("Could not add these orders: " + e.message, true);
+    setStatus("Could not add these orders: " + friendlyNetworkError(), true);
   }
 }
 
@@ -1103,13 +1165,13 @@ async function startPrepone() {
     });
     const body = await res.json().catch(() => null);
     if (!res.ok) {
-      if (prog) prog.textContent = (body && body.detail) || "Could not start the search.";
+      if (prog) prog.textContent = friendlyDetail(body, res, "Could not start the search.");
       if (searchBtn) searchBtn.disabled = false;
       return;
     }
     await pollPreponeStatus();
   } catch (e) {
-    if (prog) prog.textContent = "Request failed: " + e.message;
+    if (prog) prog.textContent = friendlyNetworkError();
     if (searchBtn) searchBtn.disabled = false;
   }
 }
@@ -1144,7 +1206,7 @@ async function pollPreponeStatus() {
       if (prog) prog.textContent = st.cancelled
         ? "Stopped early. Showing the best plan found so far."
         : "Search finished.";
-      renderPreponeResult(st);
+      await renderPreponeResult(st);
       return;
     }
     if (prog) prog.textContent = "The search did not finish as expected. Try again.";
@@ -1152,26 +1214,65 @@ async function pollPreponeStatus() {
   }
 }
 
+// Whole days from ISO date `a` to ISO date `b` (b - a), or null if either is
+// unparsable. Used to say "3 days later than asked" in plain words.
+function isoDaysDiff(a, b) {
+  const da = isoToDate(a), db = isoToDate(b);
+  if (!da || !db) return null;
+  return Math.round((db - da) / 86400000);
+}
+
 // What was achieved per line, and every existing order that moved (worst
 // first), with the totals — then Accept or Cancel. Cancel changes nothing.
-function renderPreponeResult(st) {
+//
+// Deliberately does NOT read `noQuote` or the on-screen `.no-target-date`
+// inputs for the "New orders" table — both are null/gone the moment the page
+// is reloaded, which is the NORMAL way to view this result (the search takes
+// 10 to 30 minutes and the instance can spin down in the meantime). Before
+// this fix the table rendered with zero rows on reload, showing every
+// existing order that got worse and nothing about what the new orders
+// achieved (2026-09-09 fix). "Asked" and the item name come fresh from
+// GET /new-orders/drafts — the server-side draft rows, which persist across a
+// reload and are only cleared on accept/discard. "Achieved" comes from the
+// search result's own `expected` map, the one definition of "when this order
+// finishes" every other surface already uses.
+async function renderPreponeResult(st) {
   const el = $("no-prepone-result");
   if (!el) return;
-  const targets = {};
-  document.querySelectorAll(".no-target-date").forEach((inp) => { targets[inp.dataset.key] = inp.value; });
+  let drafts = [];
+  try {
+    const res = await fetch("/new-orders/drafts");
+    if (res.ok) { const body = await res.json(); drafts = body.drafts || []; }
+  } catch (e) { /* reported per row below via the empty-drafts message */ }
   const achieved = (st.best && st.best.expected) || {};
-  const lines = (noQuote && noQuote.lines) || [];
   let h = "<h4>New orders</h4><div class=\"table-wrap\"><table><thead><tr>"
     + "<th>SO number</th><th>Item</th><th>Asked</th><th>Achieved</th></tr></thead><tbody>";
-  lines.forEach((l) => {
-    const key = l.so_no + "\x1f" + l.item_code;
-    const asked = targets[key];
+  if (!drafts.length) {
+    h += '<tr><td colspan="4" class="warn">Could not load these lines. Reload the page.</td></tr>';
+  }
+  drafts.forEach((d) => {
+    const key = d.so_no + "\x1f" + d.item_code;
+    const asked = d.target_date;
     const got = achieved[key];
-    const late = asked && got && got > asked;
-    h += `<tr><td>${escapeHtml(l.so_no)}</td><td>${escapeHtml(l.item_code)} ${escapeHtml(l.item_name || "")}</td>`
+    let cell;
+    if (!got) {
+      cell = '<span class="warn">Could not work out a finish date for this line.</span>';
+    } else if (!asked) {
+      cell = `<strong>${isoToDdmmyyyy(got)}</strong>`;
+    } else {
+      const diff = isoDaysDiff(asked, got);
+      if (diff === null) {
+        cell = `<strong>${isoToDdmmyyyy(got)}</strong>`;
+      } else if (diff <= 0) {
+        cell = `<strong class="ok">${isoToDdmmyyyy(got)}</strong> · met the date asked for`;
+      } else {
+        cell = `<strong class="warn">${isoToDdmmyyyy(got)}</strong> · `
+          + `${diff} day${diff === 1 ? "" : "s"} later than asked`;
+      }
+    }
+    h += `<tr><td>${escapeHtml(d.so_no)}</td><td>${escapeHtml(d.item_code)} ${escapeHtml(d.item_name || "")}</td>`
       + `<td>${asked ? isoToDdmmyyyy(asked) : "-"}</td>`
-      + `<td class="${late ? "warn" : "ok"}"><strong>${got ? isoToDdmmyyyy(got) : "-"}</strong>`
-      + `${late ? " (late)" : ""}</td></tr>`;
+      + `<td>${cell}</td></tr>`;
   });
   h += "</tbody></table></div>";
   const mv = st.quote_movement;
@@ -1219,7 +1320,8 @@ async function acceptPrepone() {
     const res = await fetch("/new-orders/prepone/accept", { method: "POST" });
     const body = await res.json().catch(() => null);
     if (!res.ok) {
-      setStatus("Could not accept this plan: " + ((body && body.detail) || res.status), true);
+      setStatus("Could not accept this plan: "
+        + friendlyDetail(body, res, "Reload the page and try again."), true);
       return;
     }
     const panel = $("no-prepone");
@@ -1230,7 +1332,7 @@ async function acceptPrepone() {
     await loadNewOrders();
     await runPlan(false);
   } catch (e) {
-    setStatus("Could not accept this plan: " + e.message, true);
+    setStatus("Could not accept this plan: " + friendlyNetworkError(), true);
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = label; }
   }
