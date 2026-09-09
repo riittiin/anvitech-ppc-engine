@@ -1,7 +1,11 @@
 # Add New Orders: quote a delivery date instead of guessing one
 
 **Date:** 2026-09-08
-**Status:** design approved by the owner (sections 1–5, 2026-09-08), not yet implemented
+**Status:** IMPLEMENTED and verified, 2026-09-09, commits `c3e3371..e888d8f`
+(27 commits). Two sections below were corrected after the build measured them
+wrong; both corrections are marked inline and recorded as rulings R12 and R13 in
+`.superpowers/sdd/2026-09-08-add-new-orders-quote/progress.md`. The verification
+numbers live in that folder's `task-15-report.md` and in CLAUDE.md's banner.
 **Owner request:** new orders arrive on a rolling basis. Today a director invents an SO
 delivery date, types it into the Excel, and it is uploaded. The date owes nothing to
 what the shop is already committed to. Replace the guess with a date the software
@@ -34,7 +38,7 @@ order exists.
 | What does "do not disturb the existing orders" mean? | **Every existing order's expected completion date reads exactly the same before and after — and its machines and operators too.** | Everything else in the design follows from the strength of this promise. Anything weaker permits an existing order to move, which is the thing the owner is protecting. |
 | May a new job be split across several idle gaps on one machine? | **No.** A job takes a gap only if it fits whole; otherwise it waits for the next gap big enough, or runs after the machine's last existing job. | Each re-engagement on a CNC/VMC pays the 90-minute setup again. Owner: *"it will require that same 90 minutes of setting time, which would take more time in general."* Crossing a night or the weekly off is **not** a split — that is what a job does today. |
 | Does pressing "Finish and Optimize" write anything to the book? | **No.** It is a quotation. Nothing exists until the director accepts. | A half-considered order must not reach the floor's plan. |
-| What may the quick (frozen) search vary? | **The order of the new orders among themselves, and which machine each new job uses** (Allotted, plus Suggested from the Item's Process Master). | Both are invisible to existing orders, so both are free. Machine choice matters: if the usual machine is booked for three weeks and a sister machine is free, the new order should be able to take it. |
+| What may the quick (frozen) search vary? | **The order of the new orders among themselves, and nothing else.** ~~and which machine each new job uses~~ | The sequence is invisible to existing orders, so it is free. **Corrected at build time (ruling R13):** the machine-set dimension was DROPPED. Stage 2 is pinned to the saved `flexible_machines`, because the quote must equal what the Orders tab shows the moment the order is added (acceptance criterion 5) and the plan that will actually run uses the saved setting. The stronger requirement wins; the prepone path exists for when the quote is too conservative. |
 | The director rejects the quoted date and moves it earlier — is that date a hard requirement? | **A target.** It becomes the new order's SO delivery date, the whole book is re-optimized with everything equal, and the app reports what it actually achieved plus every existing order that moved. | A hard requirement refuses too often on a loaded shop and returns nothing usable. A target reuses the objective the optimizer already has (miss delivery dates as little as possible) instead of bolting a new rule onto it. |
 | Does accepting a **preponed** result adopt that plan? | **Yes** — same Apply that follows a deep search today. | The whole answer depends on the new sequence. Not adopting it would mean the slip figures shown were from a plan that was then thrown away. |
 | Does accepting a **frozen** quote adopt anything? | The orders are saved, and **new orders queue behind the orders already in the book** until the next full optimization. | See §5. Without this the app re-sorts the whole book by delivery date on the very next recalculation, and the date the director was quoted sixty seconds ago changes on screen. |
@@ -185,13 +189,22 @@ hopeful.
 
 Two dimensions, both invisible to existing orders:
 
-* **Sequence** of the new orders among themselves. **Exhaustive for 4 or fewer**
-  (at most 24 arrangements — so the answer is provably the best available under the
-  freeze); a bounded hill-climb above that, seeded with the order they were typed in.
-* **Machine set** for the new orders: Allotted-only, and Allotted + Suggested (the
-  existing `flexible_machines` dimension), keeping whichever is better. **Stage 1 is
-  always planned at whatever setting the live plan currently uses** — the machine-set
-  choice applies to stage 2 only, so it cannot reach an existing order.
+**Corrected at build time. As written below this section was wrong twice, and both
+errors were measured rather than argued.**
+
+* **Sequence** of the new orders among themselves. **The lever is `priority_rank`,
+  not list order** (ruling R12): Rule 1 regroups the lines by item and Rule 2 sorts
+  the batches by delivery date, so the caller's list order is discarded before
+  anything is scheduled. Measured: all 6 permutations of 3 lines passed as list order
+  produced byte-identical schedules. Re-expressed as a `priority_rank` map the same
+  3 lines give 2 distinct schedules and 2 distinct scores, so the search is real.
+  Several rotations are tried and scored; the winning arrangement is what the accept
+  stores, and `_plan` re-derives the same rank from the stored group, so the quote
+  and the plan agree by construction.
+* **Machine set: DROPPED** (ruling R13). Stage 2 is pinned to the saved
+  `flexible_machines`, the setting the plan that will actually run uses, so a quoted
+  date is reproducible on the next screen. Trying both sets could quote a date the
+  live plan would not deliver, which acceptance criterion 5 forbids.
 
 Scored on the new orders' own completion dates (earliest first; against the typed
 target once §3 step 4b has supplied one). Seconds either way; a progress indicator

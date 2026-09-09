@@ -1,6 +1,152 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-08-31)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-09)
+>
+> - **A DELIVERY DATE IS NOW QUOTED FROM THE PLAN INSTEAD OF GUESSED (2026-09-08,
+>   owner request; spec
+>   `docs/superpowers/specs/2026-09-08-add-new-orders-quote-design.md`, commits
+>   `c3e3371..e888d8f`, 27 commits).** New orders arrive all week. A director used to
+>   invent an SO delivery date, type it into the Excel and upload it, so the number
+>   the customer was told owed nothing to what the shop was already committed to.
+>   There is now an admin-only **`Add New Orders`** tab: he types SO number, item and
+>   quantity, presses "Finish and Optimize", and gets a date computed against the plan
+>   the shop is actually running, with no existing order moved. He accepts it (the
+>   quoted date becomes that order's SO delivery date) or asks for an earlier one,
+>   which drops the protection, re-optimizes the whole book, and shows him what it
+>   achieved plus every existing order that moved. New pure module **`engine/quote.py`**
+>   (no store, no HTTP); endpoints `GET`/`PUT /new-orders/drafts`,
+>   `POST /new-orders/quote`, `POST /new-orders/add`, `POST /new-orders/prepone`,
+>   `POST /new-orders/prepone/accept`, all admin, all 403 for the user role.
+>   **The one load-bearing decision: existing orders cannot move because they are NOT
+>   IN THE SECOND CALCULATION AT ALL.** The plan runs in two stages. Stage 1 is
+>   today's plan, untouched: same orders, same punches, same settings, same applied
+>   ranks, same in-progress freeze. Stage 2 turns stage 1's schedule into a statement
+>   of what every machine and person is already doing
+>   (`new_engine.occupancy_from_entries`) and plans ONLY the new orders against it.
+>   No code path in stage 2 can reach a stage-1 placement, so this is a guarantee by
+>   construction, not a test result. Stage 2 never gets a frozen set either (a
+>   brand-new order cannot be half finished), and `decode` raises rather than assumes
+>   it.
+>   **The second decision, and it was got WRONG TWICE before it was got right: the
+>   chain unit is the ACCEPT, not the order.** Lines quoted together are quoted
+>   POOLED, in one `run_forward` call, so Rule 1 clubs same-item lines inside the
+>   accept and they pay ONE setup. They must therefore be PLANNED pooled, as a single
+>   chain step; separate accepts chain against each other in arrival order, each
+>   against the accumulated occupancy of everything before it. Both wrong versions
+>   produced a quoted date that the very next screen contradicted, after the date was
+>   already written into the book as the promise.
+>   **Version 1 had no chaining at all**: `_plan` re-planned the whole queue in one
+>   pass while each quote had been computed against the previous accept as immovable
+>   occupancy, two different computations of the same number. Measured over 10
+>   sequential single-line adds on the real books: already-accepted new orders moved
+>   2 / 14 / 2 times (Test5 / Test8 / Test9), worst 34 days, and 9 of 30 adds showed a
+>   date different from the one just quoted.
+>   **Version 2 chained one LINE at a time**, which cannot reproduce a multi-line
+>   quote: two draft lines sharing an item code are clubbed by Rule 1 inside the quote
+>   but cannot be clubbed one per pass, so they got different dates and paid the
+>   90-minute setup twice. Measured on Test8 at a production-like config, one accept
+>   of 10 lines: **9 of 10 quoted dates differed on the next screen, worst 33 days
+>   LATER than promised**; 140 mismatches over 36 pure runs, worst 146 days. CLAUDE.md
+>   already records that 15 of 42 real item codes are clubbed, so this is common, not
+>   exotic. With the accept as the chain unit both symptoms are 0 (multi-line accept
+>   0 of 10 on all three books; 10 sequential adds 0 moves, 0 mismatches). Both parts
+>   proven load-bearing by individual reversion, and the clubbing proven by COUNTING:
+>   1 batch of qty 100 covering both SO refs with 6 setup-bearing entries, against 2
+>   batches and 12 entries under the per-line counterfactual.
+>   **Third: occupancy reaches placement WITHOUT touching `iter_windows`.**
+>   `ShopCalendar` gained three optional maps (`machine_busy`, `operator_busy`,
+>   `machine_shift_operator`, all empty by default) plus a `free_runs(machine, after)`
+>   view; `_lay_on_machine` gained an optional stop line, and `_place_operation` walks
+>   the free runs in turn. Every attempt is bounded by the run it is in, so no segment
+>   can land on occupied time and the single window source the whole engine shares is
+>   untouched. `_lay_frozen` is untouched too. `StaffingBoard` accepts pre-existing
+>   bookings and assignments and seeds them, so qualification, shift, scarce-first
+>   picking and one-operator-per-machine-per-shift all carry across the two stages
+>   with no logic change. A job takes a gap only if it fits WHOLE, so it never pays
+>   the setup twice; running through a night or the weekly off is not a split.
+>   **Fourth: a new order is NOT clubbed with an existing batch of the same item while
+>   it is queued.** Clubbing would change that batch's quantity, which moves the
+>   existing order's date, which is the thing being protected. Within ONE accept,
+>   lines sharing an item code ARE clubbed, and that is what makes them pay one setup
+>   instead of two. **Fifth: the queue ends at the next full optimization**, that is
+>   "Done entering", an applied deep search, or a new Excel upload, after which the
+>   new orders are ranked on merit like everything else and keep the quoted date as
+>   their SO delivery date permanently. Two store keys:
+>   `anvitech:new_order_drafts` (the typed lines) and `anvitech:new_order_queue` (a
+>   list of arrival GROUPS, each the (SO#, item) pairs one accept took together). The
+>   queue is in `_plan_fingerprint`, or the 2026-08-08 stale-screen class returns.
+>   **TWO DEFECTS WERE FOUND ONLY BY VERIFYING ON THE OWNER'S REAL BOOKS, after every
+>   task had already passed review, and NEITHER was visible to any test.**
+>   **(1) A batch-id collision that made the Gantt republish EXISTING orders' dates.**
+>   `rule1_consolidate` names batches `B001, B002, ...` from a counter that RESTARTS
+>   on every call, and `_plan` now calls the rule chain more than once, so every
+>   stage-2 id collided with a stage-1 id. `build_gantt`, `build_machine_view` and
+>   `build_shiftwise_timeline` all GROUP rows by `batch_id` and publish the row's max
+>   end as the completion date, so a new order's bars were glued onto an unrelated
+>   existing order's row and republished THAT order's date. It fired with a single new
+>   order, on every book: Test5 with one new order moved B001 / 26-27SO117 from
+>   03-10-2026 to 27-10-2026, and across 12 runs no new order got a Gantt row of its
+>   own at all. The PLAN was right; the three surfaces the floor actually reads were
+>   wrong. Fixed by **`api.main._reid_batches`**, which prefixes each chain step's ids
+>   (`Q1-`, `Q2-`, ...) before merging, disjoint by construction for any queue length.
+>   **(2) The quote-versus-plan divergence** above. Neither was reachable from the
+>   suite or from the API alone. A throwaway instance defaults to
+>   `apply_operator_logic=False` and overlap 50, which understates contention and HID
+>   the second one: always persist a production-like config before verifying anything
+>   about contention.
+>   **Measured, and these are the numbers.** Byte-identical **18 of 18** against the
+>   pre-feature commit `8dc1e75`: nine book-size runs on Test5/8/9 plus nine runs with
+>   real work in progress and derived frozen sets, hashing machine, operator, start,
+>   end and qty on every entry at a fixed plan start, so every engine change on this
+>   branch is provably inert on a book with no new orders. The freeze itself: **36
+>   runs** (3 books x 3 WIP levels x 1/3/10/20 new orders), **zero moves of date,
+>   machine or operator** on any pre-existing order and **zero routing, qualification
+>   or batch-quantity violations**, checking 57, 67 and 68 existing orders per run.
+>   The gap rule: **0 overlaps, 0 spans**, with **353 new operations (17%) landing in
+>   a gap** between existing jobs against 1,723 after the machine's last job, so the
+>   feature really does use idle capacity rather than only queueing at the end.
+>   Multi-line accept mismatches **0 of 10 on all three books**. Cost: about **17 to
+>   50 ms of plan time per queued order, linear** (Test9 cold `/run`: 1 order 460 ms,
+>   5 orders 594 ms, 20 orders 1,408 ms), cache hits unchanged at 29 to 68 ms. Suite:
+>   **1119 passed, 2 skipped**. `SCHEDULER_FINGERPRINT` was deliberately NOT bumped:
+>   no existing work moves.
+>   **Mutation testing, 8 mutations each reverted individually: 7 of 8 are
+>   load-bearing.** The eighth, the assignment seeding in `decode`
+>   (`StaffingBoard(assigned=...)` put back to `assigned=None`), **fails NO test** and
+>   leaves the suite byte-identical. It is genuine belt-and-braces, kept because it is
+>   what makes stage 2 prefer the operator already manning that machine that shift,
+>   and nothing checks that it does. Said plainly, not dressed up as covered.
+>   **A second honest gap:
+>   `test_a_contended_multi_item_accept_reproduces_its_own_quote` does NOT
+>   discriminate on the sample workbook** (it is too uncontended to tell a pooled
+>   accept from a per-line chain). The mechanism's real proof lives in an uncommitted
+>   harness in the verification report, so a future refactor of `group_rank` would not
+>   be caught by the suite. Verify that mechanism on the real books at a
+>   production-like config, never by running pytest.
+>   **What was NOT run:** the preponed path end to end (each trial needs a finished
+>   contest, 15 to 30 minutes; only its role gating was checked), the cloud / GitHub
+>   Actions / Oracle contest path, a real browser for the live end-to-end run (a
+>   native `confirm()` dialog blocks automation, so that step went by HTTP; the tab
+>   itself was driven in a browser earlier), and multi-admin concurrency (the drafts
+>   are shared server state, documented rather than defended, the same as every other
+>   admin control here).
+>   **Deliberate decisions, so they are not relitigated:** an Excel re-import still
+>   overwrites a quoted date, exactly as before (owner's call; `merge_upload` is
+>   untouched). The tab is admin-only, server-enforced, and
+>   `tests/test_role_parity.py`'s whole-nav invariant now carries ONE named exception
+>   for it, written as an exact set so hiding a SECOND tab still fails loudly.
+>   `run_forward(occupancy=...)` RAISES on the retired classic and flow engines rather
+>   than letting their `**kw` swallow it, because a freeze that silently did nothing
+>   would look like it worked; if a deployment is ever on those engines with a queue
+>   on file, `_plan` degrades to a single pass and says so in a visible note.
+>   **Deliberately NOT built:** partial-day or hour-level control of anything; editing
+>   or re-quoting an order already in the book; splitting one new job across several
+>   gaps to finish sooner (rejected on setup cost); clubbing a new order into an
+>   existing batch (rejected because it moves the existing order); any change to the
+>   objective, the scoring, or how the Excel re-import treats delivery dates.
+>   **Rule: a date promised to a customer must be computed against the plan in force,
+>   and a new order may never move an order that is already promised. Anything that
+>   plans a subset of the book must plan it against the occupancy of the rest.**
 >
 > - **AN OPERATION NEEDS A MACHINE, NOT JUST A PERSON — MACHINE MAINTENANCE
 >   DOWNTIME (2026-08-31, owner request).** An admin can now mark a CNC/VMC
