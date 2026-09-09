@@ -1036,7 +1036,16 @@ def _plan(config: Config):
         from engine import new_engine as _ne_stage2
         n_queued = sum(len(g) for g in queued_groups)
         for i, group in enumerate(queued_groups, start=1):
-            occupancy = _ne_stage2.occupancy_from_entries(plan_run.schedule, config)
+            # Must match `ranked_config` below (and the `config` stored in
+            # _PLAN_CACHE["artifacts"]) -- this occupancy feeds the SAME
+            # group's run_forward call a few lines down, so a mismatched
+            # config expression here is the quote-vs-plan divergence bug,
+            # just at a different call site. Passing plain `config` is inert
+            # today only because occupancy_from_entries's _plan_config does
+            # not read expedite_window_min (the one field the two configs
+            # differ in) -- keep both sides identical so a future knob
+            # can't silently reintroduce the divergence.
+            occupancy = _ne_stage2.occupancy_from_entries(plan_run.schedule, ranked_config)
             # `group`'s own LIST ORDER is `res.order` — the winning arrangement
             # `engine.quote.quote` searched over (for 2+ lines it tries several
             # rotations, scores each, and keeps the best) and passed to its OWN
