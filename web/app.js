@@ -25,6 +25,8 @@ let currentOrders = null;     // {columns, rows} from /run or /orders
 let currentExpected = null;   // {"SO\x1fITEM": "YYYY-MM-DD"} from /run's expected_end (Task 9)
 let optimizeMeta = null;      // /run's optimize_meta: applied optimization + staleness
 let autoNote = null;          // /run's auto_note: scheduled optimization's latest note ({text, at} or null)
+let queueNote = null;         // /run's queue_note: arrival-queue status (informational, or a
+                               // plain-English reason the queue could not be honoured this plan)
 let optimizePollTimer = null; // /optimize/status polling handle
 let ITEMS = null;
 let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour detail)
@@ -293,6 +295,7 @@ async function runPlan(persist = false) {
     currentExpected = data.expected_end || null;
     optimizeMeta = data.optimize_meta || null;
     autoNote = data.auto_note || null;
+    queueNote = data.queue_note || null;
     currentConfig = data.config || null;
     if (data.resolved_plan_start) lastResolvedStart = data.resolved_plan_start;
     if (currentRole === "admin" && data.config) applyConfig(data.config, data.resolved_plan_start);
@@ -488,6 +491,17 @@ function renderStatusStrip() {
   }
   const datesChangedWarn = datesChangedWarningText(optimizeMeta);
   if (datesChangedWarn) warns.push(datesChangedWarn);
+  // The arrival queue's status: ordinarily informational (new orders are
+  // planned behind the book, as designed) — shown as a plain segment. The one
+  // case it needs a real warning is when the engine in force cannot honour
+  // the queue at all (the retired classic/flow engines), because then the
+  // new orders were planned together with everything else instead, which is
+  // the very thing this feature exists to prevent — 2026-09-11 review: this
+  // note was returned by the server all along but nothing on screen read it.
+  if (queueNote) {
+    if (queueNote.includes("could not be planned")) warns.push(queueNote);
+    else segs.push(`<span class="ss-seg">${escapeHtml(queueNote)}</span>`);
+  }
   const unstaffed = currentTrace && currentTrace.analytics && currentTrace.analytics.headline
     ? currentTrace.analytics.headline.unstaffed_hrs : 0;
   if (unstaffed && unstaffed > 0) {
@@ -851,7 +865,7 @@ function renderNewOrderLines() {
   const list = $("no-items-list");
   if (list) {
     list.innerHTML = noItems.map((it) =>
-      `<option value="${escapeHtml(it.item_code)}">${escapeHtml(it.item_code)} — ${escapeHtml(it.item_name)}</option>`
+      `<option value="${escapeHtml(it.item_code)}">${escapeHtml(it.item_code)} - ${escapeHtml(it.item_name)}</option>`
     ).join("");
   }
   const tbody = $("no-lines");
@@ -968,8 +982,9 @@ function renderQuote(body) {
   const el = $("no-result");
   if (!el) return;
   if (!body.verified) {
+    const reason = body.reason || "the quote could not be confirmed against the plan in force";
     el.innerHTML = '<p class="warn">This quote could not be confirmed: '
-      + body.moved.length + ' existing order(s) moved. No date is shown. '
+      + escapeHtml(reason) + '. No date is shown. '
       + 'Press Finish and Optimize again.</p>';
     return;
   }
@@ -1159,8 +1174,8 @@ function renderPreponeResult(st) {
       + `${late ? " (late)" : ""}</td></tr>`;
   });
   h += "</tbody></table></div>";
-  const mv = st.quote_movement || { moved: [], late_days_before: null, late_days_after: null };
-  const moved = mv.moved || [];
+  const mv = st.quote_movement;
+  const moved = (mv && mv.moved) || [];
   h += `<h4>Existing orders that moved: ${moved.length}</h4>`;
   if (moved.length) {
     h += "<div class=\"table-wrap\"><table><thead><tr>"
@@ -1174,7 +1189,13 @@ function renderPreponeResult(st) {
   } else {
     h += '<p class="ok">No existing order moved later.</p>';
   }
-  h += `<p>Total days late across the plan: ${mv.late_days_before} → <strong>${mv.late_days_after}</strong></p>`;
+  // `quote_movement` is missing when the movement summary itself failed to
+  // compute server-side — say so plainly rather than printing "null -> null".
+  if (mv && mv.late_days_before !== null && mv.late_days_after !== null) {
+    h += `<p>Total days late across the plan: ${mv.late_days_before} → <strong>${mv.late_days_after}</strong></p>`;
+  } else {
+    h += '<p class="warn">Total days late across the plan could not be worked out.</p>';
+  }
   h += '<div class="cfg-row">'
     + '<button id="no-prepone-accept" class="primary" type="button">Accept this plan</button>'
     + '<button id="no-prepone-cancel-result" class="ghost-btn" type="button">Cancel</button>'
@@ -2845,8 +2866,33 @@ if (_noQuoteBtn) _noQuoteBtn.onclick = quoteNewOrders;
   // Optimize card lives on the Schedule view and updates in place. Both roles:
   // the panel is read-only for a user but they still need to see a search is
   // running (2026-08-09 role-parity fix), and GET /optimize/status is role-open.
+  //
+  // A preponed (Add New Orders) search shares this same slot but is a DIFFERENT
+  // kind of job (`st.kind === "quote"`) — `renderOptimizeResult` deliberately
+  // hides the Settings panel for it, so resuming with `pollOptimizeStatus()`
+  // would poll forever with nothing ever shown. A 10-to-30-minute search that
+  // outlives a reload (or a Render spin-down and wake) must resume on the
+  // Add New Orders panel instead, or the finished result is stuck behind
+  // pressing the button again — which just starts a brand new search.
   try {
     const st = await (await fetch("/optimize/status")).json();
-    if (st.state === "running" || (st.state === "done" && st.best)) pollOptimizeStatus();
+    if (st.kind === "quote") {
+      if (newOrdersAllowed() && (st.state === "running" || st.state === "done")) {
+        // The panel's skeleton is normally built by showPreponePanel() when the
+        // director presses "I need one earlier" — on a fresh page load nothing
+        // has built it yet, so give pollPreponeStatus()/renderPreponeResult()
+        // somewhere to write without needing that click first.
+        const el = $("no-prepone");
+        if (el && !$("no-prepone-progress")) {
+          el.classList.remove("hidden");
+          el.innerHTML = '<h3>Ask for an earlier date</h3>'
+            + '<div id="no-prepone-progress" class="status"></div>'
+            + '<div id="no-prepone-result"></div>';
+        }
+        pollPreponeStatus();
+      }
+    } else if (st.state === "running" || (st.state === "done" && st.best)) {
+      pollOptimizeStatus();
+    }
   } catch (e) { /* status is cosmetic at boot */ }
 })();

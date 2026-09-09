@@ -966,6 +966,16 @@ def _plan(config: Config):
     ab = _current_reservations(absences_raw, downtime_raw)
 
     so_lines = orderbook.active_so_lines(active, actuals, masters)   # remaining = ordered − finished good
+    # The WHOLE active book, before the arrival-queue split below — stage 1
+    # plus every queued group. This is what the merged schedule (stage 1 +
+    # stage 2) actually contains, so anything that must enumerate every line
+    # IN THE PLAN — the delay justification report, not `so_lines` below,
+    # which the schedule's own two stages are built from — reads this one
+    # instead (2026-09-11 review, I4: `build_delay_report` iterates `so_lines`
+    # to decide which orders to explain, so a queued new order — present in
+    # the schedule since `_plan`'s stage 2 above merges it in — got zero rows
+    # in the report, silently, exactly the class CLAUDE.md keeps naming).
+    all_active_so_lines = so_lines
 
     # First come, first served (2026-09-08 spec): lines added through Add New
     # Orders are planned BEHIND the book that was already there, so accepting a
@@ -1240,8 +1250,18 @@ def _plan(config: Config):
     # read `config` here for their own stage-2 pass while `_plan`'s own stage
     # 2 used `ranked_config` — two different config expressions computing
     # what should be the same date (2026-09-11 review, second finding).
+    #
+    # `all_active_so_lines` (stage 1 + every queued group), not the `so_lines`
+    # local (stage 1 only): `plan_run.schedule` above already carries BOTH
+    # stages merged, so an artifacts consumer that enumerates lines to decide
+    # what to report on — `_plan_run_for_report` / the delay justification
+    # report is the one real reader today — must see every line the schedule
+    # actually contains, not just the ones stage 1 planned (2026-09-11 review,
+    # I4). `/new-orders/quote` and `/new-orders/add` never read this key —
+    # they read `plan_run`/`masters`/`config` only — so widening it here moves
+    # nothing else.
     _PLAN_CACHE.update(key=_fp, result=result,
-                       artifacts={"plan_run": plan_run, "so_lines": so_lines,
+                       artifacts={"plan_run": plan_run, "so_lines": all_active_so_lines,
                                   "masters": masters, "config": ranked_config})
     return result
 
@@ -2171,6 +2191,22 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
     inputs_sig = _inputs_signature(replace(base_config,
                                            flexible_machines=bool(winner_flexible),
                                            **{_knob: winner_overlap}))
+    # For a quote-kind run only, compute the "what moved" summary ONCE, here,
+    # rather than on every /optimize/status poll (2026-09-11 review: both
+    # roles poll this endpoint at boot and on every "Done entering" press, and
+    # a finished quote result sits in `_OPTIMIZE` until the director accepts
+    # or discards it — recomputing two full plan replays on every poll in the
+    # meantime is real CPU on a free-tier instance for a number that cannot
+    # change between polls, since it depends only on the ranks this contest
+    # already found). Computed outside the lock, same as `_local_best` above,
+    # since it is itself a full plan replay.
+    kind = _OPTIMIZE.get("kind", "plan")
+    quote_movement = None
+    if kind == "quote":
+        try:
+            quote_movement = _quote_movement(ranks)
+        except Exception:  # noqa: BLE001 — a movement summary must never crash finalize
+            quote_movement = None
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["job_id"] != job_id:
             return False
@@ -2188,7 +2224,8 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                     "knob": _knob,
                     "flexible_machines": bool(winner_flexible),
                     "current_flexible": bool(getattr(base_config, "flexible_machines", False)),
-                    "sweep_table": table})
+                    "sweep_table": table,
+                    "quote_movement": quote_movement})
         # Record a "last searched" marker for EVERY completed contest — not
         # just an applied one — so a redundant Done click (no improvement
         # found, or nothing was ever applied) can still be skipped without
@@ -2237,15 +2274,15 @@ def _optimize_status():
                 # (manual-dispatch mode / debugging) — not sensitive by itself.
                 "job_id": _OPTIMIZE.get("job_id") if state == "running" else None,
                 "stopping": bool(_OPTIMIZE.get("cancel")) and state == "running"}
-    # Computed OUTSIDE the lock — a full plan replay is too slow to run while
-    # holding the global optimize lock (it would block Stop / a status poll from
-    # a concurrent request for the length of a plan). Only for a finished quote,
-    # so this never fires on the ordinary Settings-sweep polling path.
-    if kind == "quote" and state == "done" and res.get("ranks") is not None:
-        try:
-            out["quote_movement"] = _quote_movement(res["ranks"])
-        except Exception:  # noqa: BLE001 — a status poll must never 500
-            out["quote_movement"] = None
+    # `quote_movement` is computed ONCE, in `_finalize_optimize`, and cached on
+    # `result` — not recomputed here. It used to be two full plan replays on
+    # EVERY poll of this endpoint (both roles poll it at boot and on every
+    # "Done entering" press, and a finished quote result sits in `_OPTIMIZE`
+    # until the director accepts or discards it), which is real CPU on a
+    # free-tier instance for a number that cannot change between polls
+    # (2026-09-11 review).
+    if kind == "quote" and state == "done":
+        out["quote_movement"] = res.get("quote_movement")
     return out
 
 
@@ -3155,7 +3192,6 @@ def add_new_orders(req: AddNewOrdersRequest, request: Request):
                     item_name=r["item_name"], ordered_qty=float(r["qty"]),
                     delivery_date=r["completion"], first_seen=today)
               for r in res.lines]
-    book_store.add_orders(orders)
     # Appended as ONE ARRIVAL GROUP, ordered by the WINNING arrangement
     # (`res.order`) rather than draft order (2026-09-08 review finding 2,
     # corrected 2026-09-11): a group is the unit `_plan`'s stage 2 replans
@@ -3165,8 +3201,17 @@ def add_new_orders(req: AddNewOrdersRequest, request: Request):
     # multi-line quote (Rule 1 would never see the lines together to club
     # them). The group as a whole still chains behind every earlier accept.
     new_group = [list(k) for k in res.order if tuple(k) in by_key]
+    # Queue BEFORE orders (2026-09-11 review, Minor): a crash between the two
+    # writes used to leave these orders in the book but unqueued — free to be
+    # clubbed and re-sequenced with everything else on the very next plan,
+    # which is exactly the move this whole feature exists to prevent. Queued
+    # first, a crash instead leaves keys in the queue that name no order yet;
+    # `_split_queue` already drops any queued key that does not match an
+    # active line, harmlessly, by construction (the same way it drops a
+    # deleted or completed order's key).
     book_store.save_new_order_queue(
         list(book_store.load_new_order_queue()) + [new_group])
+    book_store.add_orders(orders)
     book_store.save_new_order_drafts([])
     _PLAN_CACHE["key"] = None      # the book changed; never serve the old response
     return {"added": len(orders),

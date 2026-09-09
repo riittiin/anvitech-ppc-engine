@@ -511,6 +511,63 @@ def test_applying_an_optimization_clears_the_queue(admin_client, uploaded_master
     assert book_store.load_new_order_queue() == []
 
 
+def test_delay_report_includes_a_queued_new_order(admin_client, uploaded_masters,
+                                                   add_new_order):
+    """2026-09-11 review, I4: `_plan` cached STAGE 1's `so_lines` only under
+    `_PLAN_CACHE["artifacts"]`, while `plan_run.schedule` in that same cache
+    entry already carried BOTH stages merged (stage 2 folds the queued order
+    in). `_plan_run_for_report` hands those artifacts straight to
+    `build_delay_report`, which enumerates `so_lines` to decide which orders
+    to explain — so a queued new order had real rows in the schedule but ZERO
+    rows in the delay report, the silent-omission class CLAUDE.md names
+    explicitly. Proven directly against `build_delay_report` (what the
+    endpoint calls), on the SAME schedule, so the before/after counts below
+    are both real and both come from the one run: before = the stage-1-only
+    line list the old code cached, after = the merged list this fix caches."""
+    import api.main as m
+    from engine import delay_report as dr
+
+    add_new_order("NEW-1", uploaded_masters, 25)
+    assert book_store.load_new_order_queue(), "the new order must still be queued"
+
+    m._plan(m._load_plan_config())
+    art = m._PLAN_CACHE["artifacts"]
+    plan_run, all_lines, masters, cfg = (art["plan_run"], art["so_lines"],
+                                         art["masters"], art["config"])
+
+    # The fix, checked directly: the cached list already names the queued order.
+    assert any(l.so_no == "NEW-1" for l in all_lines), (
+        "the artifacts' so_lines must include the queued new order (I4 fix)")
+    assert any(e.so_refs and "NEW-1" in e.so_refs for e in plan_run.schedule), (
+        "sanity: the merged schedule really does contain the new order's work")
+
+    def _rows_for_new_order(lines):
+        report = dr.build_delay_report(plan_run.schedule, lines,
+                                        plan_run.batches_prioritized, cfg, masters,
+                                        book_store.load_machine_downtime())
+        return [r for r in report["detail"] if r["SO No"] == "NEW-1"]
+
+    before_rows = _rows_for_new_order([l for l in all_lines if l.so_no != "NEW-1"])
+    after_rows = _rows_for_new_order(all_lines)
+    print(f"I4: delay report detail rows for NEW-1 — before={len(before_rows)} "
+         f"after={len(after_rows)}")
+    assert before_rows == [], "sanity: the stage-1-only list must not name NEW-1"
+    assert after_rows, "the queued new order must have rows in the delay report"
+
+    # And the real endpoint (which reads these same cached artifacts) agrees.
+    pytest.importorskip("openpyxl")
+    import openpyxl
+    r = admin_client.get("/delay-report.xlsx")
+    assert r.status_code == 200, r.text
+    wb = openpyxl.load_workbook(io.BytesIO(r.content))
+    detail = wb["Detail"]
+    header = [c.value for c in next(detail.iter_rows(min_row=1, max_row=1))]
+    so_col = header.index("SO No")
+    endpoint_rows = [row for row in detail.iter_rows(min_row=2, values_only=True)
+                     if row[so_col] == "NEW-1"]
+    assert endpoint_rows, "the downloaded xlsx must also carry rows for NEW-1"
+
+
 # --- Task 13: the preponed path --- #
 
 @pytest.fixture
@@ -531,7 +588,14 @@ def finished_quote_optimize(_api_module, admin_client, uploaded_masters):
     tests/test_manual_apply_backstop.py stages `_OPTIMIZE` for `_optimize_apply` —
     never a real 10-30 minute contest. Also leaves behind the one draft line
     `/new-orders/prepone` would have, with its typed target date already set (as
-    the endpoint would have left it)."""
+    the endpoint would have left it).
+
+    ``quote_movement`` is staged in ``result`` too (2026-09-11 review, I2): the
+    real path now computes it ONCE, inside `_finalize_optimize`, and
+    `/optimize/status` only ever reads it back from `result` — it is no
+    longer recomputed on every poll. A hand-staged `_OPTIMIZE` that skips
+    `_finalize_optimize` entirely must stage this the same way a real finished
+    contest would have left it, or the status endpoint has nothing to serve."""
     r = admin_client.put("/new-orders/drafts",
                          json={"drafts": [{"so_no": "NEW-1",
                                            "item_code": uploaded_masters, "qty": 25}]})
@@ -551,7 +615,9 @@ def finished_quote_optimize(_api_module, admin_client, uploaded_masters):
                     "cancelled": False, "improved": True,
                     "best_overlap": None, "current_overlap": None,
                     "flexible_machines": None, "current_flexible": None,
-                    "knob": None, "inputs_sig": None})
+                    "knob": None, "inputs_sig": None,
+                    "quote_movement": {"moved": [], "late_days_before": 20,
+                                        "late_days_after": 10}})
     return _api_module
 
 
@@ -703,6 +769,53 @@ def test_a_finished_quotes_status_reports_the_movement(admin_client, uploaded_ma
     assert isinstance(move["moved"], list)
     assert isinstance(move["late_days_before"], int)
     assert isinstance(move["late_days_after"], int)
+
+
+def test_quote_movement_is_computed_once_not_on_every_status_poll(
+        admin_client, uploaded_masters, monkeypatch):
+    """2026-09-11 review, I2: `_quote_movement` runs two full plan replays
+    (`_incumbent_metrics` + `_metrics_for_ranks`). Both roles poll
+    `/optimize/status` at boot and on every "Done entering" press, and a
+    finished quote result sits in `_OPTIMIZE` until the director accepts or
+    discards it — so recomputing on every poll meant seconds of CPU on a
+    free-tier instance for a number that cannot change between polls. It must
+    now be computed exactly ONCE, inside `_finalize_optimize`, and every poll
+    after that must be served straight from the cached `result`."""
+    import api.main as m
+    calls = []
+    real = m._quote_movement
+
+    def _counting(ranks):
+        calls.append(1)
+        return real(ranks)
+
+    monkeypatch.setattr(m, "_quote_movement", _counting)
+    monkeypatch.setitem(m._OPT_BUDGETS, "deep", 15)
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    r = admin_client.post(
+        "/new-orders/prepone",
+        json={"targets": {"NEW-1\x1f" + uploaded_masters: "2025-03-20"}})
+    assert r.status_code == 200, r.text
+    t0 = time.time()
+    st = admin_client.get("/optimize/status").json()
+    while st["state"] == "running" and time.time() - t0 < 20:
+        time.sleep(0.05)
+        st = admin_client.get("/optimize/status").json()
+    assert st["state"] == "done", st
+    assert st["quote_movement"] is not None
+
+    # Poll several more times — a finished quote sits here until accepted or
+    # discarded, exactly like a director leaving the tab open, a "Done
+    # entering" press elsewhere, or a boot re-fetch after a reload.
+    for _ in range(5):
+        st2 = admin_client.get("/optimize/status").json()
+        assert st2["quote_movement"] == st["quote_movement"]
+
+    assert len(calls) == 1, (
+        f"_quote_movement was called {len(calls)} times across the finalize "
+        "plus 6 status polls — it must be computed exactly once")
 
 
 def test_accepting_a_preponed_result_uses_the_typed_date_not_the_achieved_one(
