@@ -66,6 +66,20 @@ def _shift_of(dt):
 
 
 def _assert_clean(segments):
+    """What a clean plan guarantees: no operation split across machines, no machine
+    or person in two places at once, and every person on THEIR shift.
+
+    Until 2026-09-22 this also asserted one operator per machine per shift and one
+    machine per operator per shift. That was the old engine's hour-by-hour hopping
+    complaint written as a hard rule, and the sample happened to satisfy it; the
+    staffing board's own rule has been interval-based since 2026-07-24 (a person
+    is booked for the duration of the work and may man another idle machine once
+    it ends), and the owner's 2026-09-22 rule is that a free machine, a free
+    qualified person and ready work may never coexist. So a person may now move to
+    another machine in the same shift when their job ends, and a machine whose
+    operator is away for a short job pauses and resumes rather than losing the
+    shift. Ping-pong is prevented by construction: a stretch is worked to its end
+    (the person leaves only when booked elsewhere or the operation finishes)."""
     work = [s for s in segments if s.machine_id and s.operator]
 
     by_op = defaultdict(set)
@@ -74,12 +88,8 @@ def _assert_clean(segments):
             by_op[(s.order_key, s.op_seq)].add(s.machine_id)
     assert all(len(v) == 1 for v in by_op.values()), "an operation was split across machines"
 
-    mach_shift, op_shift = defaultdict(set), defaultdict(set)
     for s in work:
-        mach_shift[(s.machine_id, _shift_of(s.start))].add(s.operator)
-        op_shift[(s.operator, _shift_of(s.start))].add(s.machine_id)
-    assert all(len(v) == 1 for v in mach_shift.values()), "two operators on one machine in a shift"
-    assert all(len(v) == 1 for v in op_shift.values()), "an operator on two machines in a shift"
+        assert _shift_of(s.start)[1] == ("1" if s.start.hour >= 8 and s.start.hour < 19 else "2")
 
     def _overlaps(intervals):
         iv = sorted(intervals)

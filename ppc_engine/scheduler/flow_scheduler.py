@@ -21,6 +21,7 @@ are later, measured layers, not hidden flags.
 
 from __future__ import annotations
 
+import functools
 from datetime import datetime, timedelta
 
 from ppc_engine.config import PlanConfig
@@ -106,7 +107,15 @@ def decode(
         ready_of[key] = config.plan_start
         prev_end_of[key] = config.plan_start
 
-    machine_free: dict[str, datetime] = {mid: config.plan_start for mid in masters.machines}
+    # What each machine is already committed to, as (start, end) spans of whole
+    # operations, kept sorted. Until 2026-09-22 this was ONE "free from" datetime per
+    # machine: once a job was committed late for its own routing reasons, every idle
+    # hour in front of it was unreachable for work that was ready and staffable the
+    # whole time (the owner's "machine free, operator free, nothing scheduled").
+    # A ready operation now takes the EARLIEST stretch of the machine it fits in
+    # whole (never split around another job, so a setup is never paid twice).
+    machine_spans: dict[str, list[tuple[datetime, datetime]]] = {
+        mid: [] for mid in masters.machines}
     staffing = StaffingBoard(build_machine_pools(masters),
                              booked=masters.calendar.operator_busy,
                              assigned=masters.calendar.machine_shift_operator)
@@ -116,7 +125,7 @@ def decode(
     if frozen:
         segments.extend(_preplace_frozen(
             frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of,
-            machine_free, staffing, completion, masters, config))
+            machine_spans, staffing, completion, masters, config))
 
     # Orders that still have operations left to schedule.
     remaining = [key for key in sequence if idx_of[key] < len(ops_of[key])]
@@ -134,7 +143,7 @@ def decode(
         placements = {
             key: _place_operation(
                 ops_of[key][idx_of[key]], order_by_key[key], ready_of[key],
-                machine_free, staffing, masters, config,
+                machine_spans, staffing, masters, config,
             )
             for key in remaining
         }
@@ -174,7 +183,7 @@ def decode(
                 _r = placement["start"] + (prev_end_of[key] - placement["end"])
                 placement = _place_operation(
                     ops_of[key][idx_of[key]], order_by_key[key], _r,
-                    machine_free, staffing, masters, config)
+                    machine_spans, staffing, masters, config)
                 if placement["end"] >= prev_end_of[key]:
                     break
         # Commit the winning placement onto the real state. The machine frees after its
@@ -182,7 +191,7 @@ def decode(
         for machine_id, day, shift, name, seg_start, seg_end in placement["assignments"]:
             staffing.commit(machine_id, day, shift, name, seg_start, seg_end)
         if placement["machine_id"] is not None:
-            machine_free[placement["machine_id"]] = placement["end"]
+            _occupy(machine_spans, placement["machine_id"], placement["start"], placement["end"])
         for seg in placement["segments"]:
             if seg.operator is not None:  # track load for the "balanced" operator pick
                 staffing.add_load(seg.operator, (seg.end - seg.start).total_seconds() / 60.0)
@@ -244,11 +253,39 @@ def _decode_consolidated(
     return Schedule(sub.segments, completion)
 
 
+def _occupy(spans, mid, start, end):
+    """Record a whole operation's span on ``mid`` (kept sorted by start)."""
+    lst = spans.setdefault(mid, [])
+    lst.append((start, end))
+    lst.sort()
+
+
+def _free_runs(mid, after, spans, calendar):
+    """The stretches of ``mid``'s time, on/after ``after``, that hold no committed
+    operation of THIS plan and no occupancy of an earlier planning stage
+    (``calendar.machine_busy``, the Add New Orders quote), in time order; the last
+    run is open-ended (``None``). A job is laid inside ONE run and never across two:
+    crossing a boundary would mean the machine was torn down for another job in
+    between, and the setup is not paid twice."""
+    busy = list(spans.get(mid, ())) + list(calendar._merged_busy(mid))
+    busy.sort()
+    runs: list[tuple[datetime, datetime | None]] = []
+    cursor = after
+    for start, end in busy:
+        if end <= cursor:
+            continue
+        if start > cursor:
+            runs.append((cursor, start))
+        cursor = max(cursor, end)
+    runs.append((cursor, None))
+    return runs
+
+
 def _place_operation(
     op: Operation,
     order: Order,
     ready: datetime,
-    machine_free: dict[str, datetime],
+    machine_spans: dict[str, list],
     staffing: StaffingBoard,
     masters: Masters,
     config: PlanConfig,
@@ -293,9 +330,8 @@ def _place_operation(
         machine = masters.machines.get(mid)
         if machine is None:
             continue  # unknown machine id (provisional handling comes with the loader)
-        earliest = max(ready, machine_free.get(mid, config.plan_start))
-        laid = _lay_in_free_run(machine, earliest, dur, order, op, int(op_qty),
-                                staffing, masters, config)
+        laid = _lay_around(machine, max(ready, config.plan_start), dur, order, op,
+                           int(op_qty), machine_spans, staffing, masters, config)
         if laid is None:
             continue
         cand = (laid["end"], opt_idx)
@@ -317,6 +353,159 @@ def _place_operation(
     }
 
 
+# A stretch of a person's free time is only worth starting the machine for if it
+# holds at least this much work (or finishes the operation). Below it, the machine
+# would be started for a sliver and stopped again — noise, not capacity.
+_MIN_STRETCH_MIN = 30.0
+
+
+def _next_stretch(machine, win, at, win_end, remaining, staffing, masters, config,
+                  preferred=None):
+    """The earliest stretch of [at, win_end) in which SOME qualified person on this
+    shift is free for at least ``min(_MIN_STRETCH_MIN, remaining)`` minutes, as
+    ``(start, end, name)``, or None when nobody can run the machine again this window.
+
+    Candidates are the machine's own shift operator (``preferred``, or the board's
+    record of who last manned it this shift) and every pool member on this shift
+    who is not on leave. The EARLIEST stretch wins; on a tie the machine's own
+    operator keeps it (stability), then scarce-first, then name — the board's own
+    order. Availability is the board's committed bookings, so a person doing a
+    short job elsewhere is simply unavailable for those minutes, and available
+    again after: the machine pauses for them instead of losing the whole shift.
+    """
+    need = min(_MIN_STRETCH_MIN, remaining)
+    owner = preferred or staffing.operator_for(machine.id, win.shift_date, win.shift)
+    eligible = staffing.eligible(machine.id, win.shift_date, win.shift, masters, config)
+    names = []
+    if owner is not None:
+        names.append((owner, -1))          # rank -1: wins every tie
+    names.extend((n, i) for i, n in enumerate(eligible) if n != owner)
+    best = None
+    for name, rank in names:
+        for s, e in staffing.free_stretches(name, at, win_end):
+            if (e - s).total_seconds() / 60.0 + _EPS_MIN < need:
+                continue
+            cand = (s, rank, e, name)
+            if best is None or cand < best:
+                best = cand
+            if s <= at:
+                return s, e, name          # free from the start: nothing can beat it
+            break                          # first qualifying stretch is the earliest
+    if best is None:
+        return None
+    s, _rank, e, name = best
+    return s, e, name
+
+
+def _lay_windows(machine, earliest, dur_min, order, op, op_qty, staffing, masters,
+                 config, deadline=None, preferred=None, preferred_ok=None,
+                 partial=False):
+    """Lay ``dur_min`` minutes of ``op`` on ``machine`` from ``earliest``, window by
+    window, in the free stretches of whoever is qualified and on shift.
+
+    The one placement loop both the main decode and the frozen pre-placement use.
+    Within a window the work is laid stretch by stretch: the machine's operator
+    runs it while they are free, the machine PAUSES while they are booked
+    elsewhere (a short job), and it resumes when they are back — or, if they are
+    gone for the rest of the window, whoever qualified is free takes over. Before
+    2026-09-22 a window was refused outright unless ONE person was free for the
+    whole remaining stretch from its start, and a ten-minute job elsewhere threw
+    away eleven hours of machine time; measured on the owner's books, that alone
+    was 1,300 to 1,750 idle hours per plan with work waiting.
+
+    ``preferred`` / ``preferred_ok(win)`` name the frozen path's planned operator
+    and whether they may still man the machine in a given window. ``deadline`` is
+    a stop line: the work must finish on or before it, or None is returned meaning
+    "not in this stretch of time" — the stage-2 occupancy rule (Add New Orders
+    quote) and, for a MACHINING op, the end of the machine's current free run,
+    since a CNC/VMC job is one engagement and is never split around another job
+    (the setup would be paid twice). With ``partial=True`` (MANUAL / INSPECTION
+    work, which has no setup to lose) whatever fits before the deadline is laid and
+    the rest is reported as ``remaining`` for the caller to continue in the
+    machine's next free run — the job runs AROUND the other jobs on the station,
+    the way a helper does.
+
+    Returns the placement (start, end, segments, assignments) or None if the work
+    can't be completed within the lookahead horizon.
+    """
+    cursor = earliest
+    remaining = dur_min
+    segments: list[Segment] = []
+    assignments: list[tuple] = []
+    first_start: datetime | None = None
+
+    for win in iter_windows(machine, earliest, masters.calendar, config):
+        if remaining <= _EPS_MIN:
+            break
+        if deadline is not None and win.start >= deadline:
+            break        # out of room in this stretch; the caller tries the next one
+        win_end = win.end if deadline is None else min(win.end, deadline)
+        at = max(cursor, win.start)
+        pref = preferred if (preferred and (preferred_ok is None or preferred_ok(win))) else None
+        while at < win_end and remaining > _EPS_MIN:
+            pick = _next_stretch(machine, win, at, win_end, remaining, staffing,
+                                 masters, config, preferred=pref)
+            if pick is None:
+                break                      # nobody can run it again this window
+            s, e, name = pick
+            take = min((e - s).total_seconds() / 60.0, remaining)
+            seg_end = s + timedelta(minutes=take)
+            assignments.append((machine.id, win.shift_date, win.shift, name, s, seg_end))
+            segments.append(Segment(order.key, op.seq, op.name, op.kind, machine.id, name,
+                                    s, seg_end, op_qty))
+            if first_start is None:
+                first_start = s
+            remaining -= take
+            at = seg_end
+            pref = name                    # whoever runs it now keeps it this shift
+        cursor = win.end
+
+    if first_start is None or (remaining > _EPS_MIN and not partial):
+        return None  # unschedulable within this stretch / the lookahead horizon
+    return {"start": first_start, "end": segments[-1].end, "segments": segments,
+            "assignments": assignments, "remaining": remaining}
+
+
+def _lay_around(machine, earliest, dur, order, op, op_qty, machine_spans, staffing,
+                masters, config, planned_operator=None):
+    """Lay ``op`` on ``machine`` given what the machine is already committed to.
+
+    MACHINING (CNC/VMC): one engagement in the earliest free run that holds it
+    WHOLE — a job is never split around another job, or the 90-minute setup would
+    be paid twice. Runs shorter (wall-clock) than the work are skipped without a
+    window walk. MANUAL / INSPECTION: no setup to lose, so the job runs AROUND the
+    jobs already on the station — as much as fits in each free run, continuing in
+    the next (it pauses while another job occupies the station, exactly as it
+    pauses while its helper is booked elsewhere). ``planned_operator`` is the frozen
+    path's pin (see ``_lay_frozen``)."""
+    lay = (functools.partial(_lay_frozen, planned_operator=planned_operator)
+           if planned_operator is not None else _lay_on_machine)
+    runs = _free_runs(machine.id, earliest, machine_spans, masters.calendar)
+    if op.kind == OperationKind.MACHINING:
+        for run_start, run_end in runs:
+            if run_end is not None and (run_end - run_start).total_seconds() / 60.0 < dur:
+                continue
+            laid = lay(machine, run_start, dur, order, op, op_qty, staffing, masters,
+                       config, deadline=run_end)
+            if laid is not None:
+                return laid
+        return None
+    segments, assignments, remaining, first = [], [], dur, None
+    for run_start, run_end in runs:
+        got = lay(machine, run_start, remaining, order, op, op_qty, staffing, masters,
+                  config, deadline=run_end, partial=True)
+        if got is None:
+            continue
+        segments.extend(got["segments"])
+        assignments.extend(got["assignments"])
+        remaining = got["remaining"]
+        first = first if first is not None else got["start"]
+        if remaining <= _EPS_MIN:
+            return {"start": first, "end": segments[-1].end, "segments": segments,
+                    "assignments": assignments}
+    return None
+
+
 def _lay_on_machine(
     machine: Machine,
     earliest: datetime,
@@ -328,90 +517,24 @@ def _lay_on_machine(
     masters: Masters,
     config: PlanConfig,
     deadline: datetime | None = None,
+    partial: bool = False,
 ) -> dict | None:
-    """Lay ``dur_min`` minutes of work for ``op`` onto ``machine`` from ``earliest``.
-
-    Walks the machine's working windows, splitting the work into per-window segments,
-    and staffs each shift with a stable operator (reusing the shift's operator if one
-    is already on the machine, otherwise assigning a free qualified one). If no
-    operator is available for a shift, that shift is skipped (the machine idles) and
-    work continues in the next staffable window.
-
-    ``staffing`` is read here, never mutated — new assignments accumulate in a local
-    list and are committed only by the caller for the placement actually chosen, so
-    this function may be called repeatedly against the same board (as
-    ``_lay_in_free_run`` now does, once per candidate run) without one attempt
-    polluting the next. Returns the placement (start, end, segments, assignments) or
-    None if the work can't be completed within the lookahead horizon.
-
-    ``deadline`` (optional) is a stop line: the work must finish on or before it, or
-    None is returned meaning "not in this stretch of time". It exists so a job can be
-    fitted into a gap between jobs an earlier planning stage already placed, without
-    ever running into them (Add New Orders quote, 2026-09-08 spec). ``None`` — every
-    ordinary plan — is exactly today's behaviour.
-    """
-    cursor = earliest
-    remaining = dur_min
-    segments: list[Segment] = []
-    assignments: list[tuple] = []
-    first_start: datetime | None = None
-
-    for win in iter_windows(machine, earliest, masters.calendar, config):
-        if remaining <= _EPS_MIN:
-            break
-
-        if deadline is not None and win.start >= deadline:
-            return None  # out of room in this stretch; the caller tries the next one
-
-        seg_start = max(cursor, win.start)
-        win_end = win.end if deadline is None else min(win.end, deadline)
-        avail = (win_end - seg_start).total_seconds() / 60.0
-        if avail <= 0:
-            cursor = win.end
-            continue
-
-        take = min(avail, remaining)
-        seg_end = seg_start + timedelta(minutes=take)
-
-        # Who mans this machine for THIS work interval? Prefer the machine's existing
-        # shift operator if they are still free during [seg_start, seg_end) (machine
-        # stability); otherwise any free-during-interval qualified operator — the
-        # short-job exception, which lets an operator freed by a short job elsewhere
-        # cover this machine. Nobody free this interval → the machine idles the window.
-        name = staffing.operator_for(machine.id, win.shift_date, win.shift)
-        if name is None or not staffing.free_during(name, seg_start, seg_end):
-            name = staffing.candidate_operator(
-                machine, win.shift_date, win.shift, seg_start, seg_end, masters, config)
-            if name is None:
-                cursor = win.end
-                continue
-        # Record (don't commit) — the decoder commits only the chosen placement; each
-        # segment's interval is booked so the operator's busy time is tracked exactly.
-        assignments.append((machine.id, win.shift_date, win.shift, name, seg_start, seg_end))
-        segments.append(Segment(order.key, op.seq, op.name, op.kind, machine.id, name, seg_start, seg_end, op_qty))
-        if first_start is None:
-            first_start = seg_start
-        remaining -= take
-        cursor = seg_end
-
-    if remaining > _EPS_MIN or first_start is None:
-        return None  # unschedulable within the lookahead horizon
-    return {"start": first_start, "end": segments[-1].end, "segments": segments, "assignments": assignments}
+    """Lay ``dur_min`` minutes of work for ``op`` onto ``machine`` from ``earliest``
+    (see ``_lay_windows``). ``staffing`` is read here, never mutated — new
+    assignments accumulate in the returned list and are committed only by the
+    caller for the placement actually chosen, so this may be called repeatedly
+    against the same board (as ``_lay_around`` does, once per candidate run)."""
+    return _lay_windows(machine, earliest, dur_min, order, op, op_qty, staffing,
+                        masters, config, deadline=deadline, partial=partial)
 
 
 def _lay_in_free_run(machine, earliest, dur_min, order, op, op_qty, staffing,
                      masters, config):
-    """Lay the op in the first stretch of ``machine``'s time that can hold it WHOLE.
-
-    A "free run" is a stretch not already occupied by work an earlier planning stage
-    committed (Add New Orders quote, 2026-09-08 spec). With no occupancy on file there
-    is exactly ONE run — [earliest, forever) — and this is a single unbounded call to
-    _lay_on_machine, i.e. byte-identical to what every plan does today.
-
-    The op is never split across two runs: the machine would have been torn down for
-    another job in between, and the 90-minute setup is not paid twice (owner rule).
-    """
-    for run_start, run_end in masters.calendar.free_runs(machine.id, earliest):
+    """Lay the op in the first stretch of ``machine``'s time (as an earlier planning
+    stage left it, ``ShopCalendar.machine_busy``) that can hold it WHOLE. The
+    stage-2 gap rule in isolation; decode itself goes through ``_lay_around`` so
+    this plan's own commitments count too."""
+    for run_start, run_end in _free_runs(machine.id, earliest, {}, masters.calendar):
         laid = _lay_on_machine(machine, run_start, dur_min, order, op, op_qty,
                                staffing, masters, config, deadline=run_end)
         if laid is not None:
@@ -419,64 +542,31 @@ def _lay_in_free_run(machine, earliest, dur_min, order, op, op_qty, staffing,
     return None
 
 
-def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, planned_operator,
-                staffing, masters, config):
+def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, staffing, masters,
+                config, deadline=None, partial=False, planned_operator=None):
     """Lay a frozen (in-progress) op onto its PINNED machine from ``earliest``.
-    Prefer the planned operator each shift; if they are absent/busy, staff a
-    substitute (candidate_operator). Same window-walking as _lay_on_machine, but the
-    machine is fixed and no setup is charged (already set up mid-run)."""
-    cursor = earliest
-    remaining = dur_min
-    segments: list[Segment] = []
-    assignments: list[tuple] = []
-    first_start = None
-    # Looked up once (not per window): the planned operator's Operator record, so we
-    # can check which SHIFT they're actually rostered on for a given day — neither
-    # `is_operator_available` (shop-open/leave only) nor `free_during` (busy-interval
-    # only) know about shifts, so without this a frozen op spanning the 19:00
-    # boundary would keep its day-shift operator on the night window.
+    Prefer the planned operator in every window they may still man this machine;
+    otherwise staff whoever qualified is free (``_lay_windows``). The machine is
+    fixed and no setup is charged (already set up mid-run)."""
     operators_by_name = {o.name: o for o in masters.operators}
-    planned_op_obj = operators_by_name.get(planned_operator) if planned_operator else None
-    for win in iter_windows(machine, earliest, masters.calendar, config):
-        if remaining <= _EPS_MIN:
-            break
-        seg_start = max(cursor, win.start)
-        avail = (win.end - seg_start).total_seconds() / 60.0
-        if avail <= 0:
-            cursor = win.end
-            continue
-        take = min(avail, remaining)
-        seg_end = seg_start + timedelta(minutes=take)
-        name = None
-        if (planned_op_obj
-                # The pinned operator must STILL be assigned to this machine in
-                # Settings. Without this, an admin who removed a machine from someone
-                # while they had work in progress got them frozen straight back onto it
-                # on the next re-plan — the live "Sidhu Singe on CNC5" bug (2026-08-03).
-                # The machine pin stays (the work is physically there); only the person
-                # is re-staffed, via candidate_operator below.
-                and machine.id in planned_op_obj.qualified_machines
-                and effective_shift(planned_op_obj, win.shift_date, config) == win.shift
-                and masters.calendar.is_operator_available(planned_operator, win.shift_date)
-                and staffing.free_during(planned_operator, seg_start, seg_end)):
-            name = planned_operator
-        else:
-            name = staffing.candidate_operator(machine, win.shift_date, win.shift,
-                                               seg_start, seg_end, masters, config)
-        if name is None:
-            cursor = win.end
-            continue
-        assignments.append((machine.id, win.shift_date, win.shift, name, seg_start, seg_end))
-        segments.append(Segment(order.key, op.seq, op.name, op.kind, machine.id, name,
-                                seg_start, seg_end, op_qty))
-        if first_start is None:
-            first_start = seg_start
-        remaining -= take
-        cursor = seg_end
-    if remaining > _EPS_MIN or first_start is None:
-        return None
-    return {"start": first_start, "end": segments[-1].end,
-            "segments": segments, "assignments": assignments}
+    planned = operators_by_name.get(planned_operator) if planned_operator else None
+
+    def _ok(win):
+        # The pinned operator must STILL be assigned to this machine in Settings.
+        # Without this, an admin who removed a machine from someone while they had
+        # work in progress got them frozen straight back onto it on the next re-plan
+        # (the live "Sidhu Singe on CNC5" bug, 2026-08-03). The machine pin stays;
+        # only the person is re-staffed. They must also be rostered on THIS shift
+        # and not on leave that day.
+        return (planned is not None
+                and machine.id in planned.qualified_machines
+                and effective_shift(planned, win.shift_date, config) == win.shift
+                and masters.calendar.is_operator_available(planned_operator, win.shift_date))
+
+    return _lay_windows(machine, earliest, dur_min, order, op, op_qty, staffing,
+                        masters, config, deadline=deadline, partial=partial,
+                        preferred=planned_operator if planned else None,
+                        preferred_ok=_ok)
 
 
 def _ready_after(order, just, nxt, start, paced_end, config, *,
@@ -511,8 +601,16 @@ def _ready_after(order, just, nxt, start, paced_end, config, *,
     return paced_end
 
 
+def _lay_pinned(machine, earliest, dur, order, op, qty, planned_operator, machine_spans,
+                staffing, masters, config):
+    """A frozen step on its pinned machine: the same rule as any other step
+    (``_lay_around``), preferring the planned operator."""
+    return _lay_around(machine, earliest, dur, order, op, qty, machine_spans, staffing,
+                       masters, config, planned_operator=planned_operator or "")
+
+
 def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of,
-                     machine_free, staffing, completion, masters, config):
+                     machine_spans, staffing, completion, masters, config):
     """Pin every in-progress op onto its machine+operator BEFORE the main loop.
 
     Frozen ops resume in previous-plan (``prev_start``) order — but an op is never
@@ -572,10 +670,10 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
         mid = fo.machine_id
         machine = masters.machines[mid]
         qty = int(fo.remaining_qty)
-        # The order's OWN predecessor gates the start, not just the machine's queue.
-        earliest = max(machine_free.get(mid, config.plan_start), ready_of[key])
-        laid = _lay_frozen(machine, earliest, dur, order, op, qty, fo.operator,
-                           staffing, masters, config)
+        # The order's OWN predecessor gates the start, not just the machine's queue;
+        # the machine's earliest free run that holds the step whole takes it.
+        laid = _lay_pinned(machine, max(ready_of[key], config.plan_start), dur, order,
+                           op, qty, fo.operator, machine_spans, staffing, masters, config)
         if laid is None:
             continue  # unstaffable — leave to the main loop
         # Piece-flow guard, identical in spirit to the main loop's: a fast op must not
@@ -584,16 +682,16 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
         for _ in range(8):
             if laid["end"] >= prev_end_of[key]:
                 break
-            shifted = _lay_frozen(machine,
+            shifted = _lay_pinned(machine,
                                   laid["start"] + (prev_end_of[key] - laid["end"]),
-                                  dur, order, op, qty, fo.operator, staffing,
-                                  masters, config)
+                                  dur, order, op, qty, fo.operator, machine_spans,
+                                  staffing, masters, config)
             if shifted is None:
                 break
             laid = shifted
         for a in laid["assignments"]:
             staffing.commit(*a)
-        machine_free[mid] = laid["end"]
+        _occupy(machine_spans, mid, laid["start"], laid["end"])
         for seg in laid["segments"]:
             if seg.operator is not None:
                 staffing.add_load(seg.operator,

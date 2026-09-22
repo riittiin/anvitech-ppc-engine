@@ -149,4 +149,8 @@ def test_the_scheduler_fingerprint_records_the_new_semantics():
     discounted, linear tardiness term) — ranks saved under the old objective were
     chosen by a different rule and must be re-searched."""
     from engine import new_engine
-    assert new_engine.SCHEDULER_FINGERPRINT == "new-engine-v7-ontime-linear-tardiness"
+    # Last bumped 2026-09-22: the placement step no longer leaves a machine idle
+    # while a qualified person is free and work is ready (stretch-based staffing,
+    # per-machine committed spans), so ranks scored under the old placement are
+    # stale on every book.
+    assert new_engine.SCHEDULER_FINGERPRINT == "new-engine-v8-no-idle-holes"

@@ -1,6 +1,12 @@
 # Idle-gap harvest — design + the blocker found before coding
 
-**Status: DESIGNED, NOT BUILT.** Owner-approved to build (2026-08-09). Work stopped
+**Status: REJECTED BY THE OWNER (2026-09-22). Do not build.** Step 2 was built and
+measured on 2026-09-22 and then unwound the same day: the owner's rule is that the
+engine must not PRODUCE holes, not fill them afterwards. The placement step was
+fixed at the source instead (CLAUDE.md banner of that date, verification record
+`2026-09-22-idle-capacity-verification.md`). Kept for the measurements in §2.
+
+Original status: DESIGNED, NOT BUILT. Owner-approved to build (2026-08-09). Work stopped
 at the integration blocker in §4, which must be done first.
 
 ## 1. The requirement (owner, verbatim in spirit)

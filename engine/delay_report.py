@@ -9,6 +9,9 @@ WAITING intervals, and every wait is attributed to a concrete cause:
   * off-hours      — that machine is outside its working window (night / weekly off / holiday)
   * crew           — machine free within working hours and EVERY qualified operator was
                      already busy elsewhere
+  * crew on leave  — the same, where at least one qualified operator was on recorded
+                     leave (its own state, so the directors read "on leave", never
+                     "machine free, operator free" for a shift nobody could have worked)
   * idle capacity  — machine free, a qualified operator free too, and still nothing was
                      scheduled. Spare capacity, not a shortage of anything.
 
@@ -29,6 +32,16 @@ export before being fixed:
   3. The clock started at MIDNIGHT of the plan-start date while the plan really begins
      at the plan-start floor, charging every order the hours before the plan existed —
      607 h across 57 orders. It now starts at the plan's first scheduled moment.
+
+**Leave is not free capacity (2026-09-22, owner escalation).** The report never
+received the absences table, so a person on recorded leave had no bookings and looked
+FREE: on the live export MD1 and DTC2 read "idle, machine and a qualified operator
+free" for whole shifts, day after day (463 h in full-shift rows), while the only other
+helper was away for 3.5 weeks and the one remaining helper was busy on the other
+manual stations. A real crew shortage was published as spare capacity — the exact
+class of defect 1 above, in the other direction. `build_delay_report` now takes the
+absences and `_staffing_split` treats a person on leave that day as unavailable, the
+same rule the engine applies (`ShopCalendar.is_operator_available`).
 """
 from __future__ import annotations
 
@@ -85,10 +98,44 @@ def _rank_by_key(batches_prioritized):
     return rank
 
 
+def _next_op(ops, gap_end):
+    """The order's NEXT operation (starting at/after the gap), or its last one."""
+    nxt = min((e for e in ops if e.start >= gap_end), key=lambda e: e.start, default=None)
+    return nxt if nxt else (ops[-1] if ops else None)
+
+
 def _next_machine(ops, gap_end):
     """The machine the order's NEXT operation (starting at/after the gap) needs."""
-    nxt = min((e for e in ops if e.start >= gap_end), key=lambda e: e.start, default=None)
-    return nxt.machine if nxt else (ops[-1].machine if ops else "")
+    nxt = _next_op(ops, gap_end)
+    return nxt.machine if nxt else ""
+
+
+def _is_setup_machine(machine_id):
+    """CNC/VMC: a job is one engagement with a 90-minute setup and is never split
+    around another job (mirrors ``ppc_engine`` MachineKind.MACHINING by id)."""
+    return str(machine_id or "").upper().startswith(("CNC", "VMC"))
+
+
+def _idle_why(machine, ps, pe, nxt):
+    """Why a free machine with a free qualified operator still ran nothing. Since
+    2026-09-22 the engine lays ready work in any stretch a qualified person is
+    free for, so what is left is a stretch the waiting job cannot use: on a CNC/VMC
+    a job runs as ONE engagement (a second setup is never paid), so a stretch
+    shorter than the job stays idle; elsewhere, a stretch under the 30-minute
+    minimum run. Named here so the directors read the reason, not a contradiction."""
+    stretch_h = _hours(ps, pe)
+    if nxt is not None and _is_setup_machine(machine):
+        need_h = float(getattr(nxt, "occupancy_min", 0) or 0) / 60.0
+        if need_h > stretch_h:
+            return (f"Machine free and a qualified operator free — the next step "
+                    f"({nxt.process_name}) needs {need_h:.1f} h as one run (a CNC/VMC job "
+                    f"is never split around another job) and this stretch is only "
+                    f"{stretch_h:.1f} h")
+    if stretch_h * 60.0 < 30.0:
+        return ("Machine free and a qualified operator free — under the 30-minute "
+                "minimum run, so nothing was started here")
+    return ("Machine free and a qualified operator free — spare capacity, nothing was "
+            "scheduled here")
 
 
 def _machine_busy(a, b, machine, schedule, this_rank, rank):
@@ -151,26 +198,65 @@ def _next_shift_boundary(t, config):
     return t + timedelta(days=1)
 
 
-def _staffing_split(a, b, machine, masters, config, op_busy):
-    """Split [a, b] into (start, end, someone_was_free) using the SAME qualification
-    rule Rule 6 staffs by. `someone_was_free` means at least one operator qualified for
-    this machine on this shift had no other booking then."""
+def _shift_anchor_day(t, config):
+    """The calendar day a moment's shift is ANCHORED to: the night shift that started
+    19:00 on D and runs past midnight still belongs to D, and that is the day the
+    engine checks a person's leave against (`worktime.iter_windows` /
+    `ShopCalendar.is_operator_available`)."""
+    if t.hour < config.first_shift_start_hour:
+        return t.date() - timedelta(days=1)
+    return t.date()
+
+
+def _staffing_split(a, b, machine, masters, config, op_busy, leave=None):
+    """Split [a, b] into (start, end, someone_was_free, on_leave) using the SAME
+    qualification rule Rule 6 staffs by. `someone_was_free` means at least one operator
+    qualified for this machine on this shift had no other booking then AND was not on
+    recorded leave that day; `on_leave` names the qualified people who were away."""
+    leave = leave or {}
     out, cur = [], a
     while cur < b:
         nxt = min(b, _next_shift_boundary(cur, config))
+        day = _shift_anchor_day(cur, config)
         names = qualified_operators(machine, cur, masters, config)
+        away = tuple(n for n in names if day in leave.get(n, ()))
         free = []
         for n in names:
+            if n in away:
+                continue
             free.extend(_gaps(cur, nxt, op_busy.get(n, [])))
         free = _merge(free)
-        out.extend((s, e, True) for s, e in free)
-        out.extend((s, e, False) for s, e in _gaps(cur, nxt, free))
+        out.extend((s, e, True, away) for s, e in free)
+        out.extend((s, e, False, away) for s, e in _gaps(cur, nxt, free))
         cur = nxt
     return sorted(out)
 
 
+def _leave_days(absences):
+    """Absence rows -> {operator: set(date)}: the days each person is away, expanded
+    exactly as `optimize_service.absence_reservations` expands them for the engine
+    (from_date through to_date inclusive). Malformed rows are skipped, never raised."""
+    out: dict = {}
+    for a in absences or []:
+        try:
+            f = date.fromisoformat(a["from_date"]); t = date.fromisoformat(a["to_date"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if t < f:
+            f, t = t, f
+        name = a.get("operator") or ""
+        if not name:
+            continue
+        days = out.setdefault(name, set())
+        cur = f
+        while cur <= t:
+            days.add(cur)
+            cur += timedelta(days=1)
+    return out
+
+
 def _classify_free(a, b, clock, machine=None, masters=None, config=None, op_busy=None,
-                   down_days=None):
+                   down_days=None, leave=None, nxt=None):
     """Split a machine-free interval into off-hours (outside the machine's working
     window) and, inside it, maintenance, a genuine crew shortage, or plain idle
     capacity.
@@ -200,10 +286,11 @@ def _classify_free(a, b, clock, machine=None, masters=None, config=None, op_busy
             "Why": "Machine out of service for maintenance"})
     for s, e in up:
         if masters is None or config is None:
-            pieces = [(s, e, False)]        # no staffing data — keep the old behaviour
+            pieces = [(s, e, False, ())]    # no staffing data — keep the old behaviour
         else:
-            pieces = _staffing_split(s, e, machine, masters, config, op_busy or {})
-        for ps, pe, someone_free in pieces:
+            pieces = _staffing_split(s, e, machine, masters, config, op_busy or {},
+                                     leave)
+        for ps, pe, someone_free, away in pieces:
             if pe <= ps:
                 continue
             if someone_free:
@@ -211,8 +298,17 @@ def _classify_free(a, b, clock, machine=None, masters=None, config=None, op_busy
                     "State": "IDLE (capacity free)", "Process": "", "Machine": machine or "",
                     "Operator": "", "From": ps, "To": pe,
                     "Hours": round(_hours(ps, pe), 2),
-                    "Why": ("Machine free and a qualified operator free — spare "
-                            "capacity, nothing was scheduled here")})
+                    "Why": _idle_why(machine, ps, pe, nxt)})
+            elif away:
+                # Its own state, so the directors read "on leave" in the State column
+                # and never "machine free, operator free" for a shift nobody could
+                # have worked. Counted in the crew bucket: it is a crew shortage.
+                rows.append({
+                    "State": "WAITING (crew on leave)", "Process": "",
+                    "Machine": machine or "", "Operator": ", ".join(away),
+                    "From": ps, "To": pe, "Hours": round(_hours(ps, pe), 2),
+                    "Why": (f"Machine free — {', '.join(away)} on leave; every other "
+                            "qualified operator was busy elsewhere")})
             else:
                 rows.append({
                     "State": "WAITING (crew)", "Process": "", "Machine": "", "Operator": "",
@@ -245,8 +341,13 @@ def _why_summary(days_late, buckets):
 
 
 def build_delay_report(schedule, so_lines, batches_prioritized, config, masters,
-                       downtime=None):
-    """See module docstring. Returns {'summary': [row], 'detail': [row]}."""
+                       downtime=None, absences=None):
+    """See module docstring. Returns {'summary': [row], 'detail': [row]}.
+
+    ``downtime`` and ``absences`` are the SAME rows the engine planned with
+    (`book_store.load_machine_downtime` / `load_absences`): a report that checks
+    fewer constraints than the plan describes a different shop, and calls whatever
+    the plan could not do "spare capacity"."""
     # The plan's FIRST SCHEDULED MOMENT, not midnight. The engine starts at the
     # plan-start floor (the next full hour after an optimization lands), so measuring
     # from midnight charged every order the hours before the plan existed — 607 h
@@ -255,6 +356,7 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters,
                   else datetime.combine(config.plan_start_date, datetime.min.time()))
     rank = _rank_by_key(batches_prioritized)
     op_busy = _operator_bookings(schedule)
+    leave = _leave_days(absences)
     clock_cache = {}
 
     # Maintenance days per machine, as dates — so a machine-free window on a day the
@@ -323,13 +425,14 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters,
                 "Why": (f"At the outsourcing vendor — {e.process_name}" if out
                         else f"Off-machine step — {e.process_name}")})
         for (a, b) in _gaps(plan_start, completion, occupied):
-            machine = _next_machine(ops, b)
+            nxt = _next_op(ops, b)
+            machine = nxt.machine if nxt else ""
             busy, free = _machine_busy(a, b, machine, schedule, this_rank, rank)
             rows.extend(busy)
             for (fa, fb) in free:
                 rows.extend(_classify_free(fa, fb, clock_for(machine), machine,
                                            masters, config, op_busy,
-                                           down_by_machine.get(machine)))
+                                           down_by_machine.get(machine), leave, nxt))
         rows.sort(key=lambda r: r["From"])
         for r in rows:
             r["SO No"], r["Item Code"] = so, item
@@ -345,7 +448,7 @@ def build_delay_report(schedule, so_lines, batches_prioritized, config, masters,
                 buckets["machine"] += r["Hours"]
             elif r["State"] == "WAITING (off-hours)":
                 buckets["off"] += r["Hours"]
-            elif r["State"] == "WAITING (crew)":
+            elif r["State"] in ("WAITING (crew)", "WAITING (crew on leave)"):
                 buckets["crew"] += r["Hours"]
             elif r["State"] in ("OUTSOURCED", "OFF-MACHINE"):
                 buckets["outsourced"] += r["Hours"]

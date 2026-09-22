@@ -337,26 +337,24 @@ def _routes_through(nm, order, machine_id):
     return any(machine_id in op.machine_options for op in routing.operations)
 
 
-def test_occupying_one_machine_leaves_untouched_orders_unchanged(book):
-    """The actual inertness guarantee, with teeth (review-flagged, 2026-09-08 fix
-    round 2): an earlier version of this test occupied MW1, which is used only by
-    B002's routing — but occupying MW1 changes NOTHING in this book (measured: the
-    whole plan, both orders, is byte-identical with or without it), so comparing
-    only "untouched" segments compared two identical plans and the test passed
-    with the mechanism removed entirely.
+def test_occupying_one_machine_moves_only_work_that_needs_it(book):
+    """Occupancy is respected and is the ONLY thing that moves work.
 
-    VMC1 is the machine that actually discriminates: it is used only by B001's
-    routing, occupying it genuinely reshapes the plan (B001's own VMC1/MI1/DISPATCH
-    steps move, and B001's completion date changes), and B002 — whose routing never
-    touches VMC1 — is confirmed below to be completely untouched. (CNC1, the third
-    candidate, is used by BOTH orders, so there would be no untouched order left to
-    compare.)
-
-    The busy window matters, not just the machine: a window starting at
-    ``cfg.plan_start`` was measured to ALSO move B002 (it disturbs the CNC1/VMC1
-    shared-operator contention at the moment both orders want a machine at once) —
-    so this test places the block a day later, over the exact slot B001's VMC1 step
-    naturally runs in when nothing is occupied, which changes only B001.
+    Until 2026-09-22 this asserted that an order which never routes through the
+    occupied machine is byte-identical with and without the block. That held only
+    because the old placement refused a window unless one person was free for the
+    whole of it, which happened to decouple the sample's two orders. A ready op now
+    takes the earliest stretch a qualified person is free for, so two orders that
+    share a PERSON are coupled through that person's bookings: freeing Alpha earlier
+    on VMC1 lets B002's CNC step start earlier. That is the intended behaviour (the
+    owner's rule: a free machine, a free person and ready work never coexist), not
+    a leak of the occupancy. What must still hold: nothing lands on the block, the
+    touching order really moves (non-degeneracy), and an order that never routes
+    through the occupied machine keeps its machines and its routing order. The
+    production guarantee that EXISTING orders never move when new ones are quoted
+    comes from the two-stage construction (stage 2 never re-plans stage 1), which
+    `test_new_work_never_lands_on_occupied_machine_time` and the engine/quote tests
+    cover; it never rested on this decode-level property.
     """
     nm, cfg, orders = book
     occupied_mid = "VMC1"
@@ -374,21 +372,33 @@ def test_occupying_one_machine_leaves_untouched_orders_unchanged(book):
     touching_keys = {o.key for o in touching}
     untouched_keys = {o.key for o in untouched}
 
-    busy_block = (D(2025, 3, 4, 8), D(2025, 3, 4, 12))
+    # Over the exact slot B001's VMC1 step naturally runs in when nothing is occupied.
+    vmc = next(s for s in before.segments
+               if s.order_key in touching_keys and s.machine_id == occupied_mid)
+    busy_block = (vmc.start, vmc.end)
     nm2 = _replace(nm, calendar=_replace(
         nm.calendar, machine_busy={occupied_mid: (busy_block,)}))
     after = _decoded(nm2, cfg, orders)
 
-    # Non-degeneracy: the occupancy must actually change something, or this proves
-    # nothing (the MW1 trap above). If it changes nothing, the fixture/window no
-    # longer discriminates and this assertion fails loudly instead of passing quietly.
     assert _rows(before, touching_keys) != _rows(after, touching_keys), (
-        f"occupying {occupied_mid} changed nothing — this test no longer discriminates"
-    )
+        f"occupying {occupied_mid} changed nothing — this test no longer discriminates")
+    for s in after.segments:
+        if s.machine_id == occupied_mid:
+            assert s.end <= busy_block[0] or s.start >= busy_block[1], (
+                f"{s.order_key} landed on the occupied block: {s.start}-{s.end}")
 
-    assert _rows(before, untouched_keys) == _rows(after, untouched_keys)
-    assert {k: v for k, v in before.completion.items() if k in untouched_keys} == \
-           {k: v for k, v in after.completion.items() if k in untouched_keys}
+    def _machines(sched, keys):
+        return {(s.order_key, s.op_seq): s.machine_id
+                for s in sched.segments if s.order_key in keys and s.machine_id}
+    assert _machines(before, untouched_keys) == _machines(after, untouched_keys)
+    for key in untouched_keys:
+        first_start = {}
+        for s in after.segments:
+            if s.order_key == key and s.machine_id:
+                first_start[s.op_seq] = min(first_start.get(s.op_seq, s.start), s.start)
+        seqs = sorted(first_start)
+        for x, y in zip(seqs, seqs[1:]):
+            assert first_start[y] > first_start[x], "routing order broken for the untouched order"
 
 
 def test_new_work_never_lands_on_occupied_machine_time(book):
@@ -491,7 +501,7 @@ from ppc_engine.scheduler.flow_scheduler import _place_operation
 
 def test_place_operation_routes_through_free_runs_not_a_direct_lay(shop):
     """Isolated proof that ``_place_operation``'s machine loop is wired to
-    ``_lay_in_free_run`` (and so consults ``ShopCalendar.free_runs``), independent of
+    ``_lay_around`` (and so consults the machine's free runs), independent of
     the decode-level fixture's own trap: the sample workbook's routing timing and
     single-operator-per-shift-per-machine structure mean two REAL orders never
     actually contend for the same machine slot, so a decode()-level test can pass
@@ -504,9 +514,9 @@ def test_place_operation_routes_through_free_runs_not_a_direct_lay(shop):
     """
     nm, cfg, order, op = shop
     mid = op.machine_options[0]
-    machine_free = {mid: cfg.plan_start}
+    machine_spans = {mid: []}          # nothing of this plan committed yet
     board = StaffingBoard(build_machine_pools(nm))
-    free = _place_operation(op, order, cfg.plan_start, machine_free, board, nm, cfg)
+    free = _place_operation(op, order, cfg.plan_start, machine_spans, board, nm, cfg)
     assert free["machine_id"] == mid
 
     # Block exactly the window the op would naturally use. Operator-busy time is left
@@ -515,8 +525,8 @@ def test_place_operation_routes_through_free_runs_not_a_direct_lay(shop):
     nm2 = _replace(nm, calendar=_replace(
         nm.calendar, machine_busy={mid: ((free["start"], free["end"]),)}))
     board2 = StaffingBoard(build_machine_pools(nm2))
-    machine_free2 = {mid: cfg.plan_start}
-    laid = _place_operation(op, order, cfg.plan_start, machine_free2, board2, nm2, cfg)
+    machine_spans2 = {mid: []}
+    laid = _place_operation(op, order, cfg.plan_start, machine_spans2, board2, nm2, cfg)
 
     assert laid["machine_id"] == mid
     assert laid["start"] >= free["end"], (

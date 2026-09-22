@@ -230,3 +230,74 @@ def test_no_crew_row_anywhere_in_a_real_plan_has_a_free_qualified_operator():
     assert offenders == [], (
         "these windows blame the crew while someone qualified was free: "
         + str(offenders[:5]))
+
+
+# --------------------------------------------------------------------------- #
+# 6. An operator on LEAVE is not a free operator (live 2026-09-22)
+# --------------------------------------------------------------------------- #
+def test_an_absent_operator_is_never_counted_as_free_capacity():
+    """The owner's 22-09-2026 export showed MD1 and DTC2 'idle with a qualified
+    operator free' for whole shifts, day after day, while the only other helper was
+    on recorded leave. The report never received the absences table, so a person on
+    leave looked free and a real crew shortage was published as spare capacity."""
+    plan = _gap_plan()
+    masters = _masters([Operator("Alpha", "M", ["M"], "First shift")])
+    absences = [{"id": "a1", "operator": "Alpha",
+                 "from_date": "2025-03-03", "to_date": "2025-03-03"}]
+    rep = build_delay_report(plan, [_line()], [_batch()], _cfg(), masters,
+                             absences=absences)
+    gap = [r for r in rep["detail"]
+           if r["From"] >= datetime(2025, 3, 3, 10, 0)
+           and r["To"] <= datetime(2025, 3, 3, 14, 0)]
+    assert gap, "the 10:00-14:00 gap must be explained"
+    assert not any("IDLE" in r["State"] for r in gap), (
+        "Alpha was on leave; nobody could have run M: " + str(gap))
+    assert all(r["State"] == "WAITING (crew on leave)" for r in gap), gap
+    assert all("Alpha" in r["Operator"] and "on leave" in r["Why"] for r in gap), gap
+    row = next(s for s in rep["summary"] if s["SO No"] == "SO1")
+    assert row["Waiting: crew (days)"] > 0 and row["Idle: capacity free (days)"] == 0
+
+
+def test_leave_on_another_day_does_not_hide_free_capacity():
+    """The absence must be checked on the day of the gap, not merely exist."""
+    plan = _gap_plan()
+    masters = _masters([Operator("Alpha", "M", ["M"], "First shift")])
+    absences = [{"id": "a1", "operator": "Alpha",
+                 "from_date": "2025-03-10", "to_date": "2025-03-12"}]
+    rep = build_delay_report(plan, [_line()], [_batch()], _cfg(), masters,
+                             absences=absences)
+    gap = [r for r in rep["detail"]
+           if r["From"] >= datetime(2025, 3, 3, 10, 0)
+           and r["To"] <= datetime(2025, 3, 3, 14, 0)]
+    assert any("IDLE" in r["State"] for r in gap), gap
+
+
+# --------------------------------------------------------------------------- #
+# 7. A remaining idle stretch says WHY the waiting job could not use it
+# --------------------------------------------------------------------------- #
+def test_an_idle_stretch_too_short_for_the_next_cnc_job_says_so():
+    """CNC9 is a CNC. The order's next step needs 6 h as one run and the free stretch
+    is 4 h; the engine leaves it (a CNC job is never split around another job), and
+    the report must say that instead of "spare capacity, nothing was scheduled"."""
+    from engine.models import ScheduleEntry
+    plan = [
+        _entry("SO1", "X", 1, "N", datetime(2025, 3, 3, 8, 0), datetime(2025, 3, 3, 10, 0),
+               op="Alpha"),
+        # somebody else's job holds CNC9 14:00-19:00, so the stretch before it is 4 h
+        _entry("SO2", "Y", 1, "CNC9", datetime(2025, 3, 3, 14, 0), datetime(2025, 3, 3, 19, 0),
+               op="Bravo"),
+        ScheduleEntry(batch_id="B_SO1", item_code="X", process_seq=2, process_name="CNC",
+                      machine="CNC9", qty=100, occupancy_min=360,
+                      start=datetime(2025, 3, 4, 8, 0), end=datetime(2025, 3, 4, 14, 0),
+                      so_refs=["SO1"], operator="Alpha",
+                      op_segments=[(datetime(2025, 3, 4, 8, 0), datetime(2025, 3, 4, 14, 0), "Alpha")]),
+    ]
+    masters = _masters([Operator("Alpha", "CNC9/N", ["CNC9", "N"], "First shift"),
+                        Operator("Bravo", "CNC9", ["CNC9"], "First shift")])
+    masters.machines["CNC9"] = Machine(machine_no="CNC9", display_name="CNC9",
+                                       machine_type="CNC lathe", available_hrs_per_day=19.5)
+    rep = build_delay_report(plan, [_line()], [_batch()], _cfg(), masters)
+    idle = [r for r in rep["detail"] if r["State"] == "IDLE (capacity free)"
+            and r["From"] >= datetime(2025, 3, 3, 10, 0) and r["To"] <= datetime(2025, 3, 3, 14, 0)]
+    assert idle, rep["detail"]
+    assert all("needs 6.0 h as one run" in r["Why"] and "only 4.0 h" in r["Why"] for r in idle), idle

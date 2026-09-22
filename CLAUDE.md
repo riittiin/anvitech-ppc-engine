@@ -1,6 +1,97 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-09)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-22)
+>
+> - **THE ENGINE NO LONGER PRODUCES HOLES — "MACHINE AND OPERATOR BOTH FREE, NOTHING
+>   SCHEDULED" (2026-09-22, owner escalation from the delay justification report;
+>   UNCOMMITTED; evidence + harnesses in
+>   `docs/superpowers/specs/2026-09-22-idle-capacity-verification.md`).** The
+>   22-09 export showed 46.9 order-days of `IDLE (capacity free)`: MD1 empty for
+>   8 straight shifts while SO185's deburring (ready at plan start) waited, DTC2
+>   empty for whole days while SO186's chamfer waited from 23-09 to 09-10. Two
+>   causes. **(1) The report never received the absences table**, so a person on
+>   recorded leave had no bookings and looked FREE: read from the export's own
+>   rows, one helper (Anturam) ran every manual station in series and the other,
+>   Sanjay, had no work until 17-10. Fixed: `build_delay_report(..., absences=)`,
+>   `_staffing_split` treats a person on leave that day as unavailable, and the
+>   row is its own state, **`WAITING (crew on leave)`**, naming them (counted in
+>   the crew bucket). **The leave itself is a PREDICTION, not confirmed on the
+>   live store** (no credential this session): check Settings > Operator absences
+>   for Sanjay through 16-10. **(2) The dispatcher's placement step produced the
+>   holes, and the owner's rule is that it must not** (he withdrew his 2026-08-09
+>   approval of the gap-harvest post-pass, which was built and then unwound; a
+>   hole must not be produced, not filled afterwards). Measured with a hole metric
+>   (machine idle inside a working window, an op whose previous step has finished
+>   could run on it, a qualified person on that shift free by the engine's own
+>   rule), on Test9-latest with the real punches to 17-09 / Test9 wip=all / Test5 /
+>   Test8 wip=30: **308 / 443 / 586 / 349 hole-hours per plan**. The audit of
+>   what the placement saw at those moments: 1,366 h had someone free for the
+>   WHOLE window (Test8: 3,387 h), 1,290 h for part of it, 576 h nobody. Three
+>   mechanisms, all in `ppc_engine/scheduler/flow_scheduler.py`: **(a)
+>   `_lay_on_machine` refused a working window unless ONE person was free for the
+>   whole remaining stretch from its start** — a ten-minute job elsewhere threw
+>   away eleven hours; **(b) `machine_free` was one "free from" datetime per
+>   machine**, so a job committed late for its own routing reasons (a frozen step
+>   waiting on its own predecessor, an op that lost the Giffler-Thompson dispatch)
+>   made every idle hour in front of it unreachable; **(c) a job was never laid
+>   around another job**, even on a manual station with no setup to lose. Fixed:
+>   work is laid stretch by stretch in the free time of whoever is qualified and
+>   on shift (`_lay_windows` / `_next_stretch`; the machine PAUSES while its person
+>   is booked elsewhere and resumes, or whoever qualified is free takes over); a
+>   machine carries the spans of its committed operations (`machine_spans`,
+>   `_free_runs`) and a ready op takes the earliest stretch it fits — WHOLE for
+>   CNC/VMC (a second setup is never paid), AROUND other jobs for manual /
+>   inspection work (`_lay_around`); the frozen path goes through the same rule
+>   (`_lay_pinned`). `StaffingBoard` keeps bookings sorted (bisect) and caches the
+>   eligible people per (machine, shift-date, shift). **Result, same four books,
+>   current Giffler-Thompson dispatch: hole-hours 308 → 76, 443 → 86, 586 → 74,
+>   349 → 136 (60 to 88% fewer), and late-days DOWN on every book: 958 → 868,
+>   1839 → 1768, 4799 → 4648, 5476 → 5429.** Routing / qualification /
+>   batch-quantity violations 0 before and after. Pure non-delay dispatch was
+>   measured too (fewer holes on 3 of 4, late-days worse on 3 of 4: 881 / 1867 /
+>   4653 / 5657) and NOT adopted. **What is left (residual classified on Test9 real
+>   and Test8): essentially all of it is CNC/VMC stretches shorter than the waiting
+>   job (224 of 241 h, 481 of 500 h)** — the price of never paying a second
+>   90-minute setup; the report now says exactly that on such a row ("needs 6.0 h
+>   as one run ... this stretch is only 4.0 h"). If the owner would rather split a
+>   CNC job and pay the setup, that is a one-line rule change in `_lay_around`,
+>   his call. **Rule 1 as the suite asserted it was relaxed**: a person may now move
+>   to another machine within a shift once their job ends, and a machine whose
+>   operator is away pauses and resumes — the staffing board's own interval rule
+>   since 2026-07-24, which the sample plan happened never to exercise
+>   (`tests/test_new_engine._assert_clean` now asserts what the engine guarantees:
+>   no double booking, no op split across machines). Cost: plan time Test5 288 →
+>   264 ms, Test9-latest 474 → 668 ms (1.4×; the deep search takes proportionally
+>   longer). **`SCHEDULER_FINGERPRINT` = `new-engine-v8-no-idle-holes`**: real work
+>   moves on every book, the applied optimization goes stale on deploy. **Mutation-
+>   tested, 4 of 4 load-bearing** (`tests/test_no_idle_holes.py`: the whole-window
+>   rule, the scalar pointer, manual-around and CNC-whole each reverted fail 1 to 4
+>   tests; NOTE a mutation written within the same second as the restore was
+>   masked by stale bytecode — sleep or `-B`). **Verified on a READ-ONLY copy of the
+>   live store (owner gave `MONGODB_URI`; every key copied to a local store, nothing
+>   written back): Sanjay's absence IS on file, 18-09 to 16-10. The old code on the
+>   copy reproduces the owner's downloaded 22-09 report to the day on all 52 orders
+>   (1,128.4 idle h, 1,260.3 crew h), so the copy is faithful. The new code on the
+>   same copy, with the applied ranks replayed: late-days 389 → 364, hole-hours
+>   377 → 49, idle 1,128 → 145 h, of which 672 h now read `WAITING (crew on
+>   leave)` (94 rows), the 6 frozen pins identical, 0 violations, 0 double
+>   bookings; per order 25 earlier (SO186 17-10 → 06-10, SO185 07-10 → 04-10,
+>   SO172 18-10 → 13-10), 14 unchanged, 13 later (worst SO183/SO184
+>   9612220706-P, 28-09 → 07-10, 9 days) — the dispatcher's tie-breaks land on a
+>   different sequence, and the applied search was run under the old placement;
+>   the next Done click re-searches.** Two sample fixtures went vacuous
+>   under the new placement and were re-anchored (`test_quote_engine`: occupy
+>   CNC2 so the two lines contend; `test_quote_occupancy`: orders sharing a person
+>   are now coupled, the inertness guarantee for the quote rests on the two-stage
+>   construction). Suite 1130 passed, 2 skipped. **Traps met on the way, recorded
+>   so they are not repeated:** a hole metric that counts a FINISHED op as
+>   "waiting" (4,872 phantom hours), and a before/after whose frozen set was
+>   derived from the changed code (49 orders looked LATER). The Test9/Test5/Test8
+>   numbers above used the workbook operator sheet and punches to 17-09; the
+>   live-copy numbers used the real Settings table, absences and punches to 21-09.
+>   **Rule: the placement step must use every stretch a qualified person is free
+>   for and every stretch a machine is idle, and a hole is a bug in the placement,
+>   never something to fill afterwards.**
 >
 > - **A DELIVERY DATE IS NOW QUOTED FROM THE PLAN INSTEAD OF GUESSED (2026-09-08,
 >   owner request; spec

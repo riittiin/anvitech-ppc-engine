@@ -211,8 +211,15 @@ def test_rank_search_actually_changes_the_schedule(loaded):
     occ = new_engine.occupancy_from_entries(stage1, _CONF)
     itemA = so_lines[0].item_code
     itemB = so_lines[-1].item_code
-    lineA = quote_mod.QuoteLine("NEW-1", itemA, "x", 50)
-    lineB = quote_mod.QuoteLine("NEW-2", itemB, "y", 50)
+    # Since the 2026-09-22 placement change (a ready op takes the earliest stretch
+    # it fits, on any routing-allowed machine) the two sample items no longer
+    # contend: item B's CNC step simply goes to CNC2. Occupy CNC2 for the whole
+    # horizon so both lines need CNC1 at the same moment and the rank must decide.
+    from datetime import timedelta as _td
+    ps = new_engine._plan_config(_CONF).plan_start
+    occ = {**occ, "machine": {**occ["machine"], "CNC2": ((ps, ps + _td(days=60)),)}}
+    lineA = quote_mod.QuoteLine("NEW-1", itemA, "x", 100)
+    lineB = quote_mod.QuoteLine("NEW-2", itemB, "y", 100)
 
     seen = set()
     for rank in quote_mod._rank_orderings([lineA, lineB]):

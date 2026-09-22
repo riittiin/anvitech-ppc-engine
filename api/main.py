@@ -3566,6 +3566,7 @@ _DELAY_FILLS = {
     "WAITING (machine busy)": "FFE699",  # amber
     "WAITING (off-hours)": "D9D9D9",     # grey
     "WAITING (crew)": "F8CBAD",          # orange
+    "WAITING (crew on leave)": "F4B183", # darker orange — a crew shortage with a name
     "OUTSOURCED": "BDD7EE",              # blue — away at a vendor, not our capacity
     "OFF-MACHINE": "BDD7EE",
     "IDLE (capacity free)": "FFC7CE",    # red — machine AND operator free, work waiting
@@ -3684,9 +3685,13 @@ def delay_report_xlsx(request: Request):
     /efficiency, which stays admin-only because it ranks named people."""
     from engine import delay_report as _dr
     plan_run, so_lines, masters, cfg = _plan_run_for_report(_load_plan_config())
+    # The SAME unavailability the plan was built with, both halves: a person on
+    # leave has no bookings, so without the absences the report called a real crew
+    # shortage "idle capacity" for whole shifts (live 2026-09-22).
     report = _dr.build_delay_report(plan_run.schedule, so_lines,
                                     plan_run.batches_prioritized, cfg, masters,
-                                    book_store.load_machine_downtime())
+                                    book_store.load_machine_downtime(),
+                                    book_store.load_absences())
     data = _delay_report_xlsx(report)
     fname = f"delay-justification-{_ist_today().isoformat()}.xlsx"
     return Response(

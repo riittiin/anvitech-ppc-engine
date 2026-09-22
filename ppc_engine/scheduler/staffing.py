@@ -19,6 +19,7 @@ overlay is needed while laying a single operation.)
 
 from __future__ import annotations
 
+from bisect import bisect_left, insort
 from datetime import date, datetime
 
 from ppc_engine.config import PlanConfig
@@ -73,14 +74,21 @@ class StaffingBoard:
         # (machine_id, shift_date, shift) -> operator name that (last) manned it — a soft
         # preference for machine stability, not a hard lock (short jobs may share).
         self._assign: dict[tuple[str, date, Shift], str] = dict(assigned or {})
-        # operator name -> list of committed busy (start, end) intervals.
+        # operator name -> committed busy (start, end) intervals, kept SORTED so a
+        # free-stretch query is a bisect, not a scan-and-sort (the placement asks
+        # this once per window per candidate per evaluation).
         self._intervals: dict[str, list[tuple[datetime, datetime]]] = {
-            name: list(ivs) for name, ivs in (booked or {}).items()
+            name: sorted(ivs) for name, ivs in (booked or {}).items()
         }
         # machine id -> pre-sorted eligible operators (scarce-first). See build_machine_pools.
         self._pools: dict[str, tuple[Operator, ...]] = pools or {}
         # operator name -> cumulative committed busy minutes (for the "balanced" pick).
         self._load: dict[str, float] = {}
+        # (machine id, shift date, shift) -> the pool members rostered on that shift
+        # and not on leave that day, scarce-first. Pure per plan (the roster and the
+        # leave table never change inside a decode), and asked for once per window
+        # per placement evaluation — a few hundred thousand times per plan.
+        self._eligible: dict[tuple[str, date, Shift], tuple[str, ...]] = {}
 
     def add_load(self, name: str, minutes: float) -> None:
         """Record committed work for an operator (drives the 'balanced' pick policy)."""
@@ -90,6 +98,42 @@ class StaffingBoard:
         """The operator that (last) manned ``machine_id`` on this shift, or None. A
         machine-stability PREFERENCE — reuse them only if still free for the new interval."""
         return self._assign.get((machine_id, day, shift))
+
+    def free_stretches(self, name: str, start: datetime, end: datetime) -> list:
+        """The stretches of [start, end) in which ``name`` has no committed booking,
+        in time order. This is what lets a placement work AROUND a person's short
+        job elsewhere instead of writing off the whole window (2026-09-22)."""
+        busy = self._intervals.get(name, ())
+        out, cur = [], start
+        # Intervals are sorted by start; those starting before `start` may still
+        # cover it, so begin one before the first interval starting at/after it.
+        i = max(0, bisect_left(busy, (start, start)) - 1)
+        for s, e in busy[i:]:
+            if e <= cur:
+                continue
+            if s >= end:
+                break
+            if s > cur:
+                out.append((cur, s))
+            cur = max(cur, e)
+        if cur < end:
+            out.append((cur, end))
+        return out
+
+    def eligible(self, machine_id: str, day: date, shift: Shift, masters: Masters,
+                 config: PlanConfig) -> tuple[str, ...]:
+        """Names of the people who may run ``machine_id`` on this shift-window:
+        qualified (the pool), rostered on this shift, not on leave — scarce-first.
+        Availability in TIME is a separate question (``free_stretches``)."""
+        key = (machine_id, day, shift)
+        got = self._eligible.get(key)
+        if got is None:
+            cal = masters.calendar
+            got = tuple(op.name for op in self._pools.get(machine_id, ())
+                        if effective_shift(op, day, config) == shift
+                        and cal.is_operator_available(op.name, day))
+            self._eligible[key] = got
+        return got
 
     def free_during(self, name: str, start: datetime, end: datetime) -> bool:
         """True if ``name`` has no committed busy interval overlapping [start, end)."""
@@ -152,4 +196,4 @@ class StaffingBoard:
         job leaves them free to man another machine later. ``_assign`` records them as the
         machine's shift operator (a stability preference for the next op on this machine)."""
         self._assign[(machine_id, day, shift)] = name
-        self._intervals.setdefault(name, []).append((start, end))
+        insort(self._intervals.setdefault(name, []), (start, end))

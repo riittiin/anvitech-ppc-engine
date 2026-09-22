@@ -726,7 +726,13 @@ def _entries_from_schedule(sched, batch_by_key):
 # engine no longer offers its windows on those days (`ppc_engine.worktime.iter_windows`)
 # and a frozen op pinned to a machine that is down during its window is released back
 # to normal scheduling (`_ppc_frozen`). Real work moves.
-SCHEDULER_FINGERPRINT = "new-engine-v7-ontime-linear-tardiness"
+# v8 (2026-09-22) = no idle holes: work is laid in the free stretches of whoever is
+# qualified and on shift (a window is no longer refused because one person was not
+# free for the whole of it), a machine carries the spans of its committed jobs
+# instead of a single "free from" time (ready work takes the earliest stretch it
+# fits whole; manual work runs around other jobs), and a person may move to another
+# machine within a shift once their job ends. Real work moves, on every book.
+SCHEDULER_FINGERPRINT = "new-engine-v8-no-idle-holes"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
