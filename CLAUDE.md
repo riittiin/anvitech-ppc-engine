@@ -42,7 +42,16 @@
 >   `_free_runs`) and a ready op takes the earliest stretch it fits — WHOLE for
 >   CNC/VMC (a second setup is never paid), AROUND other jobs for manual /
 >   inspection work (`_lay_around`); the frozen path goes through the same rule
->   (`_lay_pinned`). `StaffingBoard` keeps bookings sorted (bisect) and caches the
+>   (`_lay_pinned`). **Regression caught by the owner within the hour of deploying,
+>   fixed in the follow-up commit:** against an EARLIER stage's occupancy (the Add
+>   New Orders quote) a manual/inspection step was laid AROUND the existing plan's
+>   jobs, so its span straddled them and the quote's verifier ("machine MI1 is
+>   double-booked ...") refused every quote. With occupancy on file, every kind of
+>   work now takes a gap only if it fits WHOLE (the 2026-09-08 gap rule);
+>   reproduced on the live-store copy with the owner's seven lines (5 violations →
+>   verified, 0 moved). Lesson: run a placement change through
+>   `/new-orders/quote` on a store copy before pushing, not only through the
+>   plan. `StaffingBoard` keeps bookings sorted (bisect) and caches the
 >   eligible people per (machine, shift-date, shift). **Result, same four books,
 >   current Giffler-Thompson dispatch: hole-hours 308 → 76, 443 → 86, 586 → 74,
 >   349 → 136 (60 to 88% fewer), and late-days DOWN on every book: 958 → 868,

@@ -260,3 +260,24 @@ def test_a_replicated_sample_book_stays_clean():
         v.sort()
         for (a, b), (c, d) in zip(v, v[1:]):
             assert c >= b, (k, a, b, c, d)
+
+
+# --------------------------------------------------------------------------- #
+# 4. Against an EARLIER stage's occupancy (the Add New Orders quote) a new job of
+#    any kind takes a gap only if it fits whole — it never straddles an existing job
+# --------------------------------------------------------------------------- #
+def test_manual_work_never_straddles_an_earlier_stages_job():
+    """Live 2026-09-22, right after the placement change shipped: a quote for seven
+    lines was refused with "machine MI1 is double-booked: the new plan runs 25-09
+    08:00 to 26-09 08:13 while the existing plan already runs 25-09 10:30 to 11:20".
+    The new inspection step had been laid AROUND the existing job, so its span
+    covered it and the quote's verifier (which compares whole spans) rejected it."""
+    from dataclasses import replace as _r
+    routings = {"G": _routing("G", ("DEBUR", "M", 1.0))}
+    m = _masters(routings)
+    m = _r(m, calendar=_r(m.calendar, machine_busy={"M": ((T(D1, 10), T(D1, 11)),)}))
+    g = _order("G", "G", 300)                       # 5 h: does not fit before 10:00
+    sched = decode([g], [g.key], m, CFG)
+    segs = [(s.start, s.end) for s in _segs(sched, g.key, 1)]
+    assert segs[0][0] >= T(D1, 11), segs           # after the existing job, as one run
+    assert all(e <= T(D1, 10) or s >= T(D1, 11) for s, e in segs), segs

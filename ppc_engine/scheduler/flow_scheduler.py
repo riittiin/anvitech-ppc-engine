@@ -481,7 +481,15 @@ def _lay_around(machine, earliest, dur, order, op, op_qty, machine_spans, staffi
     lay = (functools.partial(_lay_frozen, planned_operator=planned_operator)
            if planned_operator is not None else _lay_on_machine)
     runs = _free_runs(machine.id, earliest, machine_spans, masters.calendar)
-    if op.kind == OperationKind.MACHINING:
+    # A machine that carries occupancy from an EARLIER planning stage (the Add New
+    # Orders quote, 2026-09-08 spec) keeps that stage's gap rule for every kind of
+    # work: a new job takes a gap only if it fits WHOLE and never straddles a job
+    # the existing plan already runs — the quote's verifier compares whole spans
+    # and rejects the straddle, and the owner rejected splitting a new job across
+    # gaps. Inside the ordinary plan (no occupancy) manual work runs around jobs.
+    whole = (op.kind == OperationKind.MACHINING
+             or bool(masters.calendar._merged_busy(machine.id)))
+    if whole:
         for run_start, run_end in runs:
             if run_end is not None and (run_end - run_start).total_seconds() / 60.0 < dur:
                 continue
