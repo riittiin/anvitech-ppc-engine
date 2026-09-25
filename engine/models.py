@@ -449,6 +449,9 @@ class Order:
     commitment: str = "open"            # "open" | "committed"
     promised_date: Optional[date] = None  # locked promise (None while open)
     committed_at: Optional[str] = None    # ISO datetime string, snapshot time
+    # IST day the order was marked complete (2026-09-25). None while active, and on
+    # every order completed before this was recorded: that date is simply unknown.
+    completed_on: Optional[date] = None
 
     @property
     def key(self):
@@ -467,6 +470,7 @@ class Order:
             "commitment": self.commitment,
             "promised_date": self.promised_date.isoformat() if self.promised_date else None,
             "committed_at": self.committed_at,
+            "completed_on": self.completed_on.isoformat() if self.completed_on else None,
         }
 
     @classmethod
@@ -488,6 +492,8 @@ class Order:
             promised_date=(date.fromisoformat(d["promised_date"])
                            if d.get("promised_date") else None),
             committed_at=d.get("committed_at"),
+            completed_on=(date.fromisoformat(d["completed_on"])
+                          if d.get("completed_on") else None),
         )
 
 

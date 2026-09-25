@@ -2900,7 +2900,7 @@ def complete_order_ep(req: CompleteRequest, request: Request):
     requires. Available to both roles, like Capture Actuals. The production records
     (actuals) are left untouched, so reports/efficiency still count them. 404 if the
     (SO No, item code) isn't an active order."""
-    if not book_store.complete_order(req.so_no, req.item_code):
+    if not book_store.complete_order(req.so_no, req.item_code, on=_ist_today()):
         raise HTTPException(status_code=404,
                             detail=f"no active order {req.so_no} / {req.item_code} to complete")
     return {"completed": True}
@@ -4100,7 +4100,7 @@ def post_actuals(req: ActualRequest):
     all_actuals = r7.run(actual)
     completed = False
     if req.mark_complete:
-        completed = book_store.complete_order(req.so_no, req.item_code)
+        completed = book_store.complete_order(req.so_no, req.item_code, on=_ist_today())
     visible = orderbook.actuals_on_latest_date(all_actuals)   # show only the latest day
     return {
         "saved": len(all_actuals),

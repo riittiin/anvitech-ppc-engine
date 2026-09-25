@@ -85,15 +85,16 @@ def delete_all() -> None:
     s.delete_key(ACTUALS_KEY)
 
 
-def complete_order(so_no: str, item_code: str) -> bool:
+def complete_order(so_no: str, item_code: str, on=None) -> bool:
     """Move one active order — the ``(so_no, item_code)`` line — into the completed
-    archive. Returns False if unknown. A sibling item line on the same SO is
-    unaffected."""
+    archive, recording ``on`` (the day it was marked complete) as ``completed_on``.
+    Returns False if unknown. A sibling item line on the same SO is unaffected."""
     s = get_store()
     o = load_active_orders().get((so_no, item_code))
     if o is None:
         return False
     o.completed = True
+    o.completed_on = on
     field = _skey(so_no, item_code)
     s.hset(COMPLETED_KEY, field, json.dumps(o.to_json()))
     s.hdel(ORDERS_KEY, field)
@@ -109,6 +110,7 @@ def uncomplete_order(so_no: str, item_code: str) -> bool:
     if o is None:
         return False
     o.completed = False
+    o.completed_on = None
     field = _skey(so_no, item_code)
     s.hset(ORDERS_KEY, field, json.dumps(o.to_json()))
     s.hdel(COMPLETED_KEY, field)

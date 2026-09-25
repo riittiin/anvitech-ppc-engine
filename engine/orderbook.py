@@ -382,6 +382,7 @@ def order_rows(active_orders: dict, completed_orders: dict, actuals, masters=Non
             "Remaining": remaining,
             "SO Delivery Date": fmt_date(o.delivery_date),
             "Status": status,
+            "Completed On": fmt_date(o.completed_on) if o.completed_on else "",
             "Lane": o.commitment,
             "Promised": fmt_date(o.promised_date) if o.promised_date else "",
             "Note": "ready to complete" if (status == RUNNING and remaining <= 0) else "",
