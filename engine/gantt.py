@@ -96,7 +96,7 @@ def build_gantt(schedule, batches, masters, status_by_order=None):
             offset = (e.start - axis_mid).total_seconds() / 86400.0
             duration = max((e.end - e.start).total_seconds() / 86400.0, 0.0)
             bars.append({
-                "process": e.process_name,
+                "process": e.process_label(),
                 "machine": disp(e.machine),
                 "operator": _bar_operator(e),
                 "color": color_by_id[e.machine],

@@ -268,6 +268,8 @@ def test_the_gantt_and_the_shift_wise_export_show_the_same_routing_order():
             item = row["item_code"]
             for so in [s.strip() for s in (row["so_no"] or "").split(",") if s.strip()]:
                 for bar in row["bars"]:
+                    if bar["process"].endswith("(resume)"):
+                        continue    # pieces already past every earlier step (2026-09-27)
                     i = pos.get((item, bar["process"].strip().upper()))
                     if i is None:
                         continue
@@ -286,6 +288,8 @@ def test_the_gantt_and_the_shift_wise_export_show_the_same_routing_order():
         for r in sw["rows"]:
             item, proc = str(r[col["Item Code"]]), str(r[col["Process"]])
             pname = proc.split(".", 1)[1].strip() if proc[:2].strip().rstrip(".").isdigit() else proc
+            if pname.endswith("(resume)"):
+                continue            # pieces already past every earlier step (2026-09-27)
             i = pos.get((item, pname.strip().upper()))
             if i is None:
                 continue

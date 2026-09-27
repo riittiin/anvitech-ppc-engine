@@ -111,6 +111,8 @@ def _finalize(cur, idx) -> Batch:
         so_delivery_date=cur["so_date"],
         source_so_refs=list(cur["so_refs"]),
         process_qty=_merge_process_qty(cur["lines"]),
+        line_process_qty={l.so_no: (l.qty, dict(l.process_qty) if l.process_qty else None)
+                          for l in cur["lines"]},
         commitment=commitment,
         promised_date=promised_date,
     )

@@ -1,6 +1,45 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-22)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-27)
+>
+> - **🔴 A CLUBBED BATCH SKIPPED A WHOLE STEP (2026-09-27, owner escalation, live).**
+>   `26-27SO206`/`207` (item 9611443650) were past CNC FIRST SIDE, SO207 mid CNC
+>   SECOND SIDE (91/200, frozen on CNC4). New `26-27SO219/220/221`, same item,
+>   untouched, were clubbed in by Rule 1. The plan showed CNC SECOND SIDE for 375
+>   pieces starting at once and **no CNC FIRST SIDE at all**: 266 pieces in no plan.
+>   **Root cause: `flow_scheduler._preplace_frozen` laid a frozen op and advanced
+>   the order past it (`idx_of = oi + 1`), assuming every earlier step was done.**
+>   False when a batch mixes stages, and also when an OUTSOURCED step before it
+>   still has pieces at the vendor (OS is never frozen). **Both checks were blind:**
+>   `batch_quantity_violations` only examined steps that HAD entries (silent-omission
+>   class again), and `routing_order_violations` cannot order an absent step. Fix:
+>   when an earlier step still owes pieces and the pre-pass has not laid it (the
+>   "blocker"), the pinned step RESUMES only the pieces already past the blocker
+>   (owed here − owed at the blocker), on its pinned machine, marked
+>   `Segment.resume_from`; the order is not advanced, and the main loop lays the
+>   blocker and then the rest of the step (`process_remaining` overridden to the
+>   held-back qty); the successor waits for both parts (`resumed_end`). Without
+>   per-step remaining (`process_remaining is None`) nothing is held back. Display:
+>   the resumed part is its own `ScheduleEntry` with `resumed=True`, labelled
+>   "(resume)" (`process_label()`) on the Gantt, machine-wise and shift-wise, a note
+>   on the Schedule tab, and `so_refs` narrowed to the lines whose pieces are on each
+>   bar (`Batch.line_process_qty`, set by Rule 1), with a fallback so no line ever
+>   vanishes from its own plan. `routing_order_violations` skips resumed entries (their
+>   pieces are past every earlier step by construction); `batch_quantity_violations`
+>   now takes `masters` and enumerates every routing step owed. Measured: live copy
+>   (read-only copy of Atlas) 1 skipped step → 0, late-days 264 unchanged, 1 other
+>   order moves (SO210 2 days earlier), quote still verified with 0 moved; Test5/8/9
+>   with a WIP ladder on one line per item: skipped steps **15/20/17 → 0** (the old
+>   checks said 0 on all), routing/qty/qualification 0, late-days 4483→4612,
+>   5371→5593, 4011→4123 (the old dates omitted real work). Mutation-tested, **11 of
+>   11 parts load-bearing** (`tests/test_frozen_step_skips_owed_work.py`, 8 tests).
+>   Fingerprint **v9**. **Owner decision, 2026-09-27, do not relitigate:** a
+>   brand-new line uploaded by Excel KEEPS joining a batch already in production by
+>   Rule 1's normal algorithm (so SO206's VMC-ready pieces wait for the new lines'
+>   CNC work before the batch's single VMC run). The Add New Orders quote path still
+>   refuses such clubbing, deliberately, to protect already-promised dates.
+>   **Rule: an operation may never be placed as if the steps before it were done; a
+>   check must enumerate what is OWED, never only what was scheduled.**
 >
 > - **THE ENGINE NO LONGER PRODUCES HOLES — "MACHINE AND OPERATOR BOTH FREE, NOTHING
 >   SCHEDULED" (2026-09-22, owner escalation from the delay justification report;

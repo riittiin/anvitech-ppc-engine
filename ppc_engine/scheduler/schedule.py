@@ -34,6 +34,10 @@ class Segment:
         end:        Segment end datetime.
         qty:        Pieces this operation is scheduled for (the op's remaining qty on a
                     re-plan; the order qty on a fresh plan). 0 for milestones.
+        resume_from: Set only on the RESUMED part of an in-progress step whose batch
+                    still owes an earlier step (2026-09-27): the seq of that earlier
+                    step. This part runs only the pieces already past it; the rest
+                    of the step is a separate, unmarked operation laid later.
     """
 
     order_key: tuple[str, str]
@@ -45,6 +49,7 @@ class Segment:
     start: datetime
     end: datetime
     qty: int = 0
+    resume_from: int | None = None
 
 
 @dataclass(frozen=True)

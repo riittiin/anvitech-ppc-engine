@@ -1053,7 +1053,7 @@ def build_shiftwise_timeline(schedule, masters, config, batches=None):
             "Item Description": routing.description if routing else "",
             "SO Del date": b.so_delivery_date if b else "",
             "Expected completion": end_by_batch.get(e.batch_id, e.end).date(),
-            "Process": f"{e.process_seq}. {e.process_name}",
+            "Process": f"{e.process_seq}. {e.process_label()}",
             "Qty": int(e.qty),                        # the order's total qty (unchanged)
             # Pieces expected in THIS operator's shift window (owner, 2026-07-27) — the
             # op's total split across its shift segments by minutes; the shifts sum to Qty.
@@ -1245,7 +1245,7 @@ def build_machine_view(schedule, masters, config, batches=None):
                 "SO Del date": (bmap[e.batch_id].so_delivery_date if e.batch_id in bmap else ""),
                 "Expected completion": (completion[e.batch_id].date()
                                         if e.batch_id in completion else ""),
-                "Process": e.process_name,
+                "Process": e.process_label(),
                 "Qty": e.qty,
                 "Start": e.start,
                 "End": e.end,

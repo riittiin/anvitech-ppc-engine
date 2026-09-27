@@ -503,7 +503,7 @@ def qualification_violations(entries, new_masters):
     return out
 
 
-def batch_quantity_violations(entries, batches):
+def batch_quantity_violations(entries, batches, masters=None):
     """Every step the plan schedules FEWER pieces on than the order book says it owes.
 
     Pure; returns ``[{"kind", "ref", "message"}]``, empty when clean. Sibling of
@@ -520,12 +520,30 @@ def batch_quantity_violations(entries, batches):
     An operation's pieces can be published either as ONE entry carrying the whole qty
     (the new engine, whose blocks each repeat the operation's qty) or as several
     entries that SUM to it (the classic engine's parallel split), so a step is short
-    only when BOTH readings fall below what is owed."""
+    only when BOTH readings fall below what is owed.
+
+    With ``masters`` (the API passes it), every routing step the batch still owes is
+    checked, **including a step with no entry at all** (2026-09-27): enumerating only
+    the steps the plan HAD entries for is what let a whole skipped step (the 266
+    pieces of CNC FIRST SIDE three new orders needed) pass this check in silence --
+    the silent-omission class: enumerate from the master, then fill in from the
+    schedule. DISPATCH is a milestone with no entry and is not checked."""
+    from engine.orderbook import is_dispatch
     owed, refs = {}, {}
     for b in batches or []:
         owed[b.batch_id] = (getattr(b, "process_qty", None) or {}, float(b.qty))
         refs[b.batch_id] = ", ".join(getattr(b, "source_so_refs", None) or []) or b.batch_id
     biggest, total, name_of = {}, {}, {}
+    routings = getattr(masters, "routings", None) or {}
+    for b in batches or []:
+        routing = routings.get(b.item_code)
+        for p in (routing.processes if routing else ()):
+            if is_dispatch(p.name):
+                continue
+            k = (b.batch_id, p.seq)
+            biggest.setdefault(k, 0.0)
+            total.setdefault(k, 0.0)
+            name_of.setdefault(k, p.name)
     for e in entries or []:
         k = (e.batch_id, e.process_seq)
         biggest[k] = max(biggest.get(k, 0.0), float(e.qty))
@@ -583,6 +601,12 @@ def routing_order_violations(entries, masters):
     # still ONE step, so take its full extent.
     spans = defaultdict(dict)
     for e in entries:
+        if getattr(e, "resumed", False):
+            # A resumed part runs pieces that are already past every earlier step
+            # (the scheduler lays exactly owed-here minus owed-at-the-step-still-due),
+            # so it has no feeding step to wait for. The rest of the same step is its
+            # own entry and is checked here like any other.
+            continue
         found = pos_of.get((e.item_code, e.process_seq))
         if found is None:
             continue                      # step not in the master — nothing to order by
@@ -624,7 +648,14 @@ def _entries_from_schedule(sched, batch_by_key):
     derives completion from the last real operation's end."""
     groups = defaultdict(list)
     for s in sched.segments:
-        groups[(s.order_key, s.op_seq)].append(s)
+        # The RESUMED part of an in-progress step (pieces already past a step its
+        # batch still owes) is its own bar; the rest of the step is laid later.
+        groups[(s.order_key, s.op_seq, getattr(s, "resume_from", None))].append(s)
+    name_of = {(s.order_key, s.op_seq): s.op_name for s in sched.segments}
+    split_of = defaultdict(dict)            # order -> {split step seq: blocker seq}
+    for (okey, seq, rfrom) in groups:
+        if rfrom is not None:
+            split_of[okey][seq] = rfrom
 
     # Every segment on each machine, so an operation's break can be classified. A
     # night / weekly off / shift change is NOT a break in the work — it happens every
@@ -652,12 +683,43 @@ def _entries_from_schedule(sched, batch_by_key):
                 out[-1].append(cur)
         return out
 
+    def _owed(batch, so, seq, order_key):
+        """What SO line ``so`` still owes at step ``seq`` (None = not knowable)."""
+        name = name_of.get((order_key, seq))
+        qty, pq = (getattr(batch, "line_process_qty", None) or {}).get(so, (None, None))
+        if name is None or qty is None:
+            return None
+        return pq.get(_norm(name), qty) if pq else qty
+
+    def _refs(batch, order_key, op_seq, resume_from):
+        """The SO lines whose pieces are on this bar. Only a batch with a split
+        step is narrowed: its lines are at different stages, and listing a line on a
+        step it has finished would draw that line's routing out of order."""
+        refs = list(batch.source_so_refs) if batch else []
+        splits = split_of.get(order_key)
+        if not splits:
+            return refs
+        if resume_from is not None:        # pieces already past the blocker
+            keep = lambda so: (_owed(batch, so, op_seq, order_key) or 0) - (  # noqa: E731
+                _owed(batch, so, resume_from, order_key) or 0) > 0
+        elif op_seq in splits:             # the rest: pieces still at the blocker
+            keep = lambda so: (_owed(batch, so, splits[op_seq], order_key) or 0) > 0  # noqa: E731
+        elif op_seq <= max(splits.values()):  # the blocker and the steps before it
+            keep = lambda so: (_owed(batch, so, op_seq, order_key) or 0) > 0  # noqa: E731
+        else:
+            return refs
+        if any(_owed(batch, so, op_seq, order_key) is None for so in refs):
+            return refs                    # no per-line data: never guess
+        return [so for so in refs if keep(so)]
+
     entries = []
-    for (order_key, op_seq), segs in groups.items():
+    resumed = set()
+    for (order_key, op_seq, resume_from), segs in groups.items():
         segs = sorted(segs, key=lambda s: s.start)
         if segs[0].kind == OperationKind.DISPATCH:
             continue
         batch = batch_by_key.get(order_key)
+        so_refs = _refs(batch, order_key, op_seq, resume_from)
         for block in _blocks(segs):
             first = block[0]
             # Per BLOCK, never per operation: a split job's second block must publish
@@ -678,11 +740,16 @@ def _entries_from_schedule(sched, batch_by_key):
                 occupancy_min=occupancy_min,
                 start=min(s.start for s in block),
                 end=max(s.end for s in block),
-                notes="",
-                so_refs=list(batch.source_so_refs) if batch else [],
+                notes=(f"Resumes {int(first.qty)} pieces already past "
+                       f"'{name_of.get((order_key, resume_from), 'the step before')}'; "
+                       f"the rest follow that step" if resume_from is not None else ""),
+                so_refs=list(so_refs),
                 operator=operator,
                 op_segments=op_segments,
+                resumed=resume_from is not None,
             ))
+            if resume_from is not None:
+                resumed.add(id(entries[-1]))
     # PACE the DISPLAY span: with overlap the new engine lets a fast downstream op
     # finish its cutting before the slow step feeding it — physically impossible (the
     # pieces don't exist yet). Extend each op's `end` to >= its predecessor's paced end
@@ -690,16 +757,31 @@ def _entries_from_schedule(sched, batch_by_key):
     # ONLY the span (`end`) grows — `op_segments` (operator busy) and `occupancy_min`
     # (machine busy) are the real cutting time and stay untouched (span > occupancy,
     # exactly how the classic engine reports it).
+    # A RESUMED part runs pieces that already exist, so it is not paced by the step
+    # before it (which is making OTHER pieces) and does not pace the step after it.
     by_batch = defaultdict(list)
     for e in entries:
         by_batch[e.batch_id].append(e)
+    batch_of = {k[0]: b for k, b in batch_by_key.items()}
     for es in by_batch.values():
         es.sort(key=lambda e: e.process_seq)
         paced = None
         for e in es:
+            if id(e) in resumed:
+                continue
             if paced is not None and e.end < paced:
                 e.end = paced
             paced = e.end
+        # Narrowing must never make a line vanish from its own plan: a line whose
+        # pieces are on no bar still finishes with the batch's last step.
+        listed = {so for e in es for so in e.so_refs}
+        batch = batch_of.get(es[0].batch_id)
+        missing = [so for so in (batch.source_so_refs if batch else []) if so not in listed]
+        if missing:
+            last = max((e for e in es if id(e) not in resumed),
+                       key=lambda e: (e.process_seq, e.end), default=None)
+            if last is not None:
+                last.so_refs = list(last.so_refs) + missing
 
     entries.sort(key=lambda e: (e.start, e.batch_id, e.process_seq))
     return entries
@@ -732,7 +814,11 @@ def _entries_from_schedule(sched, batch_by_key):
 # instead of a single "free from" time (ready work takes the earliest stretch it
 # fits whole; manual work runs around other jobs), and a person may move to another
 # machine within a shift once their job ends. Real work moves, on every book.
-SCHEDULER_FINGERPRINT = "new-engine-v8-no-idle-holes"
+# v9 (2026-09-27) = an in-progress step never lets its batch skip a step the batch
+# still owes: it resumes only the pieces already past that step, and the rest go
+# through it first (`flow_scheduler._preplace_frozen`). Real work moves wherever a
+# clubbed batch mixes stages or an outsourced step still has pieces out.
+SCHEDULER_FINGERPRINT = "new-engine-v9-no-skipped-steps"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,

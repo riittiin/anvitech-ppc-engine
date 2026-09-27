@@ -94,6 +94,11 @@ class Batch:
     # merged lines (Rule 1). None = run the full batch qty at every step. Internal
     # scheduling input consumed by Rule 6 — not serialized into the trace.
     process_qty: Optional[dict] = None
+    # Each clubbed line's own remaining, {so_no: (qty, {normalized process -> qty} or
+    # None = untouched, its full qty at every step)). Lines in one batch can be at different
+    # stages; only the display needs to know whose pieces a bar holds (2026-09-27).
+    # Not serialized into the trace.
+    line_process_qty: Optional[dict] = None
     # Commitment lane carried from the merged SO-lines: "open" (default) |
     # "committed". All lines in a batch share the same lane (Rule 1
     # never merges across lanes).
@@ -267,6 +272,14 @@ class ScheduleEntry:
     # above mirrors the FIRST segment's person for a single-line display; the
     # segments are the truth.
     op_segments: list = field(default_factory=list)
+    # True on the RESUMED part of an in-progress step whose batch still owes an
+    # earlier step (2026-09-27): it runs only pieces already past every earlier step,
+    # so it may legitimately start before them. The rest of the step is its own entry.
+    resumed: bool = False
+
+    def process_label(self):
+        """The process as the floor reads it; a resumed part says so."""
+        return f"{self.process_name} (resume)" if self.resumed else self.process_name
 
     def operator_label(self):
         """The operator(s) working this op, in start order, joined for display

@@ -121,11 +121,15 @@ def decode(
                              assigned=masters.calendar.machine_shift_operator)
     segments: list[Segment] = []
     completion: dict[tuple[str, str], datetime] = {}
+    # (order, op seq) -> when the RESUMED part of that step ends, for a step that
+    # `_preplace_frozen` split because the batch still owes an earlier step. The rest
+    # of the step is laid by the main loop; its successor must wait for both parts.
+    resumed_end: dict[tuple[tuple[str, str], int], datetime] = {}
 
     if frozen:
         segments.extend(_preplace_frozen(
             frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of,
-            machine_spans, staffing, completion, masters, config))
+            machine_spans, staffing, completion, masters, config, resumed_end))
 
     # Orders that still have operations left to schedule.
     remaining = [key for key in sequence if idx_of[key] < len(ops_of[key])]
@@ -199,6 +203,7 @@ def decode(
 
         just = ops_of[key][idx_of[key]]                       # the op just scheduled
         paced_end = max(placement["end"], prev_end_of[key])   # never finish before predecessor
+        paced_end = max(paced_end, resumed_end.get((key, just.seq), paced_end))
         prev_end_of[key] = paced_end
         idx_of[key] += 1
 
@@ -618,7 +623,8 @@ def _lay_pinned(machine, earliest, dur, order, op, qty, planned_operator, machin
 
 
 def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of,
-                     machine_spans, staffing, completion, masters, config):
+                     machine_spans, staffing, completion, masters, config,
+                     resumed_end=None):
     """Pin every in-progress op onto its machine+operator BEFORE the main loop.
 
     Frozen ops resume in previous-plan (``prev_start``) order — but an op is never
@@ -633,9 +639,25 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
     VMC, DEBURING and INSP all running before CNC FIRST SIDE. Checked, not assumed, by
     `new_engine.routing_order_violations`.
 
+    **A pinned step never lets its batch skip a step the batch still owes** (live
+    2026-09-27). Laying a frozen op used to advance the order past it, which assumes
+    every earlier step is finished. Rule 1 clubs SO lines at DIFFERENT stages (two
+    lines past CNC FIRST SIDE, one mid CNC SECOND SIDE, three brand new), so that
+    was false: CNC FIRST SIDE for the new lines' 266 pieces was in no plan at all,
+    and CNC SECOND SIDE ran all 375 pieces at once, before the step that makes them.
+    Now, when an earlier step still owes pieces and the pre-pass has not laid it
+    (the "blocker"), the pinned step RESUMES only the pieces already past the
+    blocker (owed here − owed at the blocker), on its pinned machine, and the order
+    is NOT advanced: the main loop lays the blocker and then the rest of this step
+    (``owed at the blocker`` pieces) in routing order. The step's successor waits
+    for both parts (``resumed_end``). With no blocker the path is unchanged.
+
     The machine's free time still advances past each frozen op, so new work queues
     after it. Returns the frozen segments."""
     from collections import defaultdict
+    from dataclasses import replace
+    if resumed_end is None:
+        resumed_end = {}
     seq_index = {k: {op.seq: i for i, op in enumerate(ops_of[k])} for k in ops_of}
 
     todo = []
@@ -654,6 +676,17 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
     for fo, oi in todo:
         frozen_pos[fo.order_key].add(oi)
     placed = defaultdict(set)
+    laid_pos = defaultdict(set)            # order -> positions this pass actually laid
+    held = defaultdict(dict)               # order -> {op seq: pieces left to the main loop}
+    resume_ready, resume_prev_end = {}, {}
+
+    def _owed(key, order, j):
+        """Pieces still to make at routing position j, net of any part resumed here."""
+        seq = ops_of[key][j].seq
+        if seq in held[key]:
+            return held[key][seq]
+        pr = order.process_remaining
+        return pr.get(seq, order.qty) if pr is not None else order.qty
 
     out: list[Segment] = []
     while todo:
@@ -672,11 +705,59 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
 
         order = order_by_key[key]
         op = ops_of[key][oi]
+        mid = fo.machine_id
+        machine = masters.machines[mid]
+        # Without per-step remaining there is no record of what earlier steps still
+        # owe (only an order with no punches at all has none), so nothing to hold back.
+        blocker = None if order.process_remaining is None else next(
+                       (j for j in range(oi - 1, -1, -1)
+                        if j not in laid_pos[key]
+                        and ops_of[key][j].kind != OperationKind.DISPATCH
+                        and _owed(key, order, j) > 0), None)
+
+        if blocker is not None:
+            # Resume only what exists; the main loop makes the rest, blocker first.
+            back = _owed(key, order, blocker)
+            qty = int(_owed(key, order, oi) - back)
+            dur = qty * op.cycle_min                     # no setup on resume
+            if qty <= 0 or dur <= 0:
+                continue        # nothing past the blocker yet: the main loop runs it whole
+            gate = resume_ready.get(key, config.plan_start)
+            laid = _lay_pinned(machine, gate, dur, order, op, qty, fo.operator,
+                               machine_spans, staffing, masters, config)
+            if laid is None:
+                continue        # unstaffable — leave the whole step to the main loop
+            floor = resume_prev_end.get(key, config.plan_start)
+            for _ in range(8):
+                if laid["end"] >= floor:
+                    break
+                shifted = _lay_pinned(machine, laid["start"] + (floor - laid["end"]),
+                                      dur, order, op, qty, fo.operator, machine_spans,
+                                      staffing, masters, config)
+                if shifted is None:
+                    break
+                laid = shifted
+            for a in laid["assignments"]:
+                staffing.commit(*a)
+            _occupy(machine_spans, mid, laid["start"], laid["end"])
+            for seg in laid["segments"]:
+                if seg.operator is not None:
+                    staffing.add_load(seg.operator,
+                                      (seg.end - seg.start).total_seconds() / 60.0)
+            bseq = ops_of[key][blocker].seq
+            out.extend(replace(seg, resume_from=bseq) for seg in laid["segments"])
+            held[key][op.seq] = back
+            paced = max(laid["end"], floor)
+            resume_prev_end[key] = paced
+            resumed_end[(key, op.seq)] = paced
+            nxt = ops_of[key][oi + 1] if oi + 1 < len(ops_of[key]) else None
+            resume_ready[key] = _ready_after(order, op, nxt, laid["start"], paced,
+                                             config, qty=qty, setup_min=0.0)
+            continue
+
         dur = fo.remaining_qty * op.cycle_min          # no setup on resume
         if dur <= 0:
             continue
-        mid = fo.machine_id
-        machine = masters.machines[mid]
         qty = int(fo.remaining_qty)
         # The order's OWN predecessor gates the start, not just the machine's queue;
         # the machine's earliest free run that holds the step whole takes it.
@@ -705,6 +786,7 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
                 staffing.add_load(seg.operator,
                                   (seg.end - seg.start).total_seconds() / 60.0)
         out.extend(laid["segments"])
+        laid_pos[key].add(oi)
 
         paced_end = max(laid["end"], prev_end_of[key])
         prev_end_of[key] = paced_end
@@ -718,4 +800,11 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
                          qty=fo.remaining_qty, setup_min=0.0))
         if nxt is None:
             completion[key] = prev_end_of[key]
+
+    # What the resumed parts left behind is the main loop's to lay, in routing order.
+    for key, over in held.items():
+        order = order_by_key[key]
+        pr = dict(order.process_remaining or {})
+        pr.update(over)
+        order_by_key[key] = replace(order, process_remaining=pr)
     return out

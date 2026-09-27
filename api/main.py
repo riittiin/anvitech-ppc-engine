@@ -539,7 +539,7 @@ def _report_for_book(masters, so_lines, absences=None, config=None, schedule=Non
         if batches:
             try:
                 from engine import new_engine as _ne3
-                rows.extend(_ne3.batch_quantity_violations(schedule, batches))
+                rows.extend(_ne3.batch_quantity_violations(schedule, batches, masters))
             except Exception:  # noqa: BLE001 — a self-check must never break the report
                 pass
     return to_table([
