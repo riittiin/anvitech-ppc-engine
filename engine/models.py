@@ -276,6 +276,13 @@ class ScheduleEntry:
     # earlier step (2026-09-27): it runs only pieces already past every earlier step,
     # so it may legitimately start before them. The rest of the step is its own entry.
     resumed: bool = False
+    # Whose pieces are physically on this bar, when a batch's lines are at different
+    # stages (empty = all of ``so_refs``). INTERNAL: read only by the freeze
+    # (`freeze.schedule_projection`) to pin each line's in-progress work to the right
+    # bar. Every screen and download shows ``so_refs``, the whole batch, because the
+    # floor runs one batch as one pile of parts (owner, 2026-09-27: three different
+    # SO labels for one batch in the shift-wise filter confused the operators).
+    piece_refs: list = field(default_factory=list)
 
     def process_label(self):
         """The process as the floor reads it; a resumed part says so."""

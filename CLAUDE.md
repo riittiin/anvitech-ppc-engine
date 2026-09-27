@@ -22,9 +22,11 @@
 >   per-step remaining (`process_remaining is None`) nothing is held back. Display:
 >   the resumed part is its own `ScheduleEntry` with `resumed=True`, labelled
 >   "(resume)" (`process_label()`) on the Gantt, machine-wise and shift-wise, a note
->   on the Schedule tab, and `so_refs` narrowed to the lines whose pieces are on each
->   bar (`Batch.line_process_qty`, set by Rule 1), with a fallback so no line ever
->   vanishes from its own plan. `routing_order_violations` skips resumed entries (their
+>   on the Schedule tab. **Every bar keeps the WHOLE batch's `so_refs`** (owner, same
+>   day: narrowed labels gave one batch three SO values in the shift-wise Excel filter
+>   and confused the floor); whose pieces are on each part lives only in the internal
+>   `ScheduleEntry.piece_refs` (`Batch.line_process_qty`, set by Rule 1), read by
+>   `freeze.schedule_projection` so each line's in-progress work pins to its own part. `routing_order_violations` skips resumed entries (their
 >   pieces are past every earlier step by construction); `batch_quantity_violations`
 >   now takes `masters` and enumerates every routing step owed. Measured: live copy
 >   (read-only copy of Atlas) 1 skipped step → 0, late-days 264 unchanged, 1 other

@@ -115,8 +115,8 @@ def test_the_pinned_step_runs_only_pieces_that_exist(masters):
     assert sum(e.qty for e in second) == 140
     resumed, later = second[0], second[-1]
     assert resumed.qty == 60 and resumed.machine == "VMC1"
-    assert resumed.so_refs == ["SO-0207"]
-    assert later.qty == 80 and later.so_refs == ["SO-0219"]
+    assert resumed.piece_refs == ["SO-0207"]
+    assert later.qty == 80 and later.piece_refs == ["SO-0219"]
     assert later.start > min(e.start for e in first), \
         "the new line's step 2 starts before its step 1 -- the reported inversion"
     assert later.end >= max(e.end for e in first)
@@ -226,9 +226,11 @@ def test_the_next_step_waits_for_the_resumed_pieces_too(masters):
         "washing finished before the 190 resumed pieces left CNC")
 
 
-def test_no_line_vanishes_from_its_own_plan(masters):
-    """A line with every in-house step done (only dispatch left) owes nothing on any
-    bar of a narrowed batch; it must still appear, or it would have no date."""
+def test_every_bar_of_a_batch_names_the_whole_batch(masters):
+    """Owner, 2026-09-27: the shift-wise download showed one batch under three SO
+    labels (the resumed rows, the new lines' CNC rows, and the rest), so its filter
+    listed them as different jobs. One batch is one pile of parts on the floor:
+    every bar names every SO in it. Whose pieces are on which part stays internal."""
     done = _line(masters, "SO-0100", 50, date(2025, 4, 1), done={0: 50, 1: 50, 2: 50})
     old = _line(masters, "SO-0207", 100, date(2025, 4, 1), done={0: 100, 1: 100, 2: 30})
     new = _line(masters, "SO-0219", 80, date(2025, 4, 2))
@@ -237,5 +239,21 @@ def test_no_line_vanishes_from_its_own_plan(masters):
     frozen = _frozen(masters, batches[0], [done, old, new], 2, "MI1", {"SO-0207": 30})
     entries = new_engine.run(batches, _CONF, None, masters, frozen=frozen)
     assert any(e.resumed for e in entries), "fixture must produce a resumed part"
-    listed = {so for e in entries for so in e.so_refs}
-    assert {"SO-0100", "SO-0207", "SO-0219"} <= listed
+    labels = {tuple(e.so_refs) for e in entries}
+    assert labels == {tuple(batches[0].source_so_refs)}, labels
+
+
+def test_the_freeze_pins_each_line_to_its_own_part(masters):
+    """Next "Done entering": SO-0207 is still part-way through step 2 on the resumed
+    part (VMC1); SO-0219 has started step 2 on the rest. Each line's pin must come
+    from ITS part, which is what the internal ``piece_refs`` is for."""
+    batches, entries = _live_shape(masters)
+    rows = freeze.schedule_projection(entries)
+    step2 = _steps(masters)[1].seq
+    mine = [r for r in rows if r["process_seq"] == step2]
+    assert len(mine) == 2
+    resumed = next(e for e in _at(masters, entries, 1) if e.resumed)
+    rest = next(e for e in _at(masters, entries, 1) if not e.resumed)
+    by_so = {so: r for r in mine for so in r["so_refs"]}
+    assert by_so["SO-0207"]["start"] == resumed.start.isoformat()
+    assert by_so["SO-0219"]["start"] == rest.start.isoformat()

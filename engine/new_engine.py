@@ -692,13 +692,13 @@ def _entries_from_schedule(sched, batch_by_key):
         return pq.get(_norm(name), qty) if pq else qty
 
     def _refs(batch, order_key, op_seq, resume_from):
-        """The SO lines whose pieces are on this bar. Only a batch with a split
-        step is narrowed: its lines are at different stages, and listing a line on a
-        step it has finished would draw that line's routing out of order."""
+        """The SO lines whose pieces are physically on this bar ([] = every line).
+        Only a batch with a split step differs: its lines are at different stages.
+        Internal (``piece_refs``, for the freeze); the bar still shows the batch."""
         refs = list(batch.source_so_refs) if batch else []
         splits = split_of.get(order_key)
         if not splits:
-            return refs
+            return []
         if resume_from is not None:        # pieces already past the blocker
             keep = lambda so: (_owed(batch, so, op_seq, order_key) or 0) - (  # noqa: E731
                 _owed(batch, so, resume_from, order_key) or 0) > 0
@@ -707,10 +707,11 @@ def _entries_from_schedule(sched, batch_by_key):
         elif op_seq <= max(splits.values()):  # the blocker and the steps before it
             keep = lambda so: (_owed(batch, so, op_seq, order_key) or 0) > 0  # noqa: E731
         else:
-            return refs
+            return []
         if any(_owed(batch, so, op_seq, order_key) is None for so in refs):
-            return refs                    # no per-line data: never guess
-        return [so for so in refs if keep(so)]
+            return []                      # no per-line data: never guess
+        mine = [so for so in refs if keep(so)]
+        return mine if mine != refs else []
 
     entries = []
     resumed = set()
@@ -719,7 +720,7 @@ def _entries_from_schedule(sched, batch_by_key):
         if segs[0].kind == OperationKind.DISPATCH:
             continue
         batch = batch_by_key.get(order_key)
-        so_refs = _refs(batch, order_key, op_seq, resume_from)
+        piece_refs = _refs(batch, order_key, op_seq, resume_from)
         for block in _blocks(segs):
             first = block[0]
             # Per BLOCK, never per operation: a split job's second block must publish
@@ -743,10 +744,11 @@ def _entries_from_schedule(sched, batch_by_key):
                 notes=(f"Resumes {int(first.qty)} pieces already past "
                        f"'{name_of.get((order_key, resume_from), 'the step before')}'; "
                        f"the rest follow that step" if resume_from is not None else ""),
-                so_refs=list(so_refs),
+                so_refs=list(batch.source_so_refs) if batch else [],
                 operator=operator,
                 op_segments=op_segments,
                 resumed=resume_from is not None,
+                piece_refs=piece_refs,
             ))
             if resume_from is not None:
                 resumed.add(id(entries[-1]))
@@ -762,7 +764,6 @@ def _entries_from_schedule(sched, batch_by_key):
     by_batch = defaultdict(list)
     for e in entries:
         by_batch[e.batch_id].append(e)
-    batch_of = {k[0]: b for k, b in batch_by_key.items()}
     for es in by_batch.values():
         es.sort(key=lambda e: e.process_seq)
         paced = None
@@ -772,16 +773,6 @@ def _entries_from_schedule(sched, batch_by_key):
             if paced is not None and e.end < paced:
                 e.end = paced
             paced = e.end
-        # Narrowing must never make a line vanish from its own plan: a line whose
-        # pieces are on no bar still finishes with the batch's last step.
-        listed = {so for e in es for so in e.so_refs}
-        batch = batch_of.get(es[0].batch_id)
-        missing = [so for so in (batch.source_so_refs if batch else []) if so not in listed]
-        if missing:
-            last = max((e for e in es if id(e) not in resumed),
-                       key=lambda e: (e.process_seq, e.end), default=None)
-            if last is not None:
-                last.so_refs = list(last.so_refs) + missing
 
     entries.sort(key=lambda e: (e.start, e.batch_id, e.process_seq))
     return entries

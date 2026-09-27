@@ -28,7 +28,10 @@ def schedule_projection(schedule) -> list[dict]:
             "operator": e.operator or "",
             "start": e.start.isoformat(timespec="seconds"),
             "end": e.end.isoformat(timespec="seconds"),
-            "so_refs": list(e.so_refs or []),
+            # Whose pieces are on this bar: a batch whose lines are at different
+            # stages is one bar per part, and each line's in-progress work must be
+            # pinned to ITS part (the resumed pieces, or the rest), never the other.
+            "so_refs": list(getattr(e, "piece_refs", None) or e.so_refs or []),
         })
     return rows
 
