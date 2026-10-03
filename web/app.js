@@ -112,7 +112,7 @@ function showView(v, push) {
   // match. It is a read-only view of the plan both roles already hold, so nothing
   // new is exposed by showing it. Settings likewise shows Operators & shifts /
   // Absences read-only to the user role (the truly admin-only sections inside it —
-  // Plan settings, the efficiency report — are their own admin-only cards).
+  // Plan settings, the production analysis report — are their own admin-only cards).
   activeView = v;
   try { localStorage.setItem("anvitech-view", v); } catch (e) { /* private mode */ }
   document.querySelectorAll(".view").forEach((s) => s.classList.toggle("active", s.id === "view-" + v));
@@ -1954,10 +1954,14 @@ function actualsFormHtml() {
     fr("Item Code <span class=auto>(step 2: pick this SO's item)</span>", `<select id="a-item"><option value="">Select SO No first</option></select>`) +
     fr("Item Name <span class=auto>(auto)</span>", `<input id="a-itemname" readonly />`) +
     fr("Process <span class=auto>(dropdown)</span>", `<select id="a-process"></select>`) +
-    `<div id="a-outstanding" class="a-outstanding"></div>`;
+    `<div id="a-outstanding" class="a-outstanding"></div>` +
+    fr("Machine <span class=auto>(the machine this job ran on)</span>", `<select id="a-machine"><option value="">-</option></select>`) +
+    fr("Cycle Time (min per piece) <span class=auto>(auto, from the Process Master)</span>", `<input id="a-cycle" readonly />`);
   const right =
+    fy("Minutes Available in Shift <span class=auto>(time spent on this job; the whole shift unless you split it)</span>", `<input id="a-mins" type="number" min="0" value="" />`) +
     fy("Qty Produced (good pieces)", `<input id="a-prod" type="number" min="0" value="" />`) +
     fy("Qty Rejected (bad pieces)", `<input id="a-rej" type="number" min="0" value="" />`) +
+    fy("Standard Setting Time (min) <span class=auto>(auto, change if needed)</span>", `<input id="a-stdsetup" type="number" min="0" value="" />`) +
     fy("Actual Setting Time (min)", `<input id="a-setup" type="number" min="0" value="" />`) +
     fy("No Power (min)", `<input id="a-nopower" type="number" min="0" value="" />`) +
     fy("No Operator (min)", `<input id="a-noop" type="number" min="0" value="" />`) +
@@ -2057,6 +2061,40 @@ function fillItemMeta() {
     $("a-itemname").value = "(unknown item code)";
     $("a-process").innerHTML = `<option value="">-</option>`;
   }
+}
+
+// ---- Production analysis inputs (report only, the planner never reads them) ----
+// The machine list puts the machines this routing step names first, then every
+// other machine; picking one fills its standard setting time. Cycle time is shown
+// from the Process Master (the server reads it again on save, it is never sent).
+function fillAnalysisFields() {
+  const code = $("a-item") ? $("a-item").value.trim() : "";
+  const proc = $("a-process") ? $("a-process").value : "";
+  const meta = ITEMS && ITEMS.items ? ITEMS.items[code] : null;
+  const info = meta && meta.process_info ? meta.process_info[proc] : null;
+  const ct = info ? info.cycle_time : null;
+  $("a-cycle").value = ct === null || ct === undefined ? (info ? "no cycle time on file" : "") : ct;
+  const step = info ? info.machines : [];
+  const all = (ITEMS && ITEMS.machines) || [];
+  const others = all.filter((m) => !step.includes(m.id));
+  const opt = (id, name) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}${name && name !== id ? " - " + escapeHtml(name) : ""}</option>`;
+  const byId = Object.fromEntries(all.map((m) => [m.id, m]));
+  $("a-machine").innerHTML = `<option value="">-</option>`
+    + (step.length ? `<optgroup label="For this step">${step.map((id) => opt(id, byId[id] && byId[id].name)).join("")}</optgroup>` : "")
+    + (others.length ? `<optgroup label="Other machines">${others.map((m) => opt(m.id, m.name)).join("")}</optgroup>` : "");
+  $("a-machine").value = step.length ? step[0] : "";
+  fillStdSetup();
+}
+
+function fillStdSetup() {
+  const id = $("a-machine").value;
+  const m = ((ITEMS && ITEMS.machines) || []).find((x) => x.id === id);
+  $("a-stdsetup").value = m ? m.std_setup_min : (id ? "" : 0);
+}
+
+function fillShiftMinutes() {
+  const mins = ITEMS && ITEMS.shift_minutes ? ITEMS.shift_minutes[$("a-shift").value] : null;
+  if (mins !== null && mins !== undefined) $("a-mins").value = mins;
 }
 
 // ---- What this step still owes (2026-08-28 spec) --------------------------
@@ -2246,10 +2284,14 @@ async function wireActualsForm() {
   fillShiftDropdown();
   fillSoDropdown();
   await fillOperatorDropdown();
-  $("a-so").addEventListener("change", () => { fillItemFromSO(); renderOutstanding(); });
-  $("a-item").addEventListener("change", () => { fillItemMeta(); renderOutstanding(); });
-  $("a-process").addEventListener("change", renderOutstanding);
+  $("a-so").addEventListener("change", () => { fillItemFromSO(); fillAnalysisFields(); renderOutstanding(); });
+  $("a-item").addEventListener("change", () => { fillItemMeta(); fillAnalysisFields(); renderOutstanding(); });
+  $("a-process").addEventListener("change", () => { fillAnalysisFields(); renderOutstanding(); });
+  $("a-machine").addEventListener("change", fillStdSetup);
+  $("a-shift").addEventListener("change", fillShiftMinutes);
   fillItemMeta();
+  fillAnalysisFields();
+  fillShiftMinutes();
   renderOutstanding();
   // The native date picker shows the browser locale (MM/DD/YYYY on US machines);
   // echo the chosen date in DD-MM-YYYY so it always matches the rest of the app.
@@ -2301,6 +2343,8 @@ async function wireActualsForm() {
       no_operator_min: num("a-noop"), tool_problem_min: num("a-tool"),
       machine_breakdown_min: num("a-mbd"), no_load_min: num("a-noload"),
       other_work_min: num("a-other"), remarks: $("a-remarks").value,
+      machine: $("a-machine").value, shift_minutes: num("a-mins"),
+      std_setup_min: num("a-stdsetup"),
     };
     // Outsourced (OS) steps run off-site — no in-house operator runs them — so the
     // operator is NOT required for them (owner rule, 2026-07-26). Every other step
@@ -2317,6 +2361,7 @@ async function wireActualsForm() {
     // form submit), so the browser never enforces it — check for negatives here.
     const negFields = [
       ["a-prod", "Qty Produced"], ["a-rej", "Qty Rejected"], ["a-setup", "Actual Setting Time"],
+      ["a-mins", "Minutes Available in Shift"], ["a-stdsetup", "Standard Setting Time"],
       ["a-nopower", "No Power"], ["a-noop", "No Operator"], ["a-tool", "Tool Problem"],
       ["a-mbd", "Machine Breakdown"], ["a-noload", "No Load"], ["a-other", "Other Work"],
     ].filter(([id]) => Number($(id).value) < 0);
@@ -2460,49 +2505,43 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-// ---- Operator efficiency (Settings-area block; admin-only — pure reporting,
-// never touches the plan). GET /efficiency for the on-screen preview,
-// GET /efficiency.csv for the download; both admin-only server-side. ----
-function effDefaultMonth() {
-  // Previous calendar month, "YYYY-MM" (the value a <input type="month"> wants).
+// ---- Production analysis (Settings-area block; admin-only, pure reporting,
+// never touches the plan). GET /production-analysis for the on-screen preview,
+// GET /production-analysis.xlsx for the download; both admin-only server-side. ----
+function paDefaultMonth() {
+  // Current calendar month, "YYYY-MM" (the value a <input type="month"> wants).
   const d = new Date();
-  d.setDate(1);          // avoid rolling into the wrong month on short months
-  d.setMonth(d.getMonth() - 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-function effYearMonth() {
-  const el = $("eff-month");
+function paYearMonth() {
+  const el = $("pa-month");
   const v = el && el.value;
   if (!v) return null;
   const [y, m] = v.split("-").map(Number);
   return { year: y, month: m };
 }
 
-async function previewEfficiency() {
-  const ym = effYearMonth();
-  const el = $("eff-table");
+async function previewProductionAnalysis() {
+  const ym = paYearMonth();
+  const el = $("pa-table");
   if (!ym) { setStatus("Pick a month first.", true); return; }
   try {
-    const res = await fetch(`/efficiency?year=${ym.year}&month=${ym.month}`);
+    const res = await fetch(`/production-analysis?year=${ym.year}&month=${ym.month}`);
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) { setStatus("Efficiency error: " + (body.detail || res.status), true); return; }
-    renderEfficiencyTable(body.rows, el);
-  } catch (e) { setStatus("Efficiency error: " + e.message, true); }
+    if (!res.ok) { setStatus("Production analysis error: " + (body.detail || res.status), true); return; }
+    if (!el) return;
+    if (!body.rows || body.rows.length === 0) { el.innerHTML = '<div class="empty">No entries this month</div>'; return; }
+    const pct = new Set(body.columns.slice(-2));
+    const cell = (c, v) => (v === null || v === undefined || v === "" ? "-" : pct.has(c) ? v + "%" : v);
+    el.innerHTML = tableHtml({ columns: body.columns, rows: body.rows.map((r) => body.columns.map((c) => cell(c, r[c]))) });
+  } catch (e) { setStatus("Production analysis error: " + e.message, true); }
 }
 
-function renderEfficiencyTable(rows, el) {
-  if (!el) return;
-  if (!rows || rows.length === 0) { el.innerHTML = '<div class="empty">No rows</div>'; return; }
-  const columns = Object.keys(rows[0]);
-  const tableRows = rows.map((r) => columns.map((c) => (r[c] === null || r[c] === undefined ? "-" : r[c])));
-  el.innerHTML = tableHtml({ columns, rows: tableRows });
-}
-
-function downloadEfficiencyCsv() {
-  const ym = effYearMonth();
+function downloadProductionAnalysis() {
+  const ym = paYearMonth();
   if (!ym) { setStatus("Pick a month first.", true); return; }
-  window.location.href = `/efficiency.csv?year=${ym.year}&month=${ym.month}`;
+  window.location.href = `/production-analysis.xlsx?year=${ym.year}&month=${ym.month}`;
 }
 
 // ---- Operator absences (Settings-area block; list is visible to both roles,
@@ -2917,15 +2956,14 @@ if (_downAdd) _downAdd.onclick = addMachineDowntime;
 // way — the server enforces the role).
 const _opAdd = $("op-add-btn");
 if (_opAdd) _opAdd.onclick = addOperator;
-// Operator efficiency: month input defaults to last month; Preview/Download are
-// admin-only (server enforces it; the fieldset is inside the admin-only Settings
-// panel so the user role never sees it at all).
-const _effMonthEl = $("eff-month");
-if (_effMonthEl) _effMonthEl.value = effDefaultMonth();
-const _effPreviewBtn = $("eff-preview-btn");
-if (_effPreviewBtn) _effPreviewBtn.onclick = previewEfficiency;
-const _effDownloadBtn = $("eff-download-btn");
-if (_effDownloadBtn) _effDownloadBtn.onclick = downloadEfficiencyCsv;
+// Production analysis: month input defaults to this month; Preview/Download are
+// admin-only (server enforces it; the card is admin-only so the user role never sees it).
+const _paMonthEl = $("pa-month");
+if (_paMonthEl) _paMonthEl.value = paDefaultMonth();
+const _paPreviewBtn = $("pa-preview-btn");
+if (_paPreviewBtn) _paPreviewBtn.onclick = previewProductionAnalysis;
+const _paDownloadBtn = $("pa-download-btn");
+if (_paDownloadBtn) _paDownloadBtn.onclick = downloadProductionAnalysis;
 // Add New Orders: admin-only (the button is inside an admin-only card, CSS-hidden
 // for the user role; the handler is harmless to wire either way — every function
 // it calls checks the role itself, and the server enforces it too).

@@ -15,7 +15,6 @@ The web/ frontend is served at /.
 from __future__ import annotations
 
 import asyncio
-import csv
 import hashlib
 import hmac
 import io
@@ -38,7 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from engine.config import Config, OVERLAP_SEQUENTIAL, OVERLAP_PERCENT
-from engine.loaders import load_all
+from engine.loaders import load_all, parse_resource_candidates
 from engine import loaders
 from engine.models import PlanRun, Actual, Masters, Order, fmt_date
 from engine.pipeline import run_forward, to_table, KEY_SEP
@@ -48,7 +47,7 @@ from engine.gantt import build_gantt
 from engine import book_store, orderbook
 from engine import operator_coverage
 from engine import storage
-from engine import efficiency
+from engine import production_analysis
 from engine import operator_master
 from engine import freeze
 from engine.rules import (
@@ -629,6 +628,10 @@ class ActualRequest(BaseModel):
     other_work_min: float = Field(default=0.0, ge=0)
     remarks: str = ""
     mark_complete: bool = False
+    # Production analysis inputs (report only, the planner never reads them).
+    machine: str = ""
+    shift_minutes: float = Field(default=0.0, ge=0)
+    std_setup_min: Optional[float] = Field(default=None, ge=0)
 
 
 class DraftLine(BaseModel):
@@ -3501,7 +3504,7 @@ def delete_operator(operator_id: str, request: Request):
 
 
 def _validate_year_month(year: int, month: int) -> None:
-    """Shared 400 guard for both efficiency endpoints. 2000-2100 is a generous
+    """Shared 400 guard for both production-analysis endpoints. 2000-2100 is a generous
     sanity window (not a business rule) — just enough to reject fat-fingered
     input without hard-coding "current year"."""
     if not (1 <= month <= 12):
@@ -3521,43 +3524,69 @@ def _csv_safe(value):
     return value
 
 
-def _efficiency_rows(year: int, month: int) -> list:
-    masters = _current_masters()
-    actuals = book_store.load_actuals()
-    absences = book_store.load_absences()
-    config = _load_plan_config()
-    return efficiency.monthly_report(actuals, absences, masters, config, year, month)
+def _production_rows(year: int, month: int) -> list:
+    return production_analysis.monthly_rows(
+        book_store.load_actuals(), _current_masters(), year, month)
 
 
-@app.get("/efficiency")
-def efficiency_report(year: int, month: int, request: Request):
-    """Monthly operator efficiency report (admin only). Pure reporting — no
-    schedule/plan impact. See engine/efficiency.py for the formula."""
+@app.get("/production-analysis")
+def production_analysis_report(year: int, month: int, request: Request):
+    """Monthly production analysis (admin only): the owner's "Format Production
+    analysis" sheet, one row per Daily Entry punch. Pure reporting, no plan
+    effect. See engine/production_analysis.py for the formulas."""
     require_admin(request)
     _validate_year_month(year, month)
-    return {"year": year, "month": month, "rows": _efficiency_rows(year, month)}
+    return {"year": year, "month": month,
+            "columns": list(production_analysis.REPORT_COLUMNS),
+            "rows": _production_rows(year, month)}
 
 
-@app.get("/efficiency.csv")
-def efficiency_report_csv(year: int, month: int, request: Request):
-    """Same report as a CSV download (admin only), built server-side (unlike the
-    Rule-6 schedule CSVs, which are generated client-side in app.js from the
-    on-screen table — this one has no on-screen table to scrape until Preview
-    is clicked, and admin-only auth is easier to enforce server-side)."""
+# The sheet's own header colours: inputs green, the four results orange.
+_PA_INPUT_FILL = "D7E4BD"
+_PA_RESULT_FILL = "FCD5B4"
+
+
+@app.get("/production-analysis.xlsx")
+def production_analysis_xlsx(year: int, month: int, request: Request):
+    """Same report laid out like the owner's workbook (admin only): title in B1,
+    month in B3/C3, headers on row 6 from column B, one punch per row from row 7."""
     require_admin(request)
     _validate_year_month(year, month)
-    rows = _efficiency_rows(year, month)
-    columns = list(rows[0].keys()) if rows else list(efficiency.REPORT_COLUMNS)
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(columns)
-    for row in rows:
-        writer.writerow(["-" if row[c] is None else _csv_safe(row[c]) for c in columns])
-    filename = f"operator-efficiency-{year:04d}-{month:02d}.csv"
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    rows = _production_rows(year, month)
+    cols = production_analysis.REPORT_COLUMNS
+    n_in = len(production_analysis.INPUT_COLUMNS)
+    pct_cols = set(production_analysis.RESULT_COLUMNS[2:])
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["B1"] = "Monthly production analysis"
+    ws["B1"].font = Font(bold=True, size=14)
+    ws["B3"] = "Month - year"
+    ws["C3"] = f"{month:02d}-{year:04d}"
+    for j, name in enumerate(cols):
+        c = ws.cell(row=6, column=2 + j, value=name)
+        c.font = Font(bold=True)
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        c.fill = PatternFill("solid", fgColor=_PA_INPUT_FILL if j < n_in else _PA_RESULT_FILL)
+        ws.column_dimensions[c.column_letter].width = 14
+    for i, row in enumerate(rows):
+        for j, name in enumerate(cols):
+            v = row[name]
+            if name in pct_cols and v is not None:
+                v = v / 100.0            # store a real fraction, shown as %
+            c = ws.cell(row=7 + i, column=2 + j, value=_csv_safe(v) if isinstance(v, str) else v)
+            if name in pct_cols:
+                c.number_format = "0.0%"
+    buf = io.BytesIO()
+    wb.save(buf)
+    fname = f"production-analysis-{year:04d}-{month:02d}.xlsx"
     return Response(
-        content="﻿" + buf.getvalue(),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
 
@@ -3682,7 +3711,7 @@ def delay_report_xlsx(request: Request):
     Role-open since 2026-08-09 (director asked for the two portals to match): this is a
     read-only view of the SAME plan both roles already see on the Schedule and Gantt
     tabs, so it exposes nothing the user role could not already read. Contrast
-    /efficiency, which stays admin-only because it ranks named people."""
+    /production-analysis, which stays admin-only because it names people."""
     from engine import delay_report as _dr
     plan_run, so_lines, masters, cfg = _plan_run_for_report(_load_plan_config())
     # The SAME unavailability the plan was built with, both halves: a person on
@@ -4001,6 +4030,33 @@ def report():
     return _report_for_book(masters, so_lines)
 
 
+def _routing_machines(process) -> list:
+    """Machines a routing step names, Allotted first then Suggested, deduped,
+    with the OS sentinel dropped (it is not a machine)."""
+    out = []
+    for raw in (process.allotted_machine, process.suggested_machine):
+        for mid in parse_resource_candidates(raw):
+            if mid != "OS" and mid not in out:
+                out.append(mid)
+    return out
+
+
+def _std_setup_for(machine, masters, config) -> float:
+    """Standard setting time for a machine: the plan's setup time on a CNC/VMC,
+    0 on a manual station (the same rule the scheduler charges setup by)."""
+    if not machine:
+        return 0.0
+    return float(config.setup_time_min) if r6._is_setup_machine(machine, masters) else 0.0
+
+
+def _shift_minutes(config) -> dict:
+    """Length of each shift in minutes, from the plan's shift hours — the default
+    "Minutes available in shift" on the Daily Entry form."""
+    first = (config.first_shift_end_hour - config.first_shift_start_hour) * 60
+    second = ((config.second_shift_end_hour - config.first_shift_end_hour) % 24) * 60
+    return {"1st shift": first, "2nd shift": second}
+
+
 @app.get("/items")
 def items():
     """Item metadata for the Daily Production Entry form."""
@@ -4015,9 +4071,15 @@ def items():
                # Outsourced (OS) steps (Allotted M/c = OS) need no operator at capture;
                # the Daily Entry form uses this to relax the required-operator check.
                "os_processes": [p.name for p in routing.processes
-                                if orderbook.process_is_outsourced(routing, p.name)]}
+                                if orderbook.process_is_outsourced(routing, p.name)],
+               # Production analysis (report only): each step's standard cycle time
+               # and the machines its routing names (Allotted first, then Suggested).
+               "process_info": {p.name: {
+                   "cycle_time": production_analysis.cycle_time_for(masters, code, p.name),
+                   "machines": _routing_machines(p)} for p in routing.processes}}
         for code, routing in masters.routings.items()
     }
+    config = _load_plan_config()
 
     # Two-step picker: pick an SO number, then pick one of THAT SO's item lines.
     # Since an SO number can carry several items, map each SO# -> its open item
@@ -4048,6 +4110,10 @@ def items():
         # under the Process dropdown before the punch. Live read, never cached.
         "progress": orderbook.entry_progress(active, book_store.load_actuals(), masters),
         "item_to_sos": dict(item_to_sos),          # {item_code: [so_no, ...]}
+        # Production analysis defaults for the form (report only).
+        "machines": [dict(m, std_setup_min=_std_setup_for(m["id"], masters, config))
+                     for m in _machine_options(masters)],
+        "shift_minutes": _shift_minutes(config),
     }
 
 
@@ -4072,6 +4138,12 @@ def post_actuals(req: ActualRequest):
             raise HTTPException(status_code=400, detail="please pick an operator")
     elif operator not in {o.name for o in masters.operators}:
         raise HTTPException(status_code=400, detail=f"'{operator}' is not in the operator list, pick one from the dropdown")
+    machine = req.machine.strip()
+    if machine and machine not in masters.machines:
+        raise HTTPException(status_code=400, detail=f"'{machine}' is not in the machine list, pick one from the dropdown")
+    std_setup = req.std_setup_min
+    if std_setup is None:
+        std_setup = _std_setup_for(machine, masters, _load_plan_config())
     actual = Actual(
         so_no=req.so_no, item_code=req.item_code,
         entry_date=entry_date,
@@ -4084,6 +4156,12 @@ def post_actuals(req: ActualRequest):
         machine_breakdown_min=req.machine_breakdown_min,
         no_load_min=req.no_load_min, other_work_min=req.other_work_min,
         remarks=req.remarks, mark_complete=req.mark_complete,
+        # Report-only fields. The cycle time is read from the Process Master HERE,
+        # never taken from the browser, and kept on the entry so a later master
+        # edit cannot rewrite a past month's report.
+        machine=machine,
+        cycle_time_min=production_analysis.cycle_time_for(masters, req.item_code, req.process),
+        shift_minutes=req.shift_minutes, std_setup_min=std_setup,
     )
     # Feedback precedence guard (2026-07-25 spec): a process's recorded qty can't
     # exceed the good qty that cleared the process before it (first step ≤ ordered).

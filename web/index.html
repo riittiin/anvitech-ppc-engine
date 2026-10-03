@@ -314,28 +314,27 @@
 
     <div class="card admin-only">
       <div class="card-head">
-        <h2>Efficiency report</h2>
-        <p class="explainer">How much each operator produced in a month, compared with the
-          standard time for those jobs. This is a report only. It never changes the plan.</p>
+        <h2>Production analysis</h2>
+        <p class="explainer">Every Daily Entry for a month, laid out like the production analysis
+          sheet: one row per entry. This is a report only. It never changes the plan.</p>
       </div>
       <div class="cfg-row">
         <label class="inline-field">Month
-          <input type="month" id="eff-month" />
+          <input type="month" id="pa-month" />
         </label>
-        <button id="eff-preview-btn" class="ghost-btn" type="button">Preview</button>
-        <button id="eff-download-btn" class="ghost-btn" type="button">⬇ Download CSV</button>
+        <button id="pa-preview-btn" class="ghost-btn" type="button">Preview</button>
+        <button id="pa-download-btn" class="ghost-btn" type="button">⬇ Download Excel</button>
       </div>
       <p class="explainer">
-        <strong>Attended (min)</strong> = time on shift minus recorded downtime and setup.
-        <strong>Earned (min)</strong> = standard time credited for GOOD pieces only. Rejects earn
-        nothing. <strong>Efficiency %</strong> = Earned ÷ Attended × 100.
-        <strong>Pace vs standard (x)</strong> = how many times faster/slower than standard cycle
-        time (1.0 = exactly standard, 1.2 = 20% faster). <strong>Reject %</strong> = rejected ÷
-        (good + rejected) qty. <strong>No-standard punches</strong> = entries for an item/process
-        with no time standard on file. These are left out of both earned and attended time, so they never
-        count against the operator.
+        <strong>Planned qty</strong> = minutes available ÷ cycle time.
+        <strong>Total actual qty</strong> = OK qty + rejected qty.
+        <strong>Overall productivity</strong> = total actual qty ÷ planned qty.
+        <strong>Operator efficiency</strong> = total actual qty ÷ ((minutes available − actual
+        setting time − all downtime) ÷ cycle time). Cycle time comes from the Item's Process
+        Master. A "-" means there was nothing to divide by: no cycle time on file, no minutes
+        entered, or no time left after setting and downtime.
       </p>
-      <div id="eff-table" class="eff-table"></div>
+      <div id="pa-table" class="eff-table"></div>
     </div>
   </section>
 

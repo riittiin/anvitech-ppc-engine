@@ -46,7 +46,7 @@ def test_delay_report_returns_xlsx_to_either_role():
     Deliberate change, not a relaxed assertion: the report is a read-only view of
     the same plan both roles already see on Schedule and Gantt. The user-role leg
     below used to assert 403. Role PARITY is pinned in tests/test_role_parity.py,
-    which also pins what stays admin-only (e.g. /efficiency).
+    which also pins what stays admin-only (e.g. /production-analysis).
     """
     m = _api()
     book_store.save_masters_bytes(build_sample_bytes())

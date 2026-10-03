@@ -74,7 +74,7 @@ def _fridays_after(anchor: date, today: date) -> list:
 def _is_two_shift(shift: str) -> bool:
     """A row is two-shift if its shift text contains "first"/"second",
     case-insensitively — matches the case-insensitive normalization
-    engine.efficiency already applies, so e.g. "first shift" (lowercase)
+    the rest of the app applies, so e.g. "first shift" (lowercase)
     rotates the same as "First shift"."""
     low = (shift or "").lower()
     return "first" in low or "second" in low

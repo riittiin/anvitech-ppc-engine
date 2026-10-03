@@ -354,6 +354,12 @@ class Actual:
     other_work_min: float = 0.0
     remarks: str = ""
     mark_complete: bool = False   # user denotes the order complete on this entry
+    # --- production analysis inputs (2026-10-03, REPORT ONLY — the planner never
+    # reads these; see engine/production_analysis.py) ------------------------ #
+    machine: str = ""             # the machine the job actually ran on
+    cycle_time_min: Optional[float] = None   # Process Master standard, snapshotted at save
+    shift_minutes: float = 0.0    # "Minutes available in shift" spent on this job
+    std_setup_min: float = 0.0    # standard setting time for this job
 
     # Loss categories that count as wasted machine time.
     DOWNTIME_FIELDS = (
@@ -398,6 +404,24 @@ class Actual:
             "Other Work": self.other_work_min,
             "Total Downtime (min)": self.total_downtime_min(),
             "Remarks": self.remarks,
+            **self._analysis_cells(),
+        }
+
+    def _analysis_cells(self):
+        """The production-analysis columns shown on the Daily Entry list — the
+        same calculation the monthly report uses (one definition)."""
+        from .production_analysis import actual_metrics
+        (planned, total, prod, eff), g = actual_metrics(self)
+        pct = lambda x: "-" if x is None else f"{x * 100:.1f}%"
+        return {
+            "Machine": self.machine or "-",
+            "Cycle Time (min)": "-" if g is None else g,
+            "Minutes Available": self.shift_minutes or "-",
+            "Std Setting (min)": self.std_setup_min,
+            "Planned Qty": "-" if planned is None else round(planned, 2),
+            "Total Actual Qty": total,
+            "Overall Productivity": pct(prod),
+            "Operator Efficiency": pct(eff),
         }
 
     def to_json(self):
@@ -421,6 +445,10 @@ class Actual:
             "other_work_min": self.other_work_min,
             "remarks": self.remarks,
             "mark_complete": self.mark_complete,
+            "machine": self.machine,
+            "cycle_time_min": self.cycle_time_min,
+            "shift_minutes": self.shift_minutes,
+            "std_setup_min": self.std_setup_min,
         }
 
     @classmethod
@@ -446,6 +474,10 @@ class Actual:
             other_work_min=d.get("other_work_min", 0.0),
             remarks=d.get("remarks", d.get("downtime_reason", "")),
             mark_complete=d.get("mark_complete", False),
+            machine=d.get("machine", "") or "",
+            cycle_time_min=d.get("cycle_time_min"),
+            shift_minutes=d.get("shift_minutes", 0.0) or 0.0,
+            std_setup_min=d.get("std_setup_min", 0.0) or 0.0,
         )
 
 

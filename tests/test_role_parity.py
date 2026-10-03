@@ -18,7 +18,7 @@ This suite pins the owner's decision on which of those asymmetries are real:
 
   DELIBERATELY STILL ADMIN-ONLY (asserted here so a future "make it all equal"
   sweep can't quietly take them with it)
-    - the efficiency report (per-person performance ranking)
+    - the production analysis report (per-person performance)
     - the Plan settings card
     - every WRITE control: upload, delete, commit, operators, absences,
       optimize start/stop/apply/clear.
@@ -228,13 +228,13 @@ def test_no_tab_is_hidden_from_the_user_role():
 
 # ---- Deliberately NOT equalized (pin the asymmetries the owner chose to keep) ---- #
 
-def test_the_efficiency_report_stays_admin_only():
-    """Per-person performance ranking — one shared 'user' login must not see it."""
+def test_the_production_analysis_report_stays_admin_only():
+    """Per-person performance — one shared 'user' login must not see it."""
     m = _seeded_api()
     user = _client(m, "user")
-    assert user.get("/efficiency?year=2025&month=3").status_code == 403
-    assert user.get("/efficiency.csv?year=2025&month=3").status_code == 403
-    assert "admin-only" in _classes_with_ancestors("eff-preview-btn")
+    assert user.get("/production-analysis?year=2025&month=3").status_code == 403
+    assert user.get("/production-analysis.xlsx?year=2025&month=3").status_code == 403
+    assert "admin-only" in _classes_with_ancestors("pa-preview-btn")
 
 
 def test_the_plan_settings_card_stays_admin_only():
