@@ -178,10 +178,11 @@ def user_client(_api_module):
 
 @pytest.fixture
 def uploaded_masters(admin_client):
-    """Upload the new-engine sample workbook (admin only) and return one item
-    code it defines, for a draft line's item_code."""
-    r = admin_client.post("/upload", files={
-        "file": ("new.xlsx", build_new_sample_bytes(), XLSX_MIME)})
+    """Upload the new-engine sample workbook (admin only), seed its sales
+    orders as the existing book (an upload no longer does that, 2026-10-03),
+    and return one item code it defines, for a draft line's item_code."""
+    from tests.seed import upload_and_seed
+    r = upload_and_seed(admin_client, build_new_sample_bytes(), "new.xlsx")
     assert r.status_code == 200, r.text
     return ITEM_A
 
@@ -489,11 +490,16 @@ def test_done_entering_does_not_clear_the_queue_when_it_skips(
     assert book_store.load_new_order_queue() == [[["NEW-1", uploaded_masters]]]
 
 
-def test_an_upload_clears_the_queue(admin_client, uploaded_masters, add_new_order,
-                                    upload_sample):
+def test_an_upload_keeps_the_queue(admin_client, uploaded_masters, add_new_order,
+                                   upload_sample):
+    """Since 2026-10-03 an upload is masters-only and never touches the order
+    book, so it no longer ends the new-order queue either: the queue refers to
+    the book, and the book did not change. (Clearing it would re-rank the new
+    orders on merit, which can move existing orders, the very thing an upload
+    must no longer do.)"""
     add_new_order("NEW-1", uploaded_masters, 25)
     upload_sample()
-    assert book_store.load_new_order_queue() == []
+    assert book_store.load_new_order_queue() == [[["NEW-1", uploaded_masters]]]
 
 
 def test_applying_an_optimization_clears_the_queue(admin_client, uploaded_masters,

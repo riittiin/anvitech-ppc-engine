@@ -71,38 +71,25 @@ def test_plan_report_shows_no_ghost_no_routing_rows():
 
 
 # --------------------------------------------------------------------------- #
-# 2026-07-18 — the upload response must show the FILE's own dropped (no-routing)
-# item codes; /run|/gantt|/report stay book-scoped (the ghost fix above).
+# 2026-10-03 — an upload is masters-only, so its report is about the BOOK: the
+# file's own SO sheet never reaches the book, and an order already in the book
+# whose item lost its routing in the new masters is what the admin must see.
 # --------------------------------------------------------------------------- #
-def test_upload_report_contains_no_routing_for_the_files_dropped_item():
-    """A SO line whose item has no routing is dropped before it ever reaches the
-    order book, so the book-scoped /run report can never show it. The upload
-    endpoint must surface it directly from the loader's own report so the admin
-    knows which item code to add to the Item's process Master."""
+def test_upload_report_ignores_the_files_own_so_sheet():
+    """A SO line in the FILE whose item has no routing used to be reported,
+    because it was about to be dropped from the merge. Nothing in the file's SO
+    sheet reaches the book any more, so reporting it would name a ghost order."""
     import io
 
     m = _api()
-    from api import auth
-
-    client = TestClient(m.app)
-    accts = auth._accounts()
-    admin = next(u for u, a in accts.items() if a["role"] == auth.ADMIN)
-    pwd = accts[admin]["password"]
-    assert client.post("/login", data={"username": admin, "password": pwd}).status_code == 200
-
+    client = _admin_client(m)
     wb = build_workbook()
     ws = wb["Sales Order (SO) list"]
     row = ws.max_row + 1
-    # Same column layout sample_workbook.build_workbook uses for SO rows
-    # (0-based col -> 1-based openpyxl col): SONo=6, Customer=9, Item code=20,
-    # Item name=21, Qty=22, Delivery=24, Remarks=25, Pend Qty=28.
     ws.cell(row=row, column=6, value="SO-404")
-    ws.cell(row=row, column=9, value="ALFA LAVAL")
     ws.cell(row=row, column=20, value="NOROUTE-ITEM")
-    ws.cell(row=row, column=21, value="No Routing Item")
     ws.cell(row=row, column=22, value=3)
     ws.cell(row=row, column=24, value=date(2025, 3, 30))
-    ws.cell(row=row, column=25, value="")
     ws.cell(row=row, column=28, value=3)
     buf = io.BytesIO()
     wb.save(buf)
@@ -110,23 +97,33 @@ def test_upload_report_contains_no_routing_for_the_files_dropped_item():
     xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     resp = client.post("/upload", files={"file": ("t.xlsx", buf.getvalue(), xlsx_mime)})
     assert resp.status_code == 200
-    report = resp.json()["report"]
-    no_routing = [r for r in report["rows"] if r[0] == "NO_ROUTING"]
-    assert any(r[1] == "NOROUTE-ITEM" for r in no_routing), no_routing
+    no_routing = [r for r in resp.json()["report"]["rows"] if r[0] == "NO_ROUTING"]
+    assert no_routing == []
 
 
-def test_report_after_upload_unit_keeps_masters_report_no_routing():
-    """`_report_after_upload` returns masters.report AS-IS (no book-scoping)."""
+def test_upload_report_names_a_book_order_whose_routing_the_new_masters_lost():
+    import io
+
     m = _api()
-    from engine.models import Masters
+    _seed_book()
+    client = _admin_client(m)
+    wb = build_workbook()
+    ws = wb["Item's process Master"]
+    lost = None
+    for r in range(3, ws.max_row + 1):          # drop ITEM_B's recipe (col 4 = item code)
+        if ws.cell(row=r, column=4).value == ITEM_B:
+            lost = ITEM_B
+            ws.delete_rows(r)
+            break
+    assert lost, "fixture: ITEM_B's routing row not found"
+    buf = io.BytesIO()
+    wb.save(buf)
 
-    masters = Masters()
-    masters.add_report("NO_ROUTING", "SOME-ITEM",
-                        "SO item 'SOME-ITEM' has no routing in Item's process "
-                        "Master; order skipped (cannot schedule without a recipe)")
-    table = m._report_after_upload(masters)
-    no_routing = [r for r in table["rows"] if r[0] == "NO_ROUTING"]
-    assert ["NO_ROUTING", "SOME-ITEM"] == [no_routing[0][0], no_routing[0][1]]
+    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = client.post("/upload", files={"file": ("t.xlsx", buf.getvalue(), xlsx_mime)})
+    assert resp.status_code == 200
+    no_routing = [r for r in resp.json()["report"]["rows"] if r[0] == "NO_ROUTING"]
+    assert [r[1] for r in no_routing] == [ITEM_B]
 
 
 # --------------------------------------------------------------------------- #

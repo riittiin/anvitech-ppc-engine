@@ -431,17 +431,24 @@ def _inputs_signature(config: Config) -> str:
 
 
 def _report_after_upload(masters):
-    """The validation report for the FILE just uploaded (upload endpoint only).
+    """The validation report for the masters just uploaded (upload endpoint only).
 
-    Unlike ``_report_for_book`` (book-scoped, used by /run|/gantt|/report), this
-    is deliberately loader-scoped: it returns ``masters.report`` AS-IS, so it
-    keeps the loader's NO_ROUTING rows for every SO item the file's routings
-    can't cover — those items are dropped before they ever reach the order book,
-    so the book-scoped report never sees them and the admin would otherwise have
-    no way to learn which item codes need a routing added. Also appends the
-    absence-orphan rows (ABSENT_OPERATOR_UNKNOWN) for parity with the plan
-    report. Does not touch or replay `_report_for_book`; /run stays book-scoped."""
-    rows = list(masters.report)
+    Since 2026-10-03 an upload carries MASTERS ONLY: the file's SO sheet is never
+    read into the book, so the loader's own NO_ROUTING rows (about that sheet's
+    lines) describe orders that will never exist and are dropped. In their place,
+    NO_ROUTING is re-derived from the ACTIVE ORDER BOOK against the new routings,
+    so an admin who uploads a master that has lost an item's recipe learns which
+    real orders can no longer be scheduled. Also appends the absence-orphan rows
+    (ABSENT_OPERATOR_UNKNOWN) for parity with the plan report."""
+    rows = [r for r in masters.report if r["kind"] != "NO_ROUTING"]
+    seen = set()
+    for o in book_store.load_active_orders().values():
+        if o.item_code not in masters.routings and o.item_code not in seen:
+            seen.add(o.item_code)
+            rows.append({"kind": "NO_ROUTING", "ref": o.item_code,
+                         "message": f"SO item '{o.item_code}' has no routing in "
+                                    f"Item's process Master; order skipped "
+                                    f"(cannot schedule without a recipe)"})
     # Absence orphans are judged against the APP-OWNED operator table (operators are
     # app-owned; this file's Operator sheet is a fossil). Overlaying keeps the loader
     # rows from `masters.report` while checking absences against the real roster — so an
@@ -2739,9 +2746,16 @@ def _optimize_clear():
 # --------------------------------------------------------------------------- #
 @app.post("/upload")
 async def upload(request: Request, file: UploadFile = File(...)):
-    """Merge an uploaded workbook into the order book. New SO numbers become
-    pending orders; known ones are flagged. Masters are updated (latest-wins,
-    kept if the file omits them). Admin only."""
+    """Replace the masters (machines, item routings, operator seed) from an
+    uploaded workbook. Admin only.
+
+    THE SALES ORDERS ARE NEVER TOUCHED (owner, 2026-10-03). New orders come in
+    through Add New Orders only, where the delivery date is quoted against the
+    plan in force; an Excel upload can no longer add, edit, or delete a single
+    order, even if the file carries an SO sheet. That sheet is read by the loader
+    and ignored here. The new-order queue is left alone too: it refers to the
+    book, and the book did not change. ``orderbook.merge_upload`` is kept (pure,
+    tested) but nothing calls it any more."""
     require_admin(request)
     if int(request.headers.get("content-length") or 0) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="file too large (max 10 MB)")
@@ -2749,36 +2763,28 @@ async def upload(request: Request, file: UploadFile = File(...)):
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="file too large (max 10 MB)")
     try:
-        so_lines, masters = load_all(io.BytesIO(contents))
+        _so_lines_ignored, masters = load_all(io.BytesIO(contents))
     except Exception as e:  # noqa: BLE001 — surface parse failures to the user
         raise HTTPException(status_code=400, detail=f"Could not read Excel: {e}")
 
-    masters_updated = False
-    if masters.routings:  # only replace masters when the file actually has them
-        book_store.save_masters_bytes(contents)
-        _MASTERS_CACHE["masters"] = None  # invalidate cache → re-read on next plan
-        masters_updated = True
+    if not masters.routings:
+        # Before 2026-10-03 such a file could still add orders. Now it would do
+        # nothing at all, so say so rather than report a silent success.
+        raise HTTPException(
+            status_code=400,
+            detail="This file has no Item's process Master, so nothing was changed. "
+                   "Upload the master Excel. Sales orders are added on the "
+                   "Add New Orders tab, not by upload.")
+    book_store.save_masters_bytes(contents)
+    _MASTERS_CACHE["masters"] = None  # invalidate cache → re-read on next plan
 
-    active = book_store.load_active_orders()
-    completed = book_store.load_completed_orders()
-    new_orders, updated_orders, flags = orderbook.merge_upload(
-        so_lines, active, completed, first_seen=_ist_today().isoformat())
-    # `add_orders` writes by (SO#, item) with hset, so an updated order overwrites
-    # in place — an update needs no separate storage path.
-    book_store.add_orders(new_orders + updated_orders)
-    # A fresh upload changes the book the queue's positions referred to.
-    book_store.clear_new_order_queue()
-
-    result = {
+    return {
         "name": file.filename,
-        "added": len(new_orders),
-        "updated": len(updated_orders),
-        "flagged": flags,
-        "masters_updated": masters_updated,
+        "masters_updated": True,
+        "orders_changed": 0,
         "summary": {"items": len(masters.routings), "machines": len(masters.machines)},
         "report": _report_after_upload(masters),
     }
-    return result
 
 
 @app.post("/run")

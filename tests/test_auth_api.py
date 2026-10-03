@@ -19,6 +19,8 @@ _USER = next(u for u, a in _ACCTS.items() if a["role"] == auth.USER)
 _USER_PWD = _ACCTS[_USER]["password"]
 
 
+from tests.seed import upload_and_seed  # noqa: E402
+
 @pytest.fixture(autouse=True)
 def _fast_login(monkeypatch):
     # Don't actually sleep on failed logins during tests.
@@ -41,7 +43,7 @@ def _user():
 
 
 def _upload(client):
-    return client.post("/upload", files={"file": ("sample.xlsx", _SAMPLE, XLSX_MIME)})
+    return upload_and_seed(client, _SAMPLE)
 
 
 # --- login flow + identity --- #

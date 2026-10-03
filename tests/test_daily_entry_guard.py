@@ -19,6 +19,8 @@ from engine import orderbook
 D = date(2025, 8, 1)
 
 
+from tests.seed import upload_and_seed  # noqa: E402
+
 def _routing(item, names):
     return Routing(
         item_code=item, description="", customer="", rm_type="", moq=None,
@@ -204,7 +206,7 @@ _ADMIN_PWD = _ACCTS[_ADMIN]["password"]
 def client():
     c = TestClient(app)
     assert c.post("/login", data={"username": _ADMIN, "password": _ADMIN_PWD}).status_code == 200
-    c.post("/upload", files={"file": ("sample.xlsx", _SAMPLE, XLSX_MIME)})
+    upload_and_seed(c, _SAMPLE)
     return c
 
 

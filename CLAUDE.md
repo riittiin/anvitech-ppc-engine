@@ -2,6 +2,24 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-27)
 >
+> - **AN EXCEL UPLOAD NO LONGER TOUCHES THE SALES ORDERS (2026-10-03, owner
+>   request).** New orders come in through **Add New Orders only**. `POST /upload`
+>   now saves the masters (machines, routings, operator seed) and nothing else: it
+>   never adds, edits (delivery date included) or deletes an order, even when the
+>   file carries an SO sheet; that sheet is read by the loader and ignored. A file
+>   with no Item's process Master is refused 400 ("nothing was changed") instead of
+>   a silent success. The new-order queue is no longer cleared by an upload (the
+>   book did not change; clearing would re-rank the new orders and could move
+>   existing ones). The upload's NO_ROUTING report is now derived from the BOOK
+>   against the new routings, never from the file's SO sheet. This RETIRES the
+>   2026-08-04 delivery-date re-import; `orderbook.merge_upload` is kept (pure,
+>   tested) but nothing in the app calls it. Tests that need a book seed it with
+>   `tests/seed.py` (`upload_and_seed`), a fixture, never an app path. Verified on
+>   Test9 through a local server: upload into an empty book → 0 orders; with 68
+>   seeded, an edited upload (date moved, SO renamed, 3 rows deleted) leaves the
+>   Orders table byte-identical. Mutation-checked: putting the merge back fails
+>   both new tests in `tests/test_api.py`.
+>
 > - **🔴 A CLUBBED BATCH SKIPPED A WHOLE STEP (2026-09-27, owner escalation, live).**
 >   `26-27SO206`/`207` (item 9611443650) were past CNC FIRST SIDE, SO207 mid CNC
 >   SECOND SIDE (91/200, frozen on CNC4). New `26-27SO219/220/221`, same item,

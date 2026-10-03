@@ -320,9 +320,8 @@ async function uploadExcel() {
   const f = $("xlsx-file").files[0];
   if (!f) { setDatasetStatus("Choose an Excel file (.xlsx) first.", true); return; }
   if (!window.confirm(
-    `Add "${f.name}" to the order list?\n\nNew and changed orders are added right away. `
-    + `You cannot undo this in one click, you would have to delete each order by hand `
-    + `afterwards. Continue?`)) {
+    `Replace the machine and item data with "${f.name}"?\n\nSales orders are NOT `
+    + `changed by an upload. To add a new order, use the Add New Orders tab. Continue?`)) {
     return;
   }
   const fd = new FormData(); fd.append("file", f);
@@ -335,23 +334,12 @@ async function uploadExcel() {
     if (!res.ok) { setDatasetStatus("Upload failed: " + (await res.text()), true); return; }
     const d = await res.json();
     ITEMS = null;  // item metadata may have changed
-    let msg = `<strong>${escapeHtml(d.name)}</strong>: ${d.added} new order(s) added`;
-    if (d.updated) msg += ` · ${d.updated} delivery date(s) updated`;
-    if (d.flagged && d.flagged.length) {
-      // Delivery-date updates are the ones a director is most likely to be
-      // checking for — surface them first so they aren't buried among routine
-      // "duplicate: already in the book" flags. Nothing is dropped, only reordered.
-      const isDateUpdate = (f) => (f.reason || "").includes("delivery date updated");
-      const ordered = d.flagged.filter(isDateUpdate).concat(d.flagged.filter((f) => !isDateUpdate(f)));
-      const detail = ordered.map((f) => `${escapeHtml(f.so_no)}/${escapeHtml(f.item_code || "")} (${escapeHtml(f.reason)})`).join("; ");
-      msg += ` · <span class="pill-pending">${d.flagged.length} flagged</span>: ${detail}`;
-    }
-    if (d.masters_updated) msg += " · uploaded machine/operator/item data updated";
+    let msg = `<strong>${escapeHtml(d.name)}</strong>: machine and item data updated`
+      + ` (${d.summary.items} items, ${d.summary.machines} machines). Sales orders were not changed.`;
     setDatasetStatus(msg);
-    // The upload's OWN (loader-scoped) report drives the always-visible
-    // missing-routings note — it still shows any item codes the file dropped
-    // for having no routing, which the runPlan() call below never can (its
-    // /run report is book-scoped and those codes never reached the book).
+    // The upload's report names the orders in the BOOK whose item has no
+    // routing in the masters just uploaded (an upload never adds orders, so the
+    // file's own SO sheet is irrelevant).
     renderMissingRoutings(d.report);
     await runPlan();           // refresh the book + schedule
     msg += ' · Schedule is ready. See the <a href="#schedule">Machine schedule</a>'
@@ -1406,7 +1394,7 @@ function renderTab(key) {
   const root = mountFor(key);
   if (!entry) {
     root.innerHTML = planEverLoaded
-      ? '<p class="placeholder">No plan yet. Upload a sales-order Excel on the Orders tab to get started.</p>'
+      ? '<p class="placeholder">No plan yet. Add orders on the Add New Orders tab to get started.</p>'
       : '<p class="placeholder">Loading your plan…</p>';
     return;
   }
@@ -1533,8 +1521,8 @@ async function renderOrders() {
       html += '<p class="placeholder">Loading your plan…</p>';
     } else {
       html += isAdmin
-        ? '<p class="placeholder">No orders yet. Upload your Excel file to begin.</p>'
-        : '<p class="placeholder">No orders yet. Ask an admin to upload the order Excel file.</p>';
+        ? '<p class="placeholder">No orders yet. Add orders on the Add New Orders tab to begin.</p>'
+        : '<p class="placeholder">No orders yet. Ask an admin to add orders on the Add New Orders tab.</p>';
     }
     root.innerHTML = html; return;
   }

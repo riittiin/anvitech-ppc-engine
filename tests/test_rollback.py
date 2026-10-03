@@ -16,11 +16,13 @@ _ADMIN = next(u for u, a in _ACCTS.items() if a["role"] == auth.ADMIN)
 _ADMIN_PWD = _ACCTS[_ADMIN]["password"]
 
 
+from tests.seed import upload_and_seed  # noqa: E402
+
 @pytest.fixture
 def client():
     c = TestClient(app)
     c.post("/login", data={"username": _ADMIN, "password": _ADMIN_PWD})
-    c.post("/upload", files={"file": ("sample.xlsx", _SAMPLE, XLSX_MIME)})
+    upload_and_seed(c, _SAMPLE)
     return c
 
 

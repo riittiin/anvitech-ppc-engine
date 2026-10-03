@@ -27,6 +27,8 @@ from tests.test_new_orders_api import (   # noqa: F401 -- fixtures, used by name
 )
 
 
+from tests.seed import upload_and_seed  # noqa: E402
+
 def _rows(table):
     """``to_table()``'s rows are plain VALUE LISTS in ``table["columns"]``
     order, not dicts — zip them back into dicts for readable assertions."""
@@ -303,7 +305,7 @@ def test_a_queue_on_a_non_new_engine_plans_in_one_stage_with_a_visible_note(
     r = c.post("/login", data={"username": "anvitech", "password": "1930rail"})
     assert r.status_code in (200, 303), r.text
     xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    up = c.post("/upload", files={"file": ("sample.xlsx", build_sample_bytes(), xlsx_mime)})
+    up = upload_and_seed(c, build_sample_bytes())
     assert up.status_code == 200, up.text
 
     # A queue can exist on a classic deployment only as leftover state — the
