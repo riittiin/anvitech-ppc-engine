@@ -49,13 +49,20 @@ Pure: everything comes from the parameters — no storage, no wall clock.
 """
 from __future__ import annotations
 
+from datetime import date
+
 from .loaders import normalize_process_name
+
+# The day the Daily Entry form first carried the report's fields (machine,
+# minutes available, setting time). Entries before it cannot be analysed and
+# are never shown (owner, 2026-10-04: "start from the 3rd of October").
+REPORT_START = date(2026, 10, 3)
 
 # Sheet1 row-6 headers, in sheet order (B..S, then U..X). Column T (Rate) is left
 # out on the owner's instruction. These are the contract for the preview table
 # and the xlsx download.
 INPUT_COLUMNS = (
-    "Date", "Machine", "Shift", "Operator", "Item description",
+    "Date", "Machine", "Shift", "Operator", "Item description", "Item code", "Process",
     "Cycle time in Min", "Minutes available in shift",
     "Actual OK Qty", "Rejected qty",
     "Std. setting time in Min", "Actual setting time in Min",
@@ -66,7 +73,8 @@ INPUT_COLUMNS = (
 # Per-line results. Productivity and efficiency are deliberately NOT here: the
 # floor types the whole shift on every line, so a per-line percentage is
 # misleading (owner, 2026-10-04). They live on the shift and month tables.
-RESULT_COLUMNS = ("Planned qty", "Total Actual Qty", "Standard minutes earned")
+RESULT_COLUMNS = ("Planned qty", "Total Actual Qty", "Total downtime (in Min)",
+                  "Standard minutes earned")
 REPORT_COLUMNS = INPUT_COLUMNS + RESULT_COLUMNS
 
 PCT_COLUMNS = ("Overall Productivity", "Operator efficiency")
@@ -74,12 +82,13 @@ SHIFT_COLUMNS = (
     "Date", "Shift", "Operator", "Machines", "Items", "Entries",
     "Minutes available in shift", "Actual setting time in Min", "Downtime (in Min)",
     "Minutes for production", "Standard minutes earned", "Total Actual Qty",
-) + PCT_COLUMNS + ("Note",)
+    "Counted in the month",
+) + PCT_COLUMNS + ("Note", "Working")
 MONTH_COLUMNS = (
     "Operator", "Shifts worked", "Shifts counted",
     "Minutes available in shift", "Actual setting time in Min", "Downtime (in Min)",
     "Minutes for production", "Standard minutes earned", "Total Actual Qty",
-) + PCT_COLUMNS + ("Note",)
+) + PCT_COLUMNS + ("Note", "Working")
 
 
 def cycle_time_for(masters, item_code, process_name):
@@ -143,9 +152,11 @@ def report_row(a, masters=None):
     values = (
         a.entry_date.strftime("%d-%m-%Y"),
         getattr(a, "machine", "") or "",
-        a.shift,
-        a.operator,
+        (a.shift or "").strip(),
+        (a.operator or "").strip() or "Unattributed",
         a.item_name or a.item_code,
+        a.item_code,
+        a.process,
         g,
         getattr(a, "shift_minutes", 0.0) or None,
         ok,
@@ -161,23 +172,28 @@ def report_row(a, masters=None):
         a.remarks,
         _r(planned),
         total,
+        _r(a.total_downtime_min(), 1),
         None if g is None else _r(total * g, 1),
     )
     return dict(zip(REPORT_COLUMNS, values))
 
 
 def _picked(actuals, masters, year, month):
-    """Every punch dated in (year, month), in floor order: date, shift, machine,
-    operator. Outsourced (OS) steps are left out — they run off-site, with no
+    """Every punch dated in (year, month), from REPORT_START on, in the order
+    date, shift, operator, machine. Outsourced (OS) steps are left out — they run off-site, with no
     machine, shift or operator to analyse."""
     from .orderbook import process_is_outsourced
 
     routings = getattr(masters, "routings", None) or {}
     picked = [a for a in actuals
               if a.entry_date.year == year and a.entry_date.month == month
+              and a.entry_date >= REPORT_START
               and not process_is_outsourced(routings.get(a.item_code), a.process)]
-    picked.sort(key=lambda a: (a.entry_date, a.shift, getattr(a, "machine", "") or "",
-                               a.operator, a.item_code))
+    # One operator's lines for one shift sit together, so the Excel's shift
+    # formulas can be plain SUM / MAX over a block of rows.
+    picked.sort(key=lambda a: (a.entry_date, (a.shift or "").strip(),
+                               (a.operator or "").strip() or "Unattributed",
+                               getattr(a, "machine", "") or "", a.item_code, a.process))
     return picked
 
 
@@ -197,14 +213,16 @@ def _shift_totals(lines, masters):
     h = max(minutes)
     setting = sum(a.actual_setup_min or 0.0 for a in lines)
     downtime = sum(a.total_downtime_min() for a in lines)
-    earned, pieces, no_ct = 0.0, 0.0, 0
+    earned, pieces, no_ct, terms = 0.0, 0.0, 0, []
     for a in lines:
         (_, total, _, _), g = actual_metrics(a, masters)
         pieces += total
         if g is None:
             no_ct += 1
+            terms.append(f"{_n(total)} x (no cycle time)")
         else:
             earned += total * g
+            terms.append(f"{_n(total)} x {_n(g)}")
     notes = []
     if no_ct:
         notes.append(f"{no_ct} entr{'y has' if no_ct == 1 else 'ies have'} no cycle time")
@@ -217,13 +235,35 @@ def _shift_totals(lines, masters):
     if h > 0 and production <= 0:
         notes.append("no time left after setting and downtime")
     return {"h": h, "setting": setting, "downtime": downtime, "production": production,
-            "earned": earned, "pieces": pieces, "complete": complete, "notes": notes}
+            "earned": earned, "pieces": pieces, "complete": complete, "notes": notes,
+            "terms": terms}
+
+
+def _n(x):
+    """A number as the working text shows it: no trailing .0, thousands commas."""
+    x = round(float(x), 2)
+    return f"{x:,.0f}" if x == int(x) else f"{x:,.2f}".rstrip("0").rstrip(".")
+
+
+def _working(earned_text, earned, h, setting, downtime, production, ok):
+    """The arithmetic behind a shift or month figure, written out in full."""
+    parts = [f"Standard minutes earned = {earned_text} = {_n(earned)}",
+             f"Minutes for production = {_n(h)} available - {_n(setting)} setting - "
+             f"{_n(downtime)} downtime = {_n(production)}"]
+    if ok:
+        parts.append(f"Operator efficiency = {_n(earned)} / {_n(production)} = "
+                     f"{earned / production * 100:.1f}%")
+        parts.append(f"Overall productivity = {_n(earned)} / {_n(h)} = {earned / h * 100:.1f}%")
+    else:
+        parts.append("No efficiency: see the note")
+    return ". ".join(parts) + "."
 
 
 def _by_operator_shift(picked):
     groups = {}
     for a in picked:
-        key = (a.entry_date, (a.shift or "").strip(), (a.operator or "").strip())
+        key = (a.entry_date, (a.shift or "").strip(),
+               (a.operator or "").strip() or "Unattributed")
         groups.setdefault(key, []).append(a)
     return groups
 
@@ -244,9 +284,12 @@ def shift_rows(actuals, masters, year, month):
             t["h"] or None, t["setting"], round(t["downtime"], 1),
             round(t["production"], 1) if t["h"] > 0 else None,
             round(t["earned"], 1), t["pieces"],
+            "Yes" if ok else "No",
             _pct(t["earned"], t["h"]) if ok else None,
             _pct(t["earned"], t["production"]) if ok else None,
             "; ".join(t["notes"]),
+            _working(" + ".join(t["terms"]), t["earned"], t["h"], t["setting"],
+                     t["downtime"], t["production"], ok),
         ))))
     return out
 
@@ -258,10 +301,12 @@ def operator_month_rows(actuals, masters, year, month):
     per_op = {}
     for (_day, _shift, op), lines in _by_operator_shift(
             _picked(actuals, masters, year, month)).items():
-        per_op.setdefault(op or "Unattributed", []).append(_shift_totals(lines, masters))
+        per_op.setdefault(op, []).append((_day, _shift, _shift_totals(lines, masters)))
     out = []
     for op, shifts in per_op.items():
-        counted = [t for t in shifts if t["complete"]]
+        counted = [t for _, _, t in shifts if t["complete"]]
+        names = [f"{d.strftime('%d-%m')} {sh}" for d, sh, t in sorted(shifts, key=lambda x: (x[0], x[1]))
+                 if t["complete"]]
         h = sum(t["h"] for t in counted)
         setting = sum(t["setting"] for t in counted)
         downtime = sum(t["downtime"] for t in counted)
@@ -274,10 +319,13 @@ def operator_month_rows(actuals, masters, year, month):
             op, len(shifts), len(counted),
             h or None, setting, round(downtime, 1),
             round(production, 1) if counted else None,
-            round(earned, 1), sum(t["pieces"] for t in shifts),
+            round(earned, 1), sum(t["pieces"] for _, _, t in shifts),
             _pct(earned, h) if counted else None,
             _pct(earned, production) if counted else None,
             note,
+            _working("sum over the shifts counted (" + ", ".join(names) + ")" if counted
+                     else "no shift counted", earned, h, setting, downtime, production,
+                     bool(counted)),
         ))))
     out.sort(key=lambda r: (r["Operator efficiency"] is None,
                             -(r["Operator efficiency"] or 0), r["Operator"]))

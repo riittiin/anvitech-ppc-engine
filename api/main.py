@@ -3553,67 +3553,24 @@ def production_analysis_report(year: int, month: int, request: Request):
     effect. See engine/production_analysis.py for the formulas."""
     require_admin(request)
     _validate_year_month(year, month)
-    return {"year": year, "month": month, **_production_tables(year, month)}
-
-
-# The sheet's own header colours: inputs green, results orange.
-_PA_INPUT_FILL = "D7E4BD"
-_PA_RESULT_FILL = "FCD5B4"
-
-
-def _pa_sheet(ws, title, year, month, columns, rows, result_cols):
-    """One report table laid out like the owner's workbook: title in B1, month in
-    B3/C3, headers on row 6 from column B, one row per record from row 7.
-    Percentages are written as real fractions shown as %."""
-    from openpyxl.styles import Alignment, Font, PatternFill
-
-    pct_cols = set(production_analysis.PCT_COLUMNS)
-    ws["B1"] = title
-    ws["B1"].font = Font(bold=True, size=14)
-    ws["B3"] = "Month - year"
-    ws["C3"] = f"{month:02d}-{year:04d}"
-    for j, name in enumerate(columns):
-        c = ws.cell(row=6, column=2 + j, value=name)
-        c.font = Font(bold=True)
-        c.alignment = Alignment(wrap_text=True, vertical="top")
-        c.fill = PatternFill("solid", fgColor=_PA_RESULT_FILL if name in result_cols
-                             else _PA_INPUT_FILL)
-        ws.column_dimensions[c.column_letter].width = 14
-    for i, row in enumerate(rows):
-        for j, name in enumerate(columns):
-            v = row[name]
-            if name in pct_cols and v is not None:
-                v = v / 100.0
-            c = ws.cell(row=7 + i, column=2 + j, value=_csv_safe(v) if isinstance(v, str) else v)
-            if name in pct_cols:
-                c.number_format = "0.0%"
+    return {"year": year, "month": month,
+            "starts": production_analysis.REPORT_START.isoformat(),
+            **_production_tables(year, month)}
 
 
 @app.get("/production-analysis.xlsx")
 def production_analysis_xlsx(year: int, month: int, request: Request):
-    """Same report as an Excel file (admin only), one sheet per table: the
-    month per operator first, then the shifts, then every entry ("Sheet1",
-    laid out like the owner's original workbook)."""
+    """Same report as an Excel file (admin only): every figure a live formula over
+    the cells it comes from, plus a written working. See
+    engine/production_analysis_xlsx.py."""
     require_admin(request)
     _validate_year_month(year, month)
-    from openpyxl import Workbook
+    from engine import production_analysis_xlsx as pax
 
-    t = _production_tables(year, month)
-    pa = production_analysis
-    totals = set(pa.MONTH_COLUMNS[3:-1])
-    wb = Workbook()
-    _pa_sheet(wb.active, "Operator efficiency for the month", year, month,
-              pa.MONTH_COLUMNS, t["operators"]["rows"], totals)
-    wb.active.title = "Operator efficiency"
-    _pa_sheet(wb.create_sheet("Shift-wise"), "Operator efficiency per shift", year, month,
-              pa.SHIFT_COLUMNS, t["shifts"]["rows"], set(pa.SHIFT_COLUMNS[6:-1]))
-    _pa_sheet(wb.create_sheet("Sheet1"), "Monthly production analysis", year, month,
-              pa.REPORT_COLUMNS, t["entries"]["rows"], set(pa.RESULT_COLUMNS))
-    buf = io.BytesIO()
-    wb.save(buf)
+    data = pax.build(year, month, _production_tables(year, month))
     fname = f"production-analysis-{year:04d}-{month:02d}.xlsx"
     return Response(
-        content=buf.getvalue(),
+        content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )

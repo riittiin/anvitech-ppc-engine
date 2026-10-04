@@ -16,6 +16,17 @@
 >   ruled: an operator running two machines at once is counted once per shift, so
 >   over 100% is correct** (Sidhu Singe 03-10: CNC3 + CNC6, 1,260 earned / 660 =
 >   191%). Standard setting time is still recorded and used in no formula.
+>   **Follow-up (2026-10-04): the report starts at `REPORT_START = 2026-10-03`** (the
+>   form had no minutes/machine before), and **the Excel is fully transparent**:
+>   `engine/production_analysis_xlsx.py` (XlsxWriter, now in requirements) writes
+>   every calculated cell as a live formula WITH its value (Shift-wise = SUM/MAX over
+>   that shift's block on "Every entry", whose rows are sorted date/shift/operator so
+>   each shift is one block; month = SUMIFS/COUNTIFS), plus a "Working" text column
+>   and a "How it is calculated" sheet. Text cells go through `write_string`, since a
+>   line starting "=" would otherwise become a formula. Verified by recalculating every
+>   formula with pycel from a copy with the stored values STRIPPED (given the original
+>   file, pycel just returns the stored values, and a mutated formula passed);
+>   `test_every_excel_formula_gives_the_value_the_preview_shows`, mutation-checked.
 >
 > - **AN EXCEL UPLOAD NO LONGER TOUCHES THE SALES ORDERS (2026-10-03, owner
 >   request).** New orders come in through **Add New Orders only**. `POST /upload`

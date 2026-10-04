@@ -2520,7 +2520,8 @@ async function previewProductionAnalysis() {
     if (!res.ok) { setStatus("Production analysis error: " + (body.detail || res.status), true); return; }
     if (!el) return;
     if (!body.entries || !body.entries.rows || body.entries.rows.length === 0) {
-      el.innerHTML = '<div class="empty">No entries this month</div>'; return;
+      el.innerHTML = '<div class="empty">No entries this month. The report starts on '
+        + escapeHtml(isoToDdmmyyyy(body.starts || "")) + '.</div>'; return;
     }
     const pct = new Set(["Overall Productivity", "Operator efficiency"]);
     const cell = (c, v) => (v === null || v === undefined || v === "" ? (c === "Note" ? "" : "-")

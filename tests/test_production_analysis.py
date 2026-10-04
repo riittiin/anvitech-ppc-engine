@@ -73,8 +73,8 @@ def test_new_fields_round_trip_and_legacy_rows_default():
 
 def test_report_columns_match_the_sheet_order():
     assert pa.REPORT_COLUMNS[0] == "Date" and pa.REPORT_COLUMNS[1] == "Machine"
-    assert pa.REPORT_COLUMNS[-3:] == ("Planned qty", "Total Actual Qty",
-                                      "Standard minutes earned")
+    assert pa.REPORT_COLUMNS[-4:] == ("Planned qty", "Total Actual Qty",
+                                      "Total downtime (in Min)", "Standard minutes earned")
     assert "Rate" not in pa.REPORT_COLUMNS
     # Per-line percentages are misleading (owner, 2026-10-04): never on an entry row.
     assert "Operator efficiency" not in pa.REPORT_COLUMNS
@@ -82,7 +82,7 @@ def test_report_columns_match_the_sheet_order():
 
 
 # --- shift and month totals (owner, 2026-10-04) ----------------------------- #
-def _line(item, qty, ct, mins=660, setup=0.0, op="Operator A", day=1, shift="1st shift",
+def _line(item, qty, ct, mins=660, setup=0.0, op="Operator A", day=5, shift="1st shift",
           machine="CNC1", **kw):
     return Actual(so_no="S", item_code=item, entry_date=date(2026, 10, day), shift=shift,
                   operator=op, process="CNC FIRST SIDE", qty_produced=qty,
@@ -121,7 +121,7 @@ def test_one_line_shift_matches_the_sheet_formula():
 
 def test_shifts_are_split_by_day_shift_and_operator():
     acts = [_line("A", 10, 6), _line("B", 10, 6, op="Operator B"),
-            _line("A", 10, 6, shift="2nd shift", mins=600), _line("A", 10, 6, day=2)]
+            _line("A", 10, 6, shift="2nd shift", mins=600), _line("A", 10, 6, day=6)]
     rows = pa.shift_rows(acts, None, 2026, 10)
     assert len(rows) == 4
     assert all(r["Entries"] == 1 for r in rows)
@@ -131,8 +131,8 @@ def test_the_month_adds_minutes_and_never_averages_percentages():
     """Shift 1: 600 earned in 600 production minutes (100%). Shift 2: 60 earned
     in 300 (20%, the rest was setting). Averaging the percentages gives 60%;
     the month is 660 earned / 900 minutes = 73.3%."""
-    acts = [_line("A", 100, 6.0, mins=600, day=1),                 # 600 / 600
-            _line("A", 10, 6.0, mins=600, setup=300, day=2)]       # 60 / 300 = 20%
+    acts = [_line("A", 100, 6.0, mins=600, day=5),                 # 600 / 600
+            _line("A", 10, 6.0, mins=600, setup=300, day=6)]       # 60 / 300 = 20%
     (row,) = pa.operator_month_rows(acts, None, 2026, 10)
     assert row["Shifts worked"] == 2 and row["Shifts counted"] == 2
     assert row["Minutes for production"] == 900
@@ -142,10 +142,10 @@ def test_the_month_adds_minutes_and_never_averages_percentages():
 
 
 def test_a_shift_with_a_missing_cycle_time_has_no_figure_and_leaves_the_month():
-    acts = [_line("A", 100, 6.0, mins=600, day=1),
-            _line("A", 50, 6.0, mins=600, day=2), _line("B", 50, None, mins=600, day=2)]
+    acts = [_line("A", 100, 6.0, mins=600, day=5),
+            _line("A", 50, 6.0, mins=600, day=6), _line("B", 50, None, mins=600, day=6)]
     shifts = pa.shift_rows(acts, None, 2026, 10)
-    day2 = next(r for r in shifts if r["Date"] == "02-10-2026")
+    day2 = next(r for r in shifts if r["Date"] == "06-10-2026")
     assert day2["Operator efficiency"] is None
     assert "no cycle time" in day2["Note"]
     (month,) = pa.operator_month_rows(acts, None, 2026, 10)
@@ -184,7 +184,7 @@ from engine import book_store  # noqa: E402
 from engine.models import Order  # noqa: E402
 from tests.sample_workbook import build_sample_bytes, ITEM_A  # noqa: E402
 
-DAY = "2026-09-15"
+DAY = "2026-10-03"   # the report's first day (REPORT_START), and never in the future
 
 
 def _api():
@@ -247,7 +247,7 @@ def test_monthly_report_json_and_excel():
     _post(c, machine="BS1", shift_minutes=330, qty_produced=12, qty_rejected=2,
           actual_setup_min=0, no_power_min=30)
     _post(c, machine="BS1", shift_minutes=330, qty_produced=8)
-    r = c.get("/production-analysis", params={"year": 2026, "month": 9})
+    r = c.get("/production-analysis", params={"year": 2026, "month": 10})
     assert r.status_code == 200
     body = r.json()
     e1, e2 = body["entries"]["rows"]
@@ -262,21 +262,106 @@ def test_monthly_report_json_and_excel():
     (op,) = body["operators"]["rows"]
     assert op["Operator"] == "Operator One"
     assert op["Operator efficiency"] == shift["Operator efficiency"]
-    empty = c.get("/production-analysis", params={"year": 2026, "month": 8}).json()
+    empty = c.get("/production-analysis", params={"year": 2026, "month": 9}).json()
     assert empty["entries"]["rows"] == [] and empty["operators"]["rows"] == []
 
-    x = c.get("/production-analysis.xlsx", params={"year": 2026, "month": 9})
+    x = c.get("/production-analysis.xlsx", params={"year": 2026, "month": 10})
     assert x.status_code == 200
     from openpyxl import load_workbook
-    wb = load_workbook(io.BytesIO(x.content))
-    assert wb.sheetnames == ["Operator efficiency", "Shift-wise", "Sheet1"]
-    ws = wb["Operator efficiency"]
-    col = 2 + pa.MONTH_COLUMNS.index("Operator efficiency")
-    assert ws.cell(row=6, column=col).value == "Operator efficiency"
-    assert ws.cell(row=7, column=col).value == pytest.approx(0.2, abs=0.001)
-    ws = wb["Sheet1"]
-    assert ws["B6"].value == "Date" and ws["C6"].value == "Machine"
-    assert ws.cell(row=6, column=1 + len(pa.REPORT_COLUMNS)).value == "Standard minutes earned"
+    from engine import production_analysis_xlsx as pax
+    values = load_workbook(io.BytesIO(x.content), data_only=True)
+    formulas = load_workbook(io.BytesIO(x.content))
+    assert values.sheetnames == ["Operator efficiency", "Shift-wise", "Every entry",
+                                 "How it is calculated"]
+    month_col = 2 + pa.MONTH_COLUMNS.index("Operator efficiency")
+    assert values["Operator efficiency"].cell(row=7, column=month_col).value == \
+        pytest.approx(0.2, abs=0.001)
+    # Transparent: every calculated cell is a formula over the cells it comes from.
+    f = formulas["Operator efficiency"].cell(row=7, column=month_col).value
+    assert f.startswith("=IF(") and "/" in f
+    sh = formulas["Shift-wise"]
+    col = lambda name: 2 + pa.SHIFT_COLUMNS.index(name)
+    assert sh.cell(row=7, column=col("Minutes available in shift")).value.startswith(
+        "=MAX('Every entry'!")
+    assert sh.cell(row=7, column=col("Standard minutes earned")).value.startswith(
+        "=SUM('Every entry'!")
+    en = formulas["Every entry"]
+    assert en["B6"].value == "Date" and en["C6"].value == "Machine"
+    earned = en.cell(row=7, column=2 + pa.REPORT_COLUMNS.index("Standard minutes earned"))
+    assert earned.value.startswith("=IF(ISNUMBER(")
+    working = values["Shift-wise"].cell(row=7, column=col("Working")).value
+    assert working.startswith("Standard minutes earned = 12 x 3 + 8 x 3 = 60")
+
+
+def test_every_excel_formula_gives_the_value_the_preview_shows():
+    """Evaluate every formula in the download independently (pycel) and check it
+    gives the stored value, which is the value the preview shows. Covers a
+    multi-line shift, a second operator, and a shift left out for a missing
+    cycle time."""
+    pycel = pytest.importorskip("pycel")
+    import pycel.excellib as xl
+    if not hasattr(xl, "counta"):           # pycel lacks COUNTA: Excel's meaning
+        def counta(*args):
+            flat = []
+            for a in args:
+                flat.extend(v for r in a for v in r) if isinstance(a, tuple) else flat.append(a)
+            return sum(1 for v in flat if v not in (None, ""))
+        xl.counta = counta
+    from engine import production_analysis_xlsx as pax
+    import math
+    acts = [_line("A", 30, 4.0, setup=90), _line("B", 20, 6.0, setup=90),
+            _line("C", 25, 2.4, setup=180),
+            _line("A", 50, 6.0, mins=600, op="Operator B", shift="2nd shift"),
+            _line("A", 10, 6.0, day=6), _line("D", 5, None, day=6),
+            _line("A", 10, 6.0, op="Operator B", day=6, no_power_min=60)]
+    tables = {"operators": {"rows": pa.operator_month_rows(acts, None, 2026, 10)},
+              "shifts": {"rows": pa.shift_rows(acts, None, 2026, 10)},
+              "entries": {"rows": pa.monthly_rows(acts, None, 2026, 10)}}
+    import tempfile, os
+    data = pax.build(2026, 10, tables)
+    from openpyxl import load_workbook
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "r.xlsx")
+        open(path, "wb").write(data)
+        wf, wv = load_workbook(path), load_workbook(path, data_only=True)
+        # Re-saving through openpyxl drops every stored value, so pycel has to
+        # RECALCULATE each formula from the inputs; given the original file it
+        # would just hand back the stored values and prove nothing.
+        bare = os.path.join(d, "bare.xlsx")
+        wf.save(bare)
+        xc = pycel.ExcelCompiler(filename=bare)
+        n = 0
+        for name in wf.sheetnames:
+            for row in wf[name].iter_rows(min_row=7):
+                for cell in row:
+                    if cell.data_type == "f":
+                        n += 1
+                        got = xc.evaluate(f"'{name}'!{cell.coordinate}")
+                        want = wv[name][cell.coordinate].value
+                        if isinstance(want, (int, float)):
+                            # The stored value is the preview's, rounded to 0.1 (0.1% for
+                            # a percentage); the formula's exact result must round to it.
+                            head = wf[name].cell(row=6, column=cell.column).value
+                            tol = 0.0005 if head in pa.PCT_COLUMNS else 0.05
+                            assert abs(got - want) <= tol + 1e-9, (name, cell.coordinate, got, want)
+                        else:
+                            assert got == want, (name, cell.coordinate, got, want)
+        assert n > 50
+        # Text is never a formula: the only formulas are the calculated cells.
+        how = wf["How it is calculated"]
+        assert not any(c.data_type == "f" for row in how.iter_rows() for c in row)
+        assert how["C5"].value == "= Actual OK Qty + Rejected qty"
+
+
+def test_entries_before_the_report_start_are_left_out():
+    """The form first had the report's fields on 03-10-2026; a 02-10 line has no
+    minutes or machine and would only show as a shift 'left out'."""
+    acts = [_line("A", 10, 6.0, day=2), _line("A", 10, 6.0, day=3)]
+    assert [r["Date"] for r in pa.monthly_rows(acts, None, 2026, 10)] == ["03-10-2026"]
+    assert len(pa.shift_rows(acts, None, 2026, 10)) == 1
+    (month,) = pa.operator_month_rows(acts, None, 2026, 10)
+    assert month["Shifts worked"] == 1
+    assert pa.monthly_rows([_line("A", 10, 6.0, day=30)], None, 2026, 9) == []
 
 
 def test_report_fields_never_reach_the_plan():
