@@ -41,6 +41,7 @@ from . import rule4_setup_time as r4
 # view of "what is machine work" stays identical to how Rule 6 actually schedules
 # it. rule6 does not import rule3, so this import is safe (no cycle).
 from .rule6_allocate import _is_os, _is_offmachine
+from ..planning_time import planning_cycle_time
 
 
 def _is_machine_work(proc):
@@ -76,17 +77,19 @@ def _work_needed(routing, qty, config):
     excluded (they are not cycle x qty machine work — see ``_is_machine_work``)."""
     if routing is None:
         return 0.0
-    return sum(r4.occupancy_minutes(p.cycle_time, qty, config)
+    return sum(r4.occupancy_minutes(planning_cycle_time(p, config), qty, config)
                for p in routing.processes if _is_machine_work(p))
 
 
-def _cycle_per_piece(routing):
+def _cycle_per_piece(routing, config=None):
     """Per-piece machining time shown as 'Cycle time per piece' — the sum of the
     REAL in-house steps' cycle times. Excludes OS (flat vendor turnaround) and
-    off-machine milestones, which are not per-piece machine cycle time."""
+    off-machine milestones, which are not per-piece machine cycle time. With a
+    new-engine ``config`` it is the PLANNING time (CNC/VMC + 30%,
+    engine/planning_time.py); with none it is the Excel value."""
     if routing is None:
         return 0.0
-    return sum(p.cycle_time for p in routing.processes
+    return sum(planning_cycle_time(p, config) for p in routing.processes
                if isinstance(p.cycle_time, (int, float)) and _is_machine_work(p))
 
 
@@ -116,7 +119,7 @@ def run(batches, config=None, notes=None, masters=None, **kw):
 
     # Per-piece machining time for display (Schedule INPUT "Cycle time per piece").
     for b in batches:
-        b.total_process_time = _cycle_per_piece(routings.get(b.item_code))
+        b.total_process_time = _cycle_per_piece(routings.get(b.item_code), config)
 
     def sort_key(b):
         work, avail, slack, cr = _metrics(b, masters, clock, plan_start, config)

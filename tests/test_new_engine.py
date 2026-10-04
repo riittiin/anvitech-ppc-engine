@@ -301,10 +301,16 @@ def test_optimizer_ranks_replay_to_the_same_plan(old_book, new_masters):
     sw = sweep_optimize(so_lines, _CONF, masters, budget_evals=40, seed=1)
     assert sw.result.ranks and "makespan_days" in sw.result.best
 
-    # Replaying the ranks through the app's normal path reproduces the reported metrics.
+    # Replaying the ranks through the app's normal path, at the settings the sweep
+    # won (Apply persists both the overlap and the machine set), reproduces the
+    # reported metrics. Replaying at the DEFAULT settings only matched while the
+    # sweep happened to pick them.
+    from dataclasses import replace
+    won = replace(_CONF, overlap_percent=sw.overlap_percent,
+                  flexible_machines=sw.flexible_machines)
     pr = PlanRun(so_lines=so_lines)
-    pipeline.run_forward(pr, _CONF, masters, priority_rank=sw.result.ranks)
-    replayed = optimizer.plan_metrics(pr.schedule, so_lines, _CONF.plan_start_date)
+    pipeline.run_forward(pr, won, masters, priority_rank=sw.result.ranks)
+    replayed = optimizer.plan_metrics(pr.schedule, so_lines, won.plan_start_date)
     assert replayed["makespan_days"] == sw.result.best["makespan_days"]
 
 

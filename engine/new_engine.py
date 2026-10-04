@@ -24,12 +24,14 @@ import hashlib
 import io
 import re
 from collections import defaultdict
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 
 from engine import book_store
 from engine.loaders import normalize_process_name
 from engine.models import ScheduleEntry
 from engine.optimizer import COMMITTED_PROMISE_WEIGHT
+from engine.planning_time import pad_routings
 
 from ppc_engine.config import PlanConfig
 from ppc_engine.domain.order import Order
@@ -88,6 +90,9 @@ def _new_masters(flexible: bool = False):
         for k in [k for k in _MASTERS_CACHE if k[0] != h]:
             del _MASTERS_CACHE[k]
         cached = load_all(io.BytesIO(raw), flexible_machines=bool(flexible)).masters
+        # Planning schedules CNC/VMC at cycle + 30%; the workbook keeps the original
+        # (engine/planning_time.py is the one place that rule lives).
+        cached = replace(cached, routings=pad_routings(cached.routings))
         _MASTERS_CACHE[key] = cached
     return cached
 
@@ -825,7 +830,9 @@ def _entries_from_schedule(sched, batch_by_key):
 # still owes: it resumes only the pieces already past that step, and the rest go
 # through it first (`flow_scheduler._preplace_frozen`). Real work moves wherever a
 # clubbed batch mixes stages or an outsourced step still has pieces out.
-SCHEDULER_FINGERPRINT = "new-engine-v10-meal-breaks"
+# v11 (2026-10-04) = planning schedules every CNC/VMC step at the Excel cycle time
+# + 30% (`engine/planning_time.py`); the workbook keeps the original. Real work moves.
+SCHEDULER_FINGERPRINT = "new-engine-v11-cnc-vmc-planning-30pct"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,

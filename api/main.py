@@ -48,6 +48,7 @@ from engine import book_store, orderbook
 from engine import operator_coverage
 from engine import storage
 from engine import production_analysis
+from engine import planning_time
 from engine import operator_master
 from engine import freeze
 from engine.rules import (
@@ -738,7 +739,8 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
         e = plan_run.schedule[0]
         routing = masters.routings.get(e.item_code)
         proc = routing.processes[0] if routing else None
-        cycle = proc.cycle_time if proc else None
+        # The cycle the PLAN used (CNC/VMC + 30%), so it matches the occupancy beside it.
+        cycle = planning_time.planning_cycle_time(proc, config) if proc else None
         notes4 = [f"occupancy = cycle({cycle}) x qty({e.qty:g}) + setup({config.setup_time_min}) = {e.occupancy_min:g} min"]
     else:
         notes4 = ["no scheduled processes to illustrate"]

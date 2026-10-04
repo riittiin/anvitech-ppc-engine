@@ -26,6 +26,7 @@ from datetime import date
 import pytest
 
 from engine import book_store, freeze, loaders, new_engine
+from engine.planning_time import planning_cycle_time
 from engine.config import Config
 from engine.models import SOLine
 from engine.rules import rule1_consolidate
@@ -104,7 +105,8 @@ def test_frozen_op_gets_the_machine_time_for_the_whole_batch(masters):
     frozen = _frozen_for(masters, batches[0], [started, fresh], {"SO-0120": 166})
 
     entries = new_engine.run(batches, _CONF, None, masters, frozen=frozen)
-    cycle = masters.routings[ITEM_A].processes[0].cycle_time
+    # The PLANNING cycle (CNC/VMC + 30%, engine/planning_time.py): the plan books it.
+    cycle = planning_cycle_time(masters.routings[ITEM_A].processes[0], _CONF)
     occupancy = sum(e.occupancy_min for e in _first_step(masters, entries))
     # A resumed op is charged no setup, so it is exactly pieces x cycle.
     assert occupancy == pytest.approx((88 + 281) * cycle), (
@@ -126,7 +128,8 @@ def test_two_in_progress_lines_in_one_batch_make_one_frozen_op(masters):
     bars = _first_step(masters, entries)
     assert len(bars) == 1
     assert bars[0].qty == 88 + 181
-    cycle = masters.routings[ITEM_A].processes[0].cycle_time
+    # The PLANNING cycle (CNC/VMC + 30%, engine/planning_time.py): the plan books it.
+    cycle = planning_cycle_time(masters.routings[ITEM_A].processes[0], _CONF)
     assert bars[0].occupancy_min == pytest.approx((88 + 181) * cycle)
 
 

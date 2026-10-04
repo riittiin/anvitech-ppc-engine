@@ -149,11 +149,13 @@ def test_the_scheduler_fingerprint_records_the_new_semantics():
     discounted, linear tardiness term) — ranks saved under the old objective were
     chosen by a different rule and must be re-searched."""
     from engine import new_engine
-    # Last bumped 2026-10-04: meal breaks (lunch 13:00-13:30, dinner 22:00-22:30)
-    # are cut out of every working window, so work moves on every book. Before that,
+    # Last bumped 2026-10-04 (second time that day): planning schedules every
+    # CNC/VMC step at the Excel cycle time + 30% (engine/planning_time.py), so work
+    # moves on every book. Before that, the same day: meal breaks (lunch 13:00-13:30,
+    # dinner 22:00-22:30) are cut out of every working window. Before that,
     # 2026-09-27: an in-progress step no longer lets its batch skip a
     # step it still owes. Before that, 2026-09-22: the placement step no longer leaves a machine idle
     # while a qualified person is free and work is ready (stretch-based staffing,
     # per-machine committed spans), so ranks scored under the old placement are
     # stale on every book.
-    assert new_engine.SCHEDULER_FINGERPRINT == "new-engine-v10-meal-breaks"
+    assert new_engine.SCHEDULER_FINGERPRINT == "new-engine-v11-cnc-vmc-planning-30pct"
