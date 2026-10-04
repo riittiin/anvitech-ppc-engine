@@ -2,6 +2,27 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-27)
 >
+> - **PLANNING ADDS 30% TO CNC/VMC CYCLE TIMES IN CODE; THE EXCEL HOLDS THE ORIGINAL
+>   (2026-10-04, owner, main `b752ea6`).** The +30% (later +20%) used to be typed into
+>   the Item's process Master; the owner had it restored to his ORIGINAL times and
+>   wants the allowance applied by the software, in planning only.
+>   **`engine/planning_time.py` is the one place the rule lives**
+>   (`CNC_VMC_PLANNING_FACTOR = 1.30`; CNC/VMC = `OperationKind.MACHINING`, classified
+>   on the original number; manual, inspection, outsourced and dispatch steps are never
+>   padded). Wired at `new_engine._new_masters` (the one door for the plan, the
+>   optimizer local and cloud, Add New Orders), Rule 3's `_work_needed` /
+>   `_cycle_per_piece` (gated on `config.scheduler == "new"`, so classic and the golden
+>   trace are unchanged) and the Rule 4 tab's example label. **Production analysis,
+>   operator efficiency, Daily Entry and the displayed master read the Excel value,
+>   untouched.** The Gantt, Analytics, delay report and shift-wise sheet are drawn from
+>   the plan, so they show the padded durations. `SCHEDULER_FINGERPRINT` =
+>   `new-engine-v11-cnc-vmc-planning-30pct`. Mutation-tested 7 of 7
+>   (`tests/test_planning_cycle_time.py`). Found on the way:
+>   `test_optimizer_ranks_replay_to_the_same_plan` replayed at the DEFAULT overlap and
+>   only passed because the sweep happened to pick it; it now replays at the won
+>   overlap and machine set, as Apply does. **Never upload a master with an allowance
+>   typed in: it is padded twice.**
+>
 > - **MEAL BREAKS: NOTHING RUNS 13:00-13:30 OR 22:00-22:30 (2026-10-04, owner).** A
 >   shift has 630 / 570 working minutes, not 660 / 600, on every machine and station.
 >   ONE definition: `engine/config.Config.lunch_break_*_min` / `dinner_break_*_min`.
