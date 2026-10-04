@@ -412,3 +412,33 @@ def test_report_fields_never_reach_the_plan():
     lines = lambda acts: [(l.so_no, l.item_code, l.qty, l.process_qty)
                           for l in orderbook.active_so_lines(orders, acts)]
     assert lines([plain]) == lines([rich])
+
+
+# --- the cycle time comes from the CURRENT master (owner, 2026-10-04) ----------- #
+def _master(item="I", process="CNC FIRST SIDE", ct=45.0):
+    from types import SimpleNamespace as NS
+    from engine.models import Process, Routing
+    proc = Process(seq=1, name=process, cycle_time=ct, total_time=ct,
+                   suggested_machine="CNC1", allotted_machine="CNC1")
+    return NS(routings={item: Routing(item_code=item, description="", customer="",
+                                      rm_type="", moq=None, processes=[proc])})
+
+
+def test_the_current_master_wins_over_the_value_saved_on_the_punch():
+    """A punch saved while the master carried a padded 54 reads the master's 45 now:
+    the report always uses the master on file, never a stale snapshot."""
+    a = _line("I", 10, 54.0, mins=630)
+    row = pa.report_row(a, _master(ct=45.0), WORKING)
+    assert row["Cycle time in Min"] == 45
+    assert row["Standard minutes earned"] == 450              # 10 x 45, not 10 x 54
+    (shift,) = pa.shift_rows([a], _master(ct=45.0), 2026, 10, WORKING)
+    assert shift["Standard minutes earned"] == 450
+    (month,) = pa.operator_month_rows([a], _master(ct=45.0), 2026, 10, WORKING)
+    assert month["Standard minutes earned"] == 450
+
+
+def test_a_step_no_longer_in_the_master_falls_back_to_the_saved_value():
+    a = _line("I", 10, 54.0, mins=630)
+    for master in (_master(item="OTHER"), _master(process="RENAMED STEP"),
+                   _master(ct=None)):
+        assert pa.report_row(a, master, WORKING)["Cycle time in Min"] == 54

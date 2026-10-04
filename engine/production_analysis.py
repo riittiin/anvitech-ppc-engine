@@ -8,7 +8,7 @@ change (2026-10-03): operator efficiency deducts the ACTUAL setting time (L),
 not the standard one (K), so a setup that overruns its standard never counts
 against the operator's production pace.
 
-    G  cycle time (min/piece)       Item's Process Master, snapshotted on the punch
+    G  cycle time (min/piece)       the CURRENT Item's Process Master (the punch's saved value only if the master has none)
     H  minutes available in shift   typed on Daily Entry (defaults to the shift length)
     I  actual OK qty                qty produced − qty rejected
     J  rejected qty
@@ -136,13 +136,15 @@ def _cap(a, working):
 
 
 def actual_metrics(a, masters=None, working=None):
-    """`metrics` for a stored Actual. The cycle time is the one snapshotted on
-    the punch; a punch saved before snapshots existed falls back to the Process
-    Master (when given). Minutes available never count past the shift's working
-    minutes (``working``): nothing is made in the meal break."""
-    g = getattr(a, "cycle_time_min", None)
-    if g is None and masters is not None:
-        g = cycle_time_for(masters, a.item_code, a.process)
+    """`metrics` for a stored Actual. The cycle time is the CURRENT Process
+    Master's (owner, 2026-10-04: one set of standards, the latest, so a master
+    upload re-reads every month); the value snapshotted on the punch is used only
+    when the master has none for that item and step (removed or renamed). Minutes
+    available never count past the shift's working minutes (``working``): nothing
+    is made in the meal break."""
+    g = cycle_time_for(masters, a.item_code, a.process) if masters is not None else None
+    if g is None:
+        g = getattr(a, "cycle_time_min", None)
     ok = max((a.qty_produced or 0.0) - (a.qty_rejected or 0.0), 0.0)
     h = getattr(a, "shift_minutes", 0.0) or 0.0
     cap = _cap(a, working)
