@@ -102,14 +102,18 @@ class _Sheet:
 def _entries(sh, rows):
     g, h, i, j = (sh.col("Cycle time in Min"), sh.col("Minutes available in shift"),
                   sh.col("Actual OK Qty"), sh.col("Rejected qty"))
+    w = sh.col("Working minutes in shift (after break)")
     down_first, down_last = sh.col("No power (in Min)"), sh.col("No Load (in Min)")
     v = sh.col("Total Actual Qty")
     for k, row in enumerate(rows):
         n = HEADER_ROW + 2 + k
         for name in pa.INPUT_COLUMNS:
             sh.put(k, name, row[name])
+        # Minutes available never count past the shift's working minutes (the meal
+        # break), so the planned qty divides the smaller of the two.
+        mins = f"IF(ISNUMBER({w}{n}),MIN({h}{n},{w}{n}),{h}{n})"
         sh.put(k, "Planned qty", row["Planned qty"],
-               f'=IF(AND(ISNUMBER({g}{n}),{g}{n}>0),{h}{n}/{g}{n},"-")')
+               f'=IF(AND(ISNUMBER({g}{n}),{g}{n}>0),{mins}/{g}{n},"-")')
         sh.put(k, "Total Actual Qty", row["Total Actual Qty"], f"={i}{n}+{j}{n}")
         sh.put(k, "Total downtime (in Min)", row["Total downtime (in Min)"],
                f"=SUM({down_first}{n}:{down_last}{n})")
@@ -141,8 +145,13 @@ def _shifts(sh, rows, entry_sh, blocks):
         for name in ("Date", "Shift", "Operator", "Machines", "Items", "Note", "Working"):
             sh.put(k, name, row[name])
         sh.put(k, "Entries", row["Entries"], f"=COUNTA({e('Date')})")
-        sh.put(k, "Minutes available in shift", row["Minutes available in shift"] or 0,
+        sh.put(k, "Minutes entered", row["Minutes entered"] or 0,
                f"=MAX({e('Minutes available in shift')})")
+        sh.put(k, "Working minutes in shift (after break)", row["Working minutes in shift (after break)"], f"=MAX({e('Working minutes in shift (after break)')})"
+               if row["Working minutes in shift (after break)"] is not None else None)
+        en, wk = c("Minutes entered"), c("Working minutes in shift (after break)")
+        sh.put(k, "Minutes available in shift", row["Minutes available in shift"] or 0,
+               f"=IF(ISNUMBER({wk}),MIN({en},{wk}),{en})")
         sh.put(k, "Actual setting time in Min", row["Actual setting time in Min"],
                f"=SUM({e('Actual setting time in Min')})")
         sh.put(k, "Downtime (in Min)", row["Downtime (in Min)"],
@@ -204,7 +213,6 @@ HOW_ROWS = (
      "Every Daily Entry line typed from 03-10-2026 on (the day the form first had these "
      "fields). Outsourced steps are left out. Cycle time is the Item's Process Master value "
      "saved on the line when it was typed."),
-    ("Every entry: Planned qty", "= Minutes available in shift / Cycle time"),
     ("Every entry: Total Actual Qty", "= Actual OK Qty + Rejected qty"),
     ("Every entry: Total downtime", "= No power + No operator + Machine breakdown + Tool problem "
                                     "+ Other work done + No load"),
@@ -212,9 +220,17 @@ HOW_ROWS = (
      "= Total Actual Qty x Cycle time. The minutes the pieces should take at standard pace."),
     ("Shift-wise: one row", "One operator, one day, one shift: all of that operator's lines "
                             "for the shift together (a block of rows on Every entry)."),
-    ("Shift-wise: Minutes available in shift",
+    ("Working minutes in shift (after break)",
+     "1st shift 08:00-19:00 = 660 minutes less the 13:00-13:30 lunch = 630. 2nd shift "
+     "19:00-05:00 = 600 minutes less the 22:00-22:30 dinner = 570. Nobody works in a break."),
+    ("Every entry: Planned qty", "= the smaller of Minutes available and Working minutes, "
+                                 "divided by Cycle time"),
+    ("Shift-wise: Minutes entered",
      "= the LARGEST minutes available typed on the shift's lines. The floor types the whole "
      "shift on every line, so it is counted once, never added up."),
+    ("Shift-wise: Minutes available in shift",
+     "= the smaller of Minutes entered and Working minutes in shift. A line typed before "
+     "the break was taken out (660 / 600) counts as 630 / 570."),
     ("Shift-wise: Actual setting time, Downtime", "= added up over the shift's lines"),
     ("Shift-wise: Minutes for production", "= Minutes available - Actual setting time - Downtime"),
     ("Shift-wise: Standard minutes earned", "= added up over the shift's lines"),

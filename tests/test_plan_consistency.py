@@ -200,7 +200,8 @@ def test_single_shift_station_window_follows_the_active_engine():
     158 hours of scheduled work sat outside the window those features believed in."""
     from engine.operator_coverage import eligible_window
     new = eligible_window(_manual_machine(), Config(scheduler="new"))
-    assert new == [(8 * 60, 19 * 60)]
+    # the whole first shift, less the 13:00-13:30 lunch (2026-10-04)
+    assert new == [(8 * 60, 13 * 60), (13 * 60 + 30, 19 * 60)]
 
     # The retired classic engine really did use 09:00-18:00 — it must not move, or the
     # ~500 tests that validate it (and the golden trace) would be measuring a new shop.
@@ -218,7 +219,7 @@ def test_single_shift_station_coverage_window_follows_the_active_engine():
     masters.operators.append(Operator(name="Sidhanath", shift="First shift",
                                       machines=["MI3"]))
     win_new, _ = machine_windows(masters, Config(scheduler="new"))
-    assert win_new["MI3"] == [(8 * 60, 19 * 60)]
+    assert win_new["MI3"] == [(8 * 60, 13 * 60), (13 * 60 + 30, 19 * 60)]   # lunch out
 
     win_classic, _ = machine_windows(masters, Config(scheduler="classic"))
     assert win_classic["MI3"] == [(9 * 60, 18 * 60)]

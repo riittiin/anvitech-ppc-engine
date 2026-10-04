@@ -82,6 +82,7 @@ def test_report_columns_match_the_sheet_order():
 
 
 # --- shift and month totals (owner, 2026-10-04) ----------------------------- #
+WORKING = {"1st shift": 630, "2nd shift": 570}     # meal breaks taken out
 def _line(item, qty, ct, mins=660, setup=0.0, op="Operator A", day=5, shift="1st shift",
           machine="CNC1", **kw):
     return Actual(so_no="S", item_code=item, entry_date=date(2026, 10, day), shift=shift,
@@ -167,6 +168,33 @@ def test_month_rows_sort_best_first_and_no_figure_last():
             _line("A", 100, None, mins=600, op="Blank")]
     assert [r["Operator"] for r in pa.operator_month_rows(acts, None, 2026, 10)] == \
         ["High", "Low", "Blank"]
+
+
+def test_a_shift_never_counts_its_meal_break():
+    """Lunch 13:00-13:30 / dinner 22:00-22:30 (owner, 2026-10-04): a line typed
+    with the old full shift (660 / 600) counts 630 / 570; fewer minutes typed
+    (a half shift) count as typed."""
+    full = [_line("A", 105, 6.0, mins=660)]                       # 630 earned
+    (row,) = pa.shift_rows(full, None, 2026, 10, WORKING)
+    assert row["Minutes entered"] == 660
+    assert row["Working minutes in shift (after break)"] == 630
+    assert row["Minutes available in shift"] == 630
+    assert row["Operator efficiency"] == 100.0
+    assert "630 working minutes" in row["Note"]
+    assert "smaller of 660 entered and 630 working minutes" in row["Working"]
+    night = [_line("A", 95, 6.0, mins=600, shift="2nd shift")]    # 570 earned
+    assert pa.shift_rows(night, None, 2026, 10, WORKING)[0]["Operator efficiency"] == 100.0
+    half = [_line("A", 50, 6.0, mins=300)]
+    (h,) = pa.shift_rows(half, None, 2026, 10, WORKING)
+    assert h["Minutes available in shift"] == 300 and h["Operator efficiency"] == 100.0
+    (e,) = pa.monthly_rows(full, None, 2026, 10, WORKING)
+    assert e["Planned qty"] == 105                                # 630 / 6, not 660 / 6
+
+
+def test_the_daily_entry_form_defaults_to_working_minutes():
+    import api.main as m
+    from engine.config import Config
+    assert m._shift_minutes(Config(scheduler="new")) == WORKING
 
 
 def test_the_daily_entry_list_no_longer_shows_the_calculated_columns():
@@ -281,8 +309,10 @@ def test_monthly_report_json_and_excel():
     assert f.startswith("=IF(") and "/" in f
     sh = formulas["Shift-wise"]
     col = lambda name: 2 + pa.SHIFT_COLUMNS.index(name)
-    assert sh.cell(row=7, column=col("Minutes available in shift")).value.startswith(
+    assert sh.cell(row=7, column=col("Minutes entered")).value.startswith(
         "=MAX('Every entry'!")
+    assert sh.cell(row=7, column=col("Minutes available in shift")).value.startswith(
+        "=IF(ISNUMBER(")
     assert sh.cell(row=7, column=col("Standard minutes earned")).value.startswith(
         "=SUM('Every entry'!")
     en = formulas["Every entry"]
@@ -314,9 +344,13 @@ def test_every_excel_formula_gives_the_value_the_preview_shows():
             _line("A", 50, 6.0, mins=600, op="Operator B", shift="2nd shift"),
             _line("A", 10, 6.0, day=6), _line("D", 5, None, day=6),
             _line("A", 10, 6.0, op="Operator B", day=6, no_power_min=60)]
-    tables = {"operators": {"rows": pa.operator_month_rows(acts, None, 2026, 10)},
-              "shifts": {"rows": pa.shift_rows(acts, None, 2026, 10)},
-              "entries": {"rows": pa.monthly_rows(acts, None, 2026, 10)}}
+    wk = WORKING
+    acts.append(_line("A", 20, 6.0, mins=300, op="Operator C"))     # under the cap
+    tables = {"operators": {"rows": pa.operator_month_rows(acts, None, 2026, 10, wk)},
+              "shifts": {"rows": pa.shift_rows(acts, None, 2026, 10, wk)},
+              "entries": {"rows": pa.monthly_rows(acts, None, 2026, 10, wk)}}
+    assert any(r["Minutes entered"] == 660 and r["Minutes available in shift"] == 630
+               for r in tables["shifts"]["rows"])                     # the cap is exercised
     import tempfile, os
     data = pax.build(2026, 10, tables)
     from openpyxl import load_workbook
@@ -350,7 +384,9 @@ def test_every_excel_formula_gives_the_value_the_preview_shows():
         # Text is never a formula: the only formulas are the calculated cells.
         how = wf["How it is calculated"]
         assert not any(c.data_type == "f" for row in how.iter_rows() for c in row)
-        assert how["C5"].value == "= Actual OK Qty + Rejected qty"
+        labels = {how.cell(row=r, column=2).value: how.cell(row=r, column=3).value
+                  for r in range(3, how.max_row + 1)}
+        assert labels["Every entry: Total Actual Qty"] == "= Actual OK Qty + Rejected qty"
 
 
 def test_entries_before_the_report_start_are_left_out():

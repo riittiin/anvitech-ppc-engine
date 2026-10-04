@@ -6,7 +6,7 @@ WAITING intervals, and every wait is attributed to a concrete cause:
   * outsourced     — the order is away at a vendor (OS step); nothing in-house can move
   * machine busy   — the machine the next step needs is occupied by other orders
                      (each blocking order named; '(higher priority)' when it ranks ahead)
-  * off-hours      — that machine is outside its working window (night / weekly off / holiday)
+  * off-hours      — that machine is outside its working window (meal break / night / weekly off / holiday)
   * crew           — machine free within working hours and EVERY qualified operator was
                      already busy elsewhere
   * crew on leave  — the same, where at least one qualified operator was on recorded
@@ -317,7 +317,7 @@ def _classify_free(a, b, clock, machine=None, masters=None, config=None, op_busy
     for s, e in _gaps(a, b, up + down):
         rows.append({"State": "WAITING (off-hours)", "Process": "", "Machine": "", "Operator": "",
                      "From": s, "To": e, "Hours": round(_hours(s, e), 2),
-                     "Why": "Outside working hours (night / weekly off / holiday)"})
+                     "Why": "Outside working hours (meal break / night / weekly off / holiday)"})
     return rows
 
 

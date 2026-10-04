@@ -46,6 +46,12 @@ class PlanConfig:
     second_start: time = time(19, 0)
     second_end: time = time(5, 0)
 
+    # Meal breaks: (start, end) clock times when NOTHING runs on any machine (owner,
+    # 2026-10-04). Each applies to every working window it falls inside; a break that
+    # ends before it starts would cross midnight. Empty = no breaks (the default, so
+    # every existing caller is byte-identical).
+    breaks: tuple = ()
+
     # rotation reference (a Friday); caller resolves the default
     week_anchor: date | None = None
 

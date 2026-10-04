@@ -252,6 +252,7 @@ def _plan_config(config) -> PlanConfig:
         first_end=time(int(getattr(config, "first_shift_end_hour", 19)), 0),
         second_start=time(int(getattr(config, "first_shift_end_hour", 19)), 0),
         second_end=time(int(getattr(config, "second_shift_end_hour", 5)), 0),
+        breaks=_plan_breaks(config),
         setup_min=float(getattr(config, "setup_time_min", 90)),
         overlap=overlap,
         consolidation_window=0.0,
@@ -259,6 +260,21 @@ def _plan_config(config) -> PlanConfig:
         committed_promise_slack_days=float(getattr(config, "committed_promise_slack_days", 3)),
         committed_promise_weight=COMMITTED_PROMISE_WEIGHT,
     )
+
+
+def _plan_breaks(config) -> tuple:
+    """The meal breaks as clock-time pairs for ppc_engine (see engine/config.py).
+    The same minutes operator_coverage.working_intervals subtracts for reports."""
+    def t(m):
+        m = int(m) % (24 * 60)
+        return time(m // 60, m % 60)
+    out = []
+    for name in ("lunch_break", "dinner_break"):
+        s = getattr(config, f"{name}_start_min", None)
+        e = getattr(config, f"{name}_end_min", None)
+        if s is not None and e is not None and e > s:
+            out.append((t(s), t(e)))
+    return tuple(out)
 
 
 def _op_has_no_runnable_machine(op, op_qty, masters) -> bool:
@@ -809,7 +825,7 @@ def _entries_from_schedule(sched, batch_by_key):
 # still owes: it resumes only the pieces already past that step, and the rest go
 # through it first (`flow_scheduler._preplace_frozen`). Real work moves wherever a
 # clubbed batch mixes stages or an outsourced step still has pieces out.
-SCHEDULER_FINGERPRINT = "new-engine-v9-no-skipped-steps"
+SCHEDULER_FINGERPRINT = "new-engine-v10-meal-breaks"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,

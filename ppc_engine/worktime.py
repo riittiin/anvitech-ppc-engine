@@ -77,6 +77,32 @@ def shift_key_for(dt: datetime, config: PlanConfig) -> tuple[date, Shift] | None
     return None
 
 
+def _without_breaks(win: Window, config: PlanConfig) -> list[Window]:
+    """``win`` with every meal break inside it cut out: the pieces, in time order,
+    each keeping the window's shift and shift_date (a break is a pause INSIDE a
+    shift, never a shift boundary)."""
+    breaks = getattr(config, "breaks", ()) or ()
+    if not breaks:
+        return [win]
+    cuts = []
+    for bs, be in breaks:
+        # A break's clock time can fall on the shift's own date or, for a night
+        # shift, on the next one.
+        for d in (win.shift_date, win.shift_date + timedelta(days=1)):
+            s = datetime.combine(d, bs)
+            e = datetime.combine(d if be > bs else d + timedelta(days=1), be)
+            if s < win.end and e > win.start:
+                cuts.append((max(s, win.start), min(e, win.end)))
+    pieces, cur = [], win.start
+    for s, e in sorted(cuts):
+        if s > cur:
+            pieces.append(Window(start=cur, end=s, shift_date=win.shift_date, shift=win.shift))
+        cur = max(cur, e)
+    if cur < win.end:
+        pieces.append(Window(start=cur, end=win.end, shift_date=win.shift_date, shift=win.shift))
+    return pieces
+
+
 def iter_windows(
     machine: Machine,
     start_from: datetime,
@@ -90,7 +116,11 @@ def iter_windows(
       - days this machine is out of service for maintenance (only this machine;
         the rest of the shop runs), and
       - the second (night) shift for machines that don't run at night
-        (manual/inspection stations — their helpers/inspectors are first-shift-only).
+        (manual/inspection stations — their helpers/inspectors are first-shift-only),
+      - the meal breaks (``config.breaks``): a shift is yielded as the pieces either
+        side of its break, so work pauses for the break and resumes after it on the
+        same machine, the way it pauses overnight. This is the ONE place breaks are
+        enforced; every placement path walks these windows.
 
     Only windows whose END is after ``start_from`` are yielded (fully-past windows are
     skipped). The caller clips the actual segment start with ``max(cursor, win.start)``.
@@ -101,13 +131,11 @@ def iter_windows(
     for _ in range(_MAX_DAYS_LOOKAHEAD):
         if calendar.is_machine_available(machine.id, day):
             # First shift, then (if the machine runs at night) the second shift.
-            first = shift_window(day, Shift.FIRST, config)
-            if first.end > start_from:
-                yield first
-            if machine.runs_second_shift:
-                second = shift_window(day, Shift.SECOND, config)
-                if second.end > start_from:
-                    yield second
+            shifts = [Shift.FIRST] + ([Shift.SECOND] if machine.runs_second_shift else [])
+            for shift in shifts:
+                for piece in _without_breaks(shift_window(day, shift, config), config):
+                    if piece.end > start_from:
+                        yield piece
         day += timedelta(days=1)
 
 

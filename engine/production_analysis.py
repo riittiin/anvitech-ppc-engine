@@ -63,7 +63,7 @@ REPORT_START = date(2026, 10, 3)
 # and the xlsx download.
 INPUT_COLUMNS = (
     "Date", "Machine", "Shift", "Operator", "Item description", "Item code", "Process",
-    "Cycle time in Min", "Minutes available in shift",
+    "Cycle time in Min", "Minutes available in shift", "Working minutes in shift (after break)",
     "Actual OK Qty", "Rejected qty",
     "Std. setting time in Min", "Actual setting time in Min",
     "No power (in Min)", "No operator (in Min)", "Machine Breakdown (in Min)",
@@ -80,6 +80,7 @@ REPORT_COLUMNS = INPUT_COLUMNS + RESULT_COLUMNS
 PCT_COLUMNS = ("Overall Productivity", "Operator efficiency")
 SHIFT_COLUMNS = (
     "Date", "Shift", "Operator", "Machines", "Items", "Entries",
+    "Minutes entered", "Working minutes in shift (after break)",
     "Minutes available in shift", "Actual setting time in Min", "Downtime (in Min)",
     "Minutes for production", "Standard minutes earned", "Total Actual Qty",
     "Counted in the month",
@@ -128,26 +129,37 @@ def metrics(cycle_time, minutes_available, ok_qty, rejected_qty,
     return planned, total_actual, productivity, efficiency
 
 
-def actual_metrics(a, masters=None):
+def _cap(a, working):
+    """The most this line's shift can count: its working minutes after the meal
+    break (``working``, e.g. {"1st shift": 630, "2nd shift": 570}), or None."""
+    return (working or {}).get((a.shift or "").strip())
+
+
+def actual_metrics(a, masters=None, working=None):
     """`metrics` for a stored Actual. The cycle time is the one snapshotted on
     the punch; a punch saved before snapshots existed falls back to the Process
-    Master (when given)."""
+    Master (when given). Minutes available never count past the shift's working
+    minutes (``working``): nothing is made in the meal break."""
     g = getattr(a, "cycle_time_min", None)
     if g is None and masters is not None:
         g = cycle_time_for(masters, a.item_code, a.process)
     ok = max((a.qty_produced or 0.0) - (a.qty_rejected or 0.0), 0.0)
-    return metrics(g, getattr(a, "shift_minutes", 0.0), ok, a.qty_rejected,
-                   a.actual_setup_min, a.total_downtime_min()), g
+    h = getattr(a, "shift_minutes", 0.0) or 0.0
+    cap = _cap(a, working)
+    if cap is not None:
+        h = min(h, cap)
+    return metrics(g, h, ok, a.qty_rejected, a.actual_setup_min,
+                   a.total_downtime_min()), g
 
 
 def _r(x, nd=2):
     return None if x is None else round(x, nd)
 
 
-def report_row(a, masters=None):
+def report_row(a, masters=None, working=None):
     """One sheet row for one punch: its inputs, planned qty, total qty and the
     standard minutes it earned (total qty x cycle time)."""
-    (planned, total, prod, eff), g = actual_metrics(a, masters)
+    (planned, total, prod, eff), g = actual_metrics(a, masters, working)
     ok = max((a.qty_produced or 0.0) - (a.qty_rejected or 0.0), 0.0)
     values = (
         a.entry_date.strftime("%d-%m-%Y"),
@@ -159,6 +171,7 @@ def report_row(a, masters=None):
         a.process,
         g,
         getattr(a, "shift_minutes", 0.0) or None,
+        _cap(a, working),
         ok,
         a.qty_rejected,
         getattr(a, "std_setup_min", 0.0),
@@ -197,9 +210,10 @@ def _picked(actuals, masters, year, month):
     return picked
 
 
-def monthly_rows(actuals, masters, year, month):
+def monthly_rows(actuals, masters, year, month, working=None):
     """Every punch dated in (year, month), one sheet row each."""
-    return [report_row(a, masters) for a in _picked(actuals, masters, year, month)]
+    return [report_row(a, masters, working)
+            for a in _picked(actuals, masters, year, month)]
 
 
 def _pct(num, den):
@@ -207,10 +221,14 @@ def _pct(num, den):
     return None if r is None else round(r * 100, 1)
 
 
-def _shift_totals(lines, masters):
-    """The totals for one operator's one shift on one day (see the module doc)."""
+def _shift_totals(lines, masters, working=None):
+    """The totals for one operator's one shift on one day (see the module doc).
+    Minutes available = the minutes entered (counted once), but never more than
+    the shift's working minutes after its meal break."""
     minutes = [getattr(a, "shift_minutes", 0.0) or 0.0 for a in lines]
-    h = max(minutes)
+    entered = max(minutes)
+    cap = _cap(lines[0], working)
+    h = entered if cap is None else min(entered, cap)
     setting = sum(a.actual_setup_min or 0.0 for a in lines)
     downtime = sum(a.total_downtime_min() for a in lines)
     earned, pieces, no_ct, terms = 0.0, 0.0, 0, []
@@ -229,12 +247,16 @@ def _shift_totals(lines, masters):
     if h <= 0:
         notes.append("minutes available not entered")
     if len({m for m in minutes if m > 0}) > 1:
-        notes.append(f"entries give different minutes available; the largest ({h:g}) is used")
+        notes.append(f"entries give different minutes available; the largest ({entered:g}) is used")
+    if cap is not None and entered > cap:
+        notes.append(f"{entered:g} entered; the shift has {cap:g} working minutes after "
+                     f"its meal break, so {cap:g} is used")
     production = h - setting - downtime
     complete = not no_ct and h > 0 and production > 0
     if h > 0 and production <= 0:
         notes.append("no time left after setting and downtime")
-    return {"h": h, "setting": setting, "downtime": downtime, "production": production,
+    return {"h": h, "entered": entered, "cap": cap,
+            "setting": setting, "downtime": downtime, "production": production,
             "earned": earned, "pieces": pieces, "complete": complete, "notes": notes,
             "terms": terms}
 
@@ -245,11 +267,13 @@ def _n(x):
     return f"{x:,.0f}" if x == int(x) else f"{x:,.2f}".rstrip("0").rstrip(".")
 
 
-def _working(earned_text, earned, h, setting, downtime, production, ok):
+def _working(earned_text, earned, h, setting, downtime, production, ok, avail_text=None):
     """The arithmetic behind a shift or month figure, written out in full."""
-    parts = [f"Standard minutes earned = {earned_text} = {_n(earned)}",
-             f"Minutes for production = {_n(h)} available - {_n(setting)} setting - "
-             f"{_n(downtime)} downtime = {_n(production)}"]
+    parts = [f"Standard minutes earned = {earned_text} = {_n(earned)}"]
+    if avail_text:
+        parts.append(avail_text)
+    parts.append(f"Minutes for production = {_n(h)} available - {_n(setting)} setting - "
+                 f"{_n(downtime)} downtime = {_n(production)}")
     if ok:
         parts.append(f"Operator efficiency = {_n(earned)} / {_n(production)} = "
                      f"{earned / production * 100:.1f}%")
@@ -268,19 +292,20 @@ def _by_operator_shift(picked):
     return groups
 
 
-def shift_rows(actuals, masters, year, month):
+def shift_rows(actuals, masters, year, month, working=None):
     """One row per operator per shift per day: everything the operator made in
     that shift, judged against the shift's minutes counted once."""
     out = []
     for (day, shift, op), lines in sorted(_by_operator_shift(
             _picked(actuals, masters, year, month)).items()):
-        t = _shift_totals(lines, masters)
+        t = _shift_totals(lines, masters, working)
         ok = t["complete"]
         out.append(dict(zip(SHIFT_COLUMNS, (
             day.strftime("%d-%m-%Y"), shift, op or "Unattributed",
             ", ".join(sorted({getattr(a, "machine", "") or "-" for a in lines})),
             ", ".join(sorted({a.item_code for a in lines})),
             len(lines),
+            t["entered"] or None, t["cap"],
             t["h"] or None, t["setting"], round(t["downtime"], 1),
             round(t["production"], 1) if t["h"] > 0 else None,
             round(t["earned"], 1), t["pieces"],
@@ -289,19 +314,22 @@ def shift_rows(actuals, masters, year, month):
             _pct(t["earned"], t["production"]) if ok else None,
             "; ".join(t["notes"]),
             _working(" + ".join(t["terms"]), t["earned"], t["h"], t["setting"],
-                     t["downtime"], t["production"], ok),
+                     t["downtime"], t["production"], ok,
+                     (f"Minutes available = smaller of {_n(t['entered'])} entered and "
+                      f"{_n(t['cap'])} working minutes after the meal break = {_n(t['h'])}")
+                     if t["cap"] is not None else None),
         ))))
     return out
 
 
-def operator_month_rows(actuals, masters, year, month):
+def operator_month_rows(actuals, masters, year, month, working=None):
     """One row per operator for the month. The minutes of every COUNTED shift are
     added up and divided once; a shift without a figure is left out and named in
     the note. Sorted by efficiency, highest first; no figure sorts last."""
     per_op = {}
     for (_day, _shift, op), lines in _by_operator_shift(
             _picked(actuals, masters, year, month)).items():
-        per_op.setdefault(op, []).append((_day, _shift, _shift_totals(lines, masters)))
+        per_op.setdefault(op, []).append((_day, _shift, _shift_totals(lines, masters, working)))
     out = []
     for op, shifts in per_op.items():
         counted = [t for _, _, t in shifts if t["complete"]]

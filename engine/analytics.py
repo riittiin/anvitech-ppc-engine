@@ -58,12 +58,16 @@ def _working_days(calendar, start, end):
 def _shift_hours(shift, config):
     """Standard hours for a shift label. Two-shift operators: first 08->19 (11h),
     second 19->05 (10h). A blank/day label is a manual/helper day window (09->18)."""
+    # Meal breaks come out (operator_coverage.working_minutes): nobody works in them,
+    # so they are not available capacity (owner, 2026-10-04).
+    from .operator_coverage import _shift_windows, _day_window, working_minutes
+    first, second, _manual = _shift_windows(config)
     s = (shift or "").lower()
     if "second" in s:                                   # 19:00 -> 05:00 next day
-        return float(24 - config.first_shift_end_hour + config.second_shift_end_hour)
+        return working_minutes(second, config) / 60.0
     if "first" in s:
-        return float(config.first_shift_end_hour - config.first_shift_start_hour)   # 08->19
-    return float(getattr(config, "manual_end_hour", 18) - getattr(config, "manual_start_hour", 9))
+        return working_minutes(first, config) / 60.0    # 08->19
+    return working_minutes(_day_window(config), config) / 60.0
 
 
 def _friday_on_or_before(d):

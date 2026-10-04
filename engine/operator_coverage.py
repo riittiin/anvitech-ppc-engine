@@ -31,6 +31,57 @@ def _shift_windows(config):
     return first, second, manual
 
 
+def _breaks(config):
+    """The meal breaks as (start_min, end_min), but only for the NEW engine, the one
+    that schedules around them (ppc_engine.worktime.iter_windows). The retired
+    classic engine never did, so its reports keep the whole shift."""
+    if getattr(config, "scheduler", "classic") != "new":
+        return []
+    out = []
+    for name in ("lunch_break", "dinner_break"):
+        s = getattr(config, f"{name}_start_min", None)
+        e = getattr(config, f"{name}_end_min", None)
+        if s is not None and e is not None and e > s:
+            out.append((s, e))
+    return out
+
+
+def working_intervals(interval, config):
+    """``interval`` (start_min, end_min; an end past 1440 crosses midnight) with
+    the meal breaks cut out, as a list of intervals. The one place a reporting
+    feature learns where the breaks are, so Analytics, the delay report and the
+    Daily Entry minutes model the shop exactly as the engine schedules it."""
+    s0, e0 = interval
+    cuts = []
+    for bs, be in _breaks(config):
+        for off in (0, 1440):                      # the break today, or after midnight
+            s, e = bs + off, be + off
+            if s < e0 and e > s0:
+                cuts.append((max(s, s0), min(e, e0)))
+    out, cur = [], s0
+    for s, e in sorted(cuts):
+        if s > cur:
+            out.append((cur, s))
+        cur = max(cur, e)
+    if cur < e0:
+        out.append((cur, e0))
+    return out
+
+
+def working_minutes(interval, config) -> int:
+    """Minutes of real work in ``interval``: its length less any break inside it."""
+    return sum(e - s for s, e in working_intervals(interval, config))
+
+
+def shift_working_minutes(config) -> dict:
+    """Working minutes per shift label, breaks taken out: {"1st shift": 630,
+    "2nd shift": 570} on the shop's clock. The Daily Entry default and the
+    production analysis cap both read this."""
+    first, second, _manual = _shift_windows(config)
+    return {"1st shift": working_minutes(first, config),
+            "2nd shift": working_minutes(second, config)}
+
+
 def _shift_kind(operator) -> str:
     s = (operator.shift or "").strip().lower()
     if "second" in s or s == "2":
@@ -99,8 +150,8 @@ def eligible_window(machine, config):
     (the operator panel). Returns a list of (start_min, end_min) intervals."""
     first, second, _manual = _shift_windows(config)
     if machine.is_two_shift(config.two_shift_threshold_hours):
-        return [first, second]
-    return [_day_window(config)]
+        return working_intervals(first, config) + working_intervals(second, config)
+    return working_intervals(_day_window(config), config)
 
 
 def staffing_gaps(masters, config):
@@ -165,18 +216,19 @@ def machine_windows(masters, config):
     windows, blocked = {}, []
     for mid, machine in masters.machines.items():
         if machine.provisional:
-            windows[mid] = [first, second]   # bypass coverage gate
+            windows[mid] = (working_intervals(first, config)
+                            + working_intervals(second, config))   # bypass coverage gate
             continue
         if machine.is_two_shift(threshold):
             iv = []
             if any(_shift_kind(o) == "first" and _qualifies(o, machine) for o in ops):
-                iv.append(first)
+                iv.extend(working_intervals(first, config))
             if any(_shift_kind(o) == "second" and _qualifies(o, machine) for o in ops):
-                iv.append(second)
+                iv.extend(working_intervals(second, config))
             reason = "no operator (any shift) specialises in this machine"
         else:
             covered = any(_shift_kind(o) == "first" and _qualifies(o, machine) for o in ops)
-            iv = [_day_window(config)] if covered else []
+            iv = working_intervals(_day_window(config), config) if covered else []
             reason = "no first-shift operator specialises in this single-shift resource"
         windows[mid] = iv
         if not iv:

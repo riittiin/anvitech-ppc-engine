@@ -2,6 +2,30 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-27)
 >
+> - **MEAL BREAKS: NOTHING RUNS 13:00-13:30 OR 22:00-22:30 (2026-10-04, owner).** A
+>   shift has 630 / 570 working minutes, not 660 / 600, on every machine and station.
+>   ONE definition: `engine/config.Config.lunch_break_*_min` / `dinner_break_*_min`.
+>   The engine enforces it in ONE place, `ppc_engine.worktime.iter_windows`
+>   (`_without_breaks` yields each shift as the pieces either side of its break, same
+>   shift/shift_date, so work PAUSES and resumes on the same machine with no second
+>   setup, like overnight); `new_engine._plan_breaks` feeds `PlanConfig.breaks` (empty
+>   by default, so ppc's own callers are byte-identical). Reports subtract the SAME
+>   minutes through `operator_coverage.working_intervals` (new engine only; classic
+>   keeps the whole shift, golden untouched): Analytics machine + operator capacity,
+>   the delay report's working windows (break time reads "off-hours ... meal break"),
+>   the "when each machine can run" table, the Daily Entry default (`_shift_minutes` ->
+>   630 / 570) and the production analysis cap (a shift counts at most its working
+>   minutes; the 03-10 lines typed 660 / 600 count 630 / 570, shown as "Minutes
+>   entered" vs "Minutes available", Excel `MIN(...)`). `SCHEDULER_FINGERPRINT` =
+>   `new-engine-v10-meal-breaks`. Measured on a read-only copy of the live store, same
+>   book: work segments overlapping a break 430 -> 0, busy hours unchanged (2,332),
+>   late-days 404 -> 411, late orders 40 -> 47, makespan 28.6 -> 29.7 d (the old dates
+>   assumed 30 min/shift of work that never happens); 0 routing / qualification /
+>   batch-qty violations; an Add New Orders quote verifies. Mutation-checked: switching
+>   the break off in the engine, the reports or the production cap each fails tests
+>   (`tests/test_meal_breaks.py`). Not built: a Settings field for the break times
+>   (they are config defaults; changing them is a code/config edit).
+>
 > - **OPERATOR EFFICIENCY IS PER SHIFT AND PER MONTH, NEVER PER LINE (2026-10-04,
 >   owner).** The floor types the whole shift (660 / 600) as "minutes available" on
 >   EVERY Daily Entry line, so a per-line efficiency read 9-30% for operators busy

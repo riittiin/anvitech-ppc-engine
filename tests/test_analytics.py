@@ -149,7 +149,8 @@ def test_operator_capacity_never_rotates_across_a_friday():
         op_segments=[(datetime(2025, 3, 10, 19, 0), datetime(2025, 3, 10, 23, 0), "X")])
     a = analytics.build_analytics([e], masters, cfg, [_batch(8)])
     o = next(o for o in a["operators"] if o["Operator"] == "X")
-    assert o["Available (hrs)"] == 10.0, o          # nominal Second shift, unrotated
+    # nominal Second shift, unrotated: 10h less the 30-minute dinner break (2026-10-04)
+    assert o["Available (hrs)"] == 9.5, o
     assert o["Utilization %"] <= 100.0, o
 
 
@@ -190,7 +191,7 @@ def test_operator_capacity_uses_the_stored_shift_across_a_friday():
             working_days.append(d)
         d += timedelta(days=1)
 
-    FIRST_SHIFT_HOURS = 11.0   # 08:00-19:00, the Config default
+    FIRST_SHIFT_HOURS = 10.5   # 08:00-19:00 less the 30-minute lunch break (2026-10-04)
     expected = len(working_days) * FIRST_SHIFT_HOURS
     assert o["Available (hrs)"] == pytest.approx(expected), (
         "operator capacity mixed in a rotated (Second shift) day somewhere in the "

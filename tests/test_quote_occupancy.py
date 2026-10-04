@@ -541,8 +541,9 @@ def test_a_four_hour_op_skips_a_one_hour_gap_and_lands_whole_in_the_next_run(sho
     """The gap rule itself, proven by a concrete case the review confirmed by hand:
     CNC1 busy 09:00-10:00 and 15:00-16:00 leaves a one-hour run (10:00, 15:00) that
     cannot hold a four-hour op whole, and a wide-open run (16:00, None) after it.
-    The op must skip the one-hour run entirely and land at 10:00-14:00 — inside the
-    (10:00, 15:00) run, never touching either block.
+    The op must skip the one-hour run entirely and land at 10:00-14:30 — inside the
+    (10:00, 15:00) run, never touching either block. (14:30, not 14:00, since
+    2026-10-04: the work pauses for the 13:00-13:30 lunch break.)
 
     This is deliberately a case NEITHER of these two mutations survives (both
     passed 25/25 before this test existed — see task-5-report.md fix round 1):
@@ -565,7 +566,7 @@ def test_a_four_hour_op_skips_a_one_hour_gap_and_lands_whole_in_the_next_run(sho
 
     assert laid is not None
     assert laid["start"] == D(day.year, day.month, day.day, 10)
-    assert laid["end"] == D(day.year, day.month, day.day, 14)
+    assert laid["end"] == D(day.year, day.month, day.day, 14, 30)
     for seg in laid["segments"]:
         assert seg.start >= block_a[1] and seg.end <= block_b[0], (
             f"segment {seg.start}-{seg.end} spills into a block "

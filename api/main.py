@@ -698,9 +698,11 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
         if config.apply_operator_logic:
             from engine.operator_coverage import machine_windows
             windows, cov = machine_windows(masters, config)
-            first = (config.first_shift_start_hour * 60, config.first_shift_end_hour * 60)
-            second = (config.first_shift_end_hour * 60, (24 + config.second_shift_end_hour) * 60)
-            manual = (config.manual_start_hour * 60, config.manual_end_hour * 60)
+            from engine.operator_coverage import _shift_windows, working_intervals
+            _f, _s, manual = _shift_windows(config)
+            # A shift's first piece (the windows are cut at the meal breaks).
+            first = working_intervals(_f, config)[0]
+            second = working_intervals(_s, config)[0]
 
             def _cov_label(mid):
                 iv = windows.get(mid)
@@ -3535,14 +3537,15 @@ def _production_tables(year: int, month: int) -> dict:
     reads them: the month per operator (the report's goal), then each operator's
     shifts, then every entry."""
     acts, masters = book_store.load_actuals(), _current_masters()
+    working = _shift_minutes(_load_plan_config())     # 630 / 570: meal breaks out
     pa = production_analysis
     return {
         "operators": {"columns": list(pa.MONTH_COLUMNS),
-                      "rows": pa.operator_month_rows(acts, masters, year, month)},
+                      "rows": pa.operator_month_rows(acts, masters, year, month, working)},
         "shifts": {"columns": list(pa.SHIFT_COLUMNS),
-                   "rows": pa.shift_rows(acts, masters, year, month)},
+                   "rows": pa.shift_rows(acts, masters, year, month, working)},
         "entries": {"columns": list(pa.REPORT_COLUMNS),
-                    "rows": pa.monthly_rows(acts, masters, year, month)},
+                    "rows": pa.monthly_rows(acts, masters, year, month, working)},
     }
 
 
@@ -4036,11 +4039,11 @@ def _std_setup_for(machine, masters, config) -> float:
 
 
 def _shift_minutes(config) -> dict:
-    """Length of each shift in minutes, from the plan's shift hours — the default
-    "Minutes available in shift" on the Daily Entry form."""
-    first = (config.first_shift_end_hour - config.first_shift_start_hour) * 60
-    second = ((config.second_shift_end_hour - config.first_shift_end_hour) % 24) * 60
-    return {"1st shift": first, "2nd shift": second}
+    """WORKING minutes in each shift, meal break taken out (630 / 570 on the shop's
+    clock) — the default "Minutes available in shift" on the Daily Entry form and
+    the most a shift can count in the production analysis."""
+    from engine.operator_coverage import shift_working_minutes
+    return shift_working_minutes(config)
 
 
 @app.get("/items")

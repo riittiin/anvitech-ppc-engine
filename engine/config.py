@@ -88,6 +88,16 @@ class Config:
     second_shift_end_hour: int = 5  # on the following calendar day
     first_shift_end_hour: int = 19  # 1st/2nd boundary
 
+    # Meal breaks, minutes from midnight (owner, 2026-10-04): lunch 13:00-13:30 in
+    # the 1st shift, dinner 22:00-22:30 in the 2nd. NOTHING runs in a break, on any
+    # machine or station, so a shift has 630 / 570 working minutes, not 660 / 600.
+    # The new engine's window walk and every reporting window read these (via
+    # operator_coverage.working_intervals); the retired classic engine ignores them.
+    lunch_break_start_min: int = 13 * 60
+    lunch_break_end_min: int = 13 * 60 + 30
+    dinner_break_start_min: int = 22 * 60
+    dinner_break_end_min: int = 22 * 60 + 30
+
     # Operator logic. A machine runs both shifts when its Available Hrs/Day is at
     # least this threshold (CNC/VMC ≈19.5); otherwise it is a single-shift resource
     # working only the manual window below (the shop's "treat 9.5 as 9am-6pm").
@@ -175,6 +185,10 @@ class Config:
             errs.append("first_shift_start_hour must be within 0..23")
         if not (0 <= self.second_shift_end_hour <= 23):
             errs.append("second_shift_end_hour must be within 0..23")
+        for name in ("lunch_break", "dinner_break"):
+            s, e = getattr(self, f"{name}_start_min"), getattr(self, f"{name}_end_min")
+            if not (0 <= s < e <= 24 * 60):
+                errs.append(f"{name} must start before it ends, within one day")
         if not (0 <= self.manual_start_hour <= 23):
             errs.append("manual_start_hour must be within 0..23")
         if not (0 < self.manual_end_hour <= 24):
