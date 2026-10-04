@@ -2,6 +2,21 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-27)
 >
+> - **OPERATOR EFFICIENCY IS PER SHIFT AND PER MONTH, NEVER PER LINE (2026-10-04,
+>   owner).** The floor types the whole shift (660 / 600) as "minutes available" on
+>   EVERY Daily Entry line, so a per-line efficiency read 9-30% for operators busy
+>   all shift. `engine/production_analysis.shift_rows` judges an operator's whole
+>   (day, shift): earned = sum of qty x cycle time over the lines, against the
+>   shift's minutes counted ONCE (the largest typed) minus all ACTUAL setting and
+>   downtime. `operator_month_rows` adds minutes over the counted shifts and divides
+>   once, never averaging percentages. A shift with a line lacking a cycle time, or
+>   no minutes, shows "-" and is left out of the month with a note. Entry rows no
+>   longer carry productivity/efficiency (they carry "Standard minutes earned"), and
+>   the Daily Entry list no longer shows the calculated columns at all. **Owner
+>   ruled: an operator running two machines at once is counted once per shift, so
+>   over 100% is correct** (Sidhu Singe 03-10: CNC3 + CNC6, 1,260 earned / 660 =
+>   191%). Standard setting time is still recorded and used in no formula.
+>
 > - **AN EXCEL UPLOAD NO LONGER TOUCHES THE SALES ORDERS (2026-10-03, owner
 >   request).** New orders come in through **Add New Orders only**. `POST /upload`
 >   now saves the masters (machines, routings, operator seed) and nothing else: it

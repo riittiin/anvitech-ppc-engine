@@ -28,6 +28,23 @@ A result whose formula has nothing to divide by (no cycle time, no minutes, or
 no time left after setting and downtime) is None, shown as "-", never 0: a zero
 would read as "the operator produced nothing".
 
+SHIFT AND MONTH TOTALS (owner, 2026-10-04). The floor types the WHOLE shift as
+"minutes available" on every line, so a per-line efficiency splits one shift's
+work across several lines and reads 20-30% for an operator who was busy all
+shift. Efficiency is therefore judged per OPERATOR per SHIFT per DAY, never per
+line:
+
+    standard minutes earned = sum over the shift's lines of  V x G
+    minutes for production  = H (counted ONCE) - all setting - all downtime
+    operator efficiency     = earned / minutes for production
+    overall productivity    = earned / H
+
+For one line this is exactly the sheet's X and W. The MONTH figure per operator
+sums those minutes over every shift and divides once; percentages are never
+averaged. A shift with a line that has no cycle time, or with no minutes
+entered, has no figure ("-") and is left out of the month, with a note saying so,
+rather than counted as idle.
+
 Pure: everything comes from the parameters — no storage, no wall clock.
 """
 from __future__ import annotations
@@ -46,11 +63,23 @@ INPUT_COLUMNS = (
     "Tool problem (in Min)", "Other work done (in Min)", "No Load (in Min)",
     "Remarks",
 )
-RESULT_COLUMNS = (
-    "Planned qty", "Total Actual Qty",
-    "Overall Productivity (Planned vs actual Qty)", "Operator efficiency",
-)
+# Per-line results. Productivity and efficiency are deliberately NOT here: the
+# floor types the whole shift on every line, so a per-line percentage is
+# misleading (owner, 2026-10-04). They live on the shift and month tables.
+RESULT_COLUMNS = ("Planned qty", "Total Actual Qty", "Standard minutes earned")
 REPORT_COLUMNS = INPUT_COLUMNS + RESULT_COLUMNS
+
+PCT_COLUMNS = ("Overall Productivity", "Operator efficiency")
+SHIFT_COLUMNS = (
+    "Date", "Shift", "Operator", "Machines", "Items", "Entries",
+    "Minutes available in shift", "Actual setting time in Min", "Downtime (in Min)",
+    "Minutes for production", "Standard minutes earned", "Total Actual Qty",
+) + PCT_COLUMNS + ("Note",)
+MONTH_COLUMNS = (
+    "Operator", "Shifts worked", "Shifts counted",
+    "Minutes available in shift", "Actual setting time in Min", "Downtime (in Min)",
+    "Minutes for production", "Standard minutes earned", "Total Actual Qty",
+) + PCT_COLUMNS + ("Note",)
 
 
 def cycle_time_for(masters, item_code, process_name):
@@ -107,8 +136,8 @@ def _r(x, nd=2):
 
 
 def report_row(a, masters=None):
-    """One sheet row for one punch. Productivity/efficiency are percentages
-    (63.6, not 0.636) here — the xlsx writer converts back to fractions."""
+    """One sheet row for one punch: its inputs, planned qty, total qty and the
+    standard minutes it earned (total qty x cycle time)."""
     (planned, total, prod, eff), g = actual_metrics(a, masters)
     ok = max((a.qty_produced or 0.0) - (a.qty_rejected or 0.0), 0.0)
     values = (
@@ -132,16 +161,15 @@ def report_row(a, masters=None):
         a.remarks,
         _r(planned),
         total,
-        _r(None if prod is None else prod * 100, 1),
-        _r(None if eff is None else eff * 100, 1),
+        None if g is None else _r(total * g, 1),
     )
     return dict(zip(REPORT_COLUMNS, values))
 
 
-def monthly_rows(actuals, masters, year, month):
-    """Every punch dated in (year, month), one sheet row each, in floor order:
-    date, shift, machine, operator. Outsourced (OS) steps are left out — they
-    run off-site, with no machine, shift or operator to analyse."""
+def _picked(actuals, masters, year, month):
+    """Every punch dated in (year, month), in floor order: date, shift, machine,
+    operator. Outsourced (OS) steps are left out — they run off-site, with no
+    machine, shift or operator to analyse."""
     from .orderbook import process_is_outsourced
 
     routings = getattr(masters, "routings", None) or {}
@@ -150,4 +178,107 @@ def monthly_rows(actuals, masters, year, month):
               and not process_is_outsourced(routings.get(a.item_code), a.process)]
     picked.sort(key=lambda a: (a.entry_date, a.shift, getattr(a, "machine", "") or "",
                                a.operator, a.item_code))
-    return [report_row(a, masters) for a in picked]
+    return picked
+
+
+def monthly_rows(actuals, masters, year, month):
+    """Every punch dated in (year, month), one sheet row each."""
+    return [report_row(a, masters) for a in _picked(actuals, masters, year, month)]
+
+
+def _pct(num, den):
+    r = _ratio(num, den)
+    return None if r is None else round(r * 100, 1)
+
+
+def _shift_totals(lines, masters):
+    """The totals for one operator's one shift on one day (see the module doc)."""
+    minutes = [getattr(a, "shift_minutes", 0.0) or 0.0 for a in lines]
+    h = max(minutes)
+    setting = sum(a.actual_setup_min or 0.0 for a in lines)
+    downtime = sum(a.total_downtime_min() for a in lines)
+    earned, pieces, no_ct = 0.0, 0.0, 0
+    for a in lines:
+        (_, total, _, _), g = actual_metrics(a, masters)
+        pieces += total
+        if g is None:
+            no_ct += 1
+        else:
+            earned += total * g
+    notes = []
+    if no_ct:
+        notes.append(f"{no_ct} entr{'y has' if no_ct == 1 else 'ies have'} no cycle time")
+    if h <= 0:
+        notes.append("minutes available not entered")
+    if len({m for m in minutes if m > 0}) > 1:
+        notes.append(f"entries give different minutes available; the largest ({h:g}) is used")
+    production = h - setting - downtime
+    complete = not no_ct and h > 0 and production > 0
+    if h > 0 and production <= 0:
+        notes.append("no time left after setting and downtime")
+    return {"h": h, "setting": setting, "downtime": downtime, "production": production,
+            "earned": earned, "pieces": pieces, "complete": complete, "notes": notes}
+
+
+def _by_operator_shift(picked):
+    groups = {}
+    for a in picked:
+        key = (a.entry_date, (a.shift or "").strip(), (a.operator or "").strip())
+        groups.setdefault(key, []).append(a)
+    return groups
+
+
+def shift_rows(actuals, masters, year, month):
+    """One row per operator per shift per day: everything the operator made in
+    that shift, judged against the shift's minutes counted once."""
+    out = []
+    for (day, shift, op), lines in sorted(_by_operator_shift(
+            _picked(actuals, masters, year, month)).items()):
+        t = _shift_totals(lines, masters)
+        ok = t["complete"]
+        out.append(dict(zip(SHIFT_COLUMNS, (
+            day.strftime("%d-%m-%Y"), shift, op or "Unattributed",
+            ", ".join(sorted({getattr(a, "machine", "") or "-" for a in lines})),
+            ", ".join(sorted({a.item_code for a in lines})),
+            len(lines),
+            t["h"] or None, t["setting"], round(t["downtime"], 1),
+            round(t["production"], 1) if t["h"] > 0 else None,
+            round(t["earned"], 1), t["pieces"],
+            _pct(t["earned"], t["h"]) if ok else None,
+            _pct(t["earned"], t["production"]) if ok else None,
+            "; ".join(t["notes"]),
+        ))))
+    return out
+
+
+def operator_month_rows(actuals, masters, year, month):
+    """One row per operator for the month. The minutes of every COUNTED shift are
+    added up and divided once; a shift without a figure is left out and named in
+    the note. Sorted by efficiency, highest first; no figure sorts last."""
+    per_op = {}
+    for (_day, _shift, op), lines in _by_operator_shift(
+            _picked(actuals, masters, year, month)).items():
+        per_op.setdefault(op or "Unattributed", []).append(_shift_totals(lines, masters))
+    out = []
+    for op, shifts in per_op.items():
+        counted = [t for t in shifts if t["complete"]]
+        h = sum(t["h"] for t in counted)
+        setting = sum(t["setting"] for t in counted)
+        downtime = sum(t["downtime"] for t in counted)
+        production = sum(t["production"] for t in counted)
+        earned = sum(t["earned"] for t in counted)
+        left_out = len(shifts) - len(counted)
+        note = (f"{left_out} shift{'s' if left_out != 1 else ''} left out "
+                f"(missing cycle time or minutes; see the shift table)") if left_out else ""
+        out.append(dict(zip(MONTH_COLUMNS, (
+            op, len(shifts), len(counted),
+            h or None, setting, round(downtime, 1),
+            round(production, 1) if counted else None,
+            round(earned, 1), sum(t["pieces"] for t in shifts),
+            _pct(earned, h) if counted else None,
+            _pct(earned, production) if counted else None,
+            note,
+        ))))
+    out.sort(key=lambda r: (r["Operator efficiency"] is None,
+                            -(r["Operator efficiency"] or 0), r["Operator"]))
+    return out

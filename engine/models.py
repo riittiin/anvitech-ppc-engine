@@ -408,20 +408,16 @@ class Actual:
         }
 
     def _analysis_cells(self):
-        """The production-analysis columns shown on the Daily Entry list — the
-        same calculation the monthly report uses (one definition)."""
-        from .production_analysis import actual_metrics
-        (planned, total, prod, eff), g = actual_metrics(self)
-        pct = lambda x: "-" if x is None else f"{x * 100:.1f}%"
+        """The production-analysis INPUTS shown on the Daily Entry list. The
+        calculated columns (planned qty, productivity, efficiency) are NOT shown
+        here (owner, 2026-10-04): they belong to the Production analysis report,
+        where efficiency is judged per operator per shift, never per line."""
+        g = self.cycle_time_min
         return {
             "Machine": self.machine or "-",
             "Cycle Time (min)": "-" if g is None else g,
             "Minutes Available": self.shift_minutes or "-",
             "Std Setting (min)": self.std_setup_min,
-            "Planned Qty": "-" if planned is None else round(planned, 2),
-            "Total Actual Qty": total,
-            "Overall Productivity": pct(prod),
-            "Operator Efficiency": pct(eff),
         }
 
     def to_json(self):

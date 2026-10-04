@@ -2519,10 +2519,19 @@ async function previewProductionAnalysis() {
     const body = await res.json().catch(() => ({}));
     if (!res.ok) { setStatus("Production analysis error: " + (body.detail || res.status), true); return; }
     if (!el) return;
-    if (!body.rows || body.rows.length === 0) { el.innerHTML = '<div class="empty">No entries this month</div>'; return; }
-    const pct = new Set(body.columns.slice(-2));
-    const cell = (c, v) => (v === null || v === undefined || v === "" ? "-" : pct.has(c) ? v + "%" : v);
-    el.innerHTML = tableHtml({ columns: body.columns, rows: body.rows.map((r) => body.columns.map((c) => cell(c, r[c]))) });
+    if (!body.entries || !body.entries.rows || body.entries.rows.length === 0) {
+      el.innerHTML = '<div class="empty">No entries this month</div>'; return;
+    }
+    const pct = new Set(["Overall Productivity", "Operator efficiency"]);
+    const cell = (c, v) => (v === null || v === undefined || v === "" ? (c === "Note" ? "" : "-")
+      : pct.has(c) ? v + "%" : v);
+    const table = (t) => tableHtml({ columns: t.columns, rows: t.rows.map((r) => t.columns.map((c) => cell(c, r[c]))) });
+    // The month per operator is the report's goal, so it comes first and open;
+    // the shift and entry tables are there to check how a figure was reached.
+    el.innerHTML =
+      `<h3>Operator efficiency for the month</h3>${table(body.operators)}`
+      + `<details><summary>Each operator's shifts, day by day (${body.shifts.rows.length})</summary>${table(body.shifts)}</details>`
+      + `<details><summary>Every Daily Entry line (${body.entries.rows.length})</summary>${table(body.entries)}</details>`;
   } catch (e) { setStatus("Production analysis error: " + e.message, true); }
 }
 

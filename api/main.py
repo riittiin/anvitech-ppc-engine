@@ -3530,62 +3530,85 @@ def _csv_safe(value):
     return value
 
 
-def _production_rows(year: int, month: int) -> list:
-    return production_analysis.monthly_rows(
-        book_store.load_actuals(), _current_masters(), year, month)
+def _production_tables(year: int, month: int) -> dict:
+    """The three production-analysis tables for a month, in the order the owner
+    reads them: the month per operator (the report's goal), then each operator's
+    shifts, then every entry."""
+    acts, masters = book_store.load_actuals(), _current_masters()
+    pa = production_analysis
+    return {
+        "operators": {"columns": list(pa.MONTH_COLUMNS),
+                      "rows": pa.operator_month_rows(acts, masters, year, month)},
+        "shifts": {"columns": list(pa.SHIFT_COLUMNS),
+                   "rows": pa.shift_rows(acts, masters, year, month)},
+        "entries": {"columns": list(pa.REPORT_COLUMNS),
+                    "rows": pa.monthly_rows(acts, masters, year, month)},
+    }
 
 
 @app.get("/production-analysis")
 def production_analysis_report(year: int, month: int, request: Request):
-    """Monthly production analysis (admin only): the owner's "Format Production
-    analysis" sheet, one row per Daily Entry punch. Pure reporting, no plan
+    """Monthly production analysis (admin only): operator efficiency for the
+    month, per shift, and every Daily Entry line. Pure reporting, no plan
     effect. See engine/production_analysis.py for the formulas."""
     require_admin(request)
     _validate_year_month(year, month)
-    return {"year": year, "month": month,
-            "columns": list(production_analysis.REPORT_COLUMNS),
-            "rows": _production_rows(year, month)}
+    return {"year": year, "month": month, **_production_tables(year, month)}
 
 
-# The sheet's own header colours: inputs green, the four results orange.
+# The sheet's own header colours: inputs green, results orange.
 _PA_INPUT_FILL = "D7E4BD"
 _PA_RESULT_FILL = "FCD5B4"
 
 
-@app.get("/production-analysis.xlsx")
-def production_analysis_xlsx(year: int, month: int, request: Request):
-    """Same report laid out like the owner's workbook (admin only): title in B1,
-    month in B3/C3, headers on row 6 from column B, one punch per row from row 7."""
-    require_admin(request)
-    _validate_year_month(year, month)
-    from openpyxl import Workbook
+def _pa_sheet(ws, title, year, month, columns, rows, result_cols):
+    """One report table laid out like the owner's workbook: title in B1, month in
+    B3/C3, headers on row 6 from column B, one row per record from row 7.
+    Percentages are written as real fractions shown as %."""
     from openpyxl.styles import Alignment, Font, PatternFill
 
-    rows = _production_rows(year, month)
-    cols = production_analysis.REPORT_COLUMNS
-    n_in = len(production_analysis.INPUT_COLUMNS)
-    pct_cols = set(production_analysis.RESULT_COLUMNS[2:])
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Sheet1"
-    ws["B1"] = "Monthly production analysis"
+    pct_cols = set(production_analysis.PCT_COLUMNS)
+    ws["B1"] = title
     ws["B1"].font = Font(bold=True, size=14)
     ws["B3"] = "Month - year"
     ws["C3"] = f"{month:02d}-{year:04d}"
-    for j, name in enumerate(cols):
+    for j, name in enumerate(columns):
         c = ws.cell(row=6, column=2 + j, value=name)
         c.font = Font(bold=True)
         c.alignment = Alignment(wrap_text=True, vertical="top")
-        c.fill = PatternFill("solid", fgColor=_PA_INPUT_FILL if j < n_in else _PA_RESULT_FILL)
+        c.fill = PatternFill("solid", fgColor=_PA_RESULT_FILL if name in result_cols
+                             else _PA_INPUT_FILL)
         ws.column_dimensions[c.column_letter].width = 14
     for i, row in enumerate(rows):
-        for j, name in enumerate(cols):
+        for j, name in enumerate(columns):
             v = row[name]
             if name in pct_cols and v is not None:
-                v = v / 100.0            # store a real fraction, shown as %
+                v = v / 100.0
             c = ws.cell(row=7 + i, column=2 + j, value=_csv_safe(v) if isinstance(v, str) else v)
             if name in pct_cols:
                 c.number_format = "0.0%"
+
+
+@app.get("/production-analysis.xlsx")
+def production_analysis_xlsx(year: int, month: int, request: Request):
+    """Same report as an Excel file (admin only), one sheet per table: the
+    month per operator first, then the shifts, then every entry ("Sheet1",
+    laid out like the owner's original workbook)."""
+    require_admin(request)
+    _validate_year_month(year, month)
+    from openpyxl import Workbook
+
+    t = _production_tables(year, month)
+    pa = production_analysis
+    totals = set(pa.MONTH_COLUMNS[3:-1])
+    wb = Workbook()
+    _pa_sheet(wb.active, "Operator efficiency for the month", year, month,
+              pa.MONTH_COLUMNS, t["operators"]["rows"], totals)
+    wb.active.title = "Operator efficiency"
+    _pa_sheet(wb.create_sheet("Shift-wise"), "Operator efficiency per shift", year, month,
+              pa.SHIFT_COLUMNS, t["shifts"]["rows"], set(pa.SHIFT_COLUMNS[6:-1]))
+    _pa_sheet(wb.create_sheet("Sheet1"), "Monthly production analysis", year, month,
+              pa.REPORT_COLUMNS, t["entries"]["rows"], set(pa.RESULT_COLUMNS))
     buf = io.BytesIO()
     wb.save(buf)
     fname = f"production-analysis-{year:04d}-{month:02d}.xlsx"

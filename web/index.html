@@ -315,9 +315,8 @@
     <div class="card admin-only">
       <div class="card-head">
         <h2>Production analysis</h2>
-        <p class="explainer">Every Daily Entry for a month, laid out like the production analysis
-          sheet: one row per entry. This is a report only. It never changes the plan.</p>
-      </div>
+        <p class="explainer">Operator efficiency for a month, worked out from Daily Entry. This is
+          a report only. It never changes the plan.</p>
       <div class="cfg-row">
         <label class="inline-field">Month
           <input type="month" id="pa-month" />
@@ -326,13 +325,18 @@
         <button id="pa-download-btn" class="ghost-btn" type="button">⬇ Download Excel</button>
       </div>
       <p class="explainer">
-        <strong>Planned qty</strong> = minutes available ÷ cycle time.
-        <strong>Total actual qty</strong> = OK qty + rejected qty.
-        <strong>Overall productivity</strong> = total actual qty ÷ planned qty.
-        <strong>Operator efficiency</strong> = total actual qty ÷ ((minutes available − actual
-        setting time − all downtime) ÷ cycle time). Cycle time comes from the Item's Process
-        Master. A "-" means there was nothing to divide by: no cycle time on file, no minutes
-        entered, or no time left after setting and downtime.
+        Efficiency is worked out for each operator's whole shift, never line by line: everything
+        the operator made in that shift, against the shift's minutes counted once.
+        <strong>Standard minutes earned</strong> = for every line, total actual qty (OK + rejected)
+        × cycle time, added up.
+        <strong>Minutes for production</strong> = minutes available in the shift − all actual
+        setting time − all downtime.
+        <strong>Operator efficiency</strong> = standard minutes earned ÷ minutes for production.
+        <strong>Overall productivity</strong> = standard minutes earned ÷ minutes available.
+        The month figure adds up the minutes of all the operator's shifts, then divides.
+        A shift with a line that has no cycle time, or with no minutes entered, shows "-" and is
+        left out of the month total; its note says why. Cycle time comes from the Item's
+        Process Master.
       </p>
       <div id="pa-table" class="eff-table"></div>
     </div>

@@ -73,10 +73,107 @@ def test_new_fields_round_trip_and_legacy_rows_default():
 
 def test_report_columns_match_the_sheet_order():
     assert pa.REPORT_COLUMNS[0] == "Date" and pa.REPORT_COLUMNS[1] == "Machine"
-    assert pa.REPORT_COLUMNS[-4:] == ("Planned qty", "Total Actual Qty",
-                                      "Overall Productivity (Planned vs actual Qty)",
-                                      "Operator efficiency")
+    assert pa.REPORT_COLUMNS[-3:] == ("Planned qty", "Total Actual Qty",
+                                      "Standard minutes earned")
     assert "Rate" not in pa.REPORT_COLUMNS
+    # Per-line percentages are misleading (owner, 2026-10-04): never on an entry row.
+    assert "Operator efficiency" not in pa.REPORT_COLUMNS
+    assert not any("Productivity" in c for c in pa.REPORT_COLUMNS)
+
+
+# --- shift and month totals (owner, 2026-10-04) ----------------------------- #
+def _line(item, qty, ct, mins=660, setup=0.0, op="Operator A", day=1, shift="1st shift",
+          machine="CNC1", **kw):
+    return Actual(so_no="S", item_code=item, entry_date=date(2026, 10, day), shift=shift,
+                  operator=op, process="CNC FIRST SIDE", qty_produced=qty,
+                  cycle_time_min=ct, shift_minutes=mins, actual_setup_min=setup,
+                  machine=machine, **kw)
+
+
+def test_a_full_shift_on_three_items_is_one_hundred_percent_not_three_small_ones():
+    """The owner's example: set up A, run A, set up B, run B, set up C, run C,
+    filling the 660-minute shift exactly. Each line on its own reads far below
+    100% because the floor types the whole shift on every line; the shift is
+    100%."""
+    lines = [_line("A", 30, 4.0, setup=90),      # 90 + 120 = 210
+             _line("B", 20, 6.0, setup=90),      # 90 + 120 = 210
+             _line("C", 25, 2.4, setup=180)]     # 180 + 60 = 240  -> 660 in all
+    for a in lines:
+        (_, _, _, eff), _ = pa.actual_metrics(a)
+        assert eff < 0.4                          # what the old per-line column showed
+    (row,) = pa.shift_rows(lines, None, 2026, 10)
+    assert row["Entries"] == 3
+    assert row["Minutes available in shift"] == 660       # counted ONCE, not 3 x 660
+    assert row["Actual setting time in Min"] == 360
+    assert row["Minutes for production"] == 300
+    assert row["Standard minutes earned"] == 300
+    assert row["Operator efficiency"] == 100.0
+    assert row["Overall Productivity"] == pytest.approx(300 / 660 * 100, abs=0.05)
+
+
+def test_one_line_shift_matches_the_sheet_formula():
+    a = _line("A", 42, 5, mins=330, setup=100, no_power_min=30)
+    (_, _, prod, eff), _ = pa.actual_metrics(a)
+    (row,) = pa.shift_rows([a], None, 2026, 10)
+    assert row["Operator efficiency"] == pytest.approx(eff * 100, abs=0.05)
+    assert row["Overall Productivity"] == pytest.approx(prod * 100, abs=0.05)
+
+
+def test_shifts_are_split_by_day_shift_and_operator():
+    acts = [_line("A", 10, 6), _line("B", 10, 6, op="Operator B"),
+            _line("A", 10, 6, shift="2nd shift", mins=600), _line("A", 10, 6, day=2)]
+    rows = pa.shift_rows(acts, None, 2026, 10)
+    assert len(rows) == 4
+    assert all(r["Entries"] == 1 for r in rows)
+
+
+def test_the_month_adds_minutes_and_never_averages_percentages():
+    """Shift 1: 600 earned in 600 production minutes (100%). Shift 2: 60 earned
+    in 300 (20%, the rest was setting). Averaging the percentages gives 60%;
+    the month is 660 earned / 900 minutes = 73.3%."""
+    acts = [_line("A", 100, 6.0, mins=600, day=1),                 # 600 / 600
+            _line("A", 10, 6.0, mins=600, setup=300, day=2)]       # 60 / 300 = 20%
+    (row,) = pa.operator_month_rows(acts, None, 2026, 10)
+    assert row["Shifts worked"] == 2 and row["Shifts counted"] == 2
+    assert row["Minutes for production"] == 900
+    assert row["Standard minutes earned"] == 660
+    assert row["Operator efficiency"] == pytest.approx(660 / 900 * 100, abs=0.05)   # 73.3, not 60
+    assert row["Overall Productivity"] == pytest.approx(660 / 1200 * 100, abs=0.05)
+
+
+def test_a_shift_with_a_missing_cycle_time_has_no_figure_and_leaves_the_month():
+    acts = [_line("A", 100, 6.0, mins=600, day=1),
+            _line("A", 50, 6.0, mins=600, day=2), _line("B", 50, None, mins=600, day=2)]
+    shifts = pa.shift_rows(acts, None, 2026, 10)
+    day2 = next(r for r in shifts if r["Date"] == "02-10-2026")
+    assert day2["Operator efficiency"] is None
+    assert "no cycle time" in day2["Note"]
+    (month,) = pa.operator_month_rows(acts, None, 2026, 10)
+    assert month["Shifts worked"] == 2 and month["Shifts counted"] == 1
+    assert month["Operator efficiency"] == 100.0
+    assert "1 shift left out" in month["Note"]
+
+
+def test_minutes_typed_once_per_line_are_counted_once():
+    acts = [_line("A", 50, 6.0, mins=600), _line("B", 50, 6.0, mins=600)]
+    (row,) = pa.shift_rows(acts, None, 2026, 10)
+    assert row["Minutes available in shift"] == 600
+    assert row["Operator efficiency"] == 100.0
+    assert row["Note"] == ""
+
+
+def test_month_rows_sort_best_first_and_no_figure_last():
+    acts = [_line("A", 50, 6.0, mins=600, op="Low"), _line("A", 100, 6.0, mins=600, op="High"),
+            _line("A", 100, None, mins=600, op="Blank")]
+    assert [r["Operator"] for r in pa.operator_month_rows(acts, None, 2026, 10)] == \
+        ["High", "Low", "Blank"]
+
+
+def test_the_daily_entry_list_no_longer_shows_the_calculated_columns():
+    row = _line("A", 10, 6.0).as_row()
+    for gone in ("Planned Qty", "Total Actual Qty", "Overall Productivity", "Operator Efficiency"):
+        assert gone not in row
+    assert row["Cycle Time (min)"] == 6.0 and row["Minutes Available"] == 660
 
 
 # --- the API ---------------------------------------------------------------- #
@@ -149,24 +246,37 @@ def test_monthly_report_json_and_excel():
     _, c = _api()
     _post(c, machine="BS1", shift_minutes=330, qty_produced=12, qty_rejected=2,
           actual_setup_min=0, no_power_min=30)
+    _post(c, machine="BS1", shift_minutes=330, qty_produced=8)
     r = c.get("/production-analysis", params={"year": 2026, "month": 9})
     assert r.status_code == 200
-    (row,) = r.json()["rows"]
-    assert row["Machine"] == "BS1" and row["Cycle time in Min"] == 3.0
-    assert row["Planned qty"] == 110                         # 330 / 3
-    assert row["Total Actual Qty"] == 12                     # 10 OK + 2 rejected
-    assert row["Overall Productivity (Planned vs actual Qty)"] == pytest.approx(10.9, abs=0.05)
-    assert row["Operator efficiency"] == pytest.approx(12 / (300 / 3) * 100, abs=0.05)
-    assert c.get("/production-analysis", params={"year": 2026, "month": 8}).json()["rows"] == []
+    body = r.json()
+    e1, e2 = body["entries"]["rows"]
+    assert e1["Machine"] == "BS1" and e1["Cycle time in Min"] == 3.0
+    assert e1["Planned qty"] == 110                          # 330 / 3
+    assert e1["Total Actual Qty"] == 12                      # 10 OK + 2 rejected
+    assert e1["Standard minutes earned"] == 36               # 12 x 3
+    (shift,) = body["shifts"]["rows"]                        # both lines, one shift
+    assert shift["Entries"] == 2 and shift["Minutes available in shift"] == 330
+    assert shift["Standard minutes earned"] == 60            # (12 + 8) x 3
+    assert shift["Operator efficiency"] == pytest.approx(60 / 300 * 100, abs=0.05)
+    (op,) = body["operators"]["rows"]
+    assert op["Operator"] == "Operator One"
+    assert op["Operator efficiency"] == shift["Operator efficiency"]
+    empty = c.get("/production-analysis", params={"year": 2026, "month": 8}).json()
+    assert empty["entries"]["rows"] == [] and empty["operators"]["rows"] == []
 
     x = c.get("/production-analysis.xlsx", params={"year": 2026, "month": 9})
     assert x.status_code == 200
     from openpyxl import load_workbook
-    ws = load_workbook(io.BytesIO(x.content))["Sheet1"]
+    wb = load_workbook(io.BytesIO(x.content))
+    assert wb.sheetnames == ["Operator efficiency", "Shift-wise", "Sheet1"]
+    ws = wb["Operator efficiency"]
+    col = 2 + pa.MONTH_COLUMNS.index("Operator efficiency")
+    assert ws.cell(row=6, column=col).value == "Operator efficiency"
+    assert ws.cell(row=7, column=col).value == pytest.approx(0.2, abs=0.001)
+    ws = wb["Sheet1"]
     assert ws["B6"].value == "Date" and ws["C6"].value == "Machine"
-    last = ws.cell(row=6, column=1 + len(pa.REPORT_COLUMNS))
-    assert last.value == "Operator efficiency"
-    assert ws.cell(row=7, column=1 + len(pa.REPORT_COLUMNS)).value == pytest.approx(0.12, abs=0.001)
+    assert ws.cell(row=6, column=1 + len(pa.REPORT_COLUMNS)).value == "Standard minutes earned"
 
 
 def test_report_fields_never_reach_the_plan():
