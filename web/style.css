@@ -282,6 +282,13 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .table-wrap table { border: none; }
 .table-wrap th, .table-wrap td { border-left: none; border-right: none; }
 .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+/* Settings > Machines and Weekly off and holidays (2026-10-05) */
+#machines-card select, #machines-card input, #holidays-card input { max-width: 100%; }
+#machines-table select { background: var(--panel-2); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; }
+#machines-table td.used { color: var(--muted); }
+#machine-new-id { min-width: 220px; }
+#holidays-table tr.past td { color: var(--muted); }
+#machines-table, #holidays-table { width: 100%; }
 .pill-pending { color: var(--warn); }
 
 /* ---------------- Status + lane badges ---------------- */

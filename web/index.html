@@ -252,6 +252,65 @@
       </div>
     </div>
 
+    <div class="card" id="machines-card">
+      <div class="card-head">
+        <h2>Machines</h2>
+        <p class="explainer">Every machine the plan can use. The type decides how a machine is
+          planned: CNC and VMC types get the 90 minute setup and the extra 30% on cycle times,
+          so pick it carefully. A machine still named in an item's process or an operator's
+          machines cannot be removed until those are changed.</p>
+      </div>
+      <div class="table-wrap">
+        <table id="machines-table">
+          <thead>
+            <tr>
+              <th>Machine</th>
+              <th>Type</th>
+              <th>Working time</th>
+              <th>Used by</th>
+              <th class="admin-only"></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="cfg-row admin-only" id="machine-add">
+        <input type="text" id="machine-new-id" placeholder="Machine number, e.g. CNC8" aria-label="Machine number" maxlength="40" />
+        <select id="machine-new-type" aria-label="Machine type"></select>
+        <input type="text" id="machine-new-type-other" placeholder="New type" aria-label="New machine type" maxlength="80" hidden />
+        <select id="machine-new-hours" aria-label="Working time">
+          <option value="19.5">2 shifts (19.5 h)</option>
+          <option value="9.5">1 shift (9.5 h)</option>
+        </select>
+        <button type="button" class="ghost-btn" id="machine-add-btn">Add machine</button>
+      </div>
+    </div>
+
+    <div class="card" id="holidays-card">
+      <div class="card-head">
+        <h2>Weekly off and holidays</h2>
+        <p class="explainer">Weekly off: <strong id="weekly-off">Thursday</strong>. On a holiday the
+          whole shop is closed, both shifts. Operator leave goes in Operator absences below.</p>
+      </div>
+      <div class="table-wrap">
+        <table id="holidays-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Holiday</th>
+              <th class="admin-only"></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="cfg-row admin-only" id="holiday-add">
+        <input type="date" id="holiday-new-date" aria-label="Holiday date" />
+        <input type="text" id="holiday-new-name" placeholder="Name, e.g. Diwali" aria-label="Holiday name" maxlength="80" />
+        <button type="button" class="ghost-btn" id="holiday-add-btn">Add holiday</button>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-head">
         <h2>Operators &amp; shifts</h2>

@@ -2636,6 +2636,192 @@ async function removeMachineDowntime(id) {
   } catch (e) { setStatus("Maintenance error: " + e.message, true); }
 }
 
+// ===== Machines and holidays =====
+// Machines and the holiday list live in the app (2026-10-05, shop masters stage 2).
+// Each write is one request and one re-plan; the user role sees both cards read-only
+// (the server refuses every write from it anyway). Every string from the server goes
+// through escapeHtml or textContent.
+let shopMachines = { machines: [], types: [] };
+
+function machineHoursText(h) {
+  if (h === 19.5) return "2 shifts (19.5 h)";
+  if (h === 9.5) return "1 shift (9.5 h)";
+  if (h === null || h === undefined) return "2 shifts (not set)";
+  return `${h} h a day`;
+}
+
+// "item X step Y", "operator Z", ... -> "12 item steps, 2 operators" for the table cell;
+// the full list sits in the cell's tooltip.
+function machineUsedText(usedBy) {
+  if (!usedBy || !usedBy.length) return "Not used";
+  const kinds = [["item ", "item step", "item steps"], ["operator ", "operator", "operators"],
+                 ["a maintenance break", "maintenance break", "maintenance breaks"],
+                 ["work in progress", "job in progress", "jobs in progress"]];
+  const parts = [];
+  let counted = 0;
+  kinds.forEach(([prefix, one, many]) => {
+    const n = usedBy.filter((u) => String(u).startsWith(prefix)).length;
+    counted += n;
+    if (n) parts.push(`${n} ${n === 1 ? one : many}`);
+  });
+  if (usedBy.length > counted) parts.push(`${usedBy.length - counted} other`);
+  return parts.join(", ");
+}
+
+async function shopWrite(url, method, body, okMsg) {
+  const isMachine = url.startsWith("/machines");
+  try {
+    const res = await fetch(url, { method, headers: { "Content-Type": "application/json" },
+                                   body: JSON.stringify(body) });
+    if (!res.ok) {
+      let msg = await res.text();
+      try { const d = JSON.parse(msg).detail; if (typeof d === "string") msg = d; } catch (e) { /* plain text */ }
+      setStatus(msg || "Could not save.", true);
+      // Put the screen back to what is really stored (a refused edit must not stay shown).
+      if (isMachine) await loadMachines(); else await loadHolidays();
+      return false;
+    }
+    setStatus(okMsg);
+    if (isMachine) {
+      // Every other picker that lists machines reads the new list.
+      imData = null;
+      await Promise.all([loadMachines(), loadOperators(), loadMachineDowntime()]);
+    } else {
+      await loadHolidays();
+    }
+    await runPlan(false);
+    return true;
+  } catch (e) {
+    setStatus("Could not save: " + e.message, true);
+    return false;
+  }
+}
+
+async function loadMachines() {
+  try {
+    const res = await fetch("/machines");
+    if (!res.ok) return;
+    shopMachines = await res.json();
+    renderMachines();
+  } catch (e) { /* a convenience view; a fetch hiccup should not block the page */ }
+}
+
+function renderMachines() {
+  const isAdmin = currentRole === "admin";
+  const tbody = document.querySelector("#machines-table tbody");
+  if (!tbody) return;
+  const types = shopMachines.types || [];
+  const machines = shopMachines.machines || [];
+  tbody.innerHTML = machines.map((m) => {
+    const id = escapeHtml(m.id);
+    const typeCell = isAdmin
+      ? `<select class="mrow-type" data-id="${id}" aria-label="Type of ${escapeHtml(m.name)}">`
+        + (types.includes(m.type) ? "" : `<option value="${escapeHtml(m.type)}" selected>${escapeHtml(m.type || "No type")}</option>`)
+        + types.map((t) => `<option value="${escapeHtml(t)}"${t === m.type ? " selected" : ""}>${escapeHtml(t)}</option>`).join("")
+        + `</select>`
+      : escapeHtml(m.type || "No type");
+    const standard = m.hours === 19.5 || m.hours === 9.5;
+    const hoursCell = isAdmin
+      ? `<select class="mrow-hours" data-id="${id}" aria-label="Working time of ${escapeHtml(m.name)}">`
+        + (standard ? "" : `<option value="${escapeHtml(String(m.hours))}" selected>${escapeHtml(machineHoursText(m.hours))}</option>`)
+        + [19.5, 9.5].map((h) => `<option value="${h}"${h === m.hours ? " selected" : ""}>${machineHoursText(h)}</option>`).join("")
+        + `</select>`
+      : escapeHtml(machineHoursText(m.hours));
+    const del = isAdmin
+      ? `<td class="admin-only"><button type="button" class="ghost-btn small mrow-del" data-id="${id}" title="Remove ${escapeHtml(m.name)}">✕</button></td>`
+      : "";
+    const name = m.name && m.name.replace(/\s+/g, "").toUpperCase() !== String(m.id).toUpperCase() ? `${escapeHtml(m.id)} <span class="muted">${escapeHtml(m.name)}</span>` : escapeHtml(m.id);
+    return `<tr><td>${name}</td><td>${typeCell}</td><td>${hoursCell}</td>`
+      + `<td class="used" title="${escapeHtml((m.used_by || []).join("\n"))}">${escapeHtml(machineUsedText(m.used_by))}</td>${del}</tr>`;
+  }).join("") || `<tr><td colspan="${isAdmin ? 5 : 4}" class="empty">No machines yet.${isAdmin ? " Add one below." : ""}</td></tr>`;
+  const sel = $("machine-new-type");
+  if (sel) {
+    const prev = sel.value;
+    sel.innerHTML = types.map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join("")
+      + `<option value="__other">Other type...</option>`;
+    if (prev) sel.value = prev;
+    $("machine-new-type-other").hidden = sel.value !== "__other";
+  }
+  const add = $("machine-add");
+  if (add) add.style.display = isAdmin ? "" : "none";
+}
+
+async function loadHolidays() {
+  try {
+    const res = await fetch("/holidays");
+    if (!res.ok) return;
+    const data = await res.json();
+    $("weekly-off").textContent = data.weekly_off || "Thursday";
+    const isAdmin = currentRole === "admin";
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const tbody = document.querySelector("#holidays-table tbody");
+    tbody.innerHTML = (data.holidays || []).map((h) =>
+      `<tr class="${h.date < today ? "past" : ""}"><td>${escapeHtml(isoToDdmmyyyy(h.date))}</td>`
+      + `<td>${escapeHtml(h.name || "")}</td>`
+      + (isAdmin ? `<td class="admin-only"><button type="button" class="ghost-btn small hol-del" data-date="${escapeHtml(h.date)}" title="Remove">✕</button></td>` : "")
+      + `</tr>`
+    ).join("") || `<tr><td colspan="${isAdmin ? 3 : 2}" class="empty">No holidays entered.</td></tr>`;
+    const add = $("holiday-add");
+    if (add) add.style.display = isAdmin ? "" : "none";
+  } catch (e) { /* a convenience view; a fetch hiccup should not block the page */ }
+}
+
+function wireShopMasters() {
+  const mt = $("machines-table");
+  if (!mt) return;
+  mt.addEventListener("change", (e) => {
+    const t = e.target;
+    if (currentRole !== "admin") return;
+    const m = (shopMachines.machines || []).find((x) => x.id === t.dataset.id);
+    if (!m) return;
+    const body = { id: m.id, type: m.type, hours: m.hours, version: m.version };
+    if (t.classList.contains("mrow-type")) body.type = t.value;
+    else if (t.classList.contains("mrow-hours")) body.hours = Number(t.value);
+    else return;
+    shopWrite("/machines", "PUT", body, `Saved ${m.id}. Updating the plan.`);
+  });
+  mt.addEventListener("click", (e) => {
+    const t = e.target.closest(".mrow-del");
+    if (!t || currentRole !== "admin") return;
+    if (!window.confirm(`Remove machine ${t.dataset.id}? The plan will no longer use it.`)) return;
+    shopWrite("/machines/delete", "POST", { id: t.dataset.id }, `Removed ${t.dataset.id}. Updating the plan.`);
+  });
+  $("machine-new-type").addEventListener("change", (e) => {
+    const other = $("machine-new-type-other");
+    other.hidden = e.target.value !== "__other";
+    if (!other.hidden) other.focus();
+  });
+  $("machine-add-btn").addEventListener("click", async () => {
+    if (currentRole !== "admin") return;
+    const id = $("machine-new-id").value.trim();
+    const sel = $("machine-new-type").value;
+    const type = sel === "__other" ? $("machine-new-type-other").value.trim() : sel;
+    if (!id) { setStatus("Type the machine number first, for example CNC8.", true); $("machine-new-id").focus(); return; }
+    if (!type) { setStatus("Pick the machine type, or type a new one.", true); return; }
+    const ok = await shopWrite("/machines", "POST",
+      { id, type, hours: Number($("machine-new-hours").value) },
+      `Machine ${id} added. Updating the plan.`);
+    if (ok) { $("machine-new-id").value = ""; $("machine-new-type-other").value = ""; }
+  });
+  $("holidays-table").addEventListener("click", (e) => {
+    const t = e.target.closest(".hol-del");
+    if (!t || currentRole !== "admin") return;
+    if (!window.confirm(`Remove the holiday on ${isoToDdmmyyyy(t.dataset.date)}? The shop will be planned as open that day.`)) return;
+    shopWrite("/holidays/delete", "POST", { date: t.dataset.date }, "Holiday removed. Updating the plan.");
+  });
+  $("holiday-add-btn").addEventListener("click", async () => {
+    if (currentRole !== "admin") return;
+    const date = $("holiday-new-date").value;
+    const name = $("holiday-new-name").value.trim();
+    if (!date) { setStatus("Pick the holiday date first.", true); return; }
+    if (!name) { setStatus("Type a name for the holiday, for example Diwali.", true); return; }
+    const ok = await shopWrite("/holidays", "POST", { date, name }, "Holiday added. Updating the plan.");
+    if (ok) { $("holiday-new-date").value = ""; $("holiday-new-name").value = ""; }
+  });
+}
+// ===== end Machines and holidays =====
+
 // ---- Operators & shifts (Settings-area block). The list is visible to both
 // roles, but rows render two different markups per role (rather than dual-DOM
 // + CSS-hiding as the absence row's single delete button does): admins get
@@ -3205,6 +3391,9 @@ if (_noQuoteBtn) _noQuoteBtn.onclick = quoteNewOrders;
   loadAbsences();
   loadMachineDowntime();
   loadOperators();
+  wireShopMasters();
+  loadMachines();
+  loadHolidays();
   // Add New Orders is genuinely admin-only (GET /new-orders/drafts 403s for the
   // user role), so only load it once the role is known and admin — unlike the
   // three calls above, which are role-open and safe to fire for everyone.
