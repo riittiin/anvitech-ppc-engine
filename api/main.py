@@ -52,6 +52,7 @@ from engine import planning_time
 from engine import operator_master
 from engine import freeze
 from engine import item_master
+from engine import shop_masters
 from engine.rules import (
     rule3_tiebreak_process_time as r3,
     rule4_setup_time as r4,
@@ -335,47 +336,63 @@ def _store_env_key():
             os.environ.get("STORE_DIR"))
 
 
+def _seed_once(load, save, seed):
+    """One app-owned master table, seeded ONCE from the workbook on file."""
+    doc = load()
+    if doc is None:
+        raw = book_store.load_masters_bytes()
+        if raw is not None:
+            doc = seed(raw, _ist_now().isoformat(timespec="seconds"))
+            if doc is not None:
+                save(doc)
+    return doc
+
+
 def _item_master_doc():
     """The app-owned Item Process Master, seeded ONCE from the workbook on file
     the first time it is needed (same pattern as operators, 2026-07-18). After that
     the workbook's routing sheet is never read again, a later upload included."""
-    doc = book_store.load_item_master()
-    if doc is None:
-        raw = book_store.load_masters_bytes()
-        if raw is not None:
-            doc = item_master.seed_doc(raw, _ist_now().isoformat(timespec="seconds"))
-            if doc is not None:
-                book_store.save_item_master(doc)
-    return doc
+    return _seed_once(book_store.load_item_master, book_store.save_item_master,
+                      item_master.seed_doc)
+
+
+def _machines_doc():
+    """The app-owned Machines table (seeded once from the workbook's Machine master)."""
+    return _seed_once(book_store.load_machines_doc, book_store.save_machines_doc,
+                      shop_masters.seed_machines)
+
+
+def _calendar_doc():
+    """The app-owned holiday list (seeded once from the workbook's holiday sheet)."""
+    return _seed_once(book_store.load_shop_calendar, book_store.save_shop_calendar,
+                      shop_masters.seed_calendar)
 
 
 def _current_masters():
-    """Masters from the latest uploaded workbook, else empty masters.
-
-    Routings come from the app's Item Process Master (seeded once from the
-    workbook); the parsed masters are cached per (store, table digest), so a
-    routing edit re-parses once.
-
-    The PARSED WORKBOOK is cached in-process (keyed by content hash / store
-    config); the app-owned operator table is overlaid on EVERY call so display
-    always reflects the latest Settings edits and a freshly-emptied store
-    re-seeds. The cache never holds operators — they belong to the store, not
-    the workbook."""
-    doc = _item_master_doc()
-    key = (_store_env_key(), item_master.digest(doc))
+    """The shop's masters, built from the app's tables: Item Process Master
+    (routings), Machines and holidays, each seeded once from the workbook on file.
+    With all three tables the workbook is not opened at all (2026-10-05, stage 2).
+    Cached per (store, the three table digests); the operator table is overlaid on
+    every call and never held in the cache."""
+    idoc, mdoc, cdoc = _item_master_doc(), _machines_doc(), _calendar_doc()
+    key = (_store_env_key(), item_master.digest(idoc),
+           shop_masters.machines_digest(mdoc), shop_masters.calendar_digest(cdoc))
     if _MASTERS_CACHE["masters"] is not None and _MASTERS_CACHE["key"] == key:
         base = _MASTERS_CACHE["masters"]
     else:
-        raw = book_store.load_masters_bytes()
-        if raw is None:
-            # No workbook uploaded yet → empty masters; the UI prompts to upload.
-            # (There is no bundled demo file anymore — production runs on uploads.)
-            base = Masters()
+        rows = dict(routing_rows=item_master.routing_rows(idoc) if idoc else None,
+                    machine_rows=shop_masters.machine_rows(mdoc) if mdoc else None,
+                    holiday_rows=shop_masters.holiday_rows(cdoc) if cdoc else None)
+        if None not in rows.values():
+            _, base = load_all(None, **rows)
         else:
-            _, base = load_all(io.BytesIO(raw),
-                               routing_rows=item_master.routing_rows(doc) if doc else None)
-        _MASTERS_CACHE.update(key=key, masters=base,
-                              sha=hashlib.sha256(raw).hexdigest() if raw else "none")
+            raw = book_store.load_masters_bytes()
+            if raw is None:
+                # No workbook uploaded yet: empty masters; the UI prompts to upload.
+                base = Masters()
+            else:
+                _, base = load_all(io.BytesIO(raw), **rows)
+        _MASTERS_CACHE.update(key=key, masters=base)
     return _with_operator_overlay(base)
 
 
@@ -390,10 +407,18 @@ def _with_operator_overlay(base):
     today = _ist_today()
     table = book_store.load_operator_table()
     if table is None:
-        if not base.operators:
+        seed_from = base.operators
+        if not seed_from:
+            # Tables mode never parses the workbook, so its operator sheet is read
+            # here, once, for the one-time seed.
+            raw = book_store.load_masters_bytes()
+            if raw is not None:
+                seed_from = load_all(io.BytesIO(raw))[1].operators
+        if not seed_from:
             return base                       # nothing to seed from yet
         table = {"week_anchor": operator_master.last_friday(today).isoformat(),
-                 "operators": operator_master.seed_rows_from_masters(base)}
+                 "operators": operator_master.seed_rows_from_masters(
+                     replace(base, operators=seed_from))}
         book_store.save_operator_table(table)
     rotated, flips = operator_master.rotate_table(table, today)
     if flips > 0:
@@ -403,9 +428,12 @@ def _with_operator_overlay(base):
 
 
 def _masters_sha() -> str:
-    """Content hash of the stored masters workbook (cached with the parsed masters)."""
-    _current_masters()   # warms the cache (and refreshes sha after an upload)
-    return _MASTERS_CACHE.get("sha") or "none"
+    """Content hash of the stored masters workbook.
+    Unchanged by stage 2: the workbook is still on file (the seed source), it
+    is just no longer parsed."""
+    _current_masters()   # seeds the tables on first use
+    raw = book_store.load_masters_bytes()
+    return hashlib.sha256(raw).hexdigest() if raw else "none"
 
 
 def _inputs_signature(config: Config) -> str:
@@ -453,9 +481,13 @@ def _inputs_signature(config: Config) -> str:
     # differs from what it was seeded from: right after the seed it equals the
     # workbook (already covered by the masters sha), so an applied optimization is
     # not flagged stale by the switch itself, while any real edit flags it.
-    doc = book_store.load_item_master()
-    if doc and item_master.digest(doc) != doc.get("seed_digest"):
-        parts.append(["item_master", item_master.digest(doc)])
+    for tag, doc, digest in (
+            ("item_master", book_store.load_item_master(), item_master.digest),
+            ("machines", book_store.load_machines_doc(), shop_masters.machines_digest),
+            ("shop_calendar", book_store.load_shop_calendar(),
+             shop_masters.calendar_digest)):
+        if doc and digest(doc) != doc.get("seed_digest"):
+            parts.append([tag, digest(doc)])
     blob = json.dumps(parts, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 
@@ -1633,6 +1665,8 @@ def _plan_fingerprint(config: Config) -> str:
         "masters": _masters_sha(),
         # Routings are app-owned (Item Process Master); an edit must refresh every screen.
         "item_master": item_master.digest(book_store.load_item_master()),
+        "machines": shop_masters.machines_digest(book_store.load_machines_doc()),
+        "shop_calendar": shop_masters.calendar_digest(book_store.load_shop_calendar()),
         "operators": book_store.load_operator_table(),
         "config": _resolve_config(config).to_dict(),
         "ranks": (book_store.load_plan_priority() or {}).get("ranks"),
