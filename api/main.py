@@ -1902,7 +1902,8 @@ def _start_optimize(budget_evals: int, label: str, background: bool = True,
                 orders, actuals, book_store.load_masters_bytes(), config,
                 seed=_OPT_SEED, candidates=_cands, budget_per_candidate=_bpc,
                 absences=absences, operator_table=operator_table, frozen=frozen,
-                machine_downtime=machine_downtime, seed_ranks=seed_ranks)
+                machine_downtime=machine_downtime, seed_ranks=seed_ranks,
+                item_master=book_store.load_item_master())
             # Use contest_jobs (not sweep_contenders) for the true candidate
             # count: under the new engine the contest also sweeps the
             # machine-set dimension (Allotted-only vs Allotted+Suggested), so

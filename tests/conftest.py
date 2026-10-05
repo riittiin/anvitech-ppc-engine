@@ -39,6 +39,13 @@ def _isolate_store(tmp_path, monkeypatch):
     except Exception:
         pass
     yield
+    # A worker-path test (run_candidate) injects an Item Process Master override
+    # into the new engine; never let it leak into the next test.
+    try:
+        from engine import new_engine
+        new_engine.clear_item_master_override()
+    except Exception:
+        pass
 
 
 @pytest.fixture(scope="session")

@@ -150,3 +150,55 @@ def test_new_engine_override_wins_and_none_means_workbook():
         assert new_engine._new_masters(False).routings[ITEM_A].operations[0].cycle_min == 3.0
     finally:
         new_engine.clear_item_master_override()
+
+
+def _payload(doc):
+    from engine import optimize_service as svc
+    from engine.config import Config
+    _seed_book()
+    orders = book_store.load_active_orders()
+    return svc.build_payload(orders, [], build_sample_bytes(),
+                             Config(plan_start_date=date(2025, 3, 1)), seed=1,
+                             item_master=doc)
+
+
+def test_payload_round_trips_the_table():
+    from engine import optimize_service as svc
+    doc = im.seed_doc(build_sample_bytes(), "t")
+    doc["items"][ITEM_A]["steps"][0]["cycle"] = 44
+    payload = json.loads(json.dumps(_payload(doc)))
+    assert payload["item_master"] == doc
+    parsed = svc.parse_payload(payload)
+    assert len(parsed) == 8
+    assert parsed[2].routings[ITEM_A].processes[0].cycle_time == 44
+
+
+def test_payload_without_item_master_falls_back_to_workbook():
+    from engine import optimize_service as svc
+    payload = json.loads(json.dumps(_payload(None)))
+    payload.pop("item_master")                      # a job built before this deploy
+    parsed = svc.parse_payload(payload)
+    assert parsed[2].routings[ITEM_A].processes[0].cycle_time == 3
+
+
+def test_run_candidate_feeds_the_table_to_the_new_engine(monkeypatch):
+    from engine import new_engine, optimize_service as svc
+    seen = {}
+    monkeypatch.setattr(new_engine, "set_item_master", lambda d: seen.setdefault("doc", d))
+    monkeypatch.setattr(svc, "prepare_contest", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop")))
+    doc = im.seed_doc(build_sample_bytes(), "t")
+    payload = json.loads(json.dumps(_payload(doc)))
+    payload["config"]["scheduler"] = "new"
+    try:
+        with pytest.raises(RuntimeError, match="stop"):
+            svc.run_candidate(payload, 50)
+    finally:
+        new_engine.set_masters_bytes(None)       # run_candidate set it; don't leak
+    assert seen["doc"] == doc
+
+
+def test_api_payload_call_site_passes_the_table():
+    import inspect
+    m = _api()
+    src = inspect.getsource(m)
+    assert "item_master=book_store.load_item_master()" in src

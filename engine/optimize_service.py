@@ -198,14 +198,16 @@ def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
                   seed: int, candidates=CLOUD_OVERLAP_CANDIDATES,
                   budget_per_candidate=CLOUD_BUDGET_PER_CANDIDATE,
                   absences=None, operator_table=None, frozen=None,
-                  machine_downtime=None, seed_ranks=None) -> dict:
+                  machine_downtime=None, seed_ranks=None, item_master=None) -> dict:
     """Snapshot everything one contest depends on. JSON-safe. ``operator_table``
     (the app-owned {week_anchor, operators} dict) is carried verbatim — the
     worker applies the SAME as-of-effective-start rotation the API does, so a
     cloud run is byte-identical to a local one. ``frozen`` (a plain list of
     dict rows, same JSON-safe shape as ``absences``) carries the in-progress
     operations that must not be rescheduled. ``machine_downtime`` (same shape
-    again) carries the maintenance breaks a contest must also honour."""
+    again) carries the maintenance breaks a contest must also honour.
+    ``item_master`` (the app-owned routing table) is carried verbatim so the worker
+    plans from the routings the screen shows."""
     return {
         "orders": [o.to_json() for o in orders.values()],
         "actuals": [a.to_json() for a in actuals],
@@ -224,6 +226,10 @@ def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
         # tuple: that is an 8-tuple whose arity four callers assert, and widening it has
         # broken them before (2026-08-31). run_candidate reads this key directly.
         "seed_ranks": dict(seed_ranks or {}),
+        # The app-owned Item Process Master (routings). Read with .get by
+        # parse_payload / run_candidate so a job built before this key existed
+        # still plans, from the workbook's own routing sheet.
+        "item_master": item_master,
     }
 
 
@@ -240,8 +246,11 @@ def parse_payload(payload: dict):
         orders[o.key] = o
     actuals = [Actual.from_json(d) for d in payload["actuals"]]
     raw = payload.get("masters_xlsx_b64")
+    doc = payload.get("item_master")
     if raw:
-        _, masters = load_all(io.BytesIO(base64.b64decode(raw)))
+        from engine import item_master as _im
+        _, masters = load_all(io.BytesIO(base64.b64decode(raw)),
+                              routing_rows=_im.routing_rows(doc) if doc else None)
     else:
         masters = Masters()
     config = Config.from_dict(payload["config"])
@@ -361,6 +370,7 @@ def run_candidate(payload: dict, overlap: int, flexible: bool = False, *, on_pro
         from engine import new_engine
         _raw = payload.get("masters_xlsx_b64")
         new_engine.set_masters_bytes(base64.b64decode(_raw) if _raw else None)
+        new_engine.set_item_master(payload.get("item_master"))
     setup = prepare_contest(orders, actuals, masters, config, absences=absences,
                             operator_table=operator_table, frozen=frozen,
                             machine_downtime=machine_downtime)
