@@ -521,7 +521,7 @@ def _register_provisional(masters: Masters, raw_label: str):
         "PENDING_MASTER_DATA",
         canonical,
         f"resource '{raw_label}' used by a routing but not in Machine master; "
-        f"registered as provisional: add it to the Excel master to complete it",
+        f"registered as provisional: add it in Settings > Machines to complete it",
     )
 
 

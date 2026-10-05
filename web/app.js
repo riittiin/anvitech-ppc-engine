@@ -2756,7 +2756,11 @@ async function loadHolidays() {
     const now = new Date();
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     const tbody = document.querySelector("#holidays-table tbody");
-    tbody.innerHTML = (data.holidays || []).map((h) =>
+    // Upcoming holidays first, soonest at the top; past ones after, greyed, most recent first.
+    const all = data.holidays || [];
+    const upcoming = all.filter((h) => h.date >= today).sort((a, b) => a.date.localeCompare(b.date));
+    const past = all.filter((h) => h.date < today).sort((a, b) => b.date.localeCompare(a.date));
+    tbody.innerHTML = upcoming.concat(past).map((h) =>
       `<tr class="${h.date < today ? "past" : ""}"><td>${escapeHtml(isoToDdmmyyyy(h.date))}</td>`
       + `<td>${escapeHtml(h.name || "")}</td>`
       + (isAdmin ? `<td class="admin-only"><button type="button" class="ghost-btn small hol-del" data-date="${escapeHtml(h.date)}" title="Remove">✕</button></td>` : "")

@@ -326,7 +326,9 @@ def test_the_settings_panel_exists_with_the_expected_controls():
 
 def test_the_add_row_is_admin_only_but_the_list_is_not():
     html = (WEB / "index.html").read_text(encoding="utf-8")
-    block = html.split("Machine maintenance", 1)[1].split("</div>\n\n", 1)[0]
+    # Anchor on the card's heading: the Machines card's copy also names the
+    # Machine maintenance card in a sentence.
+    block = html.split("<h2>Machine maintenance</h2>", 1)[1].split("</div>\n\n", 1)[0]
     add = block.split('id="downtime-add"')[0]
     assert "admin-only" in add, "the add controls must be admin-only"
     lst = block.split('id="downtime-list"')[0].rsplit("<ul", 1)[-1]
