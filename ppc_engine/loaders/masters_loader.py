@@ -39,8 +39,10 @@ def _as_date(value):
     return None
 
 
-def load_machines(wb) -> dict[str, Machine]:
-    """Read the 'Machine master' sheet into {canonical id → Machine}."""
+def machine_rows_from_sheet(wb) -> list:
+    """The 'Machine master' as raw rows ``[(machine_no, machine_type, available_hrs)]``.
+    The ONE reading of the sheet: ``load_machines`` and the app's one-time seed of
+    its Machines table both use it."""
     ws = find_sheet(wb, "Machine master")
     rows = rows_of(ws)
     h = locate_header_row(rows, "Machine No", "Machine Type")
@@ -48,18 +50,27 @@ def load_machines(wb) -> dict[str, Machine]:
     c_type = t.col("Machine Type")
     c_no = t.col("Machine No")
     c_hrs = t.col("Available Hrs/Day", "Available Hrs", "Available Hrs / Day")
+    return [(t.get(row, c_no), t.get(row, c_type), t.get(row, c_hrs)) for row in t.data_rows]
 
+
+def machines_from_rows(rows) -> dict[str, Machine]:
+    """``[(machine_no, machine_type, available_hrs)]`` -> {canonical id -> Machine}.
+    The ONE rule, whatever the source (sheet or the app's Machines table)."""
     machines: dict[str, Machine] = {}
-    for row in t.data_rows:
-        mid = canon_machine(t.get(row, c_no))
+    for no, type_raw, hrs in rows:
+        mid = canon_machine(no)
         if not mid:
             continue
-        type_text = str(t.get(row, c_type) or "").strip()
+        type_text = str(type_raw or "").strip()
         kind = machine_kind_from_type(type_text)
-        hrs = t.get(row, c_hrs)
         hrs = float(hrs) if isinstance(hrs, (int, float)) else _DEFAULT_HRS.get(kind, 9.5)
         machines[mid] = Machine(mid, type_text, kind, hrs)
     return machines
+
+
+def load_machines(wb) -> dict[str, Machine]:
+    """Read the 'Machine master' sheet into {canonical id → Machine}."""
+    return machines_from_rows(machine_rows_from_sheet(wb))
 
 
 def load_operators(wb) -> tuple[Operator, ...]:
@@ -118,6 +129,33 @@ def load_calendar(wb) -> ShopCalendar:
         holidays=frozenset(holidays),
         leaves={k: frozenset(v) for k, v in leaves.items()},
     )
+
+
+def holiday_rows_from_sheet(wb) -> list:
+    """The 'Weekly off & holiday master' HOLIDAY rows as ``[(date, name)]``, in sheet
+    order. Weekly-off and Leave rows are not returned: the weekly off is Thursday in
+    the engine, and leave belongs to Settings > Operator absences."""
+    ws = find_sheet(wb, "Weekly off & holiday master")
+    rows = rows_of(ws)
+    h = locate_header_row(rows, "Category", "Day / Date", "Day/Date")
+    t = Table.from_rows(rows, h)
+    c_cat = t.col("Category")
+    c_name = t.col("Name")
+    c_date = t.col("Day / Date", "Day/Date", "Date")
+    out = []
+    for row in t.data_rows:
+        cat = str(t.get(row, c_cat) or "").strip().lower()
+        d = _as_date(t.get(row, c_date))
+        if cat.startswith("holiday") and d is not None:
+            out.append((d, str(t.get(row, c_name) or "").strip()))
+    return out
+
+
+def calendar_from_holiday_rows(rows) -> ShopCalendar:
+    """The shop calendar from the app's holiday list: Thursday off, the listed
+    holidays closed, no per-operator leave (absences carry that)."""
+    return ShopCalendar(weekly_off_weekday=THURSDAY,
+                        holidays=frozenset(d for d, _name in rows), leaves={})
 
 
 def _block_is_process(header_row, start, n) -> bool:

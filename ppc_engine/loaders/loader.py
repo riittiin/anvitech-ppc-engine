@@ -15,10 +15,12 @@ from ppc_engine.domain.order import Order
 from ppc_engine.domain.resources import ROLE_FOR_KIND
 from ppc_engine.domain.routing import OperationKind
 from ppc_engine.loaders.masters_loader import (
+    calendar_from_holiday_rows,
     load_calendar,
     load_machines,
     load_operators,
     load_routings,
+    machines_from_rows,
     register_provisional_machines,
     routings_from_rows,
 )
@@ -83,7 +85,8 @@ def _block_unschedulable(masters: Masters, orders: list[Order], report: DataRepo
                     break
 
 
-def load_all(path, flexible_machines: bool = False, routing_rows=None) -> LoadResult:
+def load_all(path, flexible_machines: bool = False, routing_rows=None,
+             machine_rows=None, holiday_rows=None) -> LoadResult:
     """Load a workbook at ``path`` into a LoadResult.
 
     ``flexible_machines`` (see load_routings): False = machining ops locked to their
@@ -93,13 +96,27 @@ def load_all(path, flexible_machines: bool = False, routing_rows=None) -> LoadRe
     ``routing_rows`` (``[(code, description, steps)]``): when given, routings come
     from these rows (the app's Item Process Master) and the workbook's routing
     sheet is not read. None = read the sheet, as before.
-    """
-    wb = open_workbook(path)
-    report = DataReport()
 
-    machines = load_machines(wb)
-    operators = load_operators(wb)
-    calendar = load_calendar(wb)
+    ``machine_rows`` / ``holiday_rows`` (the app's Machines and holiday tables):
+    when routing, machine AND holiday rows are all given, the masters come from them
+    alone and no workbook is opened (``path`` may be None; operators come from the
+    app overlay, orders from the book). Given partly, the rest is read from the
+    workbook, which then must be supplied.
+    """
+    tables_only = None not in (routing_rows, machine_rows, holiday_rows)
+    report = DataReport()
+    if tables_only:
+        wb = None
+    elif path is None:
+        raise ValueError("load_all: a workbook is required unless routing, machine "
+                         "and holiday rows are all given")
+    else:
+        wb = open_workbook(path)
+
+    machines = machines_from_rows(machine_rows) if machine_rows is not None else load_machines(wb)
+    operators = () if wb is None else load_operators(wb)
+    calendar = (calendar_from_holiday_rows(holiday_rows) if holiday_rows is not None
+                else load_calendar(wb))
     if routing_rows is None:
         routings = load_routings(wb, report, flexible_machines=flexible_machines)
     else:
@@ -107,7 +124,7 @@ def load_all(path, flexible_machines: bool = False, routing_rows=None) -> LoadRe
     register_provisional_machines(machines, routings, report)
 
     masters = Masters(machines=machines, operators=operators, routings=routings, calendar=calendar)
-    orders = load_orders(wb)
+    orders = [] if wb is None else load_orders(wb)
     _block_unschedulable(masters, orders, report)
 
     return LoadResult(masters=masters, orders=orders, report=report)
