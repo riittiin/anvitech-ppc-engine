@@ -1,6 +1,6 @@
 # Item Process Master tab: routings move out of Excel into the app
 
-**Date:** 2026-10-05 · **Status:** design approved in conversation, awaiting spec review
+**Date:** 2026-10-05 · **Status:** implemented, unpushed
 **Branch:** `item-process-master` (from `origin/main` @ `c123fa1`)
 **Stage:** 1 of 2 in removing the Excel upload entirely (see "Staging" below)
 

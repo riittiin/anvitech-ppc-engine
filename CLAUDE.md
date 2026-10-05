@@ -2,6 +2,54 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-27)
 >
+> - **ITEM ROUTINGS LIVE IN THE APP NOW: THE ITEM PROCESS MASTER TAB (2026-10-05, owner
+>   request; branch `item-process-master`, UNPUSHED; spec
+>   `docs/superpowers/specs/2026-10-05-item-process-master-tab-design.md`, verification
+>   with harnesses `...-item-process-master-verification.md`).** Routings used to come
+>   from the workbook's "Item's process Master" sheet on every upload. They now live in
+>   the store key **`anvitech:item_process_master`** (`engine/item_master.py`, pure),
+>   **seeded ONCE** from the workbook on file the first time it is needed (same pattern
+>   as operators); after that the routing sheet is never read again, an upload included
+>   (upload seeds from the OLD workbook before replacing it). Insertion order is kept,
+>   never sorted: dict order reaches the scheduler. The table holds ORIGINAL times; the
+>   CNC/VMC +30% stays in `engine/planning_time.py`. Dropped on purpose: Customer, RM
+>   type, MOQ, Total Time (no reader). **One rule per loader:** `ppc_engine` routings go
+>   through `masters_loader.routings_from_rows`, classic through
+>   `loaders._load_routings_from_rows`; both `load_all`s take `routing_rows=`.
+>   **Four wiring points:** `api._current_masters` (classic masters, cache keyed on the
+>   table digest), `new_engine._new_masters` (ppc masters, cached by (workbook sha, table
+>   digest, flexible)), `optimize_service.build_payload/parse_payload` (the payload
+>   carries `item_master`; `parse_payload` still returns its 8-tuple) and
+>   `run_candidate` -> `new_engine.set_item_master` (the cloud/Mac worker). A payload
+>   built before the table existed falls back to the workbook. `_plan_fingerprint`
+>   hashes the table digest; **`_inputs_signature` folds the table in ONLY once it
+>   differs from the seed**, so the switch itself never flags an applied optimization
+>   stale but any real edit does. **Punch safety:** on an active order a step with
+>   punches may not be renamed or removed, punched steps keep their relative order, an
+>   item an open order or a draft uses cannot be deleted, and Save carries a version
+>   (409 on a stale one). `SCHEDULER_FINGERPRINT` NOT bumped (nothing moves).
+>   **Measured:** schedule hashes **16 of 16 byte-identical** against `c123fa1` (Test5,
+>   Test8, Test9, Test9-ORIGINAL x flexible F/T x clean / WIP with a derived frozen set),
+>   ppc routings 16/16 identical, classic routings identical once the four dropped
+>   fields are blanked, two-line quote identical on all four books. One CNC cycle edit
+>   through `PUT /item-master` moved EVERY reader with the workbook bytes unchanged:
+>   `/run`, Gantt, shift-wise, delay report, production analysis, `/items`, quote, and
+>   the payload round trip (classic and the worker's ppc masters). Uploading a doctored
+>   workbook after the seed: plan hash unchanged. **Mutation testing, 9 brief mutations:
+>   8 of 9 load-bearing; `_keep_blank_as_stored` fails NO test in the whole suite yet IS
+>   load-bearing** (all 106 Test9 items have a null machine field; the browser sends
+>   `""`, and without it an unedited Save flips the inputs signature), so that test gap
+>   is open. Cache-hit `/run` on Test9 ~38 -> ~43 ms locally (+13%). Suite 1208 passed,
+>   4 skipped, 1 pre-existing local failure (`xlsxwriter`). **Open for the owner:** the
+>   punch-safety rule accepts moving a punched step BELOW an unpunched one (or a new step
+>   in front of it), which leaves the order in a state `precedence_cap_error` refuses;
+>   the code matches the spec, the spec is narrower than its own reason. **NOT run:**
+>   the live-store copy (no credential this session; run it before deploy), the browser
+>   run of the tab, `/production-analysis.xlsx` (no `xlsxwriter` locally), the cloud
+>   worker end to end.
+>   **Rule: Routings come from the Item Process Master. Never read the workbook's routing
+>   sheet for planning; any new masters builder must pass `routing_rows=`.**
+>
 > - **PLANNING ADDS 30% TO CNC/VMC CYCLE TIMES IN CODE; THE EXCEL HOLDS THE ORIGINAL
 >   (2026-10-04, owner, main `b752ea6`).** The +30% (later +20%) used to be typed into
 >   the Item's process Master; the owner had it restored to his ORIGINAL times and
