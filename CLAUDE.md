@@ -37,25 +37,38 @@
 >   sheet). CNC1 set to 1 shift + a holiday on 09-10 + a machine added moved the plan,
 >   Analytics, delay report, shift-wise, Daily Entry machine list, quote and the payload
 >   (classic and worker ppc); production analysis did NOT move, by design (its 630/570
->   working minutes come from the shift config). **Mutation testing, 11 mutations: 9
->   load-bearing; two fail NO test in the whole suite:** `_current_masters` never taking
->   the tables-only branch (matters only on a store with the tables and NO workbook:
->   classic masters go empty, 428 -> 422 plan entries) and `parse_payload` ignoring
->   `machines` (the worker's classic hours stay 19.5 instead of 9.5; its new-engine
->   score is identical). **A machine's TYPE does not move the plan** (CNC1 retyped
+>   working minutes come from the shift config). **Mutation testing: 11 of 11
+>   load-bearing** after the final fix wave (the two that first failed no test,
+>   `_current_masters` never taking the tables-only branch and `parse_payload` ignoring
+>   `machines`, are now pinned in `tests/test_shop_wiring.py`), plus 7 of 7 on that
+>   wave's own fixes. **A machine's TYPE does not move the plan** (CNC1 retyped
 >   Manual Packing, MD1 retyped CNC lathe: hash unchanged): setup and +30% follow the
->   step's machine ID prefix (`classify_operation`), so the Machines card's "the type
->   decides the 90 minute setup and the 30%" explainer is wrong and awaits the owner's
->   wording. Cache-hit `/run` on Test9 ~43.0 -> ~43.3 ms; cold first plan +50 to 80 ms
->   (the seed). Suite 1272 passed, 4 skipped, 1 pre-existing local failure
->   (`xlsxwriter`). **NOT run:** the live-store copy (no credential this session; run it
->   before deploy), the browser run of the two cards, `/production-analysis.xlsx`, the
->   cloud worker end to end.
+>   step's machine ID prefix (`classify_operation`). The Machines card says so: a
+>   CNC/VMC machine NUMBER gets the setup and the 30%; the type groups machines and
+>   decides which ones the Machine maintenance picker offers.
+>   **Fresh install / missing sheet (final fix wave):** with NO workbook on file, a
+>   table not created yet is an EMPTY table, in memory only, never written (so a
+>   workbook stored later still seeds once); one helper,
+>   `shop_masters.fill_missing`, applied in `_current_masters`, `new_engine._new_masters`
+>   and `parse_payload`, so a fresh install plans from the first machine and item
+>   added by hand. A workbook WITHOUT one of the sheets seeds that table EMPTY, once
+>   (with `seed_digest` + `seeded_from_sha`), never re-reading the workbook per call.
+>   `calendar_digest` hashes the holidays sorted by date (add then remove restores the
+>   seed digest). The Holidays card lists upcoming holidays first, soonest first, then
+>   past ones greyed, most recent first. A seeded store's path is untouched (no
+>   byte-identical re-run needed). Cache-hit `/run` on Test9 ~43.0 -> ~43.3 ms; cold first plan +50 to 80 ms
+>   (the seed). Suite 1279 passed, 4 skipped, 1 pre-existing local failure
+>   (`xlsxwriter`). Browser run of both cards as admin and user on a throwaway Test9
+>   instance and on an empty store with no workbook: clean, no console errors. **NOT
+>   run:** the live-store copy (no credential this session; run it before deploy),
+>   `/production-analysis.xlsx`, the cloud worker end to end.
 >   **Deploy:** the live store's Machine master and holiday sheet are copied once, at the
 >   first request after deploy. The holiday sheet is stale (three 2025 dates and
 >   15-08-2026): **ask the owner to enter the 2026 holidays** in Settings.
 >   **Rule: Masters come from the app's tables. Nothing may open the stored workbook for
->   planning; it is kept only as the one-time seed source and for rollback.**
+>   planning; it is kept only as the one-time seed source and for rollback. A table
+>   that does not exist yet, with no workbook to seed it, is an empty table, never
+>   "no masters".**
 >
 > - **ITEM ROUTINGS LIVE IN THE APP NOW: THE ITEM PROCESS MASTER TAB (2026-10-05, owner
 >   request; branch `item-process-master`, UNPUSHED; spec

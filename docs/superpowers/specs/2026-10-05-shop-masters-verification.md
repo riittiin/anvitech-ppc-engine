@@ -21,7 +21,7 @@ Harness sources are at the end, verbatim.
 | 3. Every reader follows an edit | CNC1 2 shifts -> 1 shift, holiday 09-10-2026, machine CNC9 added: **plan, Analytics, delay report, shift-wise, Daily Entry machine list, quote, payload (classic and worker ppc) all moved**; workbook bytes unchanged. **Production analysis did NOT move**, by design: its working minutes (630 / 570) come from the shift config, not from the Machines table or holidays (see F2). |
 | 4. Role has no effect | Every new-engine operator forced to `Role.HELPER`: **32 of 32 hashes unchanged** (all 16 runs, in both checkouts), including Test9 WIP+frozen (`95cbb28f49bb624f`). |
 | Extra: machine TYPE | Retyping CNC1 to Manual Packing, or MD1 to CNC lathe: **plan hash unchanged** (Test9). Setup and +30% follow the step's machine id prefix, not the type, so the Machines card's explainer is wrong (F4). |
-| 5. Mutation testing | **11 mutations (the brief's 10, #10 split classic / ppc): 9 load-bearing on the shop + item-master test files; #1 and #3 fail NO test, in those files or in the whole suite.** #1 matters on a store with tables but no workbook (classic masters empty, 428 -> 422 plan entries); #3 changes the worker's classic machine hours (19.5 instead of 9.5) but not its new-engine score. See section 5. |
+| 5. Mutation testing | **11 mutations (the brief's 10, #10 split classic / ppc): 9 load-bearing on the shop + item-master test files; #1 and #3 fail NO test, in those files or in the whole suite.** #1 matters on a store with tables but no workbook (classic masters empty, 428 -> 422 plan entries); #3 changes the worker's classic machine hours (19.5 instead of 9.5) but not its new-engine score. See section 5. **After the final fix wave: 11 of 11 (section 8).** |
 | 6. Browser run | **Not run in Task 9.** |
 | 7. Full suite | **1 failed, 1272 passed, 4 skipped (80.7 s).** The failure is the pre-existing `test_production_analysis.py::test_monthly_report_json_and_excel` (`xlsxwriter` not installed locally; present at base). |
 | Cache-hit `/run` cost | Test9, median of 30, three rounds: base **42.9 / 43.0 / 43.1 ms**, feature **43.3 / 43.2 / 43.3 ms** (+0.2 to +0.4 ms). Cold first `/run` **+50 to +80 ms** (the one-time seed of two more tables). |
@@ -232,9 +232,87 @@ rounds alternating base/feature:
 workbook sha is cached in-process since `639d3bd`). Cold first plan +50 to +80 ms: the
 one-time seed of the Machines and holiday tables. Not measured on Render / MongoDB.
 
+## 8. Final fix wave (after the whole-branch review)
+
+Commits `401c120` (code + tests) and `b670c19` (copy, holiday order, test anchor).
+
+**F1, fresh install / missing sheet.** Before: item + machines tables and no workbook
+and no holiday table gave `Masters()` in `_current_masters` and a `RuntimeError("no
+masters workbook available")` in `new_engine._new_masters`. Now, with no workbook on
+file, a missing table is an EMPTY table in memory (`shop_masters.fill_missing`, never
+written to the store), in `_current_masters`, `_new_masters` and `parse_payload`. A
+workbook missing a sheet seeds that table EMPTY once (`shop_masters.empty_seed`:
+`seed_digest` by the same digest function, `seeded_from_sha`). The create endpoints
+already took `None` docs; checked end to end. **The seeded-store path is unchanged**
+(all three docs present: `_seed_once` returns them, `fill_missing` is not reached,
+`tables_only` is True exactly as before), and `calendar_digest` sorted is the same
+hash for an already date-sorted list, so the byte-identical harness was not re-run.
+
+**F5, holidays.** `calendar_digest` hashes the holidays sorted by date. The card lists
+upcoming holidays ascending, then past ones greyed, most recent first (JS only).
+
+**F3 / F4, copy.** Machines card: "Machines whose number starts with CNC or VMC get the
+90 minute setup and the extra 30% on cycle times. The type is used to group machines and
+decides which ones are offered for Machine maintenance." `PENDING_MASTER_DATA` now says
+"add it in Settings > Machines"; the operator-specialty table title points to Settings >
+Operators and Settings > Machines; three docstrings describe the Machines table. A grep of
+`engine/ api/ web/` finds no other user-visible Excel/upload wording (the remaining hits
+are comments, docstrings, the dead `merge_upload`, and real Excel downloads).
+`test_machine_downtime_api.py::test_the_add_row_is_admin_only_but_the_list_is_not`
+split the page on the first "Machine maintenance", which the new Machines copy now
+contains; it anchors on the card's `<h2>` instead (assertion unchanged).
+
+**Tests added** (`tests/test_shop_wiring.py`), RED on the pre-fix code where they test
+new behaviour:
+
+| test | pre-fix |
+|---|---|
+| test_fresh_install_plans_from_tables_added_by_hand (no workbook; POST /machines, /operators, /item-master; `/run` gantt uses CNC9; no holiday doc written) | RED (`no masters workbook available`) |
+| test_item_and_machines_without_workbook_or_holidays_give_full_masters (mutation #1) | RED |
+| test_workbook_without_the_holiday_sheet_seeds_an_empty_calendar_once (2nd call with openpyxl + both ppc `open_workbook`s raising) | RED |
+| test_workbook_without_the_machine_sheet_seeds_an_empty_machines_table | RED |
+| test_parse_payload_uses_the_payload_machines_doc (mutation #3) | GREEN (pins existing behaviour; RED under #3) |
+| test_parse_payload_without_a_workbook_treats_a_missing_table_as_empty | RED |
+| test_adding_then_removing_a_holiday_restores_the_seed_digest (seed not in date order) | RED |
+
+**Mutation testing.** The section-5 set, rerun (`mutate2.py` with #2's anchor moved to
+`raw = None`, since `tables_only` is now computed after the fill): **11 of 11
+load-bearing.** #1 now fails test_fresh_install_plans_from_tables_added_by_hand and
+test_item_and_machines_without_workbook_or_holidays_give_full_masters; #3 fails
+test_parse_payload_uses_the_payload_machines_doc; #2 fails two (the new no-workbook test
+and the old one); #4 to #10b unchanged from section 5. The wave's own fixes, each
+reverted alone (`tests/test_shop_wiring.py`): **7 of 7 caught** — `_current_masters`
+without `fill_missing` (2 tests), `_new_masters` without it (2), `_seed_once` not
+seeding an empty table (2), `parse_payload` ignoring `machines` (1), `parse_payload`
+without `fill_missing` (1), order-sensitive `calendar_digest` (1), `if False` on the
+tables-only branch (2).
+
+**Browser pass (spec 9.6), Chrome, throwaway local instances only** (`STORE_DIR` in the
+session scratchpad, `DEFAULT_SCHEDULER=new`, `AUTO_OPTIMIZE=0`, ports 8765 / 8766,
+stopped after):
+- Test9 stored via `book_store.save_masters_bytes`, admin: Machines card 26 rows with
+  the new copy; Holidays card (seed: 15-08-2026 and three 2025 dates, all past) in
+  most-recent-first order, greyed; added 25-12-2026 then 08-11-2026 through the form:
+  listed 08-11, 25-12 (ungreyed), then the past ones; added CNC8 and CNC9 through the
+  form (CNC9 by mouse); both appear in the table and in the operator picker. One
+  earlier mouse click on Add machine sent no request (the typed id was gone before the
+  click landed, likely a re-render from the page's first plan); not reproduced on the
+  retry. No console errors, no 500s in the server log.
+- Same instance as user (after a real reload): body `role-user`, both cards listed,
+  add rows hidden, no remove buttons, no enabled selects; holiday order the same;
+  `POST /machines` and `POST /holidays` from the user session 403.
+- Empty `STORE_DIR`, NO workbook, admin: the app loads, plan completes, Machines says
+  "No machines yet", Holidays "No holidays entered"; added CNC1 (type typed under
+  Other type, the only option on an empty table) and a holiday: both listed, CNC1
+  offered in the operator and maintenance pickers, every `/run` 200, no console errors.
+  The store then held only `machines`, `shop_calendar` and the session secret (no item
+  master written, as ruled).
+
+**Full suite:** 1 failed (the pre-existing xlsxwriter test), 1279 passed, 4 skipped.
+
 ## Findings
 
-- **F1 (test gap).** Mutations #1 and #3 fail no test (section 5). #1 matters on a
+- **F1 (test gap, CLOSED in section 8).** Mutations #1 and #3 fail no test (section 5). #1 matters on a
   store with tables and no workbook; #3 does not change a new-engine worker's score.
   Two small tests would pin both; not added here (Task 9 changes no code).
 - **F2 (expectation not met, by design).** Production analysis does not move on a
@@ -262,7 +340,7 @@ one-time seed of the Machines and holiday tables. Not measured on Render / Mongo
   VMC 90 min, Manual Packing 0), the maintenance-downtime picker's machining filter, and
   the retired classic engine. `CNC9` retyped Manual Packing keeps 90 min on the Daily
   Entry form (`rule6._is_setup_machine` checks the id prefix first). Not fixed here
-  (Task 9 changes no product code); the card copy needs the owner's wording.
+  (Task 9 changes no product code); the copy was corrected in section 8.
 - **F5 (minor).** A payload carrying all three tables but NO `operator_table` now plans
   with no operators (the worker's masters no longer read the workbook's operator
   sheet): an early run of `survivors.py` without the operator table scored 0 orders.
@@ -277,7 +355,7 @@ one-time seed of the Machines and holiday tables. Not measured on Render / Mongo
 - The live-store copy (no `MONGODB_URI` this session; owner to run before deploy), and
   therefore the quote on the store copy with live WIP, frozen ops, applied ranks and
   absences.
-- The browser run of the two Settings cards as both roles (spec 9.6).
+- (Done in section 8: the browser run of the two Settings cards as both roles.)
 - `/production-analysis.xlsx` (needs `xlsxwriter`, not installed locally).
 - Cloud / GitHub Actions / Mac worker end to end: the payload round trip, the worker's
   masters path and one `run_candidate` were exercised in-process only.
