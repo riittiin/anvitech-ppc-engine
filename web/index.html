@@ -32,6 +32,7 @@
       <a class="nav-item" data-view="schedule" href="#schedule">Schedule</a>
       <a class="nav-item" data-view="gantt" href="#gantt">Gantt</a>
       <a class="nav-item" data-view="entry" href="#entry">Daily Entry</a>
+      <a class="nav-item" data-view="itemmaster" href="#itemmaster">Item Process Master</a>
       <a class="nav-item" data-view="analytics" href="#analytics">Analytics</a>
       <a class="nav-item" data-view="settings" href="#settings">Settings</a>
     </nav>
@@ -187,6 +188,25 @@
         <p class="explainer">How busy your machines and operators are in the current plan, and where the work is going.</p>
       </div>
       <div id="analytics-mount"></div>
+    </div>
+  </section>
+
+  <!-- ===================== ITEM PROCESS MASTER (both roles; edits admin-only) ===================== -->
+  <section class="view" id="view-itemmaster">
+    <div class="card">
+      <div class="card-head">
+        <h2>Item Process Master</h2>
+        <p class="explainer">The steps each item goes through, in order, with the cycle time and the machines that can run each step. The plan is built from this list.</p>
+      </div>
+      <div class="im-toolbar">
+        <input type="search" id="im-search" placeholder="Search item code or description" aria-label="Search items">
+        <label class="im-filter"><input type="checkbox" id="im-needs"> Only items that need a machine</label>
+        <button type="button" class="primary admin-only" id="im-new">+ New item</button>
+      </div>
+      <div class="im-layout">
+        <ul class="im-list" id="im-list" aria-label="Items"></ul>
+        <div class="im-detail" id="im-detail"><p class="empty">Pick an item on the left.</p></div>
+      </div>
     </div>
   </section>
 

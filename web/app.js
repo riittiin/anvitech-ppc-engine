@@ -48,7 +48,7 @@ let quoteStamp = null; // the quote's plan fingerprint — required by /new-orde
 // Six destinations, one visible at a time. Each maps to an existing render call
 // (the old per-rule tab machinery, absorbed into a fixed nav). `mountFor` returns
 // the per-view content div so the unchanged render functions write to the right spot.
-const VIEWS = ["orders", "neworders", "schedule", "gantt", "entry", "analytics", "settings"];
+const VIEWS = ["orders", "neworders", "schedule", "gantt", "entry", "analytics", "itemmaster", "settings"];
 let activeView = "orders";
 
 const $ = (id) => document.getElementById(id);
@@ -95,6 +95,7 @@ function renderView(v) {
   else if (v === "gantt") renderGantt();
   else if (v === "entry") renderTab("rule7");
   else if (v === "analytics") renderAnalytics();
+  else if (v === "itemmaster") renderItemMaster();
   // "settings" is static markup (cards wired once at boot) — nothing to render.
 }
 
@@ -106,6 +107,15 @@ function showView(v, push) {
   // closes the other door (2026-08-09 lesson: a role gate belongs on every entry
   // point, not just the one a mouse click goes through).
   if (v === "neworders" && !newOrdersAllowed()) v = "orders";
+  // Item Process Master: leaving with unsaved edits asks first. Saying no keeps
+  // the tab (and puts the hash back, if the move came from the address bar).
+  if (activeView === "itemmaster" && v !== "itemmaster" && imDraft) {
+    if (!imLeaveOk()) {
+      if (location.hash.replace(/^#/, "") !== "itemmaster") history.replaceState(null, "", "#itemmaster");
+      return;
+    }
+    imDraft = null;
+  }
   // Every OTHER tab is open to every role (2026-08-09 role-parity fix). Analytics
   // used to be admin-only (owner rule, 2026-07-27) — nav link CSS-hidden AND a
   // redirect here — but a director compared the two logins and asked for them to
@@ -334,8 +344,10 @@ async function uploadExcel() {
     if (!res.ok) { setDatasetStatus("Upload failed: " + (await res.text()), true); return; }
     const d = await res.json();
     ITEMS = null;  // item metadata may have changed
+    imData = null; // the Item Process Master is re-read on its next render
     let msg = `<strong>${escapeHtml(d.name)}</strong>: machine and item data updated`
       + ` (${d.summary.items} items, ${d.summary.machines} machines). Sales orders were not changed.`;
+    if (d.routings_note) msg += " " + escapeHtml(d.routings_note);
     setDatasetStatus(msg);
     // The upload's report names the orders in the BOOK whose item has no
     // routing in the masters just uploaded (an upload never adds orders, so the
@@ -2923,6 +2935,271 @@ async function removeOperator(id) {
   } catch (e) { setStatus("Remove operator error: " + e.message, true); }
 }
 
+// ===== Item Process Master =====
+// Routings live in the app (2026-10-05), not the Excel. The server decides what kind
+// each step is (it runs the planner's own classifier and returns `kind`), so this
+// screen never re-derives it. Edits are made on a local copy of ONE item and sent
+// with a single Save, which is one re-plan; Cancel throws the copy away.
+let imData = null;          // last GET /item-master
+let imSelected = null;      // item code shown on the right
+let imDraft = null;         // {isNew, code, description, version, steps[]} while editing
+let imLoading = null;
+
+async function loadItemMaster() {
+  if (imLoading) return imLoading;
+  imLoading = (async () => {
+    try {
+      const res = await fetch("/item-master");
+      if (!res.ok) { setStatus("Could not load the Item Process Master.", true); return; }
+      imData = await res.json();
+    } finally { imLoading = null; }
+  })();
+  return imLoading;
+}
+
+function imMachineName(id) {
+  const m = (imData && imData.machines || []).find((x) => x.id === id);
+  return m ? m.name : id;
+}
+
+function imTokens(raw) {
+  const out = [];
+  String(raw || "").split(/[/,]/).forEach((tok) => {
+    const id = tok.replace(/\s+/g, "").toUpperCase();
+    if (!id || id === "OS" || out.includes(id)) return;
+    out.push(id);
+  });
+  return out;
+}
+
+function imKnown(id) {
+  return (imData && imData.machines || []).some((m) => m.id === id && !m.provisional);
+}
+
+async function renderItemMaster() {
+  if (!imData) await loadItemMaster();
+  if (!imData) return;
+  const isAdmin = currentRole === "admin";
+  const q = ($("im-search").value || "").trim().toLowerCase();
+  const onlyNeeds = $("im-needs").checked;
+  const items = imData.items.filter((it) =>
+    (!q || it.code.toLowerCase().includes(q) || (it.description || "").toLowerCase().includes(q))
+    && (!onlyNeeds || it.needs_machine));
+  $("im-list").innerHTML = items.length ? items.map((it) =>
+    `<li><button type="button" class="im-item${it.code === imSelected ? " active" : ""}" data-code="${escapeHtml(it.code)}">`
+    + `<span class="im-code">${escapeHtml(it.code)}</span>`
+    + `<span class="im-meta">${it.steps.length} step${it.steps.length === 1 ? "" : "s"}${it.needs_machine ? ' <span class="im-warn" title="A step has no machine">needs a machine</span>' : ""}</span>`
+    + `<span class="im-desc">${escapeHtml(it.description || "")}</span></button></li>`).join("")
+    : `<li class="empty">No items match.</li>`;
+  $("im-new").style.display = isAdmin ? "" : "none";
+  renderItemDetail();
+}
+
+function imStepRowView(s, factor) {
+  const kindLabel = { machine: "Machine", outsourced: "Outsourced", dispatch: "Dispatch" }[s.kind];
+  let cycle = "-";
+  if (s.kind === "outsourced" && typeof s.cycle === "number") cycle = `${+(s.cycle / 60).toFixed(2)} h`;
+  else if (s.kind === "machine" && s.cycle !== null && s.cycle !== "") cycle = `${escapeHtml(String(s.cycle))} min`;
+  const chips = (raw) => imTokens(raw).map((id) => imKnown(id)
+    ? `<span class="mach-chip">${escapeHtml(imMachineName(id))}</span>`
+    : `<span class="mach-chip unknown" title="Not in your Machine master">⚠ ${escapeHtml(id)}</span>`).join("") || "";
+  const planNote = s.machining && typeof s.cycle === "number"
+    ? `<div class="im-note">Planned at ${+(s.cycle * factor).toFixed(2)} min (CNC/VMC +${Math.round((factor - 1) * 100)}%)</div>` : "";
+  return `<td>${escapeHtml(kindLabel)}</td><td>${escapeHtml(s.name)}${planNote}</td><td>${cycle}</td>`
+    + `<td>${s.kind === "machine" ? chips(s.allotted) : (s.kind === "outsourced" ? "Outsourced" : "Milestone")}</td>`
+    + `<td>${s.kind === "machine" ? chips(s.suggested) : ""}</td>`;
+}
+
+function renderItemDetail() {
+  const box = $("im-detail");
+  if (imDraft) { renderItemEditor(); return; }
+  const it = imData.items.find((x) => x.code === imSelected);
+  if (!it) { box.innerHTML = `<p class="empty">Pick an item on the left.</p>`; return; }
+  const isAdmin = currentRole === "admin";
+  const used = it.open_orders.length ? `Used by ${it.open_orders.length} open order(s): ${escapeHtml(it.open_orders.join(", "))}` : "Not used by any open order.";
+  box.innerHTML = `<div class="im-head"><div><h3>${escapeHtml(it.code)}</h3><div class="im-sub">${escapeHtml(it.description || "")}</div><div class="im-sub">${used}</div></div>`
+    + (isAdmin ? `<div class="im-actions"><button type="button" class="primary" id="im-edit">Edit</button>`
+      + `<button type="button" class="ghost-btn" id="im-delete">Delete item</button></div>` : "")
+    + `</div><table class="im-steps"><thead><tr><th>#</th><th>Type</th><th>Process</th><th>Cycle</th><th>Allotted</th><th>Suggested</th></tr></thead><tbody>`
+    + it.steps.map((s, i) => `<tr><td>${i + 1}</td>${imStepRowView(s, imData.planning_factor)}</tr>`).join("")
+    + `</tbody></table>`;
+}
+
+function imBlankStep() { return { name: "", cycle: null, allotted: "", suggested: "", kind: "machine" }; }
+
+function imStartEdit(it, isNew) {
+  imDraft = { isNew, code: it.code, description: it.description || "", version: it.version,
+              steps: it.steps.map((s) => ({ name: s.name, cycle: s.cycle, allotted: s.allotted,
+                                            suggested: s.suggested, kind: s.kind })),
+              dirty: isNew };
+  renderItemDetail();
+}
+
+function imMachinePicker(i, field, raw) {
+  const picked = imTokens(raw);
+  const chips = picked.map((id) =>
+    `<span class="mach-chip${imKnown(id) ? "" : " unknown"}">${imKnown(id) ? "" : "⚠ "}${escapeHtml(imMachineName(id))}`
+    + `<button type="button" class="mach-x im-mx" data-i="${i}" data-f="${field}" data-id="${escapeHtml(id)}" title="Remove">✕</button></span>`).join("");
+  const groups = new Map();
+  (imData.machines || []).forEach((m) => {
+    if (m.provisional || picked.includes(m.id)) return;
+    const label = m.type || "Other";
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(m);
+  });
+  const opts = Array.from(groups).map(([label, rows]) => `<optgroup label="${escapeHtml(label)}">`
+    + rows.map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.name)}</option>`).join("") + `</optgroup>`).join("");
+  return `<div class="mach-cell">${chips}<select class="im-madd" data-i="${i}" data-f="${field}"><option value="">+ add</option>${opts}</select></div>`;
+}
+
+function renderItemEditor() {
+  const d = imDraft;
+  const rows = d.steps.map((s, i) => {
+    const cycleInput = s.kind === "dispatch" ? "-"
+      : s.kind === "outsourced"
+        ? `<input type="number" min="0" step="0.5" class="im-cyc" data-i="${i}" value="${typeof s.cycle === "number" ? +(s.cycle / 60).toFixed(2) : ""}"> h`
+        : `<input type="number" min="0" step="0.01" class="im-cyc" data-i="${i}" value="${s.cycle === null || s.cycle === undefined ? "" : escapeHtml(String(s.cycle))}"> min`;
+    return `<tr><td>${i + 1}</td>`
+      + `<td><select class="im-kind" data-i="${i}">`
+      + ["machine", "outsourced", "dispatch"].map((k) => `<option value="${k}"${s.kind === k ? " selected" : ""}>${{ machine: "Machine", outsourced: "Outsourced", dispatch: "Dispatch" }[k]}</option>`).join("")
+      + `</select></td>`
+      + `<td><input type="text" class="im-name" data-i="${i}" value="${escapeHtml(s.name)}" placeholder="Process name"></td>`
+      + `<td class="im-cycell">${cycleInput}</td>`
+      + `<td>${s.kind === "machine" ? imMachinePicker(i, "allotted", s.allotted) : ""}</td>`
+      + `<td>${s.kind === "machine" ? imMachinePicker(i, "suggested", s.suggested) : ""}</td>`
+      + `<td class="im-rowbtns"><button type="button" class="im-up" data-i="${i}" title="Move up"${i === 0 ? " disabled" : ""}>↑</button>`
+      + `<button type="button" class="im-down" data-i="${i}" title="Move down"${i === d.steps.length - 1 ? " disabled" : ""}>↓</button>`
+      + `<button type="button" class="im-ins" data-i="${i}" title="Insert a step below">+</button>`
+      + `<button type="button" class="im-del" data-i="${i}" title="Remove this step">✕</button></td></tr>`;
+  }).join("");
+  $("im-detail").innerHTML = `<div class="im-head"><div><h3>${d.isNew ? "New item " : ""}${escapeHtml(d.code)}</h3>`
+    + `<label class="im-sub">Description <input type="text" id="im-desc" value="${escapeHtml(d.description)}"></label></div>`
+    + `<div class="im-actions"><button type="button" class="primary" id="im-save">Save</button>`
+    + `<button type="button" class="ghost-btn" id="im-cancel">Cancel</button></div></div>`
+    + `<table class="im-steps editing"><thead><tr><th>#</th><th>Type</th><th>Process</th><th>Cycle</th><th>Allotted</th><th>Suggested</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    + `<button type="button" class="ghost-btn" id="im-addstep"${d.steps.length >= 12 ? " disabled" : ""}>+ Add step at the end</button>`
+    + `<p class="im-note">Cycle times are the original times. The plan adds ${Math.round((imData.planning_factor - 1) * 100)}% to CNC/VMC steps.</p>`
+    + `<p class="im-error" id="im-error" role="alert"></p>`;
+}
+
+function imMutate(fn) { fn(imDraft); imDraft.dirty = true; renderItemEditor(); }
+
+function imSetKind(i, kind) {
+  imMutate((d) => {
+    const s = d.steps[i];
+    if (kind === "outsourced") { s.allotted = "OS"; s.suggested = ""; }
+    if (kind === "dispatch") { s.allotted = ""; s.suggested = ""; s.cycle = null; if (!/DISPATCH/i.test(s.name)) s.name = "DISPATCH"; }
+    if (kind === "machine" && s.allotted === "OS") s.allotted = "";
+    s.kind = kind;
+  });
+}
+
+async function imSave() {
+  const d = imDraft;
+  const body = { code: d.code, description: d.description,
+                 steps: d.steps.map((s) => ({ name: s.name, cycle: s.cycle, allotted: s.allotted || "", suggested: s.suggested || "" })) };
+  if (!d.isNew) body.version = d.version;
+  const btn = $("im-save");
+  if (btn) btn.disabled = true;        // one click, one write
+  let res;
+  try {
+    res = await fetch("/item-master", { method: d.isNew ? "POST" : "PUT",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  } catch (e) {
+    $("im-error").textContent = "Could not reach the server: " + e.message;
+    if (btn) btn.disabled = false;
+    return;
+  }
+  if (!res.ok) {
+    if (btn) btn.disabled = false;
+    let msg = await res.text();
+    try { msg = JSON.parse(msg).detail || msg; } catch (e) { /* plain text */ }
+    $("im-error").textContent = msg;
+    return;
+  }
+  const saved = (await res.json()).item;
+  imDraft = null; imSelected = saved.code; imData = null;
+  setStatus(`Saved ${saved.code}. Updating the plan.`);
+  await renderItemMaster();
+  await runPlan(false);
+  if (!$("status").classList.contains("status-error")) setStatus(`Saved ${saved.code}. The plan is updated.`);
+}
+
+async function imDelete(code) {
+  if (!confirm(`Delete item ${code}? This cannot be undone.`)) return;
+  const res = await fetch("/item-master/delete", { method: "POST",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
+  if (!res.ok) { let m = await res.text(); try { m = JSON.parse(m).detail; } catch (e) { /* */ } setStatus(m, true); return; }
+  imSelected = null; imData = null;
+  setStatus(`Deleted ${code}. Updating the plan.`);
+  await renderItemMaster();
+  await runPlan(false);
+  if (!$("status").classList.contains("status-error")) setStatus(`Deleted ${code}. The plan is updated.`);
+}
+
+function imNewItem() {
+  const code = (prompt("Item code for the new item?") || "").trim();
+  if (!code) return;
+  if (imData.items.some((x) => x.code === code)) { setStatus(`Item ${code} already exists.`, true); return; }
+  const from = (prompt("Copy the steps of another item? Type its code, or leave blank to start empty.") || "").trim();
+  const src = from ? imData.items.find((x) => x.code === from) : null;
+  if (from && !src) { setStatus(`No item ${from} to copy from. Starting empty.`, true); }
+  imSelected = code;
+  imStartEdit({ code, description: src ? src.description : "", version: null,
+                steps: src ? src.steps : [imBlankStep()] }, true);
+}
+
+function imLeaveOk() { return !imDraft || !imDraft.dirty || confirm("You have unsaved changes to this item. Throw them away?"); }
+
+function wireItemMaster() {
+  $("im-search").addEventListener("input", () => renderItemMaster());
+  $("im-needs").addEventListener("change", () => renderItemMaster());
+  $("im-new").addEventListener("click", () => { if (imLeaveOk()) { imDraft = null; imNewItem(); } });
+  $("im-list").addEventListener("click", (e) => {
+    const b = e.target.closest(".im-item"); if (!b) return;
+    if (!imLeaveOk()) return;
+    imDraft = null; imSelected = b.dataset.code;
+    renderItemMaster().then(() => {   // on a phone the steps sit below the list: bring them into view
+      if (window.innerWidth <= 760) $("im-detail").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+  const box = $("im-detail");
+  box.addEventListener("click", (e) => {
+    const t = e.target; const i = +t.dataset.i;
+    if (t.id === "im-edit") imStartEdit(imData.items.find((x) => x.code === imSelected), false);
+    else if (t.id === "im-delete") imDelete(imSelected);
+    else if (t.id === "im-cancel") { if (imLeaveOk()) { imDraft = null; imData = null; renderItemMaster(); } }   // re-read, so a change saved elsewhere shows
+    else if (t.id === "im-save") imSave();
+    else if (t.id === "im-addstep") imMutate((d) => d.steps.push(imBlankStep()));
+    else if (t.classList.contains("im-up")) imMutate((d) => d.steps.splice(i - 1, 0, d.steps.splice(i, 1)[0]));
+    else if (t.classList.contains("im-down")) imMutate((d) => d.steps.splice(i + 1, 0, d.steps.splice(i, 1)[0]));
+    else if (t.classList.contains("im-ins")) imMutate((d) => { if (d.steps.length < 12) d.steps.splice(i + 1, 0, imBlankStep()); });
+    else if (t.classList.contains("im-del")) imMutate((d) => d.steps.splice(i, 1));
+    else if (t.classList.contains("im-mx")) imMutate((d) => {
+      const s = d.steps[i]; s[t.dataset.f] = imTokens(s[t.dataset.f]).filter((x) => x !== t.dataset.id).join("/");
+    });
+  });
+  box.addEventListener("change", (e) => {
+    const t = e.target; const i = +t.dataset.i;
+    if (t.classList.contains("im-kind")) imSetKind(i, t.value);
+    else if (t.classList.contains("im-madd") && t.value) imMutate((d) => {
+      const s = d.steps[i]; const ids = imTokens(s[t.dataset.f]); ids.push(t.value); s[t.dataset.f] = ids.join("/");
+    });
+  });
+  box.addEventListener("input", (e) => {
+    const t = e.target; if (!imDraft) return; const i = +t.dataset.i;
+    if (t.id === "im-desc") imDraft.description = t.value;
+    else if (t.classList.contains("im-name")) imDraft.steps[i].name = t.value;
+    else if (t.classList.contains("im-cyc")) {
+      const v = t.value === "" ? null : Number(t.value);
+      imDraft.steps[i].cycle = v === null ? null : (imDraft.steps[i].kind === "outsourced" ? v * 60 : v);
+    } else return;
+    imDraft.dirty = true;     // typing never re-renders, so focus stays in the box
+  });
+  window.addEventListener("beforeunload", (e) => { if (imDraft && imDraft.dirty) { e.preventDefault(); e.returnValue = ""; } });
+}
+// ===== end Item Process Master =====
+
 // Wire the admin controls (null-guarded — they're absent/hidden for the user role).
 const _runBtn = $("run-btn");
 if (_runBtn) _runBtn.onclick = () => runPlan(true);   // explicit admin Plan → persist
@@ -2986,6 +3263,7 @@ if (_noQuoteBtn) _noQuoteBtn.onclick = quoteNewOrders;
   document.querySelectorAll(".nav-item").forEach((n) => {
     n.addEventListener("click", (e) => { e.preventDefault(); showView(n.dataset.view, true); });
   });
+  wireItemMaster();   // before the first showView, so the tab is live if it is the landing view
   // Land on the hash's view, else the last view visited (defaults to Orders).
   const initial = VIEWS.includes(location.hash.replace(/^#/, "")) ? location.hash.replace(/^#/, "") : lastView();
   showView(initial, true);
