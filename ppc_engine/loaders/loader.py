@@ -20,6 +20,7 @@ from ppc_engine.loaders.masters_loader import (
     load_operators,
     load_routings,
     register_provisional_machines,
+    routings_from_rows,
 )
 from ppc_engine.loaders.report import DataReport
 from ppc_engine.loaders.sales_orders import load_orders
@@ -82,12 +83,16 @@ def _block_unschedulable(masters: Masters, orders: list[Order], report: DataRepo
                     break
 
 
-def load_all(path, flexible_machines: bool = False) -> LoadResult:
+def load_all(path, flexible_machines: bool = False, routing_rows=None) -> LoadResult:
     """Load a workbook at ``path`` into a LoadResult.
 
     ``flexible_machines`` (see load_routings): False = machining ops locked to their
     Allotted machine; True = ops may use any machine in their Suggested set (the
     machine-flexibility lever, OPTIMIZATION.md).
+
+    ``routing_rows`` (``[(code, description, steps)]``): when given, routings come
+    from these rows (the app's Item Process Master) and the workbook's routing
+    sheet is not read. None = read the sheet, as before.
     """
     wb = open_workbook(path)
     report = DataReport()
@@ -95,7 +100,10 @@ def load_all(path, flexible_machines: bool = False) -> LoadResult:
     machines = load_machines(wb)
     operators = load_operators(wb)
     calendar = load_calendar(wb)
-    routings = load_routings(wb, report, flexible_machines=flexible_machines)
+    if routing_rows is None:
+        routings = load_routings(wb, report, flexible_machines=flexible_machines)
+    else:
+        routings = routings_from_rows(routing_rows, report, flexible_machines=flexible_machines)
     register_provisional_machines(machines, routings, report)
 
     masters = Masters(machines=machines, operators=operators, routings=routings, calendar=calendar)

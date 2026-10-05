@@ -120,29 +120,25 @@ def load_calendar(wb) -> ShopCalendar:
     )
 
 
-def load_routings(wb, report: DataReport, flexible_machines: bool = False) -> dict[str, Routing]:
-    """Read the "Item's process Master" into {item_code → Routing}.
+def _block_is_process(header_row, start, n) -> bool:
+    if start >= len(header_row):
+        return False
+    norm = "".join(str(header_row[start] or "").lower().split())
+    return norm == f"process{n}"
 
-    Process columns come in fixed 5-wide blocks (name, cycle, total, suggested,
-    allotted). We anchor on the 'Process 1' header by NAME, then step by 5, validating
-    each block's header, so a reordered/extra column elsewhere doesn't break us.
 
-    ``flexible_machines``: how to build an in-house op's machine options.
-      - False (default): the Allotted machine only (falling back to Suggested if
-        Allotted is blank) — the planner's locked choice.
-      - True: the UNION of Allotted + Suggested (Allotted first / preferred). Suggested
-        lists every machine that CAN do the step, so this hands the scheduler the full
-        feasible set to load-balance across (RULES.md: the planner may override the
-        lock). This is the machine-flexibility lever — see OPTIMIZATION.md.
-    """
+def routing_rows_from_sheet(wb) -> list:
+    """The "Item's process Master" as plain rows: ``[(code, description, steps)]``,
+    each step ``(name, cycle_raw, total_raw, suggested_raw, allotted_raw)`` exactly
+    as the cells hold them. Stops at the first blank step (an item using fewer
+    processes). The ONE reading of the sheet: ``load_routings`` and the app's
+    one-time seed of the Item Process Master both use it."""
     ws = find_sheet(wb, "Item's process Master", "Items process Master")
     rows = rows_of(ws)
     h = locate_header_row(rows, "Item code", "Item Code")
     t = Table.from_rows(rows, h)
     c_code = t.col("Item code", "Item Code")
     c_desc = t.col("Item Description", "Item Desc")
-
-    # Anchor on "Process 1" (normalised, space-insensitive so "Process 1\n" matches).
     proc1 = None
     for i, cell in enumerate(t.header):
         norm = "".join(str(cell or "").lower().split())
@@ -151,20 +147,13 @@ def load_routings(wb, report: DataReport, flexible_machines: bool = False) -> di
             break
     if proc1 is None:
         raise KeyError("could not find the 'Process 1' column in the routing sheet")
-
-    def _block_is_process(header_row, start, n) -> bool:
-        if start >= len(header_row):
-            return False
-        norm = "".join(str(header_row[start] or "").lower().split())
-        return norm == f"process{n}"
-
-    routings: dict[str, Routing] = {}
+    out = []
     for row in t.data_rows:
         code = str(t.get(row, c_code) or "").strip()
         if not code:
             continue
         desc = str(t.get(row, c_desc) or "").strip()
-        ops: list[Operation] = []
+        steps = []
         for p in range(12):
             start = proc1 + p * 5
             if not _block_is_process(t.header, start, p + 1):
@@ -172,11 +161,23 @@ def load_routings(wb, report: DataReport, flexible_machines: bool = False) -> di
             name = t.get(row, start)
             if name is None or str(name).strip() == "":
                 break  # this item uses fewer processes
+            steps.append((str(name).strip(), t.get(row, start + 1), t.get(row, start + 2),
+                          t.get(row, start + 3), t.get(row, start + 4)))
+        out.append((code, desc, steps))
+    return out
+
+
+def routings_from_rows(rows, report: DataReport, flexible_machines: bool = False) -> dict:
+    """``[(code, description, steps)]`` -> {item_code -> Routing}. The ONE rule that
+    turns routing steps into operations, whatever their source (the workbook sheet
+    or the app's Item Process Master table). A later row with the same code
+    replaces the earlier one, as a sheet row always did."""
+    routings: dict[str, Routing] = {}
+    for code, desc, steps in rows:
+        ops: list[Operation] = []
+        for i, (name, cyc, _total, suggested, allotted) in enumerate(steps):
             name = str(name).strip()
-            cyc = t.get(row, start + 1)
             cyc = float(cyc) if isinstance(cyc, (int, float)) else 0.0
-            suggested = t.get(row, start + 3)
-            allotted = t.get(row, start + 4)
             kind = classify_operation(name, suggested, allotted, cyc)
             if kind in (OperationKind.MACHINING, OperationKind.MANUAL, OperationKind.INSPECTION):
                 allot_opts = parse_machine_options(allotted)
@@ -192,13 +193,31 @@ def load_routings(wb, report: DataReport, flexible_machines: bool = False) -> di
                     report.add(
                         GapKind.ROUTING_GAP,
                         code,
-                        f"step '{name}' (seq {p + 1}) has no machine and isn't outsourced",
+                        f"step '{name}' (seq {i + 1}) has no machine and isn't outsourced",
                     )
             else:
                 options = ()
-            ops.append(Operation(p + 1, name, kind, options, cyc))
+            ops.append(Operation(i + 1, name, kind, options, cyc))
         routings[code] = Routing(code, desc, tuple(ops))
     return routings
+
+
+def load_routings(wb, report: DataReport, flexible_machines: bool = False) -> dict[str, Routing]:
+    """Read the "Item's process Master" into {item_code → Routing}.
+
+    Process columns come in fixed 5-wide blocks (name, cycle, total, suggested,
+    allotted). We anchor on the 'Process 1' header by NAME, then step by 5, validating
+    each block's header, so a reordered/extra column elsewhere doesn't break us.
+
+    ``flexible_machines``: how to build an in-house op's machine options.
+      - False (default): the Allotted machine only (falling back to Suggested if
+        Allotted is blank) — the planner's locked choice.
+      - True: the UNION of Allotted + Suggested (Allotted first / preferred). Suggested
+        lists every machine that CAN do the step, so this hands the scheduler the full
+        feasible set to load-balance across (RULES.md: the planner may override the
+        lock). This is the machine-flexibility lever — see OPTIMIZATION.md.
+    """
+    return routings_from_rows(routing_rows_from_sheet(wb), report, flexible_machines)
 
 
 def register_provisional_machines(
