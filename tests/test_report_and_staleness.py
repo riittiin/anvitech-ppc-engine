@@ -101,7 +101,7 @@ def test_upload_report_ignores_the_files_own_so_sheet():
     assert no_routing == []
 
 
-def test_upload_report_names_a_book_order_whose_routing_the_new_masters_lost():
+def test_upload_ignores_a_routing_dropped_from_the_new_file():
     import io
 
     m = _api()
@@ -123,7 +123,11 @@ def test_upload_report_names_a_book_order_whose_routing_the_new_masters_lost():
     resp = client.post("/upload", files={"file": ("t.xlsx", buf.getvalue(), xlsx_mime)})
     assert resp.status_code == 200
     no_routing = [r for r in resp.json()["report"]["rows"] if r[0] == "NO_ROUTING"]
-    assert [r[1] for r in no_routing] == [ITEM_B]
+    # Routings are app-owned since 2026-10-05 (seeded from the workbook on file
+    # before this upload replaces it), so a recipe dropped from the NEW file is
+    # ignored: ITEM_B keeps its routing and nothing is reported lost.
+    assert no_routing == []
+    assert resp.json()["routings_note"]
 
 
 # --------------------------------------------------------------------------- #

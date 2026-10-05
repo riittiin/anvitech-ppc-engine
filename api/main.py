@@ -2797,7 +2797,8 @@ async def upload(request: Request, file: UploadFile = File(...)):
     contents = await file.read()
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="file too large (max 10 MB)")
-    doc = book_store.load_item_master()
+    # Seed from the workbook CURRENTLY on file, before the save below replaces it.
+    doc = _item_master_doc()
     try:
         _so_lines_ignored, masters = load_all(
             io.BytesIO(contents),

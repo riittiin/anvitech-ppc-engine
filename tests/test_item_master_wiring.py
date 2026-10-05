@@ -114,3 +114,12 @@ def test_upload_without_routing_sheet_is_accepted_once_seeded():
     r = _admin(m).post("/upload", files={"file": ("x.xlsx", buf.getvalue())})
     assert r.status_code == 200, r.text
     assert list(m._current_masters().routings) == [ITEM_A, ITEM_B]
+
+
+def test_upload_as_first_request_seeds_from_the_workbook_on_file():
+    m = _api(); _seed_book()          # no _current_masters(): table not seeded yet
+    assert book_store.load_item_master() is None
+    r = _admin(m).post("/upload", files={"file": ("x.xlsx", _workbook_with_cycle(99))})
+    assert r.status_code == 200, r.text
+    assert r.json()["routings_note"]
+    assert m._current_masters().routings[ITEM_A].processes[0].cycle_time == 3
