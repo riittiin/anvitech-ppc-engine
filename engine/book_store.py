@@ -358,6 +358,30 @@ def save_item_master(doc: dict) -> None:
     get_store().kv_set(ITEM_MASTER_KEY, json.dumps(doc))
 
 
+MACHINES_KEY = "anvitech:machines"            # kv: json {seed..., machines:{id:{name,type,hours,version}}}
+SHOP_CALENDAR_KEY = "anvitech:shop_calendar"  # kv: json {seed..., holidays:[{date,name}]}
+
+
+def load_machines_doc():
+    """The app-owned Machines table, or ``None`` if never seeded."""
+    raw = get_store().kv_get(MACHINES_KEY)
+    return json.loads(raw) if raw else None
+
+
+def save_machines_doc(doc: dict) -> None:
+    get_store().kv_set(MACHINES_KEY, json.dumps(doc))
+
+
+def load_shop_calendar():
+    """The app-owned holiday list, or ``None`` if never seeded."""
+    raw = get_store().kv_get(SHOP_CALENDAR_KEY)
+    return json.loads(raw) if raw else None
+
+
+def save_shop_calendar(doc: dict) -> None:
+    get_store().kv_set(SHOP_CALENDAR_KEY, json.dumps(doc))
+
+
 # --- add new orders: drafts and arrival queue --- #
 def load_new_order_drafts() -> list:
     """The order lines a director has typed into Add New Orders but not yet added.
