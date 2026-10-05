@@ -1,6 +1,6 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-09-27)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-10-05)
 >
 > - **ITEM ROUTINGS LIVE IN THE APP NOW: THE ITEM PROCESS MASTER TAB (2026-10-05, owner
 >   request; branch `item-process-master`, UNPUSHED; spec
@@ -41,10 +41,34 @@
 >   sends a null machine field as `""`; without it an unedited Save flips the inputs
 >   signature); `test_resaving_unchanged_item_as_the_browser_sends_it_keeps_digest` now
 >   pins it. Cache-hit `/run` on Test9 ~38 -> ~43 ms locally (+13%). Suite 1209 passed,
->   4 skipped, 1 pre-existing local failure (`xlsxwriter`). **Open for the owner:** the
->   punch-safety rule accepts moving a punched step BELOW an unpunched one (or a new step
->   in front of it), which leaves the order in a state `precedence_cap_error` refuses;
->   the code matches the spec, the spec is narrower than its own reason. **NOT run:**
+>   4 skipped, 1 pre-existing local failure (`xlsxwriter`).
+>   **Final fix wave (same day, after the whole-branch review):** **(F1) a frozen
+>   in-progress step is followed by NAME, never by sequence number.** An edit that
+>   removes a step ahead of a running one shifts its seq; `freeze.compute_frozen_set`
+>   matched the applied plan by (item, seq) and, on the next Done, pinned the running
+>   step to the removed step's machine and helper (MW1 / Charlie instead of VMC1), and
+>   `new_engine._ppc_frozen` trusted the stored `op_seq` and pinned INSPECTION onto the
+>   running job's VMC on the very next re-plan. Both now match by normalised name; a
+>   step no longer in the routing is not frozen. `flow_scheduler` untouched. Regression
+>   `tests/test_item_master_freeze.py` (4 tests, each half of the fix reverted fails
+>   its tests); still 16 of 16 hashes identical to `c123fa1`. **(F2) no step may be
+>   new, or moved, in FRONT of a punched step** on an open order (message names both
+>   steps and the order); removing an unpunched step, editing times or machines and
+>   adding steps after the last punched step stay allowed. Renaming an unpunched step
+>   that sits in front of a punched step is refused too: the rule cannot tell a rename
+>   from a new step. **(F3) cycle times are bounded:** non-finite refused (the endpoint
+>   used to store NaN / Infinity and then fail to answer), a machine step at most
+>   `MAX_MACHINE_CYCLE_MIN` = 1440 min per piece, an outsourced block at most
+>   `MAX_OUTSOURCED_BLOCK_MIN` = 86400 min (60 days); the real books peak at 1092 and
+>   10080, so no seeded item is refused. **(F4) only real Machine-master rows can be
+>   newly added** to a step; a provisional machine stays only where it already was.
+>   **Deploy / rollback:** (a) before deploy, confirm on a READ-ONLY copy of the live
+>   store that the stored workbook holds the ORIGINAL cycle times: the seed copies it
+>   once and no later upload can change a routing. (b) Rollback: the old code ignores
+>   `anvitech:item_process_master`, so tab edits made after deploy are not seen while
+>   rolled back; a re-deploy restores the table exactly as it was, and uploads made
+>   during the rollback window do not reach it. (c) The only reset today is deleting
+>   that store key; the next request re-seeds from the workbook on file. **NOT run:**
 >   the live-store copy (no credential this session; run it before deploy), the browser
 >   run of the tab, `/production-analysis.xlsx` (no `xlsxwriter` locally), the cloud
 >   worker end to end.

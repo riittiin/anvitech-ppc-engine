@@ -1,7 +1,8 @@
 # Item Process Master: verification (Task 10)
 
-**Date:** 2026-10-05 · **Branch:** `item-process-master` (feature HEAD `987c1ba`, from
-`origin/main` @ `c123fa1`) · **Status:** implemented, unpushed.
+**Date:** 2026-10-05 · **Branch:** `item-process-master` (code HEAD `43bfabd` after
+the final fix wave, section 8; Task 10 itself ran at `987c1ba`; from `origin/main` @
+`c123fa1`) · **Status:** implemented, unpushed.
 Spec: `docs/superpowers/specs/2026-10-05-item-process-master-tab-design.md` (section 10 is
 the contract this document answers).
 
@@ -17,10 +18,10 @@ workbooks were read only. Harness sources are at the end, verbatim.
 | 1. Live-store copy | **Not run** (no credential this session); owner to run before deploy. |
 | 2. Every reader switched | **All moved** on one table edit, workbook bytes unchanged: `/run` schedule, Gantt, shift-wise, delay report, production analysis, `/items`, quote, cloud payload round-trip (classic and worker ppc masters). |
 | 3. Upload no longer reaches routings | Upload of a doctored Test9 (one cycle cell x3+7, one item row blanked): **plan hash unchanged**, table digest unchanged. |
-| 4. Safety rules | rename / remove punched step: 400 with the message; cycle change: 200; delete in-use item: 400; stale version: 409. **Finding:** moving a punched step below an unpunched one is ACCEPTED (spec wording) and leaves the order in a state the capture guard calls illegal. See Findings F2. |
+| 4. Safety rules | rename / remove punched step: 400 with the message; cycle change: 200; delete in-use item: 400; stale version: 409. Moving a punched step below an unpunched one, or a new step in front of it, was accepted at Task 10 (Findings F2); **refused since the final fix wave** (section 8). |
 | 5. Mutation testing | 9 brief mutations: **9 of 9 load-bearing** on the four item-master files. #9 `_keep_blank_as_stored` first failed NO test (whole suite included) although it is load-bearing on the real book; closed by the new `test_resaving_unchanged_item_as_the_browser_sends_it_keeps_digest` (F3). Extras: #10 caught only by the full suite, #11 caught. |
 | 6. Browser run | **Not run in Task 10.** |
-| 7. Full suite | **1209 passed, 4 skipped, 1 failed** (1208 before the F3 test was added) (the pre-existing `test_production_analysis.py::test_monthly_report_json_and_excel`, `xlsxwriter` not installed locally; present at base). |
+| 7. Full suite | After the final fix wave: **1 failed, 1233 passed, 4 skipped (78.5 s)**. The one failure is the pre-existing `test_production_analysis.py::test_monthly_report_json_and_excel` (`xlsxwriter` not installed locally; present at base). |
 | Cache-hit `/run` cost | Test9: base **38.2 / 39.0 / 38.2 ms**, feature **43.6 / 42.9 / 43.5 ms** (median of 30, three rounds): about **+5 ms (+13%)** per cache hit on the local file store. |
 
 ## 1. Byte-identical switch
@@ -185,7 +186,9 @@ shape. Closed: `test_resaving_unchanged_item_as_the_browser_sends_it_keeps_diges
 
 ## 6. Full suite
 
-`python3.12 -m pytest -q`: **1 failed, 1208 passed, 4 skipped** (77.6 s); after the F3 test was added: **1 failed, 1209 passed, 4 skipped** (77.9 s). The one failure
+`python3.12 -m pytest -q` at Task 10: **1 failed, 1208 passed, 4 skipped** (77.6 s).
+With the test that closed Finding F3: **1 failed, 1209 passed, 4 skipped** (77.9 s).
+After the final fix wave (section 8): **1 failed, 1233 passed, 4 skipped (78.5 s)**. The one failure
 is `tests/test_production_analysis.py::test_monthly_report_json_and_excel`
 (`ModuleNotFoundError: xlsxwriter`), pre-existing at base and environment-only.
 
@@ -209,7 +212,7 @@ within one request, but the absolute cost on Render was not measured.
 
 - **F1 (intended, recorded).** Classic routings no longer carry Customer, RM type, MOQ
   or Total Time (blank/None). No reader; plans byte-identical. Spec section 3.
-- **F2 (OPEN OWNER QUESTION, no code change).** Should Save also refuse moving a
+- **F2 (CLOSED by the final fix wave, section 8: both are now refused).** Should Save also refuse moving a
   punched step below an unpunched one, or adding a new step in front of it? Today both
   are accepted, and the next punch on that step is then refused. Detail: the punch-safety rule checks only the RELATIVE order of
   punched steps (spec section 8 says exactly that), so moving a punched step below an
@@ -225,6 +228,85 @@ within one request, but the absolute cost on Render was not measured.
   the four item-master test files, by `test_report_and_staleness.py`.
 - **F5.** A cycle-time edit can move an order's date the "wrong" way through Rule 3's
   priority (section 2). Behaviour of Rule 3, not of this feature.
+
+## 8. Final fix wave (after the whole-branch review)
+
+Commits `39f240d` (F1) and `43bfabd` (F2 to F5). Every code fix was written test
+first (RED for the stated reason), then fixed (GREEN), then mutated: each mutation
+applied alone, run with `python3.12 -B`, a 1.1 s sleep after every write, file
+restored and compared byte for byte before the next.
+
+**F1. A frozen step is followed by its name, not its sequence number.** Routings are
+editable, so removing a step ahead of a running one shifts the running step's seq.
+`freeze.compute_frozen_set` looked the applied plan up by (item, seq) and
+`new_engine._ppc_frozen` trusted the stored `op_seq`. Now `compute_frozen_set` indexes
+the applied rows by (item, normalised process name), rows at the step's own seq first
+so an unedited routing reads exactly the row it always did, and `_ppc_frozen` keeps the
+row's seq only while the routing still has the row's step at that seq, otherwise
+re-resolves it by name, and drops the row when the name is gone.
+`ppc_engine/scheduler/flow_scheduler.py` is untouched.
+
+`tests/test_item_master_freeze.py`, new-engine sample workbook, through the API. ITEM_A
+is edited to PREWASH (1 min, MW1, helper Charlie) -> VMC FIRST SIDE (10 min, VMC1,
+Alpha / Bravo) -> INSPECTION (MI1) -> DISPATCH, so a SHORT step feeds a LONG one on
+machines with different people. 20 of 50 are punched on VMC FIRST SIDE (PREWASH
+unpunched, as the floor punches machining steps only); the plan is stored as the
+applied plan and Done derives the frozen row (VMC FIRST SIDE, seq 2, VMC1). Then
+`PUT /item-master` removes PREWASH, so VMC FIRST SIDE becomes seq 1.
+
+| test | RED on the old code |
+|---|---|
+| re-plan after the edit keeps VMC FIRST SIDE pinned | "VMC1 runs ['INSPECTION', 'VMC FIRST SIDE']" (INSPECTION pinned onto the running job's machine) |
+| Done after the edit freezes it by name | frozen row came back as (VMC FIRST SIDE, seq 1, **MW1, Charlie**): the removed PREWASH's machine and helper |
+| a stale seq is re-resolved by name (`_ppc_frozen` unit) | pinned INSPECTION's seq |
+| a step no longer in the routing is not frozen (`_ppc_frozen` unit) | pinned at the stale seq |
+
+Each re-plan test also asserts the first entry on VMC1 resumes with the pinned
+operator, INSPECTION stays on MI1, and `routing_order_violations` and
+`qualification_violations` are empty. Mutation: `freeze.py` reverted alone fails the
+Done test; `new_engine.py` reverted alone fails the other three. Not covered by a test,
+said plainly: the "same seq first" ordering inside `compute_frozen_set` only matters
+when two steps of one routing share a normalised name, which `validate_item` refuses
+and no real book has; it is there so an unedited routing can never read differently.
+
+**Byte-identical re-run.** `verify_switch.py` (unchanged) in a fresh worktree of
+`c123fa1` and on the fixed branch: **16 of 16 schedule hashes identical**, frozen counts
+identical (17 / 19 / 10 / 13 on the WIP legs), ppc routings 16 of 16 identical, classic
+routings differing only as section 1 records (same hashes as section 1). The baseline
+worktree was removed afterwards.
+
+**F2. No step new, or moved, in front of a punched step.** `punch_safety_errors` now
+also refuses, on every open order with punches, any unpunched step that sits before a
+punched step P in the new list but was not before P in the old list (a name the old
+list does not have counts as new). Message: "WASH cannot go before BANDSAW: BANDSAW has
+4 punched on SO1. Add new steps after it, or finish that order first." Tests: insert
+before refused, move an unpunched step from after to before refused, insert after
+allowed, remove an unpunched step ahead allowed, completed order allowed (unit); insert
+before and move before refused through the endpoint. Mutation (rule skipped): 4 tests
+fail. Behaviour change, deliberate: renaming an UNPUNCHED step that sits in front of a
+punched step is now refused too, since the rule cannot tell a rename from a new step;
+`test_safe_edits_are_allowed` was rebased to rename a step after the last punched one.
+
+**F3. Cycle times bounded.** `validate_item` refuses non-finite numbers, a Machine step
+above `MAX_MACHINE_CYCLE_MIN` = 1440 min per piece, an Outsourced block above
+`MAX_OUTSOURCED_BLOCK_MIN` = 86400 min (60 days). RED evidence through the endpoint
+with a raw JSON body: `60000` was saved (200); `NaN` and `Infinity` were accepted and
+saved, and the response then failed to serialise ("Out of range float values are not
+JSON compliant"); `-Infinity` gave the wrong message. Mutations: isfinite removed 6
+fail, machine cap removed 2, outsourced cap removed 2. Real books: largest machine
+cycle 1092 min (Test5/8/9), 910 (Test9-ORIGINAL), largest outsourced block 10080 on all
+four, so **no seeded item is refused** on an unedited re-save (checked on all four).
+
+**F4. Only real machines can be newly added.** `_save_item` passes the ids of
+non-provisional Machine-master rows; a provisional token already on the item stays
+allowed. Test: CNC9 (provisional, from ITEM_B's routing) cannot be added to ITEM_A, and
+ITEM_B still re-saves. Mutation (filter removed): 1 test fails. No real book registers a
+provisional machine today.
+
+**F5. Test gaps closed.** Delete refused while an Add New Orders draft line uses the
+item; `PUT` on an unknown code is 404 and creates nothing;
+`test_upload_ignores_a_routing_dropped_from_the_new_file` now also asserts ITEM_B keeps
+its routing (with `_current_masters` mutated to ignore the table, that test fails).
 
 ## What was NOT run
 
