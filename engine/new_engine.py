@@ -98,24 +98,53 @@ def _item_master_doc():
     return book_store.load_item_master()
 
 
+_OVERRIDE_SHOP = _UNSET   # (machines_doc, calendar_doc) from a worker payload
+
+
+def set_shop_masters(machines_doc, calendar_doc) -> None:
+    global _OVERRIDE_SHOP
+    _OVERRIDE_SHOP = (machines_doc, calendar_doc)
+
+
+def clear_shop_masters_override() -> None:
+    global _OVERRIDE_SHOP
+    _OVERRIDE_SHOP = _UNSET
+
+
+def _shop_docs():
+    if _OVERRIDE_SHOP is not _UNSET:
+        return _OVERRIDE_SHOP
+    return book_store.load_machines_doc(), book_store.load_shop_calendar()
+
+
 def _new_masters(flexible: bool = False):
-    """Load the new-engine Masters at the given machine flexibility from the injected
-    bytes or the stored workbook. flexible=False -> Allotted-only options (today);
-    True -> the Allotted+Suggested union. Cached by (workbook sha, Item
-    Process Master digest, flexible)."""
-    raw = _OVERRIDE_BYTES if _OVERRIDE_BYTES is not None else book_store.load_masters_bytes()
-    if not raw:
-        raise RuntimeError("new_engine: no masters workbook available (store empty and none injected)")
+    """Load the new-engine Masters at the given machine flexibility. flexible=False ->
+    Allotted-only options (today); True -> the Allotted+Suggested union. With the Item
+    Process Master, Machines and holiday tables all present no workbook is needed or
+    opened; otherwise the injected bytes or stored workbook fill the gaps. Cached by
+    (workbook sha or "none", (item, machines, calendar) digests, flexible)."""
+    from engine import shop_masters
     doc = _item_master_doc()
-    h = hashlib.sha256(raw).hexdigest()
-    d = item_master.digest(doc)
+    mdoc, cdoc = _shop_docs()
+    tables_only = bool(doc and mdoc and cdoc)
+    raw = None
+    if not tables_only:
+        raw = _OVERRIDE_BYTES if _OVERRIDE_BYTES is not None else book_store.load_masters_bytes()
+        if not raw:
+            raise RuntimeError("new_engine: no masters workbook available (store empty and none injected)")
+    h = hashlib.sha256(raw).hexdigest() if raw else "none"
+    d = (item_master.digest(doc), shop_masters.machines_digest(mdoc),
+         shop_masters.calendar_digest(cdoc))
     key = (h, d, bool(flexible))
     cached = _MASTERS_CACHE.get(key)
     if cached is None:
         for k in [k for k in _MASTERS_CACHE if k[:2] != (h, d)]:
             del _MASTERS_CACHE[k]
-        cached = load_all(io.BytesIO(raw), flexible_machines=bool(flexible),
-                          routing_rows=item_master.routing_rows(doc) if doc else None).masters
+        cached = load_all(
+            None if tables_only else io.BytesIO(raw), flexible_machines=bool(flexible),
+            routing_rows=item_master.routing_rows(doc) if doc else None,
+            machine_rows=shop_masters.machine_rows(mdoc) if mdoc else None,
+            holiday_rows=shop_masters.holiday_rows(cdoc) if cdoc else None).masters
         # Planning schedules CNC/VMC at cycle + 30%; the table keeps the original
         # (engine/planning_time.py is the one place that rule lives).
         cached = replace(cached, routings=pad_routings(cached.routings))

@@ -198,7 +198,8 @@ def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
                   seed: int, candidates=CLOUD_OVERLAP_CANDIDATES,
                   budget_per_candidate=CLOUD_BUDGET_PER_CANDIDATE,
                   absences=None, operator_table=None, frozen=None,
-                  machine_downtime=None, seed_ranks=None, item_master=None) -> dict:
+                  machine_downtime=None, seed_ranks=None, item_master=None,
+                  machines=None, shop_calendar=None) -> dict:
     """Snapshot everything one contest depends on. JSON-safe. ``operator_table``
     (the app-owned {week_anchor, operators} dict) is carried verbatim — the
     worker applies the SAME as-of-effective-start rotation the API does, so a
@@ -230,6 +231,10 @@ def build_payload(orders: dict, actuals, masters_bytes, config: Config, *,
         # parse_payload / run_candidate so a job built before this key existed
         # still plans, from the workbook's own routing sheet.
         "item_master": item_master,
+        # The app-owned Machines and holiday tables, same rule: read with .get, a
+        # job built before they existed falls back to the workbook it carries.
+        "machines": machines,
+        "shop_calendar": shop_calendar,
     }
 
 
@@ -246,11 +251,16 @@ def parse_payload(payload: dict):
         orders[o.key] = o
     actuals = [Actual.from_json(d) for d in payload["actuals"]]
     raw = payload.get("masters_xlsx_b64")
-    doc = payload.get("item_master")
-    if raw:
-        from engine import item_master as _im
-        _, masters = load_all(io.BytesIO(base64.b64decode(raw)),
-                              routing_rows=_im.routing_rows(doc) if doc else None)
+    from engine import item_master as _im, shop_masters as _sm
+    idoc, mdoc, cdoc = (payload.get("item_master"), payload.get("machines"),
+                        payload.get("shop_calendar"))
+    rows = dict(routing_rows=_im.routing_rows(idoc) if idoc else None,
+                machine_rows=_sm.machine_rows(mdoc) if mdoc else None,
+                holiday_rows=_sm.holiday_rows(cdoc) if cdoc else None)
+    if None not in rows.values():
+        _, masters = load_all(None, **rows)
+    elif raw:
+        _, masters = load_all(io.BytesIO(base64.b64decode(raw)), **rows)
     else:
         masters = Masters()
     config = Config.from_dict(payload["config"])
@@ -371,6 +381,7 @@ def run_candidate(payload: dict, overlap: int, flexible: bool = False, *, on_pro
         _raw = payload.get("masters_xlsx_b64")
         new_engine.set_masters_bytes(base64.b64decode(_raw) if _raw else None)
         new_engine.set_item_master(payload.get("item_master"))
+        new_engine.set_shop_masters(payload.get("machines"), payload.get("shop_calendar"))
     setup = prepare_contest(orders, actuals, masters, config, absences=absences,
                             operator_table=operator_table, frozen=frozen,
                             machine_downtime=machine_downtime)

@@ -44,6 +44,7 @@ def _isolate_store(tmp_path, monkeypatch):
     try:
         from engine import new_engine
         new_engine.clear_item_master_override()
+        new_engine.clear_shop_masters_override()
     except Exception:
         pass
 

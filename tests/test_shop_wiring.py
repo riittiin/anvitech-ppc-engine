@@ -99,3 +99,75 @@ def test_masters_sha_is_cached_not_refetched_per_call(monkeypatch):
     monkeypatch.setattr(m.book_store, "load_masters_bytes", real)
     book_store.save_masters_bytes(build_sample_bytes() + b"x")
     assert m._masters_sha() != old
+
+
+def test_new_engine_masters_follow_the_tables_without_a_workbook(monkeypatch):
+    from engine import new_engine
+    new_engine._MASTERS_CACHE.clear()
+    m = _api(); _seed_book(); m._current_masters()
+    mdoc = book_store.load_machines_doc()
+    mid = next(i for i, x in mdoc["machines"].items() if "CNC" in x["type"].upper())
+    from ppc_engine.loaders import loader as ppc_loader
+    def boom(*a, **k):
+        raise AssertionError("workbook opened")
+    monkeypatch.setattr(ppc_loader, "open_workbook", boom)
+    mdoc["machines"][mid]["type"] = "Manual deburring"
+    book_store.save_machines_doc(mdoc)
+    from ppc_engine.domain.resources import MachineKind
+    assert new_engine._new_masters(False).machines[mid].kind == MachineKind.MANUAL
+
+
+def _payload(machines, calendar):
+    from engine import optimize_service as svc
+    from engine.config import Config
+    from engine import item_master as im
+    _seed_book()
+    return svc.build_payload(book_store.load_active_orders(), [], build_sample_bytes(),
+                             Config(plan_start_date=date(2025, 3, 1)), seed=1,
+                             item_master=im.seed_doc(build_sample_bytes(), "t"),
+                             machines=machines, shop_calendar=calendar)
+
+
+def test_payload_round_trips_the_shop_tables():
+    from engine import optimize_service as svc
+    mdoc = sm.seed_machines(build_sample_bytes(), "t")
+    cdoc = sm.add_holiday(sm.seed_calendar(build_sample_bytes(), "t"), "2026-11-08", "Diwali", "t")
+    payload = json.loads(json.dumps(_payload(mdoc, cdoc)))
+    assert payload["machines"] == mdoc and payload["shop_calendar"] == cdoc
+    parsed = svc.parse_payload(payload)
+    assert len(parsed) == 8
+    assert date(2026, 11, 8) in parsed[2].calendar.holidays
+
+
+def test_payload_without_shop_tables_falls_back():
+    from engine import optimize_service as svc
+    payload = json.loads(json.dumps(_payload(None, None)))
+    payload.pop("machines"); payload.pop("shop_calendar")
+    parsed = svc.parse_payload(payload)
+    assert parsed[2].machines                          # read from the workbook it carries
+
+
+def test_run_candidate_feeds_the_shop_tables(monkeypatch):
+    import pytest
+    from engine import new_engine, optimize_service as svc
+    seen = {}
+    monkeypatch.setattr(new_engine, "set_shop_masters", lambda md, cd: seen.update(m=md, c=cd))
+    monkeypatch.setattr(svc, "prepare_contest", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop")))
+    mdoc = sm.seed_machines(build_sample_bytes(), "t")
+    cdoc = sm.seed_calendar(build_sample_bytes(), "t")
+    payload = json.loads(json.dumps(_payload(mdoc, cdoc)))
+    payload["config"]["scheduler"] = "new"
+    try:
+        with pytest.raises(RuntimeError, match="stop"):
+            svc.run_candidate(payload, 50)
+    finally:
+        new_engine.set_masters_bytes(None)
+        new_engine.clear_item_master_override()
+    assert seen == {"m": mdoc, "c": cdoc}
+
+
+def test_api_payload_call_site_passes_the_shop_tables():
+    import inspect
+    src = inspect.getsource(_api())
+    assert "machines=book_store.load_machines_doc()" in src
+    assert "shop_calendar=book_store.load_shop_calendar()" in src
