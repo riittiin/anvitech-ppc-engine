@@ -30,6 +30,7 @@ OPERATORS_KEY = "anvitech:operators"        # kv: json {week_anchor, operators:[
 LAST_APPLIED_SCHEDULE_KEY = "anvitech:last_applied_schedule"  # kv: json list of applied-schedule op rows
 FROZEN_OPS_KEY = "anvitech:frozen_ops"       # kv: json list of frozen (in-progress) op rows for today
 PLAN_START_FLOOR_KEY = "anvitech:plan_start_floor"  # kv: json {date, floor} — today's pinned auto start
+ITEM_MASTER_KEY = "anvitech:item_process_master"  # kv: json {seeded_at, seeded_from_sha, seed_digest, items}
 DRAFT_ORDERS_KEY = "anvitech:new_order_drafts"  # kv: json list of typed (not yet added) order lines
 NEW_ORDER_QUEUE_KEY = "anvitech:new_order_queue"  # kv: json list of arrival GROUPS, each a list of [so_no, item_code] pairs accepted together, planned behind the book
 
@@ -345,6 +346,16 @@ def load_operator_table():
 
 def save_operator_table(table: dict) -> None:
     get_store().kv_set(OPERATORS_KEY, json.dumps(table))
+
+
+def load_item_master():
+    """The app-owned Item Process Master (routings), or ``None`` if never seeded."""
+    raw = get_store().kv_get(ITEM_MASTER_KEY)
+    return json.loads(raw) if raw else None
+
+
+def save_item_master(doc: dict) -> None:
+    get_store().kv_set(ITEM_MASTER_KEY, json.dumps(doc))
 
 
 # --- add new orders: drafts and arrival queue --- #
