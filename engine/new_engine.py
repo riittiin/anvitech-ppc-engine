@@ -27,7 +27,7 @@ from collections import defaultdict
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 
-from engine import book_store
+from engine import book_store, item_master
 from engine.loaders import normalize_process_name
 from engine.models import ScheduleEntry
 from engine.optimizer import COMMITTED_PROMISE_WEIGHT
@@ -75,22 +75,48 @@ def set_masters_bytes(raw: bytes | None) -> None:
     _OVERRIDE_BYTES = raw
 
 
+# The Item Process Master injected out-of-band (the cloud worker carries it in its
+# payload, like the workbook). _UNSET = read the store; None = read the workbook's
+# own routing sheet (a payload built before the table existed).
+_UNSET = object()
+_OVERRIDE_ITEM_MASTER = _UNSET
+
+
+def set_item_master(doc) -> None:
+    global _OVERRIDE_ITEM_MASTER
+    _OVERRIDE_ITEM_MASTER = doc
+
+
+def clear_item_master_override() -> None:
+    global _OVERRIDE_ITEM_MASTER
+    _OVERRIDE_ITEM_MASTER = _UNSET
+
+
+def _item_master_doc():
+    if _OVERRIDE_ITEM_MASTER is not _UNSET:
+        return _OVERRIDE_ITEM_MASTER
+    return book_store.load_item_master()
+
+
 def _new_masters(flexible: bool = False):
     """Load the new-engine Masters at the given machine flexibility from the injected
     bytes or the stored workbook. flexible=False -> Allotted-only options (today);
-    True -> the Allotted+Suggested union. Cached by (workbook sha, flexible)."""
+    True -> the Allotted+Suggested union. Cached by (workbook sha, Item
+    Process Master digest, flexible)."""
     raw = _OVERRIDE_BYTES if _OVERRIDE_BYTES is not None else book_store.load_masters_bytes()
     if not raw:
         raise RuntimeError("new_engine: no masters workbook available (store empty and none injected)")
+    doc = _item_master_doc()
     h = hashlib.sha256(raw).hexdigest()
-    key = (h, bool(flexible))
+    d = item_master.digest(doc)
+    key = (h, d, bool(flexible))
     cached = _MASTERS_CACHE.get(key)
     if cached is None:
-        # Keep both flexibilities of the CURRENT workbook; evict any other workbook.
-        for k in [k for k in _MASTERS_CACHE if k[0] != h]:
+        for k in [k for k in _MASTERS_CACHE if k[:2] != (h, d)]:
             del _MASTERS_CACHE[k]
-        cached = load_all(io.BytesIO(raw), flexible_machines=bool(flexible)).masters
-        # Planning schedules CNC/VMC at cycle + 30%; the workbook keeps the original
+        cached = load_all(io.BytesIO(raw), flexible_machines=bool(flexible),
+                          routing_rows=item_master.routing_rows(doc) if doc else None).masters
+        # Planning schedules CNC/VMC at cycle + 30%; the table keeps the original
         # (engine/planning_time.py is the one place that rule lives).
         cached = replace(cached, routings=pad_routings(cached.routings))
         _MASTERS_CACHE[key] = cached

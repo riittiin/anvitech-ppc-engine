@@ -123,3 +123,30 @@ def test_upload_as_first_request_seeds_from_the_workbook_on_file():
     assert r.status_code == 200, r.text
     assert r.json()["routings_note"]
     assert m._current_masters().routings[ITEM_A].processes[0].cycle_time == 3
+
+
+def test_new_engine_masters_follow_the_table():
+    from engine import new_engine
+    new_engine._MASTERS_CACHE.clear()
+    m = _api(); _seed_book(); m._current_masters()
+    before = new_engine._new_masters(False).routings[ITEM_A].operations[0].cycle_min
+    doc = book_store.load_item_master()
+    doc["items"][ITEM_A]["steps"][0]["cycle"] = 30
+    book_store.save_item_master(doc)
+    after = new_engine._new_masters(False).routings[ITEM_A].operations[0].cycle_min
+    assert before == 3.0 and after == 30.0      # BANDSAW is manual: no +30%
+
+
+def test_new_engine_override_wins_and_none_means_workbook():
+    from engine import new_engine
+    new_engine._MASTERS_CACHE.clear()
+    _seed_book()
+    doc = im.seed_doc(build_sample_bytes(), "t")
+    doc["items"][ITEM_A]["steps"][0]["cycle"] = 44
+    try:
+        new_engine.set_item_master(doc)
+        assert new_engine._new_masters(False).routings[ITEM_A].operations[0].cycle_min == 44.0
+        new_engine.set_item_master(None)
+        assert new_engine._new_masters(False).routings[ITEM_A].operations[0].cycle_min == 3.0
+    finally:
+        new_engine.clear_item_master_override()
