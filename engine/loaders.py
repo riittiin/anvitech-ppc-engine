@@ -326,6 +326,47 @@ def _load_calendar(wb, masters: Masters):
     masters.calendar = cal
 
 
+def _routing_from_steps(code, description, steps, masters: Masters,
+                        customer: str = "", rm_type: str = "", moq=None) -> Routing:
+    """One routing from its steps ``(name, cycle, total, suggested, allotted)``. A
+    ``None`` step or a blank name is skipped but still takes its sequence number
+    (the workbook's fixed 5-column blocks). The ONE classic rule for turning steps
+    into Processes, whether they come from the sheet or the Item Process Master."""
+    processes = []
+    for p, step in enumerate(steps):
+        if step is None:
+            continue
+        name, cyc, total, sm, am = step
+        if not name or str(name).strip() == "":
+            continue
+        processes.append(
+            Process(
+                seq=p + 1,
+                name=str(name).strip(),
+                cycle_time=_num(cyc, masters, f"{code} P{p+1} cycle"),
+                total_time=_num(total, masters, f"{code} P{p+1} total"),
+                suggested_machine=(str(sm).strip() if sm else None),
+                allotted_machine=(str(am).strip() if am else None),
+            )
+        )
+    # Per-process progress (WIP 'continue from reality' re-planning) is keyed by the
+    # NORMALISED process name, so two steps in one routing that normalise to the same
+    # name would merge — their completed/remaining qty would be wrong and could exceed
+    # the ordered qty. Owner-confirmed this never happens in the current data; report
+    # it loudly (non-blocking) if a future workbook ever introduces it.
+    _by_name: dict = {}
+    for pr in processes:
+        _by_name.setdefault(normalize_process_name(pr.name), []).append(pr.seq)
+    for _nm, _seqs in _by_name.items():
+        if len(_seqs) > 1:
+            masters.add_report(
+                "DUPLICATE_PROCESS", str(code),
+                f"process name {_nm!r} appears at steps {_seqs}: per-step progress "
+                f"would merge — give each step a distinct name")
+    return Routing(item_code=code, description=description, customer=customer,
+                   rm_type=rm_type, moq=moq, processes=processes)
+
+
 def _load_routings(wb, masters: Masters):
     ws = _find_sheet(wb, "Item's process Master")
     if ws is None:
@@ -336,46 +377,27 @@ def _load_routings(wb, masters: Masters):
         if item_code is None or str(item_code).strip() == "":
             continue  # blank / separator row
         code = str(item_code).strip()
-        processes = []
+        steps = []
         for p in range(MAX_PROCESSES):
             base = ROUTING_FIRST_PROCESS_COL + p * 5
-            name = _cell(row, base)
-            if not name or str(name).strip() == "":
-                continue
-            sm, am = _cell(row, base + 3), _cell(row, base + 4)
-            processes.append(
-                Process(
-                    seq=p + 1,
-                    name=str(name).strip(),
-                    cycle_time=_num(_cell(row, base + 1), masters, f"{code} P{p+1} cycle"),
-                    total_time=_num(_cell(row, base + 2), masters, f"{code} P{p+1} total"),
-                    suggested_machine=(str(sm).strip() if sm else None),
-                    allotted_machine=(str(am).strip() if am else None),
-                )
-            )
-        # Per-process progress (WIP 'continue from reality' re-planning) is keyed by the
-        # NORMALISED process name, so two steps in one routing that normalise to the same
-        # name would merge — their completed/remaining qty would be wrong and could exceed
-        # the ordered qty. Owner-confirmed this never happens in the current data; report
-        # it loudly (non-blocking) if a future workbook ever introduces it.
-        _by_name: dict = {}
-        for pr in processes:
-            _by_name.setdefault(normalize_process_name(pr.name), []).append(pr.seq)
-        for _nm, _seqs in _by_name.items():
-            if len(_seqs) > 1:
-                masters.add_report(
-                    "DUPLICATE_PROCESS", str(code),
-                    f"process name {_nm!r} appears at steps {_seqs}: per-step progress "
-                    f"would merge — give each step a distinct name")
-
-        masters.routings[code] = Routing(
-            item_code=code,
-            description=str(_cell(row, 2)).strip() if _cell(row, 2) else "",
+            steps.append((_cell(row, base), _cell(row, base + 1), _cell(row, base + 2),
+                          _cell(row, base + 3), _cell(row, base + 4)))
+        masters.routings[code] = _routing_from_steps(
+            code,
+            str(_cell(row, 2)).strip() if _cell(row, 2) else "",
+            steps, masters,
             customer=str(_cell(row, 1)).strip() if _cell(row, 1) else "",
             rm_type=str(_cell(row, 6)).strip() if _cell(row, 6) else "",
             moq=_num(_cell(row, 10)),
-            processes=processes,
         )
+
+
+def _load_routings_from_rows(rows, masters: Masters):
+    """Routings from the app's Item Process Master rows ``[(code, desc, steps)]``.
+    Customer / RM type / MOQ are not kept by the app (nothing reads them)."""
+    for code, desc, steps in rows:
+        masters.routings[str(code).strip()] = _routing_from_steps(
+            str(code).strip(), desc or "", steps, masters)
 
 
 def _load_so_lines(wb, masters: Masters):
@@ -508,7 +530,7 @@ def _validate(masters: Masters, so_lines):
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
-def load_all(xlsx_path):
+def load_all(xlsx_path, routing_rows=None):
     """Load masters + SO lines from a workbook in the Test4 format.
 
     ``xlsx_path`` is a path or a file-like object (e.g. an uploaded BytesIO) — there
@@ -518,6 +540,9 @@ def load_all(xlsx_path):
     Returns ``(so_lines, masters)``. ``masters.report`` holds all non-blocking
     issues. SO lines whose item has no routing are dropped from the returned
     list (recorded as NO_ROUTING) so downstream rules only see schedulable demand.
+
+    ``routing_rows`` (``[(code, description, steps)]``): when given, routings come
+    from the app's Item Process Master and the workbook's routing sheet is not read.
     """
     wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
     masters = Masters()
@@ -525,7 +550,10 @@ def load_all(xlsx_path):
         _load_machines(wb, masters)
         _load_operators(wb, masters)
         _load_calendar(wb, masters)
-        _load_routings(wb, masters)
+        if routing_rows is None:
+            _load_routings(wb, masters)
+        else:
+            _load_routings_from_rows(routing_rows, masters)
         so_lines = _load_so_lines(wb, masters)
     finally:
         wb.close()

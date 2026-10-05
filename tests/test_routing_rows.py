@@ -48,3 +48,30 @@ def test_ppc_rows_register_provisional_machines():
     res = ppc_loader.load_all(io.BytesIO(build_sample_bytes()), routing_rows=rows)
     assert "CNC9" in res.masters.machines
     assert list(res.masters.routings) == [ITEM_B]
+
+
+from engine import loaders as classic
+
+
+def test_classic_load_all_from_rows_equals_from_sheet():
+    for raw in (build_sample_bytes(), build_new_sample_bytes()):
+        rows = _ppc_rows(raw)
+        so_a, m_a = classic.load_all(io.BytesIO(raw))
+        so_b, m_b = classic.load_all(io.BytesIO(raw), routing_rows=rows)
+        assert list(m_a.routings) == list(m_b.routings)
+        for code in m_a.routings:
+            ra, rb = m_a.routings[code], m_b.routings[code]
+            assert ra.description == rb.description
+            assert [(p.seq, p.name, p.cycle_time, p.suggested_machine, p.allotted_machine)
+                    for p in ra.processes] == \
+                   [(p.seq, p.name, p.cycle_time, p.suggested_machine, p.allotted_machine)
+                    for p in rb.processes]
+        assert set(m_a.machines) == set(m_b.machines)
+        assert [s.key for s in so_a] == [s.key for s in so_b]
+
+
+def test_classic_rows_report_duplicate_process():
+    rows = [(ITEM_A, "RING", [("CNC", 3, None, "CNC1", None),
+                              ("cnc ", 4, None, "CNC2", None)])]
+    _so, m = classic.load_all(io.BytesIO(build_sample_bytes()), routing_rows=rows)
+    assert any(r["kind"] == "DUPLICATE_PROCESS" and r["ref"] == ITEM_A for r in m.report)
