@@ -36,10 +36,11 @@
 >   `/run`, Gantt, shift-wise, delay report, production analysis, `/items`, quote, and
 >   the payload round trip (classic and the worker's ppc masters). Uploading a doctored
 >   workbook after the seed: plan hash unchanged. **Mutation testing, 9 brief mutations:
->   8 of 9 load-bearing; `_keep_blank_as_stored` fails NO test in the whole suite yet IS
->   load-bearing** (all 106 Test9 items have a null machine field; the browser sends
->   `""`, and without it an unedited Save flips the inputs signature), so that test gap
->   is open. Cache-hit `/run` on Test9 ~38 -> ~43 ms locally (+13%). Suite 1208 passed,
+>   9 of 9 load-bearing**, after one gap was closed: `_keep_blank_as_stored` at first
+>   failed NO test in the whole suite yet matters on all 106 Test9 items (the browser
+>   sends a null machine field as `""`; without it an unedited Save flips the inputs
+>   signature); `test_resaving_unchanged_item_as_the_browser_sends_it_keeps_digest` now
+>   pins it. Cache-hit `/run` on Test9 ~38 -> ~43 ms locally (+13%). Suite 1209 passed,
 >   4 skipped, 1 pre-existing local failure (`xlsxwriter`). **Open for the owner:** the
 >   punch-safety rule accepts moving a punched step BELOW an unpunched one (or a new step
 >   in front of it), which leaves the order in a state `precedence_cap_error` refuses;

@@ -18,9 +18,9 @@ workbooks were read only. Harness sources are at the end, verbatim.
 | 2. Every reader switched | **All moved** on one table edit, workbook bytes unchanged: `/run` schedule, Gantt, shift-wise, delay report, production analysis, `/items`, quote, cloud payload round-trip (classic and worker ppc masters). |
 | 3. Upload no longer reaches routings | Upload of a doctored Test9 (one cycle cell x3+7, one item row blanked): **plan hash unchanged**, table digest unchanged. |
 | 4. Safety rules | rename / remove punched step: 400 with the message; cycle change: 200; delete in-use item: 400; stale version: 409. **Finding:** moving a punched step below an unpunched one is ACCEPTED (spec wording) and leaves the order in a state the capture guard calls illegal. See Findings F2. |
-| 5. Mutation testing | 9 brief mutations: **8 of 9 load-bearing** on the four item-master files. **#9 `_keep_blank_as_stored` fails NO test, whole suite included**, yet is load-bearing on the real book (F3). Extras: #10 caught only by the full suite, #11 caught. |
+| 5. Mutation testing | 9 brief mutations: **9 of 9 load-bearing** on the four item-master files. #9 `_keep_blank_as_stored` first failed NO test (whole suite included) although it is load-bearing on the real book; closed by the new `test_resaving_unchanged_item_as_the_browser_sends_it_keeps_digest` (F3). Extras: #10 caught only by the full suite, #11 caught. |
 | 6. Browser run | **Not run in Task 10.** |
-| 7. Full suite | **1208 passed, 4 skipped, 1 failed** (the pre-existing `test_production_analysis.py::test_monthly_report_json_and_excel`, `xlsxwriter` not installed locally; present at base). |
+| 7. Full suite | **1209 passed, 4 skipped, 1 failed** (1208 before the F3 test was added) (the pre-existing `test_production_analysis.py::test_monthly_report_json_and_excel`, `xlsxwriter` not installed locally; present at base). |
 | Cache-hit `/run` cost | Test9: base **38.2 / 39.0 / 38.2 ms**, feature **43.6 / 42.9 / 43.5 ms** (median of 30, three rounds): about **+5 ms (+13%)** per cache hit on the local file store. |
 
 ## 1. Byte-identical switch
@@ -170,7 +170,7 @@ guards against the stale-bytecode masking seen on 2026-09-22. Unmutated: 55 pass
 | 6 | `_inputs_signature` never appends the table | 1: test_inputs_signature_unchanged_by_seeding_but_moved_by_an_edit |
 | 7 | `punch_safety_errors` returns `[]` | 4: test_renaming_a_punched_step_is_refused (api), test_removing_a_punched_step_is_refused, test_renaming_a_punched_step_is_refused_with_reason, test_reordering_punched_steps_is_refused |
 | 8 | `apply_save` skips the version comparison | 2: test_apply_save_versions_and_conflicts, test_stale_version_is_refused |
-| 9 | `_keep_blank_as_stored` returns `new_steps` unchanged | **0. Whole suite: also 0** (only the pre-existing xlsxwriter failure) |
+| 9 | `_keep_blank_as_stored` returns `new_steps` unchanged | first run: **0, whole suite also 0**. After the F3 fix: 1: test_resaving_unchanged_item_as_the_browser_sends_it_keeps_digest |
 | 10 (extra) | upload parses the new file with `routing_rows=None` | 0 in the four files; **full suite: 1** (test_report_and_staleness.py::test_upload_ignores_a_routing_dropped_from_the_new_file) |
 | 11 (extra) | upload does not seed before replacing the workbook | 1: test_upload_as_first_request_seeds_from_the_workbook_on_file |
 
@@ -181,11 +181,11 @@ item: with the helper, digest and inputs signature unchanged; with it bypassed, 
 change** (200, digest moved, inputs signature moved), i.e. one click of Save with no
 edit would flag an applied optimization stale. `test_resaving_unchanged_item_keeps_digest`
 does not catch it because it PUTs the GET response verbatim (nulls), not the browser's
-shape. See F3.
+shape. Closed: `test_resaving_unchanged_item_as_the_browser_sends_it_keeps_digest` (tests/test_item_master_api.py) PUTs ITEM_A the way the browser does (`null` machine fields as `""`) and asserts the digest is unchanged; it passes, fails with the mutation applied (digest `8cc2b5d0...` vs `ee9e4f02...`), and passes again after restore. See F3.
 
 ## 6. Full suite
 
-`python3.12 -m pytest -q`: **1 failed, 1208 passed, 4 skipped** (77.6 s). The one failure
+`python3.12 -m pytest -q`: **1 failed, 1208 passed, 4 skipped** (77.6 s); after the F3 test was added: **1 failed, 1209 passed, 4 skipped** (77.9 s). The one failure
 is `tests/test_production_analysis.py::test_monthly_report_json_and_excel`
 (`ModuleNotFoundError: xlsxwriter`), pre-existing at base and environment-only.
 
@@ -209,16 +209,18 @@ within one request, but the absolute cost on Render was not measured.
 
 - **F1 (intended, recorded).** Classic routings no longer carry Customer, RM type, MOQ
   or Total Time (blank/None). No reader; plans byte-identical. Spec section 3.
-- **F2 (owner question).** The punch-safety rule checks only the RELATIVE order of
+- **F2 (OPEN OWNER QUESTION, no code change).** Should Save also refuse moving a
+  punched step below an unpunched one, or adding a new step in front of it? Today both
+  are accepted, and the next punch on that step is then refused. Detail: the punch-safety rule checks only the RELATIVE order of
   punched steps (spec section 8 says exactly that), so moving a punched step below an
   unpunched one, or inserting a new step in front of a punched one ("new steps are
   always allowed"), is accepted. The result is the state the spec's own reason forbids:
   a downstream step with more pieces than its new upstream; the next punch on that step
   is refused by `precedence_cap_error`. The implementation matches the spec; the spec's
   rule is narrower than its rationale. Owner's call whether to widen it.
-- **F3 (test gap).** `_keep_blank_as_stored` is load-bearing on every real item but no
-  test fails without it. A test that PUTs the browser's shape (`""` for null machine
-  fields) would pin it. Not added in this task (verification only).
+- **F3 (test gap, CLOSED).** `_keep_blank_as_stored` is load-bearing on every real item
+  but no test failed without it. Closed by `test_resaving_unchanged_item_as_the_browser_sends_it_keeps_digest`, which PUTs the browser's shape
+  (`""` for null machine fields); mutation-proven.
 - **F4.** Mutation 10 (the upload's own parse ignoring the table) is caught only outside
   the four item-master test files, by `test_report_and_staleness.py`.
 - **F5.** A cycle-time edit can move an order's date the "wrong" way through Rule 3's

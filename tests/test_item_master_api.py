@@ -82,6 +82,24 @@ def test_resaving_unchanged_item_keeps_digest():
     assert im.digest(book_store.load_item_master()) == d0
 
 
+def test_resaving_unchanged_item_as_the_browser_sends_it_keeps_digest():
+    # The browser (app.js imSave) sends a null machine field back as "". Re-saving an
+    # unedited item that way must change nothing, or one Save click would flag an
+    # applied optimization stale (every real Test9 item has a null machine field).
+    m, admin, _ = _setup()
+    a = _get_item(admin, ITEM_A)          # first GET seeds the table
+    assert any(s["allotted"] is None or s["suggested"] is None for s in a["steps"])
+    d0 = im.digest(book_store.load_item_master())
+    steps = [{"name": s["name"], "cycle": s["cycle"],
+              "allotted": s["allotted"] if s["allotted"] is not None else "",
+              "suggested": s["suggested"] if s["suggested"] is not None else ""}
+             for s in a["steps"]]
+    r = admin.put("/item-master", json={"code": ITEM_A, "description": a["description"],
+                                        "steps": steps, "version": a["version"]})
+    assert r.status_code == 200, r.text
+    assert im.digest(book_store.load_item_master()) == d0
+
+
 def test_stale_version_is_refused():
     m, admin, _ = _setup()
     a = _get_item(admin, ITEM_A)
