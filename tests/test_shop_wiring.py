@@ -82,3 +82,20 @@ def test_signatures_unchanged_by_seeding_and_moved_by_edits(monkeypatch):
                                                  "2026-11-08", "Diwali", "t"))
     assert m._inputs_signature(cfg) != seeded
     assert m._plan_fingerprint(cfg) != f0
+
+
+def test_masters_sha_is_cached_not_refetched_per_call(monkeypatch):
+    m = _api(); _seed_book()
+    cfg = m._load_plan_config()
+    m._plan_fingerprint(cfg)
+
+    def boom():
+        raise AssertionError("workbook fetched on a warm cache")
+    real = book_store.load_masters_bytes
+    monkeypatch.setattr(m.book_store, "load_masters_bytes", boom)
+    m._plan_fingerprint(cfg)                      # must not raise
+    old = m._masters_sha()
+    m._MASTERS_CACHE["masters"] = None
+    monkeypatch.setattr(m.book_store, "load_masters_bytes", real)
+    book_store.save_masters_bytes(build_sample_bytes() + b"x")
+    assert m._masters_sha() != old

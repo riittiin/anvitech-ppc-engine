@@ -392,7 +392,7 @@ def _current_masters():
                 base = Masters()
             else:
                 _, base = load_all(io.BytesIO(raw), **rows)
-        _MASTERS_CACHE.update(key=key, masters=base)
+        _MASTERS_CACHE.update(key=key, masters=base, sha=None, sha_key=None)
     return _with_operator_overlay(base)
 
 
@@ -431,9 +431,14 @@ def _masters_sha() -> str:
     """Content hash of the stored masters workbook.
     Unchanged by stage 2: the workbook is still on file (the seed source), it
     is just no longer parsed."""
-    _current_masters()   # seeds the tables on first use
+    _current_masters()   # seeds the tables on first use; a rebuild clears the sha
+    sha_key = _store_env_key()
+    if _MASTERS_CACHE.get("sha") is not None and _MASTERS_CACHE.get("sha_key") == sha_key:
+        return _MASTERS_CACHE["sha"]
     raw = book_store.load_masters_bytes()
-    return hashlib.sha256(raw).hexdigest() if raw else "none"
+    sha = hashlib.sha256(raw).hexdigest() if raw else "none"
+    _MASTERS_CACHE.update(sha=sha, sha_key=sha_key)
+    return sha
 
 
 def _inputs_signature(config: Config) -> str:
