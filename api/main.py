@@ -721,6 +721,26 @@ class ItemStep(BaseModel):
     suggested: Optional[str] = None                   # refuses it with a clear message
 
 
+class MachineSaveRequest(BaseModel):
+    id: str
+    type: str = ""
+    hours: Optional[Union[int, float]] = None
+    version: Optional[int] = None
+
+
+class MachineIdRequest(BaseModel):
+    id: str
+
+
+class HolidayRequest(BaseModel):
+    date: str
+    name: str = ""
+
+
+class HolidayDateRequest(BaseModel):
+    date: str
+
+
 class ItemSaveRequest(BaseModel):
     code: str
     description: str = ""
@@ -3719,6 +3739,125 @@ def delete_item(req: ItemCodeRequest, request: Request):
     del doc["items"][code]
     book_store.save_item_master(doc)
     return {"deleted": code}
+
+
+# --------------------------------------------------------------------------- #
+# Machines and holidays (2026-10-05, stage 2): edited in Settings, not the Excel.
+# --------------------------------------------------------------------------- #
+def _machine_users(mid):
+    return shop_masters.machine_usage(
+        mid, book_store.load_item_master(), book_store.load_operator_table(),
+        book_store.load_machine_downtime(), book_store.load_frozen_ops())
+
+
+def _machine_view(mid, m):
+    from ppc_engine.loaders.normalize import machine_kind_from_type
+    return {"id": mid, "name": m.get("name") or mid, "type": m.get("type") or "",
+            "hours": m.get("hours"), "version": m.get("version", 1),
+            "kind": machine_kind_from_type(m.get("type")).value,
+            "used_by": _machine_users(mid)}
+
+
+@app.get("/machines")
+def get_machines():
+    _current_masters()                        # seeds the tables once
+    doc = book_store.load_machines_doc() or {"machines": {}}
+    types = list(dict.fromkeys(m.get("type") for m in doc["machines"].values() if m.get("type")))
+    return {"machines": [_machine_view(mid, m) for mid, m in doc["machines"].items()],
+            "types": types,
+            "standard_hours": {"two": shop_masters.TWO_SHIFT_HOURS,
+                               "one": shop_masters.ONE_SHIFT_HOURS}}
+
+
+def _save_machine(req: MachineSaveRequest, request: Request, create: bool):
+    require_admin(request)
+    _current_masters()
+    doc = book_store.load_machines_doc() or {"machines": {}}
+    raw_id = req.id.strip()
+    mid = loaders.normalize_resource_id(raw_id) if raw_id else ""
+    if not create and mid not in doc["machines"]:
+        raise HTTPException(status_code=404, detail=f"No machine {mid or raw_id}.")
+    item = {"name": doc["machines"].get(mid, {}).get("name") or raw_id,
+            "type": req.type, "hours": req.hours}
+    if create and mid in doc["machines"]:
+        raise HTTPException(status_code=409, detail=f"Machine {mid} already exists.")
+    errs = shop_masters.validate_machine(raw_id, item, doc["machines"], create)
+    if errs:
+        raise HTTPException(status_code=400, detail=" ".join(errs))
+    try:
+        new_doc = shop_masters.apply_machine_save(
+            doc, mid, item, req.version, _ist_now().isoformat(timespec="seconds"),
+            getattr(request.state, "user", "admin"), create)
+    except shop_masters.VersionConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    book_store.save_machines_doc(new_doc)
+    return {"machine": _machine_view(mid, new_doc["machines"][mid])}
+
+
+@app.post("/machines")
+def create_machine(req: MachineSaveRequest, request: Request):
+    """Add a machine (admin). Appears at once in every machine picker."""
+    return _save_machine(req, request, create=True)
+
+
+@app.put("/machines")
+def update_machine(req: MachineSaveRequest, request: Request):
+    """Change a machine's type or working hours (admin). The number never changes."""
+    return _save_machine(req, request, create=False)
+
+
+@app.post("/machines/delete")
+def delete_machine(req: MachineIdRequest, request: Request):
+    """Remove a machine (admin). Refused while a routing step, an operator, a
+    maintenance break or work in progress still names it."""
+    require_admin(request)
+    _current_masters()
+    doc = book_store.load_machines_doc() or {"machines": {}}
+    mid = loaders.normalize_resource_id(req.id.strip()) if req.id.strip() else ""
+    if mid not in doc["machines"]:
+        raise HTTPException(status_code=404, detail=f"No machine {mid or req.id}.")
+    used = _machine_users(mid)
+    if used:
+        raise HTTPException(status_code=400,
+                            detail=f"{mid} is still used by {', '.join(used)}. Change those first.")
+    del doc["machines"][mid]
+    book_store.save_machines_doc(doc)
+    return {"deleted": mid}
+
+
+@app.get("/holidays")
+def get_holidays():
+    _current_masters()
+    doc = book_store.load_shop_calendar() or {"holidays": []}
+    return {"weekly_off": shop_masters.WEEKLY_OFF, "holidays": doc["holidays"]}
+
+
+@app.post("/holidays")
+def add_holiday(req: HolidayRequest, request: Request):
+    """Add a whole-shop holiday (admin)."""
+    require_admin(request)
+    _current_masters()
+    doc = book_store.load_shop_calendar() or {"holidays": []}
+    errs = shop_masters.validate_holiday(req.date, req.name, doc["holidays"], _ist_today())
+    if errs:
+        raise HTTPException(status_code=400, detail=" ".join(errs))
+    doc = shop_masters.add_holiday(doc, req.date, req.name, _ist_now().isoformat(timespec="seconds"))
+    book_store.save_shop_calendar(doc)
+    return {"holidays": doc["holidays"]}
+
+
+@app.post("/holidays/delete")
+def delete_holiday(req: HolidayDateRequest, request: Request):
+    """Remove a holiday (admin)."""
+    require_admin(request)
+    _current_masters()
+    doc = book_store.load_shop_calendar() or {"holidays": []}
+    try:
+        doc = shop_masters.remove_holiday(doc, req.date)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"{req.date} is not a holiday.")
+    book_store.save_shop_calendar(doc)
+    return {"holidays": doc["holidays"]}
 
 
 def _validate_year_month(year: int, month: int) -> None:
