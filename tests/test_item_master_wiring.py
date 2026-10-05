@@ -17,3 +17,100 @@ def test_store_round_trip():
     book_store.save_item_master(doc)
     assert book_store.load_item_master() == doc
     assert list(book_store.load_item_master()["items"]) == [ITEM_A, ITEM_B]
+
+
+def _api():
+    import importlib
+    import api.main as m
+    importlib.reload(m)
+    return m
+
+
+def _seed_book():
+    book_store.save_masters_bytes(build_sample_bytes())
+    book_store.add_orders([Order("SO1", ITEM_A, ITEM_A, 10, date(2025, 3, 20)),
+                           Order("SO2", ITEM_B, ITEM_B, 15, date(2025, 3, 21))])
+
+
+def test_first_masters_read_seeds_the_table_once():
+    m = _api(); _seed_book()
+    assert book_store.load_item_master() is None
+    masters = m._current_masters()
+    doc = book_store.load_item_master()
+    assert list(doc["items"]) == list(masters.routings) == [ITEM_A, ITEM_B]
+    doc["items"][ITEM_A]["description"] = "EDITED"
+    book_store.save_item_master(doc)
+    m._current_masters()
+    assert book_store.load_item_master()["items"][ITEM_A]["description"] == "EDITED"
+
+
+def test_masters_follow_a_table_edit():
+    m = _api(); _seed_book()
+    m._current_masters()
+    doc = book_store.load_item_master()
+    doc["items"][ITEM_A]["steps"][0]["cycle"] = 30
+    book_store.save_item_master(doc)
+    proc = m._current_masters().routings[ITEM_A].processes[0]
+    assert proc.cycle_time == 30
+
+
+def test_inputs_signature_unchanged_by_seeding_but_moved_by_an_edit(monkeypatch):
+    m = _api(); _seed_book()
+    cfg = m._load_plan_config()
+    m._current_masters()                         # seeds
+    seeded = m._inputs_signature(cfg)
+    # Without the table part the formula is the pre-feature one; a freshly seeded
+    # table must not change the signature (no applied optimization goes stale on deploy).
+    real_load = book_store.load_item_master
+    monkeypatch.setattr(m.book_store, "load_item_master", lambda: None)
+    m._MASTERS_CACHE["masters"] = None
+    assert m._inputs_signature(cfg) == seeded
+    monkeypatch.setattr(m.book_store, "load_item_master", real_load)
+    doc = book_store.load_item_master()
+    doc["items"][ITEM_A]["steps"][0]["cycle"] = 30
+    book_store.save_item_master(doc)
+    assert m._inputs_signature(cfg) != seeded
+
+
+def test_plan_fingerprint_moves_with_the_table():
+    m = _api(); _seed_book()
+    cfg = m._load_plan_config()
+    f0 = m._plan_fingerprint(cfg)
+    doc = book_store.load_item_master()
+    doc["items"][ITEM_A]["steps"][0]["cycle"] = 30
+    book_store.save_item_master(doc)
+    assert m._plan_fingerprint(cfg) != f0
+
+
+def _admin(m):
+    from fastapi.testclient import TestClient
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    return c
+
+
+def _workbook_with_cycle(cycle):
+    from tests.sample_workbook import build_workbook
+    wb = build_workbook()
+    wb["Item's process Master"].cell(row=3, column=14).value = cycle   # ITEM_A step 1 cycle
+    buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+def test_upload_after_seed_does_not_touch_routings():
+    m = _api(); _seed_book()
+    m._current_masters()
+    r = _admin(m).post("/upload", files={"file": ("x.xlsx", _workbook_with_cycle(99))})
+    assert r.status_code == 200, r.text
+    assert "Item Process Master" in r.json()["routings_note"]
+    assert m._current_masters().routings[ITEM_A].processes[0].cycle_time == 3
+
+
+def test_upload_without_routing_sheet_is_accepted_once_seeded():
+    m = _api(); _seed_book()
+    m._current_masters()
+    from tests.sample_workbook import build_workbook
+    wb = build_workbook(); del wb["Item's process Master"]
+    buf = io.BytesIO(); wb.save(buf)
+    r = _admin(m).post("/upload", files={"file": ("x.xlsx", buf.getvalue())})
+    assert r.status_code == 200, r.text
+    assert list(m._current_masters().routings) == [ITEM_A, ITEM_B]

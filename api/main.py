@@ -51,6 +51,7 @@ from engine import production_analysis
 from engine import planning_time
 from engine import operator_master
 from engine import freeze
+from engine import item_master
 from engine.rules import (
     rule3_tiebreak_process_time as r3,
     rule4_setup_time as r4,
@@ -334,15 +335,34 @@ def _store_env_key():
             os.environ.get("STORE_DIR"))
 
 
+def _item_master_doc():
+    """The app-owned Item Process Master, seeded ONCE from the workbook on file
+    the first time it is needed (same pattern as operators, 2026-07-18). After that
+    the workbook's routing sheet is never read again, a later upload included."""
+    doc = book_store.load_item_master()
+    if doc is None:
+        raw = book_store.load_masters_bytes()
+        if raw is not None:
+            doc = item_master.seed_doc(raw, _ist_now().isoformat(timespec="seconds"))
+            if doc is not None:
+                book_store.save_item_master(doc)
+    return doc
+
+
 def _current_masters():
     """Masters from the latest uploaded workbook, else empty masters.
+
+    Routings come from the app's Item Process Master (seeded once from the
+    workbook); the parsed masters are cached per (store, table digest), so a
+    routing edit re-parses once.
 
     The PARSED WORKBOOK is cached in-process (keyed by content hash / store
     config); the app-owned operator table is overlaid on EVERY call so display
     always reflects the latest Settings edits and a freshly-emptied store
     re-seeds. The cache never holds operators — they belong to the store, not
     the workbook."""
-    key = _store_env_key()
+    doc = _item_master_doc()
+    key = (_store_env_key(), item_master.digest(doc))
     if _MASTERS_CACHE["masters"] is not None and _MASTERS_CACHE["key"] == key:
         base = _MASTERS_CACHE["masters"]
     else:
@@ -352,7 +372,8 @@ def _current_masters():
             # (There is no bundled demo file anymore — production runs on uploads.)
             base = Masters()
         else:
-            _, base = load_all(io.BytesIO(raw))
+            _, base = load_all(io.BytesIO(raw),
+                               routing_rows=item_master.routing_rows(doc) if doc else None)
         _MASTERS_CACHE.update(key=key, masters=base,
                               sha=hashlib.sha256(raw).hexdigest() if raw else "none")
     return _with_operator_overlay(base)
@@ -427,7 +448,15 @@ def _inputs_signature(config: Config) -> str:
         op_blob = sorted([[r.get("name", ""), r.get("machines_raw", ""),
                            r.get("shift", ""), bool(r.get("pinned"))]
                           for r in table.get("operators", [])])
-    blob = json.dumps([_masters_sha(), d, op_blob], sort_keys=True, default=str)
+    parts = [_masters_sha(), d, op_blob]
+    # Item routings live in the app now (2026-10-05). Fold the table in ONLY once it
+    # differs from what it was seeded from: right after the seed it equals the
+    # workbook (already covered by the masters sha), so an applied optimization is
+    # not flagged stale by the switch itself, while any real edit flags it.
+    doc = book_store.load_item_master()
+    if doc and item_master.digest(doc) != doc.get("seed_digest"):
+        parts.append(["item_master", item_master.digest(doc)])
+    blob = json.dumps(parts, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -1584,6 +1613,8 @@ def _plan_fingerprint(config: Config) -> str:
                 key=lambda o: o.key)],
             sort_keys=True, default=str).encode("utf-8")).hexdigest(),
         "masters": _masters_sha(),
+        # Routings are app-owned (Item Process Master); an edit must refresh every screen.
+        "item_master": item_master.digest(book_store.load_item_master()),
         "operators": book_store.load_operator_table(),
         "config": _resolve_config(config).to_dict(),
         "ranks": (book_store.load_plan_priority() or {}).get("ranks"),
@@ -2750,8 +2781,8 @@ def _optimize_clear():
 # --------------------------------------------------------------------------- #
 @app.post("/upload")
 async def upload(request: Request, file: UploadFile = File(...)):
-    """Replace the masters (machines, item routings, operator seed) from an
-    uploaded workbook. Admin only.
+    """Replace the masters (machines, holidays, operator seed) from an uploaded
+    workbook. Item routings are app-owned (Item Process Master) once seeded. Admin only.
 
     THE SALES ORDERS ARE NEVER TOUCHED (owner, 2026-10-03). New orders come in
     through Add New Orders only, where the delivery date is quoted against the
@@ -2766,12 +2797,15 @@ async def upload(request: Request, file: UploadFile = File(...)):
     contents = await file.read()
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="file too large (max 10 MB)")
+    doc = book_store.load_item_master()
     try:
-        _so_lines_ignored, masters = load_all(io.BytesIO(contents))
+        _so_lines_ignored, masters = load_all(
+            io.BytesIO(contents),
+            routing_rows=item_master.routing_rows(doc) if doc else None)
     except Exception as e:  # noqa: BLE001 — surface parse failures to the user
         raise HTTPException(status_code=400, detail=f"Could not read Excel: {e}")
 
-    if not masters.routings:
+    if doc is None and not masters.routings:
         # Before 2026-10-03 such a file could still add orders. Now it would do
         # nothing at all, so say so rather than report a silent success.
         raise HTTPException(
@@ -2788,6 +2822,8 @@ async def upload(request: Request, file: UploadFile = File(...)):
         "orders_changed": 0,
         "summary": {"items": len(masters.routings), "machines": len(masters.machines)},
         "report": _report_after_upload(masters),
+        "routings_note": ("Item routings are now managed in the Item Process Master tab. "
+                          "The routing sheet in this file was not read.") if doc else None,
     }
 
 
