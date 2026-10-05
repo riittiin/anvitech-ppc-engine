@@ -38,7 +38,8 @@ def schedule_projection(schedule) -> list[dict]:
 
 def compute_frozen_set(applied_rows, so_lines, good_by_step, masters) -> list[dict]:
     """Frozen (in-progress) ops: partially-punched steps (good>0 and remaining>0),
-    with machine + operator looked up from the applied plan. Steps not present in the
+    with machine + operator looked up from the applied plan BY STEP NAME (never by
+    sequence number, which an edit to the routing can shift). Steps not present in the
     applied plan, or whose applied machine is OS/off-lane, are not frozen.
 
     ``remaining_qty`` here is ONE SO line's remaining at that step — it decides
@@ -49,10 +50,15 @@ def compute_frozen_set(applied_rows, so_lines, good_by_step, masters) -> list[di
     as the op's qty is the 2026-08-11 live bug — a part-finished SO clubbed with an
     untouched one scheduled 88 pieces where the batch owed 369, and the missing 281
     appeared in no plan at all."""
-    # Index applied rows: (item_code, process_seq) -> list of rows (with so_refs).
-    by_item_seq: dict[tuple[str, int], list[dict]] = {}
+    # Index applied rows by (item_code, normalised process NAME), never by seq: the
+    # routing is editable (Item Process Master, 2026-10-05), so removing a step ahead
+    # of a running one shifts its seq, and a seq lookup then reads ANOTHER step's row
+    # (its machine and operator) for the step on the floor. The name is what the
+    # punches key on too. A row with no name (none is written without one) is skipped.
+    by_item_name: dict[tuple[str, str], list[dict]] = {}
     for r in applied_rows or []:
-        by_item_seq.setdefault((r["item_code"], r["process_seq"]), []).append(r)
+        if r.get("process_name"):
+            by_item_name.setdefault((r["item_code"], _norm(r["process_name"])), []).append(r)
 
     out = []
     for line in so_lines:
@@ -67,7 +73,10 @@ def compute_frozen_set(applied_rows, so_lines, good_by_step, masters) -> list[di
             if good <= 0 or remaining <= 0:
                 continue  # not started, or fully done → not frozen
             # Machine/operator from the applied plan row covering this SO for this op.
-            cand = by_item_seq.get((line.item_code, op.seq), [])
+            # Rows at this step's own seq first, so an unedited routing reads exactly
+            # the row it always did.
+            cand = sorted(by_item_name.get((line.item_code, nkey), []),
+                          key=lambda r: r.get("process_seq") != op.seq)
             row = next((r for r in cand if line.so_no in (r.get("so_refs") or [])), None)
             if row is None or row["machine"] in _OS_LANES:
                 continue  # not in last plan / outsourced → not frozen

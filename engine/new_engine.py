@@ -478,12 +478,23 @@ def _ppc_frozen(rows, orders, batch_by_key, masters, plan_start_date):
                 continue             # this line is finished at this step -> nothing to pin
         except (TypeError, ValueError):
             continue
-        # Resolve op_seq: trust the row, else match the routing by normalised name.
+        # Resolve op_seq. The row's seq is trusted only while the routing still has
+        # the row's step AT that seq: routings are editable (Item Process Master,
+        # 2026-10-05), and removing a step ahead of a running one shifts its seq, so
+        # a stale seq would pin a DIFFERENT step onto the running job's machine.
+        # Otherwise re-resolve by normalised name; a step no longer in the routing
+        # is not frozen (it falls through to normal scheduling).
         op_seq = r.get("op_seq")
+        want = _norm(r.get("process", "")) if r.get("process") else None
+        _routing = masters.routings.get(order_by_key[key].item_code)
+        ops = _routing.operations if _routing is not None else ()
+        if want is not None and not any(op.seq == op_seq and _norm(op.name) == want
+                                        for op in ops):
+            op_seq = None
         if op_seq is None:
-            want = _norm(r.get("process", ""))
-            op_seq = next((op.seq for op in masters.routings[order_by_key[key].item_code].operations
-                           if _norm(op.name) == want), None)
+            if want is None:
+                continue
+            op_seq = next((op.seq for op in ops if _norm(op.name) == want), None)
             if op_seq is None:
                 continue
         try:
