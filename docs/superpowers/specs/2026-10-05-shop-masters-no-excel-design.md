@@ -1,6 +1,6 @@
 # Machines and holidays move into the app; the Excel upload goes (stage 2)
 
-**Date:** 2026-10-05 · **Status:** design approved in conversation, awaiting spec review
+**Date:** 2026-10-05 · **Status:** implemented, unpushed (verification: `2026-10-05-shop-masters-verification.md`)
 **Branch:** `shop-masters` (from `origin/main` @ `1199583`, which carries stage 1)
 **Stage:** 2 of 2. Stage 1 (Item Process Master) is live: `docs/superpowers/specs/2026-10-05-item-process-master-tab-design.md`.
 

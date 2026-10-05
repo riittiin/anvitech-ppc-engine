@@ -1508,10 +1508,10 @@ def _worker_secret_ok(request: Request) -> bool:
 # Feedback trigger (spec 2026-07-22, replaces the Mon/Fri GitHub-cron design
 # of 2026-07-18-scheduled-optimize): the job order re-optimizes when POST
 # /optimize/done fires — the "Done entering — update plan" button, reachable
-# by either role. Admin mutations (uploads, commit/uncommit, deletes,
-# Settings saves) still never start a contest on their own; absences are
-# covered in tests/test_absences_api.py. AUTO_OPTIMIZE=0 is internal test
-# isolation only — never user-facing.
+# by either role. Admin mutations (commit/uncommit, deletes, Settings saves,
+# Machines / holidays / Item Process Master edits) still never start a contest
+# on their own; absences are covered in tests/test_absences_api.py.
+# AUTO_OPTIMIZE=0 is internal test isolation only — never user-facing.
 # --------------------------------------------------------------------------- #
 def _auto_enabled() -> bool:
     return os.environ.get("AUTO_OPTIMIZE", "1") != "0"

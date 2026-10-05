@@ -2,6 +2,61 @@
 
 > ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-10-05)
 >
+> - **MACHINES AND HOLIDAYS LIVE IN THE APP; THE EXCEL UPLOAD IS GONE (2026-10-05, owner
+>   request, stage 2 of 2; branch `shop-masters`, UNPUSHED; spec
+>   `docs/superpowers/specs/2026-10-05-shop-masters-no-excel-design.md`, verification
+>   with harnesses `...-shop-masters-verification.md`).** After stage 1 the stored
+>   workbook still supplied the Machine master and the holiday list. Both now live in
+>   Settings cards backed by **`anvitech:machines`** (canonical id -> name, raw type,
+>   raw Available Hrs/Day, version) and **`anvitech:shop_calendar`** (holiday dates +
+>   names), pure module **`engine/shop_masters.py`**, each **seeded ONCE** from the
+>   workbook on file through the same sheet reader the loaders use, insertion order
+>   kept. Weekly off is Thursday, shown, not stored, not editable. Dropped on purpose:
+>   `Hr Rate` (no reader) and the sheet's Leave rows (Settings > Operator absences owns
+>   leave). **Tables-only load:** both `load_all`s take `machine_rows=` and
+>   `holiday_rows=` beside `routing_rows=`; with all three given NO workbook is opened
+>   (`path` may be None), no SO lines and no workbook operators come back.
+>   `api._current_masters`, `new_engine._new_masters` (+ `set_shop_masters` for the
+>   worker), `optimize_service.build_payload/parse_payload` (the payload carries
+>   `machines` and `shop_calendar`; `masters_xlsx_b64` is still sent only so an
+>   in-flight job or an old worker parses; the 8-tuple is unchanged) and `run_candidate`
+>   all pass the three tables. `_plan_fingerprint` hashes both digests;
+>   `_inputs_signature` folds them in only once a table differs from its seed.
+>   **The one exception that still parses the workbook: the operator table's one-time
+>   seed** (`_with_operator_overlay`, only while `anvitech:operators` is empty).
+>   **Upload removed:** `POST /upload` and the Upload card are deleted; orders come only
+>   from Add New Orders; `anvitech:masters` (the workbook) is KEPT, never overwritten,
+>   as the seed source and for rollback. `SCHEDULER_FINGERPRINT` NOT bumped.
+>   **Measured:** schedule hashes **16 of 16 byte-identical** against `1199583` (Test5,
+>   Test8, Test9, Test9-ORIGINAL x flexible F/T x clean / WIP with a derived frozen
+>   set), and **16 of 16 again with the workbook made unreadable** after the seed
+>   (`openpyxl.load_workbook` and both ppc `open_workbook`s raise, caches cleared: 0
+>   opens). Two-line quote identical on all four books, also with the workbook
+>   unreadable. Role has no effect: every new-engine operator forced to HELPER, 32 of
+>   32 hashes unchanged (in tables mode every role is inferred, none inherited from the
+>   sheet). CNC1 set to 1 shift + a holiday on 09-10 + a machine added moved the plan,
+>   Analytics, delay report, shift-wise, Daily Entry machine list, quote and the payload
+>   (classic and worker ppc); production analysis did NOT move, by design (its 630/570
+>   working minutes come from the shift config). **Mutation testing, 11 mutations: 9
+>   load-bearing; two fail NO test in the whole suite:** `_current_masters` never taking
+>   the tables-only branch (matters only on a store with the tables and NO workbook:
+>   classic masters go empty, 428 -> 422 plan entries) and `parse_payload` ignoring
+>   `machines` (the worker's classic hours stay 19.5 instead of 9.5; its new-engine
+>   score is identical). **A machine's TYPE does not move the plan** (CNC1 retyped
+>   Manual Packing, MD1 retyped CNC lathe: hash unchanged): setup and +30% follow the
+>   step's machine ID prefix (`classify_operation`), so the Machines card's "the type
+>   decides the 90 minute setup and the 30%" explainer is wrong and awaits the owner's
+>   wording. Cache-hit `/run` on Test9 ~43.0 -> ~43.3 ms; cold first plan +50 to 80 ms
+>   (the seed). Suite 1272 passed, 4 skipped, 1 pre-existing local failure
+>   (`xlsxwriter`). **NOT run:** the live-store copy (no credential this session; run it
+>   before deploy), the browser run of the two cards, `/production-analysis.xlsx`, the
+>   cloud worker end to end.
+>   **Deploy:** the live store's Machine master and holiday sheet are copied once, at the
+>   first request after deploy. The holiday sheet is stale (three 2025 dates and
+>   15-08-2026): **ask the owner to enter the 2026 holidays** in Settings.
+>   **Rule: Masters come from the app's tables. Nothing may open the stored workbook for
+>   planning; it is kept only as the one-time seed source and for rollback.**
+>
 > - **ITEM ROUTINGS LIVE IN THE APP NOW: THE ITEM PROCESS MASTER TAB (2026-10-05, owner
 >   request; branch `item-process-master`, UNPUSHED; spec
 >   `docs/superpowers/specs/2026-10-05-item-process-master-tab-design.md`, verification
@@ -372,7 +427,8 @@
 >   existing order's date, which is the thing being protected. Within ONE accept,
 >   lines sharing an item code ARE clubbed, and that is what makes them pay one setup
 >   instead of two. **Fifth: the queue ends at the next full optimization**, that is
->   "Done entering", an applied deep search, or a new Excel upload, after which the
+>   "Done entering" or an applied deep search (a new Excel upload also ended it until
+>   the upload was removed on 2026-10-05), after which the
 >   new orders are ranked on merit like everything else and keep the quoted date as
 >   their SO delivery date permanently. Two store keys:
 >   `anvitech:new_order_drafts` (the typed lines) and `anvitech:new_order_queue` (a
