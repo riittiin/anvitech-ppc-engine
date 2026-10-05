@@ -171,3 +171,22 @@ def test_api_payload_call_site_passes_the_shop_tables():
     src = inspect.getsource(_api())
     assert "machines=book_store.load_machines_doc()" in src
     assert "shop_calendar=book_store.load_shop_calendar()" in src
+
+
+def test_upload_endpoint_is_gone():
+    m = _api(); _seed_book()
+    from fastapi.testclient import TestClient
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    r = c.post("/upload", files={"file": ("x.xlsx", build_sample_bytes())})
+    assert r.status_code in (404, 405)
+    assert book_store.load_masters_bytes() == build_sample_bytes()   # workbook on file kept
+
+
+def test_no_upload_ui_left():
+    from pathlib import Path
+    web = Path(__file__).resolve().parents[1] / "web"
+    html = (web / "index.html").read_text()
+    js = (web / "app.js").read_text()
+    assert 'id="upload-card"' not in html and 'id="upload-btn"' not in html
+    assert 'fetch("/upload"' not in js

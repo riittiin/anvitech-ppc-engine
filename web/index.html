@@ -47,21 +47,7 @@
 
   <!-- ===================== ORDERS ===================== -->
   <section class="view" id="view-orders">
-    <div class="card admin-only" id="upload-card">
-      <div class="card-head">
-        <h2>Upload master data</h2>
-        <p class="explainer">Upload your master Excel file to update machines and item routings. Sales orders are never changed by an upload. Add new orders on the Add New Orders tab.</p>
-      </div>
-      <div class="cfg-row">
-        <label class="file-field">
-          <input id="xlsx-file" type="file" accept=".xlsx" />
-        </label>
-        <button id="upload-btn" class="primary">Upload master data</button>
-        <span id="dataset-status" class="status">No file uploaded yet.</span>
-      </div>
-    </div>
-
-    <!-- Data gaps. Deliberately OUTSIDE the admin-only "Add orders" card above:
+    <!-- Data gaps. Deliberately a card of its own, not inside an admin-only one:
          renderReport() runs for BOTH roles on every plan, but while these two
          panels lived inside that card the user role could never see a warning
          about its own data (2026-08-09 role-parity fix). The card itself stays
@@ -270,8 +256,7 @@
       <div class="card-head">
         <h2>Operators &amp; shifts</h2>
         <p class="explainer">Who runs which machine, and on which shift. The shift you set here
-          is used every week until you change it. This list is filled in once from your uploaded
-          Excel. After that, add or edit operators here.</p>
+          is used every week until you change it. Add or edit operators here.</p>
       </div>
       <p id="operators-header" class="muted"></p>
       <div class="table-wrap">

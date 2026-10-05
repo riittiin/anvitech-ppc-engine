@@ -53,24 +53,6 @@ def test_empty_book_plans_cleanly(client):
     assert r.json()["orders"]["rows"] == []          # nothing uploaded yet
 
 
-def test_upload_never_adds_orders(client):
-    """Owner, 2026-10-03: an upload carries MASTERS ONLY. The sample workbook
-    has an SO sheet with 3 orders; uploading it must put none of them in the
-    book. New orders come in through Add New Orders only."""
-    up = client.post("/upload", files={"file": ("sample.xlsx", _SAMPLE, XLSX_MIME)})
-    assert up.status_code == 200
-    body = up.json()
-    assert body["masters_updated"] is True
-    assert body["orders_changed"] == 0
-    assert "added" not in body and "updated" not in body and "flagged" not in body
-    assert client.get("/orders").json()["orders"]["rows"] == []
-
-    from engine import book_store
-    assert not book_store.load_active_orders()
-    assert not book_store.load_completed_orders()
-    assert book_store.load_masters_bytes() == _SAMPLE   # the masters DID land
-
-
 def test_seeded_book_plans(client):
     up = _upload_test_workbook(client)
     assert up.status_code == 200
@@ -89,69 +71,6 @@ def test_seeded_book_plans(client):
 def _book(orders):
     import json
     return sorted(json.dumps(o.to_json(), sort_keys=True, default=str) for o in orders.values())
-
-
-def test_upload_never_edits_or_deletes_an_existing_order(client):
-    """The other half of the owner's rule: re-uploading a workbook whose SO
-    sheet changes a delivery date and a quantity, drops an order and adds a
-    brand-new one, must leave the book exactly as it was, field for field,
-    including recorded production and a completed order."""
-    import datetime
-    import io
-    from engine import book_store
-    from tests.sample_workbook import build_workbook
-
-    _upload_test_workbook(client)
-    r = client.post("/actuals", json={
-        "so_no": SO1, "item_code": ITEM_A, "operator": "Operator One",
-        "entry_date": "2025-03-10", "qty_produced": 2,
-    })
-    assert r.status_code == 200
-    before_active = _book(book_store.load_active_orders())
-    before_done = _book(book_store.load_completed_orders())
-    before_actuals = [a.to_json() for a in book_store.load_actuals()]
-    before_table = client.get("/orders").json()["orders"]
-    assert len(before_table["rows"]) == 3
-
-    wb = build_workbook()
-    ws = wb["Sales Order (SO) list"]
-    so_col, qty_col, dd_col = 6, 22, 24          # 'SONo', 'SO Qty', 'SO Delivery Date'
-    assert ws.cell(row=1, column=so_col).value == "SONo"
-    assert ws.cell(row=1, column=dd_col).value == "SO Delivery Date"
-    old = ws.cell(row=2, column=dd_col).value
-    assert isinstance(old, datetime.date)
-    ws.cell(row=2, column=dd_col).value = old + datetime.timedelta(days=30)  # edit SO1's date
-    ws.cell(row=2, column=qty_col).value = 99                                # ...and its qty
-    ws.cell(row=3, column=so_col).value = "BRAND-NEW-SO"   # SO2 "dropped", a new SO "added"
-    buf = io.BytesIO()
-    wb.save(buf)
-
-    r = client.post("/upload", files={"file": ("t2.xlsx", buf.getvalue(), XLSX_MIME)})
-    assert r.status_code == 200 and r.json()["orders_changed"] == 0
-
-    assert _book(book_store.load_active_orders()) == before_active
-    assert _book(book_store.load_completed_orders()) == before_done
-    assert [a.to_json() for a in book_store.load_actuals()] == before_actuals
-    assert client.get("/orders").json()["orders"] == before_table
-
-
-def test_upload_without_routings_changes_nothing_and_says_so(client):
-    """A file with no Item's process Master used to still add its orders. Now it
-    would do nothing at all, so it is refused with a plain reason rather than
-    reported as a success."""
-    import io
-    from engine import book_store
-    from tests.sample_workbook import build_workbook
-
-    wb = build_workbook()
-    del wb["Item's process Master"]
-    buf = io.BytesIO()
-    wb.save(buf)
-    r = client.post("/upload", files={"file": ("so-only.xlsx", buf.getvalue(), XLSX_MIME)})
-    assert r.status_code == 400
-    assert "nothing was changed" in r.json()["detail"]
-    assert not book_store.load_active_orders()
-    assert book_store.load_masters_bytes() in (None, b"")
 
 
 def test_actual_marks_order_complete(client):
@@ -211,11 +130,6 @@ def test_delete_rejected_without_correct_password(client):
     assert client.post("/orders/delete", json={"orders": [[SO1, ITEM_A]]}).status_code == 403
     assert client.post("/orders/clear", json={"password": "wrong"}).status_code == 403
     assert len(client.get("/orders").json()["orders"]["rows"]) == 3   # all still there
-
-
-def test_bad_upload_returns_400(client):
-    bad = client.post("/upload", files={"file": ("x.xlsx", b"not excel", "application/octet-stream")})
-    assert bad.status_code == 400
 
 
 def test_report_lists_pending_master_data(client):

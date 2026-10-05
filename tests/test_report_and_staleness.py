@@ -71,67 +71,6 @@ def test_plan_report_shows_no_ghost_no_routing_rows():
 
 
 # --------------------------------------------------------------------------- #
-# 2026-10-03 — an upload is masters-only, so its report is about the BOOK: the
-# file's own SO sheet never reaches the book, and an order already in the book
-# whose item lost its routing in the new masters is what the admin must see.
-# --------------------------------------------------------------------------- #
-def test_upload_report_ignores_the_files_own_so_sheet():
-    """A SO line in the FILE whose item has no routing used to be reported,
-    because it was about to be dropped from the merge. Nothing in the file's SO
-    sheet reaches the book any more, so reporting it would name a ghost order."""
-    import io
-
-    m = _api()
-    client = _admin_client(m)
-    wb = build_workbook()
-    ws = wb["Sales Order (SO) list"]
-    row = ws.max_row + 1
-    ws.cell(row=row, column=6, value="SO-404")
-    ws.cell(row=row, column=20, value="NOROUTE-ITEM")
-    ws.cell(row=row, column=22, value=3)
-    ws.cell(row=row, column=24, value=date(2025, 3, 30))
-    ws.cell(row=row, column=28, value=3)
-    buf = io.BytesIO()
-    wb.save(buf)
-
-    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    resp = client.post("/upload", files={"file": ("t.xlsx", buf.getvalue(), xlsx_mime)})
-    assert resp.status_code == 200
-    no_routing = [r for r in resp.json()["report"]["rows"] if r[0] == "NO_ROUTING"]
-    assert no_routing == []
-
-
-def test_upload_ignores_a_routing_dropped_from_the_new_file():
-    import io
-
-    m = _api()
-    _seed_book()
-    client = _admin_client(m)
-    wb = build_workbook()
-    ws = wb["Item's process Master"]
-    lost = None
-    for r in range(3, ws.max_row + 1):          # drop ITEM_B's recipe (col 4 = item code)
-        if ws.cell(row=r, column=4).value == ITEM_B:
-            lost = ITEM_B
-            ws.delete_rows(r)
-            break
-    assert lost, "fixture: ITEM_B's routing row not found"
-    buf = io.BytesIO()
-    wb.save(buf)
-
-    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    resp = client.post("/upload", files={"file": ("t.xlsx", buf.getvalue(), xlsx_mime)})
-    assert resp.status_code == 200
-    no_routing = [r for r in resp.json()["report"]["rows"] if r[0] == "NO_ROUTING"]
-    # Routings are app-owned since 2026-10-05 (seeded from the workbook on file
-    # before this upload replaces it), so a recipe dropped from the NEW file is
-    # ignored: ITEM_B keeps its routing and nothing is reported lost.
-    assert no_routing == []
-    assert resp.json()["routings_note"]
-    assert ITEM_B in m._current_masters().routings
-
-
-# --------------------------------------------------------------------------- #
 # Bug 2 — applied optimization fingerprints its inputs; /run flags changes
 # --------------------------------------------------------------------------- #
 def test_optimize_meta_flags_inputs_changed_when_settings_change():
@@ -220,7 +159,7 @@ def test_optimize_meta_flags_inputs_changed_when_masters_change():
     cfg = m._load_plan_config()
     assert m._plan(cfg)["optimize_meta"]["inputs_changed"] is False
 
-    # The owner re-uploads an edited workbook (masters latest-wins).
+    # The workbook on file is replaced with an edited one (a masters change).
     import openpyxl, io
     wb = openpyxl.load_workbook(io.BytesIO(build_sample_bytes()))
     ws = wb["Machine master"]
@@ -228,7 +167,7 @@ def test_optimize_meta_flags_inputs_changed_when_masters_change():
     ws.cell(row=ws.max_row + 1, column=1, value="CNC99")            # ...then add a machine
     buf = io.BytesIO(); wb.save(buf)
     book_store.save_masters_bytes(buf.getvalue())
-    m._MASTERS_CACHE.update(key=None, masters=None)                 # what /upload does
+    m._MASTERS_CACHE.update(key=None, masters=None)                 # invalidate the masters cache
 
     assert m._plan(cfg)["optimize_meta"]["inputs_changed"] is True
 

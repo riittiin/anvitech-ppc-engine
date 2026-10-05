@@ -306,34 +306,6 @@ def test_save_preserves_optimizer_and_deploy_owned_knobs(monkeypatch):
     assert stored["consolidation_window_days"] == 1, "Save reset the optimizer's consolidation window"
 
 
-def test_upload_report_orphans_use_app_operators_not_workbook(monkeypatch):
-    """The post-upload validation banner must judge absence orphans against the
-    APP-OWNED operator table, not the just-parsed workbook sheet (operators are
-    app-owned; the sheet is a fossil). An operator added in Settings — never in any
-    workbook — who is marked absent must NOT be flagged ABSENT_OPERATOR_UNKNOWN when
-    a workbook is re-uploaded."""
-    import io
-    from engine.loaders import load_all
-    m = _api(); _seed_book()
-    admin = _admin_client(m)
-    admin.get("/operators")                     # seed the app table from the workbook
-    # Add an app-only operator (not present in any workbook sheet) + an absence.
-    table = book_store.load_operator_table()
-    table["operators"].append({"id": "app-only-1", "name": "Priya",
-                               "machines_raw": "MI1", "shift": "First shift",
-                               "pinned": False})
-    book_store.save_operator_table(table)
-    book_store.save_absence({"operator": "Priya",
-                             "from_date": "2025-03-10", "to_date": "2025-03-12"})
-
-    # Simulate the upload handler: it parses the workbook (no 'Priya') and builds the
-    # report from THAT masters object.
-    _, workbook_masters = load_all(io.BytesIO(build_sample_bytes()))
-    report = m._report_after_upload(workbook_masters)
-    refs = {dict(zip(report["columns"], row))["Reference"] for row in report["rows"]}
-    assert "Priya" not in refs, "an app-owned operator was wrongly flagged as an orphan"
-
-
 # --- orphan absences after delete (reuses tests/test_absences_api.py pattern) - #
 def test_delete_orphans_absences_non_blocking(monkeypatch):
     m = _api(); _seed_book()

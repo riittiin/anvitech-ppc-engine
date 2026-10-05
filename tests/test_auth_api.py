@@ -94,14 +94,12 @@ def test_static_shell_requires_session():
 # --- role enforcement (server-side) --- #
 def test_user_is_refused_on_admin_endpoints():
     user = _user()
-    assert _upload(user).status_code == 403
     assert user.post("/orders/delete", json={"orders": [["X", "A"]]}).status_code == 403
     assert user.post("/orders/clear", json={}).status_code == 403
 
 
 def test_admin_allowed_on_admin_endpoints():
     admin = _admin()
-    assert _upload(admin).status_code == 200
     # Deletes also require the admin to re-enter their password.
     assert admin.post("/orders/delete",
                       json={"orders": [["nope", "A"]], "password": _ADMIN_PWD}).status_code == 200
@@ -179,11 +177,3 @@ def test_interactive_docs_disabled():
     admin = _admin()
     assert admin.get("/openapi.json").status_code == 404
     assert admin.get("/docs").status_code == 404
-
-
-# --- upload size cap --- #
-def test_oversize_upload_rejected():
-    admin = _admin()
-    big = b"x" * (10 * 1024 * 1024 + 1)
-    r = admin.post("/upload", files={"file": ("big.xlsx", big, XLSX_MIME)})
-    assert r.status_code == 413

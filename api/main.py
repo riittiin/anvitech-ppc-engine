@@ -1,7 +1,6 @@
 """FastAPI layer — order-book engine + per-rule trace, behind one login.
 
 Endpoints:
-  POST /upload        merge an uploaded workbook into the order book (+ masters)
   POST /run           plan the active order book (unifies old Run + Rerun MRP)
   POST /rerun         alias of /run (kept for compatibility)
   GET  /orders        the order-book dashboard (status / remaining per SO#)
@@ -31,7 +30,7 @@ from pathlib import Path
 from typing import List, Optional, Union
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -63,7 +62,6 @@ from engine.rules import (
 from api import auth
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB cap on uploaded workbooks
 MAX_LOGIN_BYTES = 8 * 1024            # tiny cap on the login form body
 
 @asynccontextmanager
@@ -298,7 +296,7 @@ def me(request: Request):
 
 
 # --------------------------------------------------------------------------- #
-# Masters: from the latest uploaded workbook, else the bundled test file.
+# Masters: app tables seeded once from the workbook on file (never re-read after).
 # Cached in-process, keyed by the workbook's content hash.
 # --------------------------------------------------------------------------- #
 # Recent plan traces, keyed by run_id, for the /trace/{id} endpoint. Bounded so it
@@ -351,7 +349,7 @@ def _seed_once(load, save, seed):
 def _item_master_doc():
     """The app-owned Item Process Master, seeded ONCE from the workbook on file
     the first time it is needed (same pattern as operators, 2026-07-18). After that
-    the workbook's routing sheet is never read again, a later upload included."""
+    the workbook's routing sheet is never read again, there is no upload any more."""
     return _seed_once(book_store.load_item_master, book_store.save_item_master,
                       item_master.seed_doc)
 
@@ -388,7 +386,7 @@ def _current_masters():
         else:
             raw = book_store.load_masters_bytes()
             if raw is None:
-                # No workbook uploaded yet: empty masters; the UI prompts to upload.
+                # No workbook on file: empty masters.
                 base = Masters()
             else:
                 _, base = load_all(io.BytesIO(raw), **rows)
@@ -495,39 +493,6 @@ def _inputs_signature(config: Config) -> str:
             parts.append([tag, digest(doc)])
     blob = json.dumps(parts, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()
-
-
-def _report_after_upload(masters):
-    """The validation report for the masters just uploaded (upload endpoint only).
-
-    Since 2026-10-03 an upload carries MASTERS ONLY: the file's SO sheet is never
-    read into the book, so the loader's own NO_ROUTING rows (about that sheet's
-    lines) describe orders that will never exist and are dropped. In their place,
-    NO_ROUTING is re-derived from the ACTIVE ORDER BOOK against the new routings,
-    so an admin who uploads a master that has lost an item's recipe learns which
-    real orders can no longer be scheduled. Also appends the absence-orphan rows
-    (ABSENT_OPERATOR_UNKNOWN) for parity with the plan report."""
-    rows = [r for r in masters.report if r["kind"] != "NO_ROUTING"]
-    seen = set()
-    for o in book_store.load_active_orders().values():
-        if o.item_code not in masters.routings and o.item_code not in seen:
-            seen.add(o.item_code)
-            rows.append({"kind": "NO_ROUTING", "ref": o.item_code,
-                         "message": f"SO item '{o.item_code}' has no routing in "
-                                    f"Item's process Master; order skipped "
-                                    f"(cannot schedule without a recipe)"})
-    # Absence orphans are judged against the APP-OWNED operator table (operators are
-    # app-owned; this file's Operator sheet is a fossil). Overlaying keeps the loader
-    # rows from `masters.report` while checking absences against the real roster — so an
-    # app-added operator isn't mislabelled an orphan, nor a workbook name kept as valid.
-    for name in _absence_orphans(_with_operator_overlay(masters)):
-        rows.append({"kind": "ABSENT_OPERATOR_UNKNOWN", "ref": name,
-                     "message": f"absence entry for an operator not in the "
-                                f"current masters: ignored"})
-    return to_table([
-        {"Kind": r["kind"], "Reference": r["ref"], "Message": r["message"]}
-        for r in rows
-    ])
 
 
 def _absence_orphans(masters, absences=None) -> list:
@@ -874,7 +839,7 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
         "waits for it to fully complete.",
     ]
     if not overlap_rows:
-        rule5_notes.append("No scheduled operations yet. Upload orders and click Plan.")
+        rule5_notes.append("No scheduled operations yet. Add orders on the Add New Orders tab.")
     trace["rule5"] = {
         "input": to_table([{
             "Overlap mode": config.overlap_mode,
@@ -2859,55 +2824,6 @@ def _optimize_clear():
 # --------------------------------------------------------------------------- #
 # Endpoints
 # --------------------------------------------------------------------------- #
-@app.post("/upload")
-async def upload(request: Request, file: UploadFile = File(...)):
-    """Replace the masters (machines, holidays, operator seed) from an uploaded
-    workbook. Item routings are app-owned (Item Process Master) once seeded. Admin only.
-
-    THE SALES ORDERS ARE NEVER TOUCHED (owner, 2026-10-03). New orders come in
-    through Add New Orders only, where the delivery date is quoted against the
-    plan in force; an Excel upload can no longer add, edit, or delete a single
-    order, even if the file carries an SO sheet. That sheet is read by the loader
-    and ignored here. The new-order queue is left alone too: it refers to the
-    book, and the book did not change. ``orderbook.merge_upload`` is kept (pure,
-    tested) but nothing calls it any more."""
-    require_admin(request)
-    if int(request.headers.get("content-length") or 0) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="file too large (max 10 MB)")
-    contents = await file.read()
-    if len(contents) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="file too large (max 10 MB)")
-    # Seed from the workbook CURRENTLY on file, before the save below replaces it.
-    doc = _item_master_doc()
-    try:
-        _so_lines_ignored, masters = load_all(
-            io.BytesIO(contents),
-            routing_rows=item_master.routing_rows(doc) if doc else None)
-    except Exception as e:  # noqa: BLE001 — surface parse failures to the user
-        raise HTTPException(status_code=400, detail=f"Could not read Excel: {e}")
-
-    if doc is None and not masters.routings:
-        # Before 2026-10-03 such a file could still add orders. Now it would do
-        # nothing at all, so say so rather than report a silent success.
-        raise HTTPException(
-            status_code=400,
-            detail="This file has no Item's process Master, so nothing was changed. "
-                   "Upload the master Excel. Sales orders are added on the "
-                   "Add New Orders tab, not by upload.")
-    book_store.save_masters_bytes(contents)
-    _MASTERS_CACHE["masters"] = None  # invalidate cache → re-read on next plan
-
-    return {
-        "name": file.filename,
-        "masters_updated": True,
-        "orders_changed": 0,
-        "summary": {"items": len(masters.routings), "machines": len(masters.machines)},
-        "report": _report_after_upload(masters),
-        "routings_note": ("Item routings are now managed in the Item Process Master tab. "
-                          "The routing sheet in this file was not read.") if doc else None,
-    }
-
-
 @app.post("/run")
 def run(request: Request, req: Optional[RunRequest] = None):
     """Plan the order book. Admin may set the config (and persist it on an

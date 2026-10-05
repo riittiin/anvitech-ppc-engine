@@ -1,9 +1,8 @@
 """Put a workbook's sales orders into the book for a test.
 
-Since 2026-10-03 ``POST /upload`` carries MASTERS ONLY and never touches the
-order book (owner's rule: orders come in through Add New Orders). Many API
-tests still need a book of orders to plan, so this does, directly in the store,
-exactly what the upload endpoint used to do with the file's SO sheet. It is a
+The Excel upload endpoint is gone (stage 2). Many API tests still need a book
+of orders to plan, so this does, directly in the store, what the upload used to
+do with the file's SO sheet. It is a
 test fixture, never an app code path."""
 import io
 
@@ -24,9 +23,19 @@ def seed_orders(data: bytes) -> int:
     return len(new)
 
 
+class _Stored:
+    """Stand-in for the old upload response (the endpoint is gone since stage 2)."""
+    status_code = 200
+
+    def json(self):
+        return {"masters_updated": True, "orders_changed": 0}
+
+
 def upload_and_seed(client, data: bytes, name: str = "sample.xlsx"):
-    """Upload the workbook's masters through the API, then seed its orders."""
-    r = client.post("/upload", files={"file": (name, data, XLSX_MIME)})
-    if r.status_code == 200:
-        seed_orders(data)
-    return r
+    """Store the workbook's masters directly (as the removed upload did), then seed
+    its orders. ``client`` is kept for call compatibility."""
+    import api.main as m
+    book_store.save_masters_bytes(data)
+    m._MASTERS_CACHE["masters"] = None
+    seed_orders(data)
+    return _Stored()

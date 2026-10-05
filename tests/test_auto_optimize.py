@@ -167,10 +167,6 @@ def test_admin_mutations_do_not_start_contests(monkeypatch):
     r = c.post("/orders/commit", json={"orders": [["SO2", ITEM_B]]})
     assert r.status_code == 200 and not starts
 
-    r = c.post("/upload", files={"file": ("sample.xlsx", build_sample_bytes(),
-               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")})
-    assert r.status_code == 200 and not starts
-
     r = c.post("/orders/uncommit", json={"orders": [["SO2", ITEM_B]]})
     assert r.status_code == 200 and not starts
 

@@ -58,11 +58,6 @@ const setStatus = (m, isError = false) => {
   el.title = m;   // full message on hover — the line itself is truncated for long text
   el.classList.toggle("status-error", !!isError);
 };
-const setDatasetStatus = (m, isError = false) => {
-  const el = $("dataset-status");
-  el.innerHTML = m;
-  el.classList.toggle("status-error", !!isError);
-};
 
 // ---- Boot-loading banner (fixed in index.html; removed/updated once the first
 // plan lands) — distinguishes "still loading" (a cold Render instance waking
@@ -101,8 +96,7 @@ function renderView(v) {
 
 function showView(v, push) {
   if (!VIEWS.includes(v)) v = "orders";
-  // Add New Orders is genuinely admin-only (a director's decision, like uploading
-  // the Excel) — unlike every other tab, it must not be reachable by URL hash
+  // Add New Orders is genuinely admin-only (a director's decision) — unlike every other tab, it must not be reachable by URL hash
   // either. The nav link is already .admin-only CSS-hidden (see style.css); this
   // closes the other door (2026-08-09 lesson: a role gate belongs on every entry
   // point, not just the one a mouse click goes through).
@@ -325,43 +319,6 @@ async function runPlan(persist = false) {
   }
 }
 
-// ---- Upload & merge into the order book ----
-async function uploadExcel() {
-  const f = $("xlsx-file").files[0];
-  if (!f) { setDatasetStatus("Choose an Excel file (.xlsx) first.", true); return; }
-  if (!window.confirm(
-    `Replace the machine and item data with "${f.name}"?\n\nSales orders are NOT `
-    + `changed by an upload. To add a new order, use the Add New Orders tab. Continue?`)) {
-    return;
-  }
-  const fd = new FormData(); fd.append("file", f);
-  setDatasetStatus("Uploading…");
-  const btn = $("upload-btn");
-  const btnLabel = btn ? btn.textContent : null;
-  if (btn) { btn.disabled = true; btn.textContent = "Uploading…"; }
-  try {
-    const res = await fetch("/upload", { method: "POST", body: fd });
-    if (!res.ok) { setDatasetStatus("Upload failed: " + (await res.text()), true); return; }
-    const d = await res.json();
-    ITEMS = null;  // item metadata may have changed
-    imData = null; // the Item Process Master is re-read on its next render
-    let msg = `<strong>${escapeHtml(d.name)}</strong>: machine and item data updated`
-      + ` (${d.summary.items} items, ${d.summary.machines} machines). Sales orders were not changed.`;
-    if (d.routings_note) msg += " " + escapeHtml(d.routings_note);
-    setDatasetStatus(msg);
-    // The upload's report names the orders in the BOOK whose item has no
-    // routing in the masters just uploaded (an upload never adds orders, so the
-    // file's own SO sheet is irrelevant).
-    renderMissingRoutings(d.report);
-    await runPlan();           // refresh the book + schedule
-    msg += ' · Schedule is ready. See the <a href="#schedule">Machine schedule</a>'
-      + ' or <a href="#gantt">the Gantt</a>.';
-    setDatasetStatus(msg);
-    showView("orders", true);
-  } catch (e) { setDatasetStatus("Upload error: " + e.message, true); }
-  finally { if (btn) { btn.disabled = false; btn.textContent = btnLabel; } }
-}
-
 // ---- Optimize (admin: search for a better job sequence; banner for everyone) ----
 function fmtMetrics(m) {
   if (!m) return "-";
@@ -396,8 +353,8 @@ function renderOptimizeBanner() {
          `run Optimize again for the best plan</span>`;
   }
   if (optimizeMeta.inputs_changed) {
-    h += ` · <span class="pill-pending">Your Settings or your uploaded machine/operator/item ` +
-         `data changed since this search ran. The numbers shown may be old. Press ` +
+    h += ` · <span class="pill-pending">Your settings, machines, holidays or item routings ` +
+         `changed since this search ran. The numbers shown may be old. Press ` +
          `Optimize again to refresh them</span>`;
   }
   const datesWarn = datesChangedWarningText(optimizeMeta);
@@ -487,7 +444,7 @@ function renderStatusStrip() {
   // Warning chip: staleness and/or unstaffed hours (both from the /run response).
   const warns = [];
   if (optimizeMeta && optimizeMeta.inputs_changed) {
-    warns.push("Your settings or your uploaded machine, operator or item data changed since the last search. The numbers shown may be old. Press Start deep search again.");
+    warns.push("Your settings, machines, holidays or item routings changed since the last search. The numbers shown may be old. Press Start deep search again.");
   }
   const datesChangedWarn = datesChangedWarningText(optimizeMeta);
   if (datesChangedWarn) warns.push(datesChangedWarn);
@@ -1374,26 +1331,6 @@ function renderReport(report) {
   toggle.onclick = () => { const open = !detail.classList.toggle("hidden"); toggle.classList.toggle("open", open); };
 }
 
-// Always-visible missing-routings note (no click needed): the item codes the
-// uploaded file couldn't schedule because the Item's process Master has no
-// recipe for them. Deliberately called ONLY from uploadExcel with the
-// upload's OWN (loader-scoped) report — never from runPlan()'s book-scoped
-// /run report, which can never see these codes (they're dropped before they
-// ever reach the order book) and would otherwise wipe this note the instant
-// the automatic post-upload Plan runs.
-function renderMissingRoutings(report) {
-  const noroute = $("report-noroute");
-  const rows = (report && report.rows) || [];
-  const codes = [...new Set(rows.filter((r) => r[0] === "NO_ROUTING").map((r) => r[1]))];
-  if (!codes.length) {
-    noroute.classList.add("hidden"); noroute.textContent = ""; syncDataGapsCard(); return;
-  }
-  noroute.textContent = "Missing routings. Add these item codes to the Item's "
-    + "process Master so they can be scheduled: " + codes.join(", ") + ".";
-  noroute.classList.remove("hidden");
-  syncDataGapsCard();
-}
-
 // ---- Per-view content (rule6 = Schedule, rule7 = Daily Entry) ----
 // The fixed nav (renderView/showView) drives which view is visible; this renders
 // the dynamic content for the rule-backed views into their per-view mount.
@@ -1437,8 +1374,8 @@ function renderTab(key) {
   }
   if (key === "rule7") {
     html += noActiveOrders
-      ? '<p class="placeholder">No orders to enter yet. Upload the order Excel on the '
-        + '<strong>Orders</strong> tab first, then come back here.</p>'
+      ? '<p class="placeholder">No orders to enter yet. Add orders on the '
+        + '<strong>Add New Orders</strong> tab first, then come back here.</p>'
       : actualsFormHtml();
   }
 
@@ -2706,7 +2643,7 @@ async function removeMachineDowntime(id) {
 // per-role conditional-render approach already used for the order book table
 // (`renderOrders`'s `isAdmin` branch). Simplest fit here since every cell but
 // the name needs an admin-only edit affordance, not just one trailing button. ----
-// The machines an operator may be qualified for, straight off the uploaded Excel's
+// The machines an operator may be qualified for, straight off the Machine master's
 // "Machine master" sheet (served read-only by GET /operators). Kept in module state
 // so the picker and the add-operator row share one list.
 let machineOptions = [];     // [{id, name, type, provisional}]
@@ -2752,7 +2689,7 @@ function machineChipsHtml(tokens, rowId, editable, emptyMsg) {
 // not list yet in a trailing group of its own.
 function machineSelectHtml(selectedIds, cls, rowId) {
   if (!machineOptions.length) {
-    return `<span class="mach-none">Upload your Excel to list machines</span>`;
+    return `<span class="mach-none">Add machines in Settings &gt; Machines</span>`;
   }
   const taken = new Set(selectedIds);
   const groups = new Map();       // insertion order = the API's (type, provisional) sort
@@ -2800,9 +2737,7 @@ function renderOperatorsTable(operators) {
   if (!tbody) return;
   const isAdmin = currentRole === "admin";
   if (!operators || operators.length === 0) {
-    const msg = "No operators yet. The first Excel you upload fills this list automatically "
-      + "from its \"Operator &amp; shift Master\" sheet"
-      + (isAdmin ? ", or add one below." : ".");
+    const msg = isAdmin ? "No operators yet. Add one below." : "No operators yet.";
     tbody.innerHTML = `<tr><td colspan="${isAdmin ? 4 : 3}" class="empty">${msg}</td></tr>`;
     return;
   }
@@ -3203,8 +3138,6 @@ function wireItemMaster() {
 // Wire the admin controls (null-guarded — they're absent/hidden for the user role).
 const _runBtn = $("run-btn");
 if (_runBtn) _runBtn.onclick = () => runPlan(true);   // explicit admin Plan → persist
-const _upBtn = $("upload-btn");
-if (_upBtn) _upBtn.onclick = uploadExcel;
 // Plan-start date: keep the DD-MM-YYYY echo in sync as the admin changes it.
 // The "Start from today" checkbox disables the picker and echoes today (auto).
 const _psField = $("cfg-plan-start");

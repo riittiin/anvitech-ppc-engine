@@ -95,7 +95,7 @@ body:not(.role-user) .user-only { display: none !important; }
 
 .session-bar { display: flex; align-items: center; gap: 14px; font-size: 13px; margin-left: auto; }
 #status { color: var(--muted); font-size: 12px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#status.status-error, #dataset-status.status-error { color: var(--danger); font-weight: 600; }
+#status.status-error { color: var(--danger); font-weight: 600; }
 #session-info { color: var(--muted); display: flex; align-items: center; gap: 10px; }
 #session-info strong { color: var(--ink); }
 .logout-form { display: inline; margin: 0; }

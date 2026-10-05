@@ -23,12 +23,14 @@ def live_app(tmp_path):
                OPTIMIZE_CLOUD_BUDGET_PER_CANDIDATE="5")
     for k in ("MONGODB_URI", "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"):
         env.pop(k, None)
-    # An upload no longer adds orders (2026-10-03), so seed the sample book into
-    # the store the server will read BEFORE it boots. conftest's _isolate_store
+    # There is no upload any more (stage 2), so put the sample masters and book
+    # into the store the server will read BEFORE it boots. conftest's _isolate_store
     # already points this process at the same tmp_path / "store".
     assert os.environ["STORE_DIR"] == env["STORE_DIR"]
     from tests.new_sample_workbook import build_new_sample_bytes
+    from engine import book_store
     from tests.seed import seed_orders
+    book_store.save_masters_bytes(build_new_sample_bytes())
     assert seed_orders(build_new_sample_bytes()) > 0
     proc = subprocess.Popen([sys.executable, "-m", "uvicorn", "api.main:app",
                              "--host", "127.0.0.1", "--port", str(port)], env=env)
@@ -47,18 +49,9 @@ def test_poller_claims_and_completes_a_job(live_app):
     import http.cookiejar
     cj = http.cookiejar.CookieJar()
     opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-    # login + upload the sample masters (the orders were seeded above)
-    from tests.new_sample_workbook import build_new_sample_bytes
+    # login (the masters and orders were put in the store above)
     body = "username=anvitech&password=1930rail".encode()
     opener.open(urllib.request.Request(base + "/login", data=body, method="POST"), timeout=10)
-    wb = build_new_sample_bytes()
-    boundary = b"----e2e"
-    mp = (b"--" + boundary + b"\r\nContent-Disposition: form-data; name=\"file\"; "
-          b"filename=\"s.xlsx\"\r\nContent-Type: application/octet-stream\r\n\r\n"
-          + wb + b"\r\n--" + boundary + b"--\r\n")
-    req = urllib.request.Request(base + "/upload", data=mp, method="POST",
-                                 headers={"Content-Type": "multipart/form-data; boundary=----e2e"})
-    opener.open(req, timeout=30)
     # start an optimize (cloud manual mode parks the job)
     opener.open(urllib.request.Request(
         base + "/run", data=json.dumps({}).encode(), method="POST",

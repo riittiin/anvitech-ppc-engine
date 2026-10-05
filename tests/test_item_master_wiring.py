@@ -96,35 +96,6 @@ def _workbook_with_cycle(cycle):
     buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
 
 
-def test_upload_after_seed_does_not_touch_routings():
-    m = _api(); _seed_book()
-    m._current_masters()
-    r = _admin(m).post("/upload", files={"file": ("x.xlsx", _workbook_with_cycle(99))})
-    assert r.status_code == 200, r.text
-    assert "Item Process Master" in r.json()["routings_note"]
-    assert m._current_masters().routings[ITEM_A].processes[0].cycle_time == 3
-
-
-def test_upload_without_routing_sheet_is_accepted_once_seeded():
-    m = _api(); _seed_book()
-    m._current_masters()
-    from tests.sample_workbook import build_workbook
-    wb = build_workbook(); del wb["Item's process Master"]
-    buf = io.BytesIO(); wb.save(buf)
-    r = _admin(m).post("/upload", files={"file": ("x.xlsx", buf.getvalue())})
-    assert r.status_code == 200, r.text
-    assert list(m._current_masters().routings) == [ITEM_A, ITEM_B]
-
-
-def test_upload_as_first_request_seeds_from_the_workbook_on_file():
-    m = _api(); _seed_book()          # no _current_masters(): table not seeded yet
-    assert book_store.load_item_master() is None
-    r = _admin(m).post("/upload", files={"file": ("x.xlsx", _workbook_with_cycle(99))})
-    assert r.status_code == 200, r.text
-    assert r.json()["routings_note"]
-    assert m._current_masters().routings[ITEM_A].processes[0].cycle_time == 3
-
-
 def test_new_engine_masters_follow_the_table():
     from engine import new_engine
     new_engine._MASTERS_CACHE.clear()
