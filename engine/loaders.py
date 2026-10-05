@@ -227,6 +227,24 @@ def _weekday_from_text(value):
 # --------------------------------------------------------------------------- #
 # Individual sheet loaders
 # --------------------------------------------------------------------------- #
+def _machine_from_row(no, type_raw, hours, rate=None):
+    """One classic Machine from a Machine-master row (sheet or the app's table), or
+    None for a blank / unusable id. The ONE classic rule."""
+    if not no or str(no).strip() == "":
+        return None
+    canonical = normalize_resource_id(no)
+    if not canonical:
+        return None
+    return Machine(
+        machine_no=canonical,
+        display_name=str(no).strip(),
+        machine_type=str(type_raw).strip() if type_raw else "",
+        hr_rate=_num(rate),
+        provisional=False,
+        available_hrs_per_day=_num(hours),
+    )
+
+
 def _load_machines(wb, masters: Masters):
     ws = _find_sheet(wb, "Machine master")
     if ws is None:
@@ -242,21 +260,25 @@ def _load_machines(wb, masters: Masters):
     avail_col = next((ci for ci, c in enumerate(rows[hdr])
                       if "availablehrs" in _norm_header(c)), None)
     for row in rows[hdr + 1:]:
-        machine_no = _cell(row, col["no"])
-        if not machine_no or str(machine_no).strip() == "":
-            continue  # skip blank rows (open-ended table)
-        canonical = normalize_resource_id(machine_no)
-        if not canonical:
-            continue
-        machine_type = _cell(row, col["type"])
-        masters.machines[canonical] = Machine(
-            machine_no=canonical,
-            display_name=str(machine_no).strip(),
-            machine_type=str(machine_type).strip() if machine_type else "",
-            hr_rate=_num(_cell(row, col["rate"])),
-            provisional=False,
-            available_hrs_per_day=(_num(_cell(row, avail_col)) if avail_col is not None else None),
-        )
+        m = _machine_from_row(
+            _cell(row, col["no"]), _cell(row, col["type"]),
+            _cell(row, avail_col) if avail_col is not None else None,
+            _cell(row, col["rate"]))
+        if m is not None:
+            masters.machines[m.machine_no] = m
+
+
+def _load_machines_from_rows(rows, masters: Masters):
+    """Machines from the app's Machines table rows ``[(no, type, hours)]``."""
+    for no, type_raw, hours in rows:
+        m = _machine_from_row(no, type_raw, hours)
+        if m is not None:
+            masters.machines[m.machine_no] = m
+
+
+def _calendar_from_holiday_rows(rows) -> WorkCalendar:
+    """The calendar from the app's holiday list: Thursday off, no leave rows."""
+    return WorkCalendar(weekly_off_weekday=3, holidays=[d for d, _n in rows], leaves=[])
 
 
 def _load_operators(wb, masters: Masters):
@@ -530,7 +552,7 @@ def _validate(masters: Masters, so_lines):
 # --------------------------------------------------------------------------- #
 # Public entry point
 # --------------------------------------------------------------------------- #
-def load_all(xlsx_path, routing_rows=None):
+def load_all(xlsx_path, routing_rows=None, machine_rows=None, holiday_rows=None):
     """Load masters + SO lines from a workbook in the Test4 format.
 
     ``xlsx_path`` is a path or a file-like object (e.g. an uploaded BytesIO) — there
@@ -543,20 +565,40 @@ def load_all(xlsx_path, routing_rows=None):
 
     ``routing_rows`` (``[(code, description, steps)]``): when given, routings come
     from the app's Item Process Master and the workbook's routing sheet is not read.
+
+    ``machine_rows`` / ``holiday_rows``: the app's Machines and holiday tables. With
+    routing, machine AND holiday rows all given no workbook is opened (``xlsx_path``
+    may be None; there are no SO lines and no workbook operators).
     """
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
+    tables_only = None not in (routing_rows, machine_rows, holiday_rows)
     masters = Masters()
-    try:
-        _load_machines(wb, masters)
-        _load_operators(wb, masters)
-        _load_calendar(wb, masters)
-        if routing_rows is None:
-            _load_routings(wb, masters)
-        else:
-            _load_routings_from_rows(routing_rows, masters)
-        so_lines = _load_so_lines(wb, masters)
-    finally:
-        wb.close()
+    so_lines = []
+    if tables_only:
+        _load_machines_from_rows(machine_rows, masters)
+        masters.calendar = _calendar_from_holiday_rows(holiday_rows)
+        _load_routings_from_rows(routing_rows, masters)
+    else:
+        if xlsx_path is None:
+            raise ValueError("load_all: a workbook is required unless routing, machine "
+                             "and holiday rows are all given")
+        wb = openpyxl.load_workbook(xlsx_path, data_only=True, read_only=True)
+        try:
+            if machine_rows is None:
+                _load_machines(wb, masters)
+            else:
+                _load_machines_from_rows(machine_rows, masters)
+            _load_operators(wb, masters)
+            if holiday_rows is None:
+                _load_calendar(wb, masters)
+            else:
+                masters.calendar = _calendar_from_holiday_rows(holiday_rows)
+            if routing_rows is None:
+                _load_routings(wb, masters)
+            else:
+                _load_routings_from_rows(routing_rows, masters)
+            so_lines = _load_so_lines(wb, masters)
+        finally:
+            wb.close()
 
     _validate(masters, so_lines)
 

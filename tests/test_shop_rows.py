@@ -65,3 +65,39 @@ def test_calendar_from_holiday_rows_is_thursday_without_leaves():
     assert cal.weekly_off_weekday == 3
     assert cal.holidays == frozenset({date(2026, 8, 15)})
     assert cal.leaves == {}
+
+
+from engine import loaders as classic
+
+
+def test_classic_tables_only_equals_workbook_except_dropped_fields():
+    for raw in (build_sample_bytes(), build_new_sample_bytes()):
+        routing, machines, holidays = _rows(raw)
+        _so, a = classic.load_all(io.BytesIO(raw), routing_rows=routing)
+        so_b, b = classic.load_all(None, routing_rows=routing, machine_rows=machines,
+                                   holiday_rows=holidays)
+        assert list(a.machines) == list(b.machines)
+        for mid in a.machines:
+            ma, mb = a.machines[mid], b.machines[mid]
+            assert (ma.machine_no, ma.display_name, ma.machine_type, ma.provisional,
+                    ma.available_hrs_per_day) == \
+                   (mb.machine_no, mb.display_name, mb.machine_type, mb.provisional,
+                    mb.available_hrs_per_day)
+            assert mb.hr_rate is None                      # dropped on purpose
+        assert sorted(a.calendar.holidays) == sorted(b.calendar.holidays)
+        assert b.calendar.weekly_off_weekday == 3 and b.calendar.leaves == []
+        assert so_b == [] and b.operators == []
+
+
+def test_classic_tables_only_never_opens_a_workbook(monkeypatch):
+    routing, machines, holidays = _rows(build_sample_bytes())
+    def boom(*a, **k):
+        raise AssertionError("a workbook was opened")
+    monkeypatch.setattr(classic.openpyxl, "load_workbook", boom)
+    classic.load_all(None, routing_rows=routing, machine_rows=machines, holiday_rows=holidays)
+
+
+def test_classic_partial_tables_without_a_workbook_is_an_error():
+    routing, machines, _h = _rows(build_sample_bytes())
+    with pytest.raises(ValueError):
+        classic.load_all(None, routing_rows=routing, machine_rows=machines)
