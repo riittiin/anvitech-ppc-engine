@@ -254,6 +254,9 @@ def parse_payload(payload: dict):
     from engine import item_master as _im, shop_masters as _sm
     idoc, mdoc, cdoc = (payload.get("item_master"), payload.get("machines"),
                         payload.get("shop_calendar"))
+    if not raw:
+        # No workbook carried: a missing table is an empty one (same rule as the app).
+        idoc, mdoc, cdoc = _sm.fill_missing(idoc, mdoc, cdoc)
     rows = dict(routing_rows=_im.routing_rows(idoc) if idoc else None,
                 machine_rows=_sm.machine_rows(mdoc) if mdoc else None,
                 holiday_rows=_sm.holiday_rows(cdoc) if cdoc else None)

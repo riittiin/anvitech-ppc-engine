@@ -104,9 +104,34 @@ def machines_digest(doc) -> str:
 
 
 def calendar_digest(doc) -> str:
+    """Order-insensitive: the holidays are hashed sorted by date, so adding a
+    holiday and removing it again leaves the digest where it was."""
     if not doc:
         return "none"
-    return _hash([[h["date"], h.get("name")] for h in doc.get("holidays", [])])
+    return _hash(sorted([h["date"], h.get("name")] for h in doc.get("holidays", [])))
+
+
+def empty_tables():
+    """The three shop tables when nothing is on file: (item master, machines,
+    holidays), each EMPTY. Used in memory only, never written to the store."""
+    return {"items": {}}, {"machines": {}}, {"holidays": []}
+
+
+def fill_missing(item_doc, machines_doc, calendar_doc):
+    """With no workbook to read from, a table that does not exist yet is an EMPTY
+    table (spec section 4: no workbook means empty tables, added by hand). A table
+    that exists is returned unchanged."""
+    return tuple(d if d is not None else e
+                 for d, e in zip((item_doc, machines_doc, calendar_doc), empty_tables()))
+
+
+def empty_seed(raw: bytes, now_iso: str, key: str, empty, digest) -> dict:
+    """The one-time seed of a table whose sheet is missing from the workbook: an
+    EMPTY table, stamped like any seed so it is never retried on every read."""
+    doc = {"seeded_at": now_iso, "seeded_from_sha": hashlib.sha256(raw).hexdigest(),
+           key: empty}
+    doc["seed_digest"] = digest(doc)
+    return doc
 
 
 def validate_machine(mid: str, item: dict, existing: dict, create: bool) -> list:

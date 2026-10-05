@@ -334,15 +334,20 @@ def _store_env_key():
             os.environ.get("STORE_DIR"))
 
 
-def _seed_once(load, save, seed):
-    """One app-owned master table, seeded ONCE from the workbook on file."""
+def _seed_once(load, save, seed, key, empty, digest):
+    """One app-owned master table, seeded ONCE from the workbook on file. A
+    workbook without that sheet seeds an EMPTY table (saved, with its seed
+    digest), so the workbook is not reopened on every read. No workbook on file:
+    returns None and writes nothing, so a workbook stored later still seeds."""
     doc = load()
     if doc is None:
         raw = book_store.load_masters_bytes()
         if raw is not None:
-            doc = seed(raw, _ist_now().isoformat(timespec="seconds"))
-            if doc is not None:
-                save(doc)
+            now = _ist_now().isoformat(timespec="seconds")
+            doc = seed(raw, now)
+            if doc is None:
+                doc = shop_masters.empty_seed(raw, now, key, empty, digest)
+            save(doc)
     return doc
 
 
@@ -351,28 +356,37 @@ def _item_master_doc():
     the first time it is needed (same pattern as operators, 2026-07-18). After that
     the workbook's routing sheet is never read again, there is no upload any more."""
     return _seed_once(book_store.load_item_master, book_store.save_item_master,
-                      item_master.seed_doc)
+                      item_master.seed_doc, "items", {}, item_master.digest)
 
 
 def _machines_doc():
-    """The app-owned Machines table (seeded once from the workbook's Machine master)."""
+    """The app-owned Machines table (seeded once from the workbook on file, if any)."""
     return _seed_once(book_store.load_machines_doc, book_store.save_machines_doc,
-                      shop_masters.seed_machines)
+                      shop_masters.seed_machines, "machines", {},
+                      shop_masters.machines_digest)
 
 
 def _calendar_doc():
     """The app-owned holiday list (seeded once from the workbook's holiday sheet)."""
     return _seed_once(book_store.load_shop_calendar, book_store.save_shop_calendar,
-                      shop_masters.seed_calendar)
+                      shop_masters.seed_calendar, "holidays", [],
+                      shop_masters.calendar_digest)
 
 
 def _current_masters():
     """The shop's masters, built from the app's tables: Item Process Master
     (routings), Machines and holidays, each seeded once from the workbook on file.
     With all three tables the workbook is not opened at all (2026-10-05, stage 2).
+    With no workbook on file, a table not created yet counts as an empty table
+    (in memory only), so a fresh install plans from what is added by hand.
     Cached per (store, the three table digests); the operator table is overlaid on
     every call and never held in the cache."""
     idoc, mdoc, cdoc = _item_master_doc(), _machines_doc(), _calendar_doc()
+    if None in (idoc, mdoc, cdoc) and book_store.load_masters_bytes() is None:
+        # No workbook on file (a fresh install): a table not created yet is an
+        # EMPTY table, in memory only, so the first machine or item added by hand
+        # plans at once. Never written: a workbook stored later still seeds once.
+        idoc, mdoc, cdoc = shop_masters.fill_missing(idoc, mdoc, cdoc)
     key = (_store_env_key(), item_master.digest(idoc),
            shop_masters.machines_digest(mdoc), shop_masters.calendar_digest(cdoc))
     if _MASTERS_CACHE["masters"] is not None and _MASTERS_CACHE["key"] == key:
@@ -800,7 +814,7 @@ def _augment_helpers(trace, plan_run, config, masters, actuals=None):
             if cov.get("unmatched_specialties"):
                 trace["rule6"]["tables"].append({
                     "title": "Operator specialties that match no machine: check the "
-                             "spelling/name in Excel",
+                             "machine numbers in Settings > Operators and Settings > Machines",
                     "table": to_table([{"Operator": u["operator"], "Specialty": u["specialty"]}
                                        for u in cov["unmatched_specialties"]])})
 
@@ -3392,10 +3406,9 @@ _VALID_SHIFTS = {"First shift", "Second shift", ""}
 def _machine_options(masters):
     """The machines the Settings operator picker may offer, as plain dicts.
 
-    Straight off the uploaded workbook's **Machine master** sheet (already parsed
-    and cached by `_current_masters()`), so a machine added to that sheet appears
-    in the picker with no code change — the same "edit Excel, never edit code"
-    rule the rest of the masters follow.
+    Straight off the app's **Machines** table in Settings (built and cached by
+    `_current_masters()`), so a machine added there appears in the picker at once,
+    with no code change.
 
     Machines a routing references but Machine master does not list yet
     (`provisional`, e.g. CNC7) ARE offered, flagged so the UI can say so:
@@ -3420,8 +3433,8 @@ def _machining_machine_options(masters):
 
     Classified by the machine's TYPE using the same function the live engine uses
     (`ppc_engine.loaders.normalize.machine_kind_from_type`), so there is one
-    definition of "is this a machining station" and a CNC8 added to the Excel
-    appears with no code change. A PROVISIONAL machine (referenced by a routing but
+    definition of "is this a machining station" and a CNC8 added in Settings >
+    Machines appears with no code change. A PROVISIONAL machine (referenced by a routing but
     not in the Machine master) has no real type, so it falls back to the id prefix —
     the same rule `ppc_engine…register_provisional_machines` applies. There are none
     in the current workbooks; this keeps a future one from silently vanishing.

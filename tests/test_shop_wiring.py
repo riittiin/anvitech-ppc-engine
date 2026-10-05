@@ -190,3 +190,141 @@ def test_no_upload_ui_left():
     js = (web / "app.js").read_text()
     assert 'id="upload-card"' not in html and 'id="upload-btn"' not in html
     assert 'fetch("/upload"' not in js
+
+
+# --------------------------------------------------------------------------- #
+# Final fix wave: a fresh install (no workbook) or a workbook missing a sheet
+# still plans from the tables.
+# --------------------------------------------------------------------------- #
+def _admin(m):
+    from fastapi.testclient import TestClient
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    return c
+
+
+def test_fresh_install_plans_from_tables_added_by_hand(monkeypatch):
+    from engine import new_engine
+    monkeypatch.setenv("DEFAULT_SCHEDULER", "new")
+    new_engine._MASTERS_CACHE.clear()
+    m = _api()
+    assert book_store.load_masters_bytes() is None
+    masters = m._current_masters()
+    assert not masters.machines and not masters.routings
+    nm = new_engine._new_masters(False)
+    assert not nm.machines and not nm.routings
+    c = _admin(m)
+    assert c.post("/machines", json={"id": "CNC9", "type": "CNC lathe", "hours": 19.5}).status_code == 200
+    assert c.post("/operators", json={"name": "Ravi", "machines_raw": "CNC9",
+                                      "shift": "First shift"}).status_code == 200
+    r = c.post("/item-master", json={"code": "NEWITEM", "description": "N",
+                                     "steps": [{"name": "CNC FIRST SIDE", "cycle": 6,
+                                                "allotted": "CNC9", "suggested": ""}]})
+    assert r.status_code == 200, r.text
+    masters = m._current_masters()
+    assert "CNC9" in masters.machines and "NEWITEM" in masters.routings
+    nm = new_engine._new_masters(False)
+    assert "CNC9" in nm.machines and "NEWITEM" in nm.routings
+    book_store.add_orders([Order("SO1", "NEWITEM", "NEWITEM", 5, date(2026, 12, 1))])
+    run = c.post("/run", json={})
+    assert run.status_code == 200, run.text
+    assert "CNC9" in json.dumps(run.json()["gantt"])        # the plan used the new machine
+    assert run.json()["expected_end"]
+    assert book_store.load_shop_calendar() is None         # no holiday doc ever written
+
+
+def test_item_and_machines_without_workbook_or_holidays_give_full_masters():
+    """Controller-ruled test for mutation #1: it fails if `_current_masters` never
+    takes the tables-only branch."""
+    from engine import item_master as im, new_engine
+    new_engine._MASTERS_CACHE.clear()
+    raw = build_sample_bytes()
+    book_store.save_item_master(im.seed_doc(raw, "t"))
+    book_store.save_machines_doc(sm.seed_machines(raw, "t"))
+    m = _api()
+    assert book_store.load_masters_bytes() is None and book_store.load_shop_calendar() is None
+    masters = m._current_masters()
+    assert masters.machines and masters.routings and ITEM_A in masters.routings
+    nm = new_engine._new_masters(False)
+    assert set(nm.machines) >= set(sm.seed_machines(raw, "t")["machines"])
+    assert ITEM_A in nm.routings
+    assert book_store.load_shop_calendar() is None
+
+
+def _workbook_without(sheet):
+    import io
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(build_sample_bytes()))
+    del wb[sheet]
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def test_workbook_without_the_holiday_sheet_seeds_an_empty_calendar_once(monkeypatch):
+    raw = _workbook_without("Weekly off & holiday master")
+    book_store.save_masters_bytes(raw)
+    m = _api()
+    first = m._current_masters()
+    cdoc = book_store.load_shop_calendar()
+    assert cdoc is not None and cdoc["holidays"] == []
+    assert cdoc["seed_digest"] == sm.calendar_digest(cdoc)
+    import hashlib
+    assert cdoc["seeded_from_sha"] == hashlib.sha256(raw).hexdigest()
+    import openpyxl
+    from ppc_engine.loaders import loader as ppc_loader, workbook as ppc_wb
+    def boom(*a, **k):
+        raise AssertionError("workbook opened")
+    monkeypatch.setattr(openpyxl, "load_workbook", boom)
+    monkeypatch.setattr(ppc_loader, "open_workbook", boom)
+    monkeypatch.setattr(ppc_wb, "open_workbook", boom)
+    m._MASTERS_CACHE["masters"] = None
+    second = m._current_masters()
+    assert set(second.machines) == set(first.machines) and second.routings
+
+
+def test_workbook_without_the_machine_sheet_seeds_an_empty_machines_table():
+    raw = _workbook_without("Machine master")
+    book_store.save_masters_bytes(raw)
+    m = _api()
+    m._current_masters()
+    mdoc = book_store.load_machines_doc()
+    assert mdoc is not None and mdoc["machines"] == {}
+    assert mdoc["seed_digest"] == sm.machines_digest(mdoc)
+
+
+def test_parse_payload_uses_the_payload_machines_doc():
+    """Controller-ruled test for mutation #3: the payload's Machines table wins
+    over the workbook it carries."""
+    from engine import optimize_service as svc
+    mdoc = sm.seed_machines(build_sample_bytes(), "t")
+    mid = next(iter(mdoc["machines"]))
+    wb_hours = svc.parse_payload(json.loads(json.dumps(_payload(None, None))))[2] \
+        .machines[mid].available_hrs_per_day
+    mdoc["machines"][mid]["hours"] = 7.25
+    assert wb_hours != 7.25
+    cdoc = sm.seed_calendar(build_sample_bytes(), "t")
+    parsed = svc.parse_payload(json.loads(json.dumps(_payload(mdoc, cdoc))))
+    assert parsed[2].machines[mid].available_hrs_per_day == 7.25
+
+
+def test_adding_then_removing_a_holiday_restores_the_seed_digest():
+    raw = build_sample_bytes()
+    doc = sm.seed_calendar(raw, "t")
+    # A seed in sheet order that is not date order still round-trips.
+    doc["holidays"] = [{"date": "2026-11-08", "name": "Diwali"}] + doc["holidays"]
+    doc["seed_digest"] = sm.calendar_digest(doc)
+    back = sm.remove_holiday(sm.add_holiday(doc, "2031-01-02", "X", "t"), "2031-01-02")
+    assert sm.calendar_digest(back) == doc["seed_digest"]
+
+
+def test_parse_payload_without_a_workbook_treats_a_missing_table_as_empty():
+    from engine import optimize_service as svc, item_master as im
+    raw = build_sample_bytes()
+    payload = json.loads(json.dumps(_payload(sm.seed_machines(raw, "t"), None)))
+    payload.pop("masters_xlsx_b64", None)
+    payload["masters_xlsx_b64"] = None
+    payload.pop("shop_calendar", None)
+    masters = svc.parse_payload(payload)[2]
+    assert masters.machines and ITEM_A in masters.routings
+    assert not masters.calendar.holidays

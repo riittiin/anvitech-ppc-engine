@@ -121,17 +121,20 @@ def _new_masters(flexible: bool = False):
     """Load the new-engine Masters at the given machine flexibility. flexible=False ->
     Allotted-only options (today); True -> the Allotted+Suggested union. With the Item
     Process Master, Machines and holiday tables all present no workbook is needed or
-    opened; otherwise the injected bytes or stored workbook fill the gaps. Cached by
+    opened; otherwise the injected bytes or stored workbook fill the gaps, and with
+    no workbook at all a missing table is an empty one. Cached by
     (workbook sha or "none", (item, machines, calendar) digests, flexible)."""
     from engine import shop_masters
     doc = _item_master_doc()
     mdoc, cdoc = _shop_docs()
-    tables_only = bool(doc and mdoc and cdoc)
     raw = None
-    if not tables_only:
+    if None in (doc, mdoc, cdoc):
         raw = _OVERRIDE_BYTES if _OVERRIDE_BYTES is not None else book_store.load_masters_bytes()
         if not raw:
-            raise RuntimeError("new_engine: no masters workbook available (store empty and none injected)")
+            # No workbook anywhere (a fresh install): a table not created yet is
+            # an EMPTY table, the same rule api.main._current_masters applies.
+            doc, mdoc, cdoc = shop_masters.fill_missing(doc, mdoc, cdoc)
+    tables_only = None not in (doc, mdoc, cdoc)
     h = hashlib.sha256(raw).hexdigest() if raw else "none"
     d = (item_master.digest(doc), shop_masters.machines_digest(mdoc),
          shop_masters.calendar_digest(cdoc))
