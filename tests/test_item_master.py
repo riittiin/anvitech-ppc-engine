@@ -146,10 +146,52 @@ def test_reordering_punched_steps_is_refused():
 
 
 def test_safe_edits_are_allowed():
+    # Rebased for the final fix wave (F2): the renamed step used to be BANDSAW, which
+    # sits BEFORE the punched CNC OS. A new name ahead of a punched step now counts as
+    # a new step there and is refused (the rule cannot tell a rename from a new step),
+    # so the rename moved to INSP, after the last punched step.
     orders, acts = _book()
-    new = [dict(OLD[0], name="BAND SAW CUT"), dict(OLD[1], cycle=9), OLD[2],
+    new = [dict(OLD[0], cycle=4, suggested="BS2"), dict(OLD[1], cycle=9),
+           dict(OLD[2], name="FINAL INSP"),
            {"name": "WASH", "cycle": 1, "allotted": "MW1", "suggested": ""}]
     assert im.punch_safety_errors(ITEM_A, OLD, new, orders.values(), acts) == []
+
+
+WASH = {"name": "WASH", "cycle": 1, "allotted": "MW1", "suggested": ""}
+
+
+def test_a_new_step_before_a_punched_step_is_refused():
+    orders, acts = _book()
+    new = [OLD[0], WASH, OLD[1], OLD[2]]
+    errs = im.punch_safety_errors(ITEM_A, OLD, new, orders.values(), acts)
+    assert errs == ["WASH cannot go before CNC OS: CNC OS has 120 punched on SO113. "
+                    "Add new steps after it, or finish that order first."]
+
+
+def test_moving_an_unpunched_step_in_front_of_a_punched_step_is_refused():
+    orders, acts = _book()
+    new = [OLD[0], OLD[2], OLD[1]]          # INSP (unpunched) moved ahead of CNC OS
+    errs = im.punch_safety_errors(ITEM_A, OLD, new, orders.values(), acts)
+    assert errs == ["INSP cannot go before CNC OS: CNC OS has 120 punched on SO113. "
+                    "Add new steps after it, or finish that order first."]
+
+
+def test_a_new_step_after_the_last_punched_step_is_allowed():
+    orders, acts = _book()
+    assert im.punch_safety_errors(ITEM_A, OLD, [OLD[0], OLD[1], WASH, OLD[2]],
+                                  orders.values(), acts) == []
+
+
+def test_removing_an_unpunched_step_ahead_is_allowed():
+    orders, acts = _book()
+    assert im.punch_safety_errors(ITEM_A, OLD, [OLD[1], OLD[2]],
+                                  orders.values(), acts) == []
+
+
+def test_a_completed_order_does_not_block_a_new_step_in_front():
+    orders, acts = _book(completed=True)
+    assert im.punch_safety_errors(ITEM_A, OLD, [WASH] + OLD,
+                                  orders.values(), acts) == []
 
 
 def test_completed_order_does_not_block():
@@ -177,3 +219,32 @@ def test_apply_save_versions_and_conflicts():
         im.apply_save(out, ITEM_A, item, expected_version=None, now_iso=NOW, user="x", create=True)
     new = im.apply_save(out, "Z9", item, expected_version=None, now_iso=NOW, user="x", create=True)
     assert list(new["items"])[-1] == "Z9"               # appended, never sorted
+
+
+def _one(step):
+    return _item([step])
+
+
+def test_machine_cycle_is_capped_at_a_day_per_piece():
+    ok = {"name": "CNC", "cycle": im.MAX_MACHINE_CYCLE_MIN, "allotted": "CNC4", "suggested": ""}
+    assert im.validate_item("X1", _one(ok), MACHINES, None) == []
+    errs = im.validate_item("X1", _one(dict(ok, cycle=60000)), MACHINES, None)
+    assert errs == ["Step 1 (CNC): the cycle time is minutes per piece and can be at "
+                    "most 1440 minutes (one day)."]
+
+
+def test_outsourced_block_is_capped_at_60_days():
+    ok = {"name": "HEAT TREAT OS", "cycle": im.MAX_OUTSOURCED_BLOCK_MIN,
+          "allotted": "OS", "suggested": ""}
+    assert im.validate_item("X1", _one(ok), MACHINES, None) == []
+    errs = im.validate_item("X1", _one(dict(ok, cycle=90 * 1440)), MACHINES, None)
+    assert errs == ["Step 1 (HEAT TREAT OS): an outsourced step can take at most "
+                    "86400 minutes (60 days)."]
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_cycle_is_refused(bad):
+    for step in ({"name": "CNC", "cycle": bad, "allotted": "CNC4", "suggested": ""},
+                 {"name": "HEAT TREAT OS", "cycle": bad, "allotted": "OS", "suggested": ""}):
+        errs = im.validate_item("X1", _one(step), MACHINES, None)
+        assert errs == [f"Step 1 ({step['name']}): the cycle time must be a number."]

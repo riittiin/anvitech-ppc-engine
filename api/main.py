@@ -3619,7 +3619,12 @@ def _save_item(req: ItemSaveRequest, request: Request, create: bool):
         raise HTTPException(status_code=404, detail=f"No item with code {code}.")
     item = {"description": req.description.strip(),
             "steps": [s.model_dump() for s in req.steps]}
-    errs = item_master.validate_item(code, item, set(masters.machines), old)
+    # Only real Machine-master rows may be newly added to a step. A provisional
+    # machine (named by some routing but in no Machine-master row) stays allowed on
+    # an item that already has it (validate_item's own rule), never spreads further.
+    real = {mid for mid, mc in masters.machines.items()
+            if not getattr(mc, "provisional", False)}
+    errs = item_master.validate_item(code, item, real, old)
     if old is not None and not errs:
         errs = item_master.punch_safety_errors(
             code, old["steps"], item["steps"],

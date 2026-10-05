@@ -157,3 +157,100 @@ def test_dotted_item_codes_work():
             "steps": [{"name": "CNC", "cycle": 6, "allotted": "CNC1", "suggested": ""}]}
     assert admin.post("/item-master", json=body).status_code == 200
     assert admin.post("/item-master/delete", json={"code": "61243661-01.."}).status_code == 200
+
+
+def _punch(process, qty):
+    book_store.append_actual(Actual(so_no="SO1", item_code=ITEM_A, process=process,
+                                    entry_date=date(2026, 10, 1),
+                                    qty_produced=qty, qty_rejected=0, operator="X"))
+
+
+def _put_steps(admin, steps):
+    a = _get_item(admin, ITEM_A)
+    return admin.put("/item-master", json={"code": ITEM_A, "description": a["description"],
+                                           "steps": steps, "version": a["version"]})
+
+
+def test_a_new_step_in_front_of_a_punched_step_is_refused():
+    m, admin, _ = _setup()
+    _punch("BANDSAW", 4)
+    steps = _get_item(admin, ITEM_A)["steps"]
+    wash = {"name": "WASH", "cycle": 1, "allotted": "MW1", "suggested": ""}
+    r = _put_steps(admin, [wash] + steps)
+    assert r.status_code == 400
+    assert ("WASH cannot go before BANDSAW: BANDSAW has 4 punched on SO1. "
+            "Add new steps after it, or finish that order first.") in r.json()["detail"]
+    assert _put_steps(admin, steps + [wash]).status_code == 200      # after: allowed
+
+
+def test_moving_an_unpunched_step_in_front_of_a_punched_step_is_refused():
+    m, admin, _ = _setup()
+    _punch("BANDSAW", 4)
+    _punch("CNC OS", 4)
+    s = _get_item(admin, ITEM_A)["steps"]
+    r = _put_steps(admin, [s[0], s[2], s[1]])
+    assert r.status_code == 400
+    assert "INSP cannot go before CNC OS: CNC OS has 4 punched on SO1." in r.json()["detail"]
+    assert [x["name"] for x in _get_item(admin, ITEM_A)["steps"]] == ["BANDSAW", "CNC OS", "INSP"]
+
+
+@pytest.mark.parametrize("raw_cycle, words", [
+    ("60000", "1440 minutes"),
+    ("NaN", "must be a number"),
+    ("Infinity", "must be a number"),
+    ("-Infinity", "must be a number"),
+])
+def test_cycle_time_out_of_bounds_is_refused_through_the_endpoint(raw_cycle, words):
+    # A raw body: JSON parsers here accept NaN / Infinity, so this is what a hand-made
+    # request can actually send.
+    m, admin, _ = _setup()
+    a = _get_item(admin, ITEM_A)
+    body = ('{"code": "%s", "description": "", "version": %d, "steps": ['
+            '{"name": "CNC OS", "cycle": %s, "allotted": "CNC1", "suggested": ""}]}'
+            % (ITEM_A, a["version"], raw_cycle))
+    r = admin.put("/item-master", content=body,
+                  headers={"Content-Type": "application/json"})
+    assert r.status_code == 400, r.text
+    assert words in r.json()["detail"]
+
+
+def test_an_outsourced_block_longer_than_60_days_is_refused():
+    m, admin, _ = _setup()
+    s = _get_item(admin, ITEM_A)["steps"]
+    os_step = {"name": "HEAT TREAT OS", "cycle": 90 * 1440, "allotted": "OS", "suggested": ""}
+    r = _put_steps(admin, s + [os_step])
+    assert r.status_code == 400
+    assert "86400 minutes" in r.json()["detail"]
+
+
+def test_a_provisional_machine_cannot_be_newly_added():
+    # CNC9 is in no Machine master row; the loader registered it provisionally because
+    # ITEM_B's routing names it. It may stay on ITEM_B, never be added elsewhere.
+    m, admin, _ = _setup()
+    assert m._current_masters().machines["CNC9"].provisional
+    s = _get_item(admin, ITEM_A)["steps"]
+    r = _put_steps(admin, [s[0], dict(s[1], allotted="CNC9"), s[2]])
+    assert r.status_code == 400
+    assert "CNC9 is not a machine in your Machine master" in r.json()["detail"]
+    b = _get_item(admin, ITEM_B)
+    r = admin.put("/item-master", json={"code": ITEM_B, "description": b["description"],
+                                        "steps": b["steps"], "version": b["version"]})
+    assert r.status_code == 200, r.text
+
+
+def test_delete_refused_while_a_draft_line_uses_the_item():
+    m, admin, _ = _setup()
+    book_store.save_new_order_drafts([{"so_no": "SO900", "item_code": ITEM_B, "qty": 5}])
+    r = admin.post("/item-master/delete", json={"code": ITEM_B})
+    assert r.status_code == 400
+    assert "SO900 (Add New Orders draft)" in r.json()["detail"]
+    assert ITEM_B in [i["code"] for i in admin.get("/item-master").json()["items"]]
+
+
+def test_put_on_an_unknown_code_is_404():
+    m, admin, _ = _setup()
+    r = admin.put("/item-master", json={"code": "NOPE", "description": "", "version": 1,
+                                        "steps": [{"name": "CNC", "cycle": 6,
+                                                   "allotted": "CNC1", "suggested": ""}]})
+    assert r.status_code == 404
+    assert "NOPE" not in [i["code"] for i in admin.get("/item-master").json()["items"]]

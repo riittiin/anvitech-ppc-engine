@@ -128,6 +128,7 @@ def test_upload_ignores_a_routing_dropped_from_the_new_file():
     # ignored: ITEM_B keeps its routing and nothing is reported lost.
     assert no_routing == []
     assert resp.json()["routings_note"]
+    assert ITEM_B in m._current_masters().routings
 
 
 # --------------------------------------------------------------------------- #

@@ -15,12 +15,19 @@ import copy
 import hashlib
 import io
 import json
+import math
 
 from engine.loaders import normalize_process_name
 from ppc_engine.domain.routing import OperationKind
 from ppc_engine.loaders.normalize import classify_operation, parse_machine_options
 
 MAX_STEPS = 12
+# Upper bounds on a typed cycle time. A machine step is minutes PER PIECE, so a day
+# per piece is already far beyond any real job; an outsourced step is one block for
+# the whole batch, capped at 60 days. They stop a slipped digit from planning an
+# order years out.
+MAX_MACHINE_CYCLE_MIN = 1440
+MAX_OUTSOURCED_BLOCK_MIN = 86400
 
 
 class VersionConflict(Exception):
@@ -129,7 +136,8 @@ def validate_item(code: str, item: dict, machine_ids: set, old_item) -> list:
                         f"Give each step a different name.")
         seen.setdefault(key, i)
         cyc = s.get("cycle")
-        if cyc is not None and (isinstance(cyc, bool) or not isinstance(cyc, (int, float))):
+        if cyc is not None and (isinstance(cyc, bool) or not isinstance(cyc, (int, float))
+                                or not math.isfinite(cyc)):
             errs.append(f"Step {i} ({name}): the cycle time must be a number.")
             continue
         if cyc is not None and cyc < 0:
@@ -141,6 +149,12 @@ def validate_item(code: str, item: dict, machine_ids: set, old_item) -> list:
                 errs.append(f"Step {i} ({name}) needs a machine, or mark it outsourced.")
             if not cyc or cyc <= 0:
                 errs.append(f"Step {i} ({name}): the cycle time must be more than 0.")
+            elif cyc > MAX_MACHINE_CYCLE_MIN:
+                errs.append(f"Step {i} ({name}): the cycle time is minutes per piece and "
+                            f"can be at most {MAX_MACHINE_CYCLE_MIN} minutes (one day).")
+        elif info["kind"] == "outsourced" and cyc is not None and cyc > MAX_OUTSOURCED_BLOCK_MIN:
+            errs.append(f"Step {i} ({name}): an outsourced step can take at most "
+                        f"{MAX_OUTSOURCED_BLOCK_MIN} minutes (60 days).")
         for mid in (set(parse_machine_options(s.get("allotted")))
                     | set(parse_machine_options(s.get("suggested")))):
             if mid != "OS" and mid not in machine_ids and mid not in allowed_unknown:
@@ -150,12 +164,18 @@ def validate_item(code: str, item: dict, machine_ids: set, old_item) -> list:
 
 def punch_safety_errors(code, old_steps, new_steps, orders, actuals) -> list:
     """Refuse an edit that would orphan recorded production: on any OPEN order of
-    this item, a step with punches may not be renamed or removed, and the steps
-    with punches must keep their order relative to each other."""
+    this item, a step with punches may not be renamed or removed, the steps with
+    punches must keep their order relative to each other, and no step may sit in
+    front of a punched step unless it was already in front of it (by name; a name
+    the old list does not have counts as a new step). The pieces already past a
+    punched step never went through a step put in front of it, and the freeze
+    keeps a running step on its machine only while its place in the routing holds."""
     from engine.orderbook import _process_totals
     old_names = [normalize_process_name(s.get("name")) for s in old_steps]
     display = {normalize_process_name(s.get("name")): str(s.get("name")).strip() for s in old_steps}
     new_names = [normalize_process_name(s.get("name")) for s in new_steps]
+    new_display = {normalize_process_name(s.get("name")): str(s.get("name")).strip()
+                   for s in new_steps}
     errs = []
     for o in orders:
         if o.item_code != code or getattr(o, "completed", False):
@@ -169,6 +189,19 @@ def punch_safety_errors(code, old_steps, new_steps, orders, actuals) -> list:
         if not missing and [n for n in new_names if n in punched] != punched:
             errs.append(f"The steps with punches on {o.so_no} "
                         f"({', '.join(display[n] for n in punched)}) must stay in the same order.")
+        if missing:
+            continue
+        # Each unpunched step, against the first punched step it was not ahead of.
+        for i, n in enumerate(new_names):
+            if n in punched:
+                continue
+            for p in new_names[i + 1:]:
+                if p in punched and (n not in old_names
+                                     or old_names.index(n) > old_names.index(p)):
+                    errs.append(f"{new_display[n]} cannot go before {display[p]}: "
+                                f"{display[p]} has {produced[p]:g} punched on {o.so_no}. "
+                                f"Add new steps after it, or finish that order first.")
+                    break
     return errs
 
 
