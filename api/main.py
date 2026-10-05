@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Union
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -675,6 +675,24 @@ class DraftLine(BaseModel):
     so_no: str
     item_code: str
     qty: float
+
+
+class ItemStep(BaseModel):
+    name: str = ""
+    cycle: Optional[Union[int, float, str]] = None   # str only so a seeded text cell
+    allotted: Optional[str] = None                    # round-trips and validate_item
+    suggested: Optional[str] = None                   # refuses it with a clear message
+
+
+class ItemSaveRequest(BaseModel):
+    code: str
+    description: str = ""
+    steps: list[ItemStep] = []
+    version: Optional[int] = None
+
+
+class ItemCodeRequest(BaseModel):
+    code: str
 
 
 class DraftsRequest(BaseModel):
@@ -3549,6 +3567,112 @@ def delete_operator(operator_id: str, request: Request):
     table["operators"] = keep
     book_store.save_operator_table(table)
     return {"deleted": True}
+
+
+# --------------------------------------------------------------------------- #
+# Item Process Master (2026-10-05): routings edited in the app, not the Excel.
+# --------------------------------------------------------------------------- #
+def _item_view(code, it, orders, drafts):
+    steps = [{**s, **item_master.step_info(s)} for s in it.get("steps", [])]
+    return {"code": code, "description": it.get("description") or "",
+            "version": it.get("version", 1), "steps": steps,
+            "open_orders": item_master.usage(code, orders, drafts),
+            "needs_machine": any(s["kind"] == "machine" and not s["machines"] for s in steps)}
+
+
+@app.get("/item-master")
+def get_item_master():
+    masters = _current_masters()          # seeds the table once
+    doc = book_store.load_item_master() or {"items": {}}
+    orders = list(book_store.load_active_orders().values())
+    drafts = book_store.load_new_order_drafts()
+    return {"items": [_item_view(c, it, orders, drafts) for c, it in doc["items"].items()],
+            "machines": _machine_options(masters),
+            "planning_factor": planning_time.CNC_VMC_PLANNING_FACTOR,
+            "seeded": bool(doc["items"])}
+
+
+def _keep_blank_as_stored(new_steps, old_steps):
+    """A field the client sends back as "" stays None when it was stored as None,
+    so re-saving an unedited seeded item changes nothing (not even the digest)."""
+    out = []
+    for i, s in enumerate(new_steps):
+        s = dict(s)
+        old = old_steps[i] if i < len(old_steps) else None
+        for f in ("allotted", "suggested"):
+            if (s.get(f) or "") == "" and old is not None and old.get(f) is None:
+                s[f] = None
+        if old is not None and isinstance(old.get("cycle"), int) \
+                and isinstance(s.get("cycle"), float) and s["cycle"] == old["cycle"]:
+            s["cycle"] = old["cycle"]
+        out.append(s)
+    return out
+
+
+def _save_item(req: ItemSaveRequest, request: Request, create: bool):
+    require_admin(request)
+    masters = _current_masters()
+    doc = book_store.load_item_master() or {"items": {}}
+    code = req.code.strip()
+    old = doc["items"].get(code)
+    if not create and old is None:
+        raise HTTPException(status_code=404, detail=f"No item with code {code}.")
+    item = {"description": req.description.strip(),
+            "steps": [s.model_dump() for s in req.steps]}
+    errs = item_master.validate_item(code, item, set(masters.machines), old)
+    if old is not None and not errs:
+        errs = item_master.punch_safety_errors(
+            code, old["steps"], item["steps"],
+            book_store.load_active_orders().values(), book_store.load_actuals())
+    if errs:
+        raise HTTPException(status_code=400, detail=" ".join(errs))
+    if old is not None:
+        item["steps"] = _keep_blank_as_stored(item["steps"], old["steps"])
+    try:
+        new_doc = item_master.apply_save(
+            doc, code, item, req.version, _ist_now().isoformat(timespec="seconds"),
+            getattr(request.state, "user", "admin"), create)
+    except item_master.VersionConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    book_store.save_item_master(new_doc)
+    return {"item": _item_view(code, new_doc["items"][code],
+                               list(book_store.load_active_orders().values()),
+                               book_store.load_new_order_drafts())}
+
+
+@app.post("/item-master")
+def create_item(req: ItemSaveRequest, request: Request):
+    """Create an item (admin). 409 if the code exists. Does not start an optimization."""
+    return _save_item(req, request, create=True)
+
+
+@app.put("/item-master")
+def update_item(req: ItemSaveRequest, request: Request):
+    """Save an item's description and steps (admin). 409 when someone saved it
+    since the caller loaded it; 400 with every reason when it is invalid or would
+    orphan recorded production on an open order."""
+    return _save_item(req, request, create=False)
+
+
+@app.post("/item-master/delete")
+def delete_item(req: ItemCodeRequest, request: Request):
+    """Delete an item (admin). Refused while an open order or an Add New Orders
+    draft line uses it."""
+    require_admin(request)
+    _current_masters()
+    doc = book_store.load_item_master() or {"items": {}}
+    code = req.code.strip()
+    if code not in doc["items"]:
+        raise HTTPException(status_code=404, detail=f"No item with code {code}.")
+    used = item_master.usage(code, book_store.load_active_orders().values(),
+                             book_store.load_new_order_drafts())
+    if used:
+        raise HTTPException(status_code=400,
+                            detail=f"{code} is still used by {', '.join(used)}. "
+                                   f"Complete or remove those first.")
+    del doc["items"][code]
+    book_store.save_item_master(doc)
+    return {"deleted": code}
 
 
 def _validate_year_month(year: int, month: int) -> None:
