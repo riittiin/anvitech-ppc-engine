@@ -394,10 +394,13 @@
         the operator made in that shift, against the shift's minutes counted once.
         <strong>Standard minutes earned</strong> = for every line, total actual qty (OK + rejected)
         × cycle time, added up.
-        <strong>Minutes for production</strong> = minutes available in the shift − all actual
-        setting time − all downtime.
-        <strong>Operator efficiency</strong> = standard minutes earned ÷ minutes for production.
-        <strong>Overall productivity</strong> = standard minutes earned ÷ minutes available.
+        <strong>Operator minutes earned</strong> = standard minutes earned + the standard
+        setting time on every line where a setup was typed (90 if the standard is blank) +
+        no power + machine breakdown + tool problem + no load + other work done. No operator,
+        and setting time beyond the standard, are not credited: they count against the operator.
+        <strong>Operator efficiency</strong> = operator minutes earned ÷ minutes available.
+        <strong>Overall productivity</strong> = standard minutes earned ÷ minutes available,
+        the real output of the shift with no credits.
         The month figure adds up the minutes of all the operator's shifts, then divides.
         A shift with a line that has no cycle time, or with no minutes entered, shows "-" and is
         left out of the month total; its note says why. Cycle time comes from the Item's

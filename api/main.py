@@ -3815,15 +3815,20 @@ def _production_tables(year: int, month: int) -> dict:
     reads them: the month per operator (the report's goal), then each operator's
     shifts, then every entry."""
     acts, masters = book_store.load_actuals(), _current_masters()
-    working = _shift_minutes(_load_plan_config())     # 630 / 570: meal breaks out
+    config = _load_plan_config()
+    working = _shift_minutes(config)                  # 630 / 570: meal breaks out
+    # A setup typed with a blank standard is credited the default (owner,
+    # 2026-10-06), the same setup time the plan and the Daily Entry form use.
+    dflt = float(config.setup_time_min)
     pa = production_analysis
     return {
         "operators": {"columns": list(pa.MONTH_COLUMNS),
-                      "rows": pa.operator_month_rows(acts, masters, year, month, working)},
+                      "rows": pa.operator_month_rows(acts, masters, year, month, working, dflt)},
         "shifts": {"columns": list(pa.SHIFT_COLUMNS),
-                   "rows": pa.shift_rows(acts, masters, year, month, working)},
+                   "rows": pa.shift_rows(acts, masters, year, month, working, dflt)},
         "entries": {"columns": list(pa.REPORT_COLUMNS),
-                    "rows": pa.monthly_rows(acts, masters, year, month, working)},
+                    "rows": pa.monthly_rows(acts, masters, year, month, working, dflt)},
+        "default_setup": dflt,
     }
 
 

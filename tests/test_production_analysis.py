@@ -1,12 +1,16 @@
 """Production analysis report (2026-10-03): the owner's "Format Production
 analysis" sheet, columns B..S + U..X, computed from Daily Entry punches.
 
-Formulas (Sheet1, with the owner's one change: efficiency deducts the ACTUAL
-setting time L, not the standard K):
+Formulas (Sheet1, with the owner's 2026-10-06 rule for efficiency: what is not
+the operator's mistake is CREDITED to him):
     U Planned qty          = H / G
     V Total actual qty     = I + J
-    W Overall productivity = V / U
-    X Operator efficiency  = V / ((H - L - M - N - O - P - Q - R) / G)
+    W Overall productivity = V x G / H
+    X Operator efficiency  = (V x G + setting credit + downtime credited) / H
+      setting credit    = the standard setting time where an actual one was typed
+                          (blank standard = 90), else 0
+      downtime credited = no power + breakdown + tool problem + no load + other work
+      No operator is NOT credited.
 """
 from datetime import date
 import io
@@ -19,34 +23,59 @@ from engine.models import Actual
 
 # --- the formulas ---------------------------------------------------------- #
 def test_the_four_columns_follow_the_sheet():
-    # G=5, H=330, I=40 OK, J=2 rejected, L=100 actual setting, 30 min no power.
-    planned, total, prod, eff = pa.metrics(5, 330, 40, 2, 100, 30)
+    # G=5, H=330, I=40 OK, J=2 rejected, 90 setting credit, 30 min downtime credited.
+    planned, total, prod, eff = pa.metrics(5, 330, 40, 2, 90, 30)
     assert planned == pytest.approx(66)                 # 330 / 5
     assert total == 42                                  # 40 + 2
-    assert prod == pytest.approx(42 / 66)               # V / U
-    assert eff == pytest.approx(42 / ((330 - 100 - 30) / 5))
+    assert prod == pytest.approx(42 / 66)               # V / U = V x G / H
+    assert eff == pytest.approx((42 * 5 + 90 + 30) / 330)
 
 
-def test_efficiency_deducts_the_actual_setting_time_not_the_standard():
-    """Owner's example: half a shift producing, half a shift setting a job whose
-    standard is 90 but which took 330. The overrun must not lower efficiency."""
-    producing = Actual(so_no="S", item_code="I", entry_date=date(2026, 9, 1),
-                       qty_produced=60, cycle_time_min=5, shift_minutes=330)
-    setting = Actual(so_no="S", item_code="J", entry_date=date(2026, 9, 1),
-                     qty_produced=0, cycle_time_min=5, shift_minutes=330,
-                     std_setup_min=90, actual_setup_min=330)
-    (_, _, prod_a, eff_a), _ = pa.actual_metrics(producing)
-    (_, _, prod_b, eff_b), _ = pa.actual_metrics(setting)
-    assert eff_a == pytest.approx(300 / 330)
-    assert prod_b == 0
-    assert eff_b is None          # no production time at all: "-", never 0%
+def _set(actual, std=90.0, **kw):
+    return Actual(so_no="S", item_code="I", entry_date=date(2026, 10, 5), qty_produced=0,
+                  cycle_time_min=5, shift_minutes=630, std_setup_min=std,
+                  actual_setup_min=actual, **kw)
+
+
+def test_setting_credit_is_the_standard_only_when_a_setup_was_typed():
+    """Owner, 2026-10-06: a setup typed earns the STANDARD, slower or faster; a
+    job run on in continuation (no actual typed) earns none; a blank standard
+    earns the default 90."""
+    assert pa.setting_credit(_set(120)) == 90            # slower: the extra 30 is his
+    assert pa.setting_credit(_set(60)) == 90             # faster: still the standard
+    assert pa.setting_credit(_set(0)) == 0               # continuation: no setup typed
+    assert pa.setting_credit(_set(120, std=0)) == 90     # blank standard: the default
+    assert pa.setting_credit(_set(120, std=0), default=75) == 75
+    assert pa.setting_credit(_set(120, std=45)) == 45    # a typed standard wins
+
+
+def test_downtime_credited_is_everything_but_no_operator():
+    a = _set(0, no_power_min=10, no_operator_min=20, machine_breakdown_min=30,
+             tool_problem_min=40, no_load_min=50, other_work_min=60)
+    assert pa.downtime_credited(a) == 10 + 30 + 40 + 50 + 60     # no operator left out
+
+
+def test_the_owners_worked_example():
+    """630 available, 100 pcs x 4 min, standard setting 90 typed as 120 actual,
+    no power 30, no operator 20: earned 400 + 90 + 30 = 520 -> 82.5%;
+    productivity 400 / 630 = 63.5%."""
+    a = _line("A", 100, 4.0, mins=630, setup=120, std_setup_min=90,
+              no_power_min=30, no_operator_min=20)
+    (row,) = pa.shift_rows([a], None, 2026, 10, WORKING)
+    assert row["Setting credit in Min"] == 90
+    assert row["Downtime credited in Min"] == 30
+    assert row["No operator (in Min)"] == 20
+    assert row["Standard minutes earned"] == 400
+    assert row["Operator minutes earned"] == 520
+    assert row["Operator efficiency"] == pytest.approx(82.5, abs=0.05)
+    assert row["Overall Productivity"] == pytest.approx(63.5, abs=0.05)
 
 
 def test_nothing_to_divide_by_is_blank_never_zero():
     assert pa.metrics(None, 600, 10, 0, 0, 0)[0] is None      # no cycle time
     assert pa.metrics(None, 600, 10, 0, 0, 0)[3] is None
     assert pa.metrics(5, 0, 10, 0, 0, 0)[2] is None           # no minutes entered
-    assert pa.metrics(5, 100, 10, 0, 60, 40)[3] is None       # all time lost
+    assert pa.metrics(5, 0, 10, 0, 90, 40)[3] is None
 
 
 def test_ok_qty_is_produced_minus_rejected():
@@ -73,8 +102,9 @@ def test_new_fields_round_trip_and_legacy_rows_default():
 
 def test_report_columns_match_the_sheet_order():
     assert pa.REPORT_COLUMNS[0] == "Date" and pa.REPORT_COLUMNS[1] == "Machine"
-    assert pa.REPORT_COLUMNS[-4:] == ("Planned qty", "Total Actual Qty",
-                                      "Total downtime (in Min)", "Standard minutes earned")
+    assert pa.REPORT_COLUMNS[-6:] == ("Planned qty", "Total Actual Qty",
+                                      "Setting credit in Min", "Downtime credited in Min",
+                                      "Standard minutes earned", "Operator minutes earned")
     assert "Rate" not in pa.REPORT_COLUMNS
     # Per-line percentages are misleading (owner, 2026-10-04): never on an entry row.
     assert "Operator efficiency" not in pa.REPORT_COLUMNS
@@ -93,21 +123,22 @@ def _line(item, qty, ct, mins=660, setup=0.0, op="Operator A", day=5, shift="1st
 
 def test_a_full_shift_on_three_items_is_one_hundred_percent_not_three_small_ones():
     """The owner's example: set up A, run A, set up B, run B, set up C, run C,
-    filling the 660-minute shift exactly. Each line on its own reads far below
-    100% because the floor types the whole shift on every line; the shift is
-    100%."""
-    lines = [_line("A", 30, 4.0, setup=90),      # 90 + 120 = 210
-             _line("B", 20, 6.0, setup=90),      # 90 + 120 = 210
-             _line("C", 25, 2.4, setup=180)]     # 180 + 60 = 240  -> 660 in all
+    filling the 660-minute shift exactly, every setup on its standard. Each line
+    on its own reads far below 100% because the floor types the whole shift on
+    every line; the shift is 100%."""
+    lines = [_line("A", 30, 4.0, setup=90, std_setup_min=90),     # 90 + 120 = 210
+             _line("B", 20, 6.0, setup=90, std_setup_min=90),     # 90 + 120 = 210
+             _line("C", 25, 2.4, setup=180, std_setup_min=180)]   # 180 + 60 = 240 -> 660
     for a in lines:
         (_, _, _, eff), _ = pa.actual_metrics(a)
-        assert eff < 0.4                          # what the old per-line column showed
+        assert eff < 0.4                          # what a per-line column would show
     (row,) = pa.shift_rows(lines, None, 2026, 10)
     assert row["Entries"] == 3
     assert row["Minutes available in shift"] == 660       # counted ONCE, not 3 x 660
     assert row["Actual setting time in Min"] == 360
-    assert row["Minutes for production"] == 300
+    assert row["Setting credit in Min"] == 360
     assert row["Standard minutes earned"] == 300
+    assert row["Operator minutes earned"] == 660
     assert row["Operator efficiency"] == 100.0
     assert row["Overall Productivity"] == pytest.approx(300 / 660 * 100, abs=0.05)
 
@@ -129,17 +160,19 @@ def test_shifts_are_split_by_day_shift_and_operator():
 
 
 def test_the_month_adds_minutes_and_never_averages_percentages():
-    """Shift 1: 600 earned in 600 production minutes (100%). Shift 2: 60 earned
-    in 300 (20%, the rest was setting). Averaging the percentages gives 60%;
-    the month is 660 earned / 900 minutes = 73.3%."""
-    acts = [_line("A", 100, 6.0, mins=600, day=5),                 # 600 / 600
-            _line("A", 10, 6.0, mins=600, setup=300, day=6)]       # 60 / 300 = 20%
+    """Shift 1: 600 earned in 600 minutes (100%). Shift 2, a half shift of 300
+    minutes: 60 earned + 90 standard setting = 150 (50%; the setup took 300).
+    Averaging the percentages gives 75%; the month is 750 / 900 = 83.3%."""
+    acts = [_line("A", 100, 6.0, mins=600, day=5),                          # 600 / 600
+            _line("A", 10, 6.0, mins=300, setup=300, std_setup_min=90, day=6)]  # 150 / 300
     (row,) = pa.operator_month_rows(acts, None, 2026, 10)
     assert row["Shifts worked"] == 2 and row["Shifts counted"] == 2
-    assert row["Minutes for production"] == 900
+    assert row["Minutes available in shift"] == 900
     assert row["Standard minutes earned"] == 660
-    assert row["Operator efficiency"] == pytest.approx(660 / 900 * 100, abs=0.05)   # 73.3, not 60
-    assert row["Overall Productivity"] == pytest.approx(660 / 1200 * 100, abs=0.05)
+    assert row["Operator minutes earned"] == 750
+    # 750 / 900 = 83.3%; averaging 100% and 50% would give 75%.
+    assert row["Operator efficiency"] == pytest.approx(750 / 900 * 100, abs=0.05)
+    assert row["Overall Productivity"] == pytest.approx(660 / 900 * 100, abs=0.05)
 
 
 def test_a_shift_with_a_missing_cycle_time_has_no_figure_and_leaves_the_month():
@@ -286,7 +319,9 @@ def test_monthly_report_json_and_excel():
     (shift,) = body["shifts"]["rows"]                        # both lines, one shift
     assert shift["Entries"] == 2 and shift["Minutes available in shift"] == 330
     assert shift["Standard minutes earned"] == 60            # (12 + 8) x 3
-    assert shift["Operator efficiency"] == pytest.approx(60 / 300 * 100, abs=0.05)
+    assert shift["Downtime credited in Min"] == 30           # the 30 min no power
+    assert shift["Operator minutes earned"] == 90            # 60 + 30
+    assert shift["Operator efficiency"] == pytest.approx(90 / 330 * 100, abs=0.05)
     (op,) = body["operators"]["rows"]
     assert op["Operator"] == "Operator One"
     assert op["Operator efficiency"] == shift["Operator efficiency"]
@@ -303,7 +338,7 @@ def test_monthly_report_json_and_excel():
                                  "How it is calculated"]
     month_col = 2 + pa.MONTH_COLUMNS.index("Operator efficiency")
     assert values["Operator efficiency"].cell(row=7, column=month_col).value == \
-        pytest.approx(0.2, abs=0.001)
+        pytest.approx(90 / 330, abs=0.001)
     # Transparent: every calculated cell is a formula over the cells it comes from.
     f = formulas["Operator efficiency"].cell(row=7, column=month_col).value
     assert f.startswith("=IF(") and "/" in f
@@ -339,8 +374,12 @@ def test_every_excel_formula_gives_the_value_the_preview_shows():
         xl.counta = counta
     from engine import production_analysis_xlsx as pax
     import math
-    acts = [_line("A", 30, 4.0, setup=90), _line("B", 20, 6.0, setup=90),
-            _line("C", 25, 2.4, setup=180),
+    # Setting credits of every kind: a typed standard (A, slower than it), a blank
+    # standard (B, the default 90), a faster setup (C); no operator and other work
+    # on the same lines, so the credited / not-credited split is checked too.
+    acts = [_line("A", 30, 4.0, setup=120, std_setup_min=90, no_operator_min=25),
+            _line("B", 20, 6.0, setup=90, other_work_min=15),
+            _line("C", 25, 2.4, setup=60, std_setup_min=180),
             _line("A", 50, 6.0, mins=600, op="Operator B", shift="2nd shift"),
             _line("A", 10, 6.0, day=6), _line("D", 5, None, day=6),
             _line("A", 10, 6.0, op="Operator B", day=6, no_power_min=60)]

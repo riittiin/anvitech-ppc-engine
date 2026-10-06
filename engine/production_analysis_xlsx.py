@@ -99,12 +99,17 @@ class _Sheet:
                                  if name in ("Working", "Note") else None)
 
 
-def _entries(sh, rows):
+def _entries(sh, rows, default_setup):
     g, h, i, j = (sh.col("Cycle time in Min"), sh.col("Minutes available in shift"),
                   sh.col("Actual OK Qty"), sh.col("Rejected qty"))
     w = sh.col("Working minutes in shift (after break)")
-    down_first, down_last = sh.col("No power (in Min)"), sh.col("No Load (in Min)")
+    std, act = sh.col("Std. setting time in Min"), sh.col("Actual setting time in Min")
+    credited = [sh.col(c) for c in ("No power (in Min)", "Machine Breakdown (in Min)",
+                                    "Tool problem (in Min)", "No Load (in Min)",
+                                    "Other work done (in Min)")]
     v = sh.col("Total Actual Qty")
+    cr, dc, ea = (sh.col("Setting credit in Min"), sh.col("Downtime credited in Min"),
+                  sh.col("Standard minutes earned"))
     for k, row in enumerate(rows):
         n = HEADER_ROW + 2 + k
         for name in pa.INPUT_COLUMNS:
@@ -115,10 +120,15 @@ def _entries(sh, rows):
         sh.put(k, "Planned qty", row["Planned qty"],
                f'=IF(AND(ISNUMBER({g}{n}),{g}{n}>0),{mins}/{g}{n},"-")')
         sh.put(k, "Total Actual Qty", row["Total Actual Qty"], f"={i}{n}+{j}{n}")
-        sh.put(k, "Total downtime (in Min)", row["Total downtime (in Min)"],
-               f"=SUM({down_first}{n}:{down_last}{n})")
+        # A setup was typed: credit the standard (the default when it is blank).
+        sh.put(k, "Setting credit in Min", row["Setting credit in Min"],
+               f"=IF(N({act}{n})>0,IF(N({std}{n})>0,{std}{n},{default_setup:g}),0)")
+        sh.put(k, "Downtime credited in Min", row["Downtime credited in Min"],
+               "=" + "+".join(f"N({c}{n})" for c in credited))
         sh.put(k, "Standard minutes earned", row["Standard minutes earned"],
                f'=IF(ISNUMBER({g}{n}),{v}{n}*{g}{n},"-")')
+        sh.put(k, "Operator minutes earned", row["Operator minutes earned"],
+               f'=IF(ISNUMBER({ea}{n}),{ea}{n}+{cr}{n}+{dc}{n},"-")')
     sh.ws.set_column(FIRST_COL + pa.REPORT_COLUMNS.index("Remarks"),
                      FIRST_COL + pa.REPORT_COLUMNS.index("Remarks"), 24)
     return sh
@@ -152,25 +162,20 @@ def _shifts(sh, rows, entry_sh, blocks):
         en, wk = c("Minutes entered"), c("Working minutes in shift (after break)")
         sh.put(k, "Minutes available in shift", row["Minutes available in shift"] or 0,
                f"=IF(ISNUMBER({wk}),MIN({en},{wk}),{en})")
-        sh.put(k, "Actual setting time in Min", row["Actual setting time in Min"],
-               f"=SUM({e('Actual setting time in Min')})")
-        sh.put(k, "Downtime (in Min)", row["Downtime (in Min)"],
-               f"=SUM({e('Total downtime (in Min)')})")
-        hm, st, dn = c("Minutes available in shift"), c("Actual setting time in Min"), c("Downtime (in Min)")
-        sh.put(k, "Minutes for production", row["Minutes for production"],
-               f'=IF({hm}>0,{hm}-{st}-{dn},"-")')
-        sh.put(k, "Standard minutes earned", row["Standard minutes earned"],
-               f"=SUM({e('Standard minutes earned')})")
-        sh.put(k, "Total Actual Qty", row["Total Actual Qty"], f"=SUM({e('Total Actual Qty')})")
-        pr, ea = c("Minutes for production"), c("Standard minutes earned")
+        for name in ("Actual setting time in Min", "Setting credit in Min",
+                     "Downtime credited in Min", "No operator (in Min)",
+                     "Standard minutes earned", "Operator minutes earned",
+                     "Total Actual Qty"):
+            sh.put(k, name, row[name], f"=SUM({e(name)})")
+        hm = c("Minutes available in shift")
+        ea, oe = c("Standard minutes earned"), c("Operator minutes earned")
         sh.put(k, "Counted in the month", row["Counted in the month"],
-               f'=IF(AND(COUNT({e("Cycle time in Min")})={c("Entries")},{hm}>0,'
-               f'ISNUMBER({pr})),IF({pr}>0,"Yes","No"),"No")')
+               f'=IF(AND(COUNT({e("Cycle time in Min")})={c("Entries")},{hm}>0),"Yes","No")')
         ok = c("Counted in the month")
         sh.put(k, "Overall Productivity", row["Overall Productivity"],
                f'=IF({ok}="Yes",{ea}/{hm},"-")')
         sh.put(k, "Operator efficiency", row["Operator efficiency"],
-               f'=IF({ok}="Yes",{ea}/{pr},"-")')
+               f'=IF({ok}="Yes",{oe}/{hm},"-")')
     for name, w in (("Working", 70), ("Note", 30), ("Items", 22), ("Machines", 14)):
         i = FIRST_COL + pa.SHIFT_COLUMNS.index(name)
         sh.ws.set_column(i, i, w)
@@ -189,19 +194,18 @@ def _month(sh, rows, shift_sh, n_shifts):
         sh.put(k, "Shifts worked", row["Shifts worked"], f"=COUNTIFS({s('Operator')},{op})")
         sh.put(k, "Shifts counted", row["Shifts counted"],
                f"=COUNTIFS({s('Operator')},{op},{yes})")
-        for name, src in (("Minutes available in shift", "Minutes available in shift"),
-                          ("Actual setting time in Min", "Actual setting time in Min"),
-                          ("Downtime (in Min)", "Downtime (in Min)"),
-                          ("Minutes for production", "Minutes for production"),
-                          ("Standard minutes earned", "Standard minutes earned")):
-            sh.put(k, name, row[name] or 0, f"=SUMIFS({s(src)},{s('Operator')},{op},{yes})")
+        for name in ("Minutes available in shift", "Actual setting time in Min",
+                     "Setting credit in Min", "Downtime credited in Min",
+                     "No operator (in Min)", "Standard minutes earned",
+                     "Operator minutes earned"):
+            sh.put(k, name, row[name] or 0, f"=SUMIFS({s(name)},{s('Operator')},{op},{yes})")
         sh.put(k, "Total Actual Qty", row["Total Actual Qty"],
                f"=SUMIFS({s('Total Actual Qty')},{s('Operator')},{op})")
-        n, ea = c("Shifts counted"), c("Standard minutes earned")
+        n, hm = c("Shifts counted"), c("Minutes available in shift")
         sh.put(k, "Overall Productivity", row["Overall Productivity"],
-               f'=IF({n}>0,{ea}/{c("Minutes available in shift")},"-")')
+               f'=IF({n}>0,{c("Standard minutes earned")}/{hm},"-")')
         sh.put(k, "Operator efficiency", row["Operator efficiency"],
-               f'=IF({n}>0,{ea}/{c("Minutes for production")},"-")')
+               f'=IF({n}>0,{c("Operator minutes earned")}/{hm},"-")')
     for name, w in (("Working", 70), ("Note", 30), ("Operator", 18)):
         i = FIRST_COL + pa.MONTH_COLUMNS.index(name)
         sh.ws.set_column(i, i, w)
@@ -211,13 +215,23 @@ def _month(sh, rows, shift_sh, n_shifts):
 HOW_ROWS = (
     ("Where the numbers come from",
      "Every Daily Entry line typed from 03-10-2026 on (the day the form first had these "
-     "fields). Outsourced steps are left out. Cycle time is the Item's Process Master value "
-     "saved on the line when it was typed."),
+     "fields). Outsourced steps are left out. Cycle time is the CURRENT Item's Process "
+     "Master value (the value saved on the line only when the master has none)."),
     ("Every entry: Total Actual Qty", "= Actual OK Qty + Rejected qty"),
-    ("Every entry: Total downtime", "= No power + No operator + Machine breakdown + Tool problem "
-                                    "+ Other work done + No load"),
+    ("Every entry: Setting credit",
+     "= the Standard setting time, on a line where an Actual setting time was typed (a setup "
+     "happened). Blank standard = the default 90. No actual setting typed (the job ran on in "
+     "continuation) = 0. Faster or slower than standard, the operator earns the standard."),
+    ("Every entry: Downtime credited",
+     "= No power + Machine breakdown + Tool problem + No load + Other work done. Not the "
+     "operator's mistake (or other work he did), so credited to him."),
+    ("Not credited",
+     "No operator (his mistake) and any actual setting time beyond the standard. They count "
+     "against the operator."),
     ("Every entry: Standard minutes earned",
      "= Total Actual Qty x Cycle time. The minutes the pieces should take at standard pace."),
+    ("Every entry: Operator minutes earned",
+     "= Standard minutes earned + Setting credit + Downtime credited"),
     ("Shift-wise: one row", "One operator, one day, one shift: all of that operator's lines "
                             "for the shift together (a block of rows on Every entry)."),
     ("Working minutes in shift (after break)",
@@ -231,21 +245,18 @@ HOW_ROWS = (
     ("Shift-wise: Minutes available in shift",
      "= the smaller of Minutes entered and Working minutes in shift. A line typed before "
      "the break was taken out (660 / 600) counts as 630 / 570."),
-    ("Shift-wise: Actual setting time, Downtime", "= added up over the shift's lines"),
-    ("Shift-wise: Minutes for production", "= Minutes available - Actual setting time - Downtime"),
-    ("Shift-wise: Standard minutes earned", "= added up over the shift's lines"),
+    ("Shift-wise: every other minutes column", "= added up over the shift's lines"),
     ("Shift-wise: Counted in the month",
-     "Yes when every line has a cycle time, minutes available were typed, and some time is "
-     "left for production. A No shift has no percentage and is left out of the month."),
-    ("Shift-wise: Operator efficiency", "= Standard minutes earned / Minutes for production"),
-    ("Shift-wise: Overall productivity", "= Standard minutes earned / Minutes available"),
+     "Yes when every line has a cycle time and minutes available were typed. A No shift has "
+     "no percentage and is left out of the month."),
+    ("Shift-wise: Operator efficiency", "= Operator minutes earned / Minutes available"),
+    ("Shift-wise: Overall productivity",
+     "= Standard minutes earned / Minutes available. The real output of the shift, no credits."),
     ("Operator efficiency (month)",
-     "= the counted shifts' Standard minutes earned added up, divided by their Minutes for "
-     "production added up. Percentages are never averaged."),
+     "= the counted shifts' Operator minutes earned added up, divided by their Minutes "
+     "available added up. Percentages are never averaged."),
     ("Overall productivity (month)",
      "= the counted shifts' Standard minutes earned added up / their Minutes available added up"),
-    ("Setting time", "Only the ACTUAL setting time typed is used. The standard setting time is "
-                     "recorded on each line but used in no formula."),
     ("Over 100%", "Possible when one operator runs two machines at once: both machines' work "
                   "counts against one shift."),
 )
@@ -274,7 +285,7 @@ def build(year, month, tables) -> bytes:
                       pa.SHIFT_COLUMNS, set(pa.SHIFT_COLUMNS[5:-2]), fmt)
     entry_sh = _Sheet(wb, ENTRY_SHEET, "Monthly production analysis: every Daily Entry line",
                       year, month, pa.REPORT_COLUMNS, pa.RESULT_COLUMNS, fmt)
-    _entries(entry_sh, entries)
+    _entries(entry_sh, entries, tables.get("default_setup", pa.DEFAULT_STD_SETUP_MIN))
     _shifts(shift_sh, shifts, entry_sh, _blocks(entries, shifts))
     _month(month_sh, tables["operators"]["rows"], shift_sh, len(shifts))
     how = wb.add_worksheet(HOW_SHEET)
