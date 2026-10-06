@@ -37,9 +37,15 @@ def _get_item(c, code):
     return next(i for i in c.get("/item-master").json()["items"] if i["code"] == code)
 
 
-def test_get_lists_items_with_kinds_for_both_roles():
+def test_the_user_role_cannot_even_see_the_item_master():
+    """Owner, 2026-10-06: admin only, reading included."""
     m, admin, user = _setup()
-    for c in (admin, user):
+    assert user.get("/item-master").status_code == 403
+
+
+def test_get_lists_items_with_kinds():
+    m, admin, user = _setup()
+    for c in (admin,):
         r = c.get("/item-master")
         assert r.status_code == 200
         data = r.json()

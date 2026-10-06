@@ -101,6 +101,8 @@ function showView(v, push) {
   // closes the other door (2026-08-09 lesson: a role gate belongs on every entry
   // point, not just the one a mouse click goes through).
   if (v === "neworders" && !newOrdersAllowed()) v = "orders";
+  // Item Process Master is admin only too (owner, 2026-10-06): same door closed.
+  if (v === "itemmaster" && currentRole !== "admin") v = "orders";
   // Item Process Master: leaving with unsaved edits asks first. Saying no keeps
   // the tab (and puts the hash back, if the move came from the address bar).
   if (activeView === "itemmaster" && v !== "itemmaster" && imDraft) {
@@ -3102,6 +3104,7 @@ function imKnown(id) {
 }
 
 async function renderItemMaster() {
+  if (currentRole !== "admin") return;   // admin only (2026-10-06); the server 403s anyway
   if (!imData) await loadItemMaster();
   if (!imData) return;
   const isAdmin = currentRole === "admin";

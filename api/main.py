@@ -3571,7 +3571,10 @@ def _item_view(code, it, orders, drafts):
 
 
 @app.get("/item-master")
-def get_item_master():
+def get_item_master(request: Request):
+    """Every item's routing (admin only). Owner, 2026-10-06: the user login may
+    neither change NOR see the Item Process Master."""
+    require_admin(request)
     masters = _current_masters()          # seeds the table once
     doc = book_store.load_item_master() or {"items": {}}
     orders = list(book_store.load_active_orders().values())

@@ -32,7 +32,9 @@
       <a class="nav-item" data-view="schedule" href="#schedule">Schedule</a>
       <a class="nav-item" data-view="gantt" href="#gantt">Gantt</a>
       <a class="nav-item" data-view="entry" href="#entry">Daily Entry</a>
-      <a class="nav-item" data-view="itemmaster" href="#itemmaster">Item Process Master</a>
+      <!-- Admin only, like Add New Orders (owner, 2026-10-06): the user login
+           neither sees nor changes item routings. Server-enforced on GET too. -->
+      <a class="nav-item admin-only" data-view="itemmaster" href="#itemmaster" id="nav-itemmaster">Item Process Master</a>
       <a class="nav-item" data-view="analytics" href="#analytics">Analytics</a>
       <a class="nav-item" data-view="settings" href="#settings">Settings</a>
     </nav>
@@ -177,7 +179,7 @@
     </div>
   </section>
 
-  <!-- ===================== ITEM PROCESS MASTER (both roles; edits admin-only) ===================== -->
+  <!-- ===================== ITEM PROCESS MASTER (admin only, 2026-10-06) ===================== -->
   <section class="view" id="view-itemmaster">
     <div class="card">
       <div class="card-head">

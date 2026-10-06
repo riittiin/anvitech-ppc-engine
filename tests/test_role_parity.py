@@ -208,7 +208,10 @@ def test_the_delay_download_button_is_offered_to_the_user_role():
 def test_no_tab_is_hidden_from_the_user_role():
     """Whole-nav invariant: a future tab must not quietly become admin-only.
 
-    One named, narrow exception: "neworders" (Add New Orders). The owner
+    Second named exception, 2026-10-06: "itemmaster" (Item Process Master) —
+    the owner ruled the user login may neither see nor change item routings.
+
+    First named, narrow exception: "neworders" (Add New Orders). The owner
     decided on 2026-09-08 that this tab is genuinely admin-only — adding
     orders and accepting delivery dates is a director's decision, and the
     floor shares one login (see docs/superpowers/specs/
@@ -217,7 +220,7 @@ def test_no_tab_is_hidden_from_the_user_role():
     precisely which tab is hidden and why, not to make the invariant vague.
     If anyone hides a SECOND tab, this assertion must still fail loudly.
     """
-    ALLOWED_ADMIN_ONLY_TABS = {"neworders"}
+    ALLOWED_ADMIN_ONLY_TABS = {"neworders", "itemmaster"}
     hidden = [m.group(1) for m in
               re.finditer(r'<a class="[^"]*admin-only[^"]*" data-view="([^"]+)"', INDEX_HTML)]
     unexpected = [v for v in hidden if v not in ALLOWED_ADMIN_ONLY_TABS]
