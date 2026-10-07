@@ -4,7 +4,12 @@ roles. It starts an auto-applying contest unless auto is disabled, one is alread
 running, or nothing material changed since the last applied plan (book + inputs
 fingerprint). Unlike the removed Mon/Fri cron it is NOT cloud-only. Admin
 mutations (upload, commit, delete, /run persist) still never start a contest on
-their own. AUTO_OPTIMIZE=0 (internal test isolation only) disables everything."""
+their own. AUTO_OPTIMIZE=0 (internal test isolation only) disables everything.
+
+Fixed plan (2026-10-06): POST /optimize/done no longer calls the trigger at all; it
+repairs the published plan. The Done tests below were rebased to that contract;
+the trigger's own machinery (`_try_start_auto`, `_auto_apply_result`) is kept,
+unreferenced by the button, and its tests are unchanged."""
 import time
 from datetime import date, datetime, timedelta
 
@@ -44,7 +49,10 @@ def _auto_env(monkeypatch):
 # --------------------------------------------------------------------------- #
 # POST /optimize/done — the feedback-driven trigger (both roles)
 # --------------------------------------------------------------------------- #
-def test_done_starts_contest_when_book_changed(monkeypatch):
+def test_done_never_starts_a_contest_even_when_book_changed(monkeypatch):
+    """Rebased 2026-10-06 (fixed plan): Done used to start a contest when the book
+    changed. It now only repairs the published plan; only the admin's Optimize
+    re-plans machines or turns."""
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
     starts = []
@@ -55,11 +63,14 @@ def test_done_starts_contest_when_book_changed(monkeypatch):
     c.post("/login", data={"username": "anvitech", "password": "1930rail"})
     r = c.post("/optimize/done")
     assert r.status_code == 200
-    assert r.json()["started"] is True
-    assert starts == [("auto", True)]
+    assert r.json()["started"] is False and r.json()["reason"] == "repaired"
+    assert starts == []
+    assert "keep their machines" in (book_store.load_auto_note() or {}).get("text", "")
 
 
 def test_done_reachable_by_user_role(monkeypatch):
+    """Rebased 2026-10-06 (fixed plan): still reachable by the user role, but it
+    repairs instead of starting a contest, and the note names who pressed it."""
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
     starts = []
@@ -70,9 +81,10 @@ def test_done_reachable_by_user_role(monkeypatch):
     c.post("/login", data={"username": "anvitech_user",
                            "password": "anvitech12345678"})
     r = c.post("/optimize/done")
-    assert r.status_code == 200            # NOT 403 — user role may trigger it
-    assert r.json()["started"] is True
-    assert starts == [("auto", True)]
+    assert r.status_code == 200            # NOT 403 — user role may press it
+    assert r.json()["started"] is False
+    assert starts == []
+    assert "anvitech_user" in (book_store.load_auto_note() or {}).get("text", "")
 
 
 def test_done_requires_login(monkeypatch):
@@ -82,7 +94,9 @@ def test_done_requires_login(monkeypatch):
     assert c.post("/optimize/done").status_code == 401
 
 
-def test_done_skips_and_notes_when_nothing_changed(monkeypatch):
+def test_done_with_nothing_changed_still_repairs_and_says_so(monkeypatch):
+    """Rebased 2026-10-06 (fixed plan): the 'nothing new to re-plan' skip belonged
+    to the contest trigger. Done now always repairs, and the note says what it did."""
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
     cfg = m._load_plan_config()
@@ -97,21 +111,15 @@ def test_done_skips_and_notes_when_nothing_changed(monkeypatch):
     assert r.status_code == 200
     assert r.json()["started"] is False
     assert starts == []
-    # Wording changed 2026-08-09 (the note now names who pressed and what to do);
-    # what is pinned here is that the skip is EXPLAINED, never silent.
     _note = (book_store.load_auto_note() or {}).get("text", "")
-    assert "nothing new to re-plan" in _note and "unchanged" in _note
+    assert "plan updated" in _note and "keep their machines" in _note
 
 
-def test_done_skips_when_last_searched_matches_even_without_applied_plan(monkeypatch):
-    """No applied plan_priority at all, but a prior contest already SEARCHED
-    this exact book+inputs (e.g. it found nothing worth applying) — a
-    redundant Done click must still be skipped, not re-run the full contest."""
+def test_done_never_searches_even_without_an_applied_plan(monkeypatch):
+    """Rebased 2026-10-06 (fixed plan): with no applied plan Done used to start a
+    search unless one had already searched this book. It never searches now."""
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
-    cfg = m._load_plan_config()
-    book_store.save_last_searched({"book_sig": m._current_book_sig(),
-                                   "inputs_sig": m._inputs_signature(cfg)})
     assert book_store.load_plan_priority() is None
     starts = []
     monkeypatch.setattr(m, "_start_optimize", lambda *a, **k: starts.append(1))
@@ -121,10 +129,7 @@ def test_done_skips_when_last_searched_matches_even_without_applied_plan(monkeyp
     assert r.status_code == 200
     assert r.json()["started"] is False
     assert starts == []
-    # Wording changed 2026-08-09 (the note now names who pressed and what to do);
-    # what is pinned here is that the skip is EXPLAINED, never silent.
-    _note = (book_store.load_auto_note() or {}).get("text", "")
-    assert "nothing new to re-plan" in _note and "unchanged" in _note
+    assert book_store.load_last_searched() is None   # no contest ran
 
 
 def test_done_disabled_by_internal_env(monkeypatch):
@@ -197,9 +202,9 @@ def test_run_still_surfaces_the_auto_note(monkeypatch):
 # No weekday gate (2026-07-29): the restricted optimize runs every day —
 # only "already running" / "nothing changed" skip it.
 # --------------------------------------------------------------------------- #
-def test_done_runs_on_non_thursday_too(monkeypatch):
-    """The Thursday-only gate is removed: /optimize/done starts the
-    restricted re-optimization on ANY weekday when the book changed."""
+def test_done_repairs_on_a_monday(monkeypatch):
+    """Rebased 2026-10-06 (fixed plan): no weekday ever starts a contest now; Done
+    repairs the same way on any day."""
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
     monkeypatch.setattr(m, "_ist_today", lambda: date(2026, 7, 27))  # a Monday
@@ -211,15 +216,15 @@ def test_done_runs_on_non_thursday_too(monkeypatch):
     c.post("/login", data={"username": "anvitech", "password": "1930rail"})
     r = c.post("/optimize/done")
     assert r.status_code == 200
-    body = r.json()
-    assert body["reason"] != "not_optimize_day"
-    assert body["started"] is True
-    assert starts == [("auto", True)]
+    assert r.json() == {**r.json(), "started": False, "reason": "repaired"}
+    assert starts == []
 
 
-def test_done_fires_optimize_on_thursday(monkeypatch):
+def test_done_repairs_on_a_thursday(monkeypatch):
+    """Rebased 2026-10-06 (fixed plan): Thursday is no different either."""
     _auto_env(monkeypatch)
     m = _api(); _seed_book()
+    monkeypatch.setattr(m, "_ist_today", lambda: date(2026, 7, 30))  # a Thursday
     starts = []
     monkeypatch.setattr(m, "_start_optimize",
                         lambda budget_evals, label, background=True, auto=False:
@@ -228,9 +233,8 @@ def test_done_fires_optimize_on_thursday(monkeypatch):
     c.post("/login", data={"username": "anvitech", "password": "1930rail"})
     r = c.post("/optimize/done")
     assert r.status_code == 200
-    assert r.json()["started"] is True
-    assert r.json()["reason"] == "started"
-    assert starts == [("auto", True)]
+    assert r.json()["started"] is False and r.json()["reason"] == "repaired"
+    assert starts == []
 
 
 # --------------------------------------------------------------------------- #

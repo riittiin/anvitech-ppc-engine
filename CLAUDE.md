@@ -1,6 +1,188 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-10-05)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-10-07)
+>
+> - **THE PLAN IS FIXED: "DONE ENTERING" ONLY MOVES TIMES; ONLY THE ADMIN'S OPTIMIZE
+>   MOVES A JOB TO ANOTHER MACHINE OR CHANGES THE PUBLISHED ORDER (2026-10-06, owner request after a
+>   director's and the floor's complaint; branch `fixed-plan`, commits `237ce35..50092f9`
+>   + doc commit `a9a0bf5` + final review fix wave `2987780..a1ae5e4` + owner amendment
+>   Task 9 `d6972f5..` (spec section 8); UNCOMMITTED TO MAIN, NOT DEPLOYED; spec
+>   `docs/superpowers/specs/2026-10-06-fixed-plan-design.md`, evidence and harnesses in
+>   `docs/superpowers/specs/2026-10-06-fixed-plan-verification.md` +
+>   `2026-10-06-fixed-plan-harness/`).** Every Done click used to re-plan the whole book:
+>   a greedy dispatcher re-laid every unstarted step from 08:00 (chaotic, 2026-08-07) and
+>   the daily auto-optimize applied whatever scored better, so a promised date jumped from
+>   1 to 10 January overnight and item B published on CNC6 was on CNC3 next morning, for
+>   reasons nobody on the floor could see. The director's rule: the plan must be
+>   constant; daily entry updates progress, not the plan. **Now:** a **published plan**
+>   (`anvitech:last_applied_schedule` + `anvitech:published_plan_meta`) is written ONLY by an
+>   applied Optimize (`_optimize_apply` -> `_publish`), an accepted earlier date (its
+>   published plan contains the accepted orders: `_optimize_apply(extra_orders=)`),
+>   "Go back to standard plan" (republishes the free standard plan), and
+>   once at go-live (`_ensure_published_plan`, keyed on the META, seeds the plan the
+>   floor sees at that moment). Add New Orders APPENDS its lines with the slots the quote
+>   gave them (`_pin_new_orders`, deliberately not `_publish`). **Every `/run` and every
+>   Done is a repair**: `run_forward(published=)` -> `new_engine._ppc_pins` ->
+>   `decode(pins=)`; each published op keeps its machine and is placed in the PUBLISHED
+>   ORDER, its people where still allowed (D7), and only its times move (D1).
+>   **D6 as amended by the owner after the live check (spec section 8, Task 9): next
+>   READY job in published order, not strict turn.** A published job that is LATE (its
+>   order reaches it more than a minute after its published start: previous step late,
+>   parts at a vendor) gives way ON ITS OWN MACHINE ONLY (`flow_scheduler._late` /
+>   `_pick`): if a job queued there can start before it is ready, the machine takes the
+>   next job in published order READY when the machine can next start one, and an
+>   earlier-published job of that machine ready by the time the picked one would really
+>   start goes before it; if the picked job cannot start before the late one could, the
+>   late one goes. A job is only known to be ready once its feeding steps are placed, so
+>   when a job ahead on that machine still waits for them, the next job in published
+>   order on another machine is placed first, unless that would put it in front of an
+>   unplaced earlier step of its own machine; then there is no give-way and the late job
+>   keeps its place. What the harness checks (0 on the live copy, both variants): no
+>   machine change, no on-time ready job finding its machine held by a later-published
+>   job (other than its machine's give-way to a late job), no ready job losing its slot
+>   to a later one. A job that is ready and on time keeps its place; a later job that
+>   was ready earlier may already be running when it becomes ready. A repair of an
+>   unpunched plan reproduces it EXACTLY (live copy: 0 of 67 orders moved, 298 = 298;
+>   the literal "any ready job first" rule breaks that, measured as a mutation). The
+>   minute of tolerance matters: published times are stored to the second, and without
+>   it 226 on-time jobs read as sub-second "late" on the live copy. Frozen ops still
+>   run first on their machine (`frozen_end` floor). Nothing waits for a turn any more,
+>   so the deadlock guard, `Schedule.turn_released` and its note are gone.
+>   **Version A0 ADOPTED by the owner 2026-10-07** (this branch, rule as of `6202018`).
+>   Two alternatives were measured on the same live harness and kept on branches:
+>   **A1** (`fixed-plan-a1`, `3e1c2e0`, the spec-literal "the picked job goes"): 116 of
+>   119 checks on variant A (one CNC pair where an earlier-published job ready for a
+>   day ran after a later one), 119 of 119 on B, late-days c / d A 606 / 598, B 493 /
+>   494 (A0: A 603 / 599, B 493 / 494); **B** (`fixed-plan-simple`, a simple
+>   chronological per-machine rule): broke repair fidelity, 22 of 67 orders moved at
+>   go-live (up to 3 days), Test5/8/9 unpunched repairs moved 34 to 58 orders up to 41
+>   days, quoted dates drifted a day, checks 113 and 112 of 119, late-days c / d A 599 /
+>   592, B 494 / 489. **A0's one accepted
+>   exception (spec section 8):** when the job ahead on a machine is late AND the work
+>   that would make it ready cannot be placed without jumping another machine's queue,
+>   there is no give-way and the machine waits for the late job (strict turn, in that
+>   case only). Measured cost on the live copy: none.
+>   **D12, vendor time from the day the parts were sent:** when the step before an
+>   outsourced step was entered complete (full qty good; for a clubbed batch every
+>   line, latest date), the OS step returns at that day's first-shift start + lead
+>   time, never before it is reached (`orderbook.process_completed_on` ->
+>   `SOLine.process_done_on` -> `Batch.process_done_on` -> ppc `Order.os_sent` ->
+>   `_place_operation`). Before, an order at a vendor slipped a day per day. A machine marked down does NOT release its jobs in a repair (D5/D11,
+>   `_ppc_frozen(release_on_downtime=False)` only when published); they wait and a banner
+>   (`fixed_plan_alerts`, both roles, top of the data-gaps card) says "Press Optimize",
+>   naming each order whose CURRENT (repaired) run on that machine overlaps the break
+>   or was pushed into the first working window after it (`fixed_plan.downtime_waits`
+>   reads the repair, since the published plan ages between Optimize clicks).
+>   A published machine no longer allowed or no longer manned is named, not fatal (D8).
+>   `POST /optimize/done` never starts a search (`_try_start_auto`/`_auto_apply_result`
+>   kept, unreferenced, like `COMMITMENT_FEATURE_ENABLED`); "Start deep search" is renamed
+>   **Optimize**, warns before it starts, never auto-applies, and its result lists every
+>   order whose delivery date moves (`fixed_plan.date_changes`). **One definition of
+>   "the plan the floor gets after Apply": `api.main._repaired_candidate`** = the
+>   candidate's free plan (what Apply publishes), the frozen set rebuilt from its
+>   projection (what Apply saves), and that plan published then repaired. The panel's
+>   After numbers and `improved`, the date list and the Add New Orders "what moved"
+>   screen all read the repaired plan; Apply builds everything first, publishes FIRST
+>   and raises 500 with nothing else written if the publish fails; the publish and its
+>   frozen set are one step (`_publish_with_frozen` rolls both back), and "Go back to
+>   standard plan" ends the Add New Orders arrival queue, as Apply does. Every write of the
+>   published plan holds `_PUBLISH_LOCK`. `SCHEDULER_FINGERPRINT` = `new-engine-v13-ready-turn-os-sent`.
+>   **The one load-bearing decision: the published plan is pinned INTO the normal
+>   engine, never replayed beside it.** Pins go through `_place_operation` ->
+>   `_lay_around` / `_lay_frozen`, the one window source (`iter_windows`: weekly off,
+>   holidays, downtime, meal breaks, night only where the machine runs it), `_ready_after`,
+>   the piece-flow guard and the StaffingBoard, and quantities still come from the batch
+>   (`Order.process_remaining`). Rows are keyed by (item, op_seq, SO refs), never batch
+>   id, and a row maps to EVERY current batch sharing an SO ref (a split batch keeps its
+>   pin in both halves). **Task 6b finding (measured on the live copy):** holding machine
+>   and turn was not enough. A repair of an UNPUNCHED published plan moved 39 of 67
+>   orders, up to 10 days, +169 late-days, because people are booked first come at
+>   PLACEMENT time and the repair placed jobs in a different order than the plan it
+>   repaired. Fix: `ScheduleEntry.placed` -> projection row `placed` -> `PinnedOp.rank`
+>   (the repair replays the published PLACEMENT order, `_replay_key`) and row `staff` ->
+>   `PinnedOp.staff` (the published person per stretch, `_pref` in `_lay_frozen`). Stage
+>   2 and appended new orders renumber `placed` after the book, or a new order would be
+>   placed first and take people from existing orders. Result: 19 of 67 orders, max 2
+>   days, +10 late-days at go-live; a repair of a repair moves 0. That residual was the
+>   strict turn itself; with the Task 9 rule the go-live repair moves 0 orders.
+>   **Measured on a read-only copy of the live store (06-10, 67 orders, 1,130 punches),
+>   through the real API, 10 simulated working days (clock monkeypatched, every planned
+>   op punched, a 50 % shortfall and an early finish on days 3 and 7, Done each day): 91
+>   of 91 checks passed (variant A), 90 of 91 (variant B); after the final fix wave 102 of
+>   102 on both, including an earlier-date accept end to end.** Every day: 0 ops changed
+>   machine, 0 turn inversions among queued jobs (4 between two half-finished 1-piece
+>   remainders, routing-wins order, the D6 punch case), 0 segments in a meal break /
+>   weekly off / holiday / down machine / night on a single-shift machine, 0 double
+>   bookings, 0 absent booked, 0 routing / qualification / batch-quantity violations, 0
+>   date disagreements between Orders, Gantt, shift-wise and delay report. (Turn
+>   numbers in this paragraph are from before Task 9; see the Task 9 numbers below.) Done twice
+>   with no punch = identical plan. Every order whose date moved is downstream (same
+>   machine later, same batch later) of a punch that differed from the plan, an OS block
+>   still out, or a whole-piece rounding: 0 unexplained on all 10 days. Optimize's date
+>   list = exactly what the floor got after Apply (47 orders listed, 0 wrong, 0 unlisted
+>   moved); the panel's After late-days = the plan after Apply (678 = 678, B 495 = 495).
+>   Machine down: 0 moves, banner for both roles, Optimize + Apply clears it.
+>   Earlier-date accept: 19 of 19 accepted steps published and held, its "what moved"
+>   screen exact (0 wrong, existing-book late-days 918 -> 681 on screen and on the floor).
+>   Add New Orders: quoted dates = plan dates, 0 existing orders moved date or machine,
+>   unchanged after a Done and after two punched days. **Late-days (the cost the owner
+>   accepted, spec section 7):** before this feature 298; go-live 308; day 10 repaired
+>   **918** vs the old free re-plan on the same punches **689** (+229); fresh Optimize on
+>   day 10 (budget 15) **678**. That gap is almost all OUTSOURCING: an unreturned OS block
+>   is re-laid in full one day later every day (pre-existing engine behaviour) and under
+>   the strict turn everything queued behind its successor waits; with OS punched when
+>   SENT (variant B) the same numbers are 508 vs 504 (+4), Optimize 495. **Tell the owner
+>   plainly: with outsourced work open, press Optimize every few days, or dates slide.**
+>   **Mutation sweep: 34 of 35 load-bearing** (the four spec 5.9 parts all bite), plus
+>   16 of 16 for the fix wave, which closed the 35th (date list from the FREE candidate)
+>   with a fixture where repair and free candidate really differ.
+>   **Fixed in the final review wave (2026-10-06):** C1 an accepted earlier date
+>   published a plan WITHOUT the accepted orders (snapshot taken before they were
+>   added, existing orders sat in the slots the search gave them); I2 the panel scored
+>   the free candidate while the floor got its repair; I3 Apply did not rebuild the
+>   frozen set, so the first Done after Apply changed the plan with no new punch and a
+>   half-finished job the search moved off a down machine went back to wait on it; I4 a
+>   failed publish was swallowed; I5 a published step gone from the routing or a
+>   machine gone from the Machines list was dropped silently (now named); I6 "Go back
+>   to standard plan" was a near no-op under pins; I7 the down-machine banner counted
+>   every later job (VMC1: "9 orders" -> 2). Base `035fe86` vs HEAD with nothing
+>   published, Test5/8/9 x WIP 0/30 x flexible off/on: 12 of 12 plans byte-identical
+>   (books with no completed step before an OS step; D12 changes free and Optimize
+>   plans once one is complete, by design).
+>   **Task 9 (owner amendment + carried fixes), live copy re-run, both variants:**
+>   late-days a / b / c (c' free re-plan) / d: A 298 / 298 / **603** (604) / 599, was
+>   298 / 308 / 918 (689) / 678; B 298 / 298 / **493** (498) / 494, was 298 / 308 / 508
+>   (504) / 495. The +229 gap of variant A is gone (repaired = free re-plan). **119 of
+>   119 checks on both variants** (two review fix rounds), incl. an audit classifying
+>   every out-of-order pair on a machine (A / B over the run: earlier job not ready
+>   695 / 287, frozen 59 / 51, placed first by the published plan 2 / 6, earlier job
+>   ready but B used time it could not use 5 / 0, **earlier job ready and B took its
+>   slot 0 / 0**) and a held-machine audit (**0 / 0**; it flags the re-reviewer's probe
+>   on the earlier code). Running the live copy found most of the rule's edge cases
+>   (sub-second lateness, pick before the piece-flow guard, feeding steps not yet
+>   placed, a time tie, a give-way reordering another machine), each fixed with a test
+>   that failed first. Repair plan time on the live copy 184 -> 794 ms (every order's
+>   next step is evaluated now, not each queue head); the free plan is about 1.1 s.
+>   Every other check passes (calendar, people, invariants, one set of dates, idempotence,
+>   date list, machine down, Add New Orders, earlier date). Also fixed in Task 9: a
+>   half-finished job an Optimize moved off a down machine pays its setup on resume
+>   (`freeze.mark_moved` -> frozen `setup_from` -> `FrozenOp.setup`, owed until the step
+>   is punched again; signal = the previous published machine, since only 56 of 1,130
+>   live punches name a machine. Limit: if the floor ran the step on a machine other
+>   than the published one and an Optimize then publishes it THERE, the setup is still
+>   charged once, though that machine was already set up); "Go back to standard plan" publishes an empty plan
+>   only for an empty book (`optimize_service.NothingToOptimize`), publishes before it
+>   forgets the ranks; an empty-ranks result reports the repaired plan's numbers.
+>   **Not run:** the browser pass (controller), Test5/8/9 here (6b measured them), cloud /
+>   Oracle Optimize, multi-admin concurrency, a
+>   floor that runs a job out of turn on its own. **Deliberately not built:** a list of
+>   jobs that changed machine (D4), any automatic optimize (D2), an automatic move back when a down machine
+>   returns. **Deferred minors worth knowing:** an order with
+>   nothing left to make but not finished at its gate has its date follow the plan clock
+>   daily (pre-existing); an unpublished step in a repair is placed after eligible pinned work, not
+>   by Giffler-Thompson. **Rule: only the admin's Optimize (or an accepted earlier date)
+>   moves a job to another machine or changes the published order; a late job lets ready
+>   ones go first on the same machine. Done entering only moves times.**
 >
 > - **MACHINES AND HOLIDAYS LIVE IN THE APP; THE EXCEL UPLOAD IS GONE (2026-10-05, owner
 >   request, stage 2 of 2; branch `shop-masters`, UNPUSHED; spec

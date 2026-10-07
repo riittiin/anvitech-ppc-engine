@@ -30,7 +30,7 @@ let queueNote = null;         // /run's queue_note: arrival-queue status (inform
 let optimizePollTimer = null; // /optimize/status polling handle
 let ITEMS = null;
 let ganttDayWidth = 200;   // px per day column (Gantt is day-level, no hour detail)
-let currentRole = "user";   // set from /me; default to the least-privileged role
+let currentRole = null;   // set from /me; unknown until then (every check treats it as not admin)
 let currentConfig = null;   // /run's config (both roles) — feeds the status strip's plan basis
 let planEverLoaded = false; // true once the first /run response (success or failure) lands —
                              // distinguishes "still loading" from a genuinely empty plan
@@ -50,6 +50,9 @@ let quoteStamp = null; // the quote's plan fingerprint — required by /new-orde
 // the per-view content div so the unchanged render functions write to the right spot.
 const VIEWS = ["orders", "neworders", "schedule", "gantt", "entry", "analytics", "itemmaster", "settings"];
 let activeView = "orders";
+// The last Done outcome, kept in state: runPlan re-renders Daily Entry, which would
+// otherwise wipe the status line the moment the update succeeded.
+let lastDoneStatus = "";
 
 const $ = (id) => document.getElementById(id);
 const setStatus = (m, isError = false) => {
@@ -103,6 +106,8 @@ function showView(v, push) {
   if (v === "neworders" && !newOrdersAllowed()) v = "orders";
   // Item Process Master is admin only too (owner, 2026-10-06): same door closed.
   if (v === "itemmaster" && currentRole !== "admin") v = "orders";
+  // The last Done outcome belongs to this visit to Daily Entry only.
+  if (activeView === "entry" && v !== "entry") lastDoneStatus = "";
   // Item Process Master: leaving with unsaved edits asks first. Saying no keeps
   // the tab (and puts the hash back, if the move came from the address bar).
   if (activeView === "itemmaster" && v !== "itemmaster" && imDraft) {
@@ -306,6 +311,7 @@ async function runPlan(persist = false) {
     if (data.resolved_plan_start) lastResolvedStart = data.resolved_plan_start;
     if (currentRole === "admin" && data.config) applyConfig(data.config, data.resolved_plan_start);
     renderReport(data.report);
+    renderFixedPlanAlerts(data.fixed_plan_alerts);
     renderOptimizeBanner();
     renderAutoNote();
     renderStatusStrip();
@@ -334,14 +340,14 @@ function isoToDisplayDateTime(iso) {       // "2026-07-13T10:04:00" -> "13-07-20
 }
 
 // Shared wording for the "delivery dates moved since the applied optimization"
-// warning — rendered in both the Optimize panel (next to the Start deep search
-// button) and the status strip, so the two can never drift.
+// warning — rendered in both the Optimize panel (next to the Optimize button)
+// and the status strip, so the two can never drift.
 function datesChangedWarningText(meta) {
   if (!meta || !meta.dates_changed) return null;
   const n = meta.dates_changed_count || 0;
   return `${n} order${n === 1 ? "" : "s"} ${n === 1 ? "has" : "have"} a delivery `
-    + "date that changed since the last search. The job order does not know about it "
-    + "reflects the change. Run Start deep search.";
+    + "date that changed since the last Optimize. The job order was worked out "
+    + "before that change. Press Optimize to plan with the new dates.";
 }
 
 function renderOptimizeBanner() {
@@ -373,7 +379,7 @@ function renderOptimizeBanner() {
     if (a.total_late_days != null && t.total_late_days != null && a.total_late_days - t.total_late_days >= 5)
       bits.push(`${Math.round(a.total_late_days)} late-days now vs ${Math.round(t.total_late_days)} targeted`);
     h += ` · <span class="pill-pending">This plan has drifted from the search it was based on` +
-         (bits.length ? ` (${bits.join("; ")})` : "") + `. Press Start deep search again.</span>`;
+         (bits.length ? ` (${bits.join("; ")})` : "") + `. Press Optimize again.</span>`;
   }
   if (currentRole === "admin") {
     h += ` <button id="optimize-clear-btn" class="ghost-btn small">Go back to standard plan</button>`;
@@ -381,7 +387,7 @@ function renderOptimizeBanner() {
   b.innerHTML = h;
   const clr = $("optimize-clear-btn");
   if (clr) clr.onclick = async () => {
-    if (!window.confirm("Go back to the standard job order? This undoes the search result you applied.")) return;
+    if (!window.confirm("Go back to the standard job order? This undoes the search result you applied and publishes a new plan. Jobs may move to other machines and their dates may change. Continue?")) return;
     const res = await fetch("/optimize/clear", { method: "POST" });
     if (res.ok) { setStatus("Back to the standard plan."); await runPlan(false); }
     else setStatus("Could not undo this: " + (await res.text()), true);
@@ -446,7 +452,7 @@ function renderStatusStrip() {
   // Warning chip: staleness and/or unstaffed hours (both from the /run response).
   const warns = [];
   if (optimizeMeta && optimizeMeta.inputs_changed) {
-    warns.push("Your settings, machines, holidays or item routings changed since the last search. The numbers shown may be old. Press Start deep search again.");
+    warns.push("Your settings, machines, holidays or item routings changed since the last Optimize. The numbers shown may be old. Press Optimize again.");
   }
   const datesChangedWarn = datesChangedWarningText(optimizeMeta);
   if (datesChangedWarn) warns.push(datesChangedWarn);
@@ -617,11 +623,35 @@ function renderOptimizeResult(st) {
       ? `<p>Best setting found: <strong>${nameLabel} ${st.best_overlap}${unit}</strong> (currently ${st.current_overlap}${unit}). Applying this plan also updates it automatically.</p>`
       : `<p>Your ${nameLabel} setting (${st.current_overlap}${unit}) was also tested against the alternatives. It is already the best.</p>`;
   }
-  h += '<div class="table-wrap"><table><thead><tr><th></th><th>Standard plan</th><th>Optimized</th></tr></thead><tbody>';
+  h += '<div class="table-wrap"><table><thead><tr><th></th><th>Now</th><th>After Apply</th></tr></thead><tbody>';
   rows.forEach((r) => {
     h += `<tr><td>${escapeHtml(String(r[0]))}</td><td>${escapeHtml(String(r[1]))}</td><td><strong>${escapeHtml(String(r[2]))}</strong></td></tr>`;
   });
   h += "</tbody></table></div>";
+  // The "After Apply" numbers come from the plan the floor would get. If they could
+  // not be worked out, the search's own numbers are shown, and the screen says so.
+  if (st.metrics_error) {
+    h += "<p>Could not work out the numbers for the plan you would get after Apply; these are the search's own numbers.</p>"
+      + `<p class="muted">Reason: ${escapeHtml(String(st.metrics_error))}</p>`;
+  }
+  // Which delivery dates change if this plan is applied. null means the server could
+  // not work it out; an empty list means nothing moves. Say each one differently.
+  if (st.date_changes === null) {
+    h += "<p>Could not work out which delivery dates change.</p>";
+    if (st.date_changes_error) h += `<p class="muted">Reason: ${escapeHtml(String(st.date_changes_error))}</p>`;
+  } else {
+    const dc = st.date_changes || [];
+    if (st.improved || dc.length) {
+      const earlier = dc.filter((r) => r.days < 0).length;
+      const later = dc.filter((r) => r.days > 0).length;
+      h += dc.length
+        ? `<p><strong>If you apply this plan, ${dc.length} delivery date${dc.length === 1 ? "" : "s"} change: ${earlier} earlier, ${later} later.</strong></p>`
+          + '<div class="table-wrap"><table><thead><tr><th>SO</th><th>Item</th><th>Now</th><th>After</th><th>Change</th></tr></thead><tbody>'
+          + dc.map((r) => `<tr><td>${escapeHtml(r.so)}</td><td>${escapeHtml(r.item)}</td><td>${isoToDdmmyyyy(r.now)}</td><td>${isoToDdmmyyyy(r.after)}</td><td>${r.days < 0 ? Math.abs(r.days) + " days earlier" : r.days + " days later"}</td></tr>`).join("")
+          + "</tbody></table></div>"
+        : "<p>No delivery date changes.</p>";
+    }
+  }
   // The orders that are physically impossible for the current crew (20+ days late) — the
   // ones to outsource, add a shift for, or renegotiate. The engine surfaces them instead
   // of silently juggling them; no software setting can make them on-time.
@@ -679,85 +709,48 @@ function renderOptimizeResult(st) {
 
 const _sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// "Done entering — update plan": fire a feedback-driven re-optimization, then
-// block on live progress until it lands and refresh the whole plan to the winner.
-// The contest auto-applies server-side if it's strictly better (both roles).
+// "Done entering — update plan": re-time the plan from today's punches. Jobs keep
+// their machines; the server never starts a search from here.
+
 async function doneOptimize() {
-  // Two-step guard: a stray tap on "Done entering: update plan" must not kick off a
-  // re-optimize on half-entered feedback. Ask first (same confirm style as Mark
-  // complete / Rollback); Cancel does nothing.
   if (!window.confirm(
     "Have you finished entering ALL of today's production updates?\n\n" +
-    "This rebuilds the schedule using everything entered so far, and can take 15 to " +
-    "30 minutes. If you still have more to enter, click Cancel and finish first."
+    "This updates the times in the plan from what was entered. " +
+    "Jobs keep their machines; only times change. " +
+    "If you still have more to enter, click Cancel and finish first."
   )) return;
   const st = $("optimize-done-status");
   const doneBtn = $("optimize-done");
   if (doneBtn) doneBtn.disabled = true;
-  if (st) st.textContent = "Starting optimization…";
-  let started = false;
-  let state = null;
+  lastDoneStatus = "";
+  if (st) st.textContent = "Updating the plan…";
   try {
     const res = await fetch("/optimize/done", { method: "POST" });
     if (!res.ok) {
-      if (st) st.textContent = "Could not start optimization: " + (await res.text());
-      if (doneBtn) doneBtn.disabled = false;
+      lastDoneStatus = "Could not update the plan: " + (await res.text());
+      if (st) st.textContent = lastDoneStatus;
       return;
     }
-    const body = await res.json();
-    started = body.started;
-    state = body.state;
-  } catch (e) {
-    if (st) st.textContent = "Could not start optimization: " + e.message;
-    if (doneBtn) doneBtn.disabled = false;
-    return;
-  }
-  if (!started && state === "running") {
-    // A contest is already in flight (e.g. another click/tab) — attach to it
-    // instead of reporting a no-op "nothing to re-optimize".
-    await pollDoneOptimize(st);
-    if (doneBtn) doneBtn.disabled = false;
-    return;
-  }
-  if (!started) {
-    // Nothing changed since the last run (or auto disabled) — just refresh facts.
     await runPlan(false);
-    if (st) st.textContent = "Plan updated. Nothing new to re-plan since last time.";
+    lastDoneStatus = "Plan updated. Jobs keep their machines; only times changed.";
+    const st2 = $("optimize-done-status");   // re-rendered by runPlan: query again
+    if (st2) st2.textContent = lastDoneStatus;
+  } catch (e) {
+    lastDoneStatus = "Could not update the plan: " + e.message;
+    const st3 = $("optimize-done-status");
+    if (st3) st3.textContent = lastDoneStatus;
+  } finally {
+    const btn = $("optimize-done");   // may have been re-rendered by runPlan
+    if (btn) btn.disabled = false;
     if (doneBtn) doneBtn.disabled = false;
-    return;
-  }
-  await pollDoneOptimize(st);
-  if (doneBtn) doneBtn.disabled = false;
-}
-
-// Poll the shared contest to completion, showing progress next to the Done
-// button. The contest auto-applies itself; on completion we refresh everything.
-async function pollDoneOptimize(st) {
-  for (;;) {
-    let status;
-    try {
-      const r = await fetch("/optimize/status");
-      if (!r.ok) { await _sleep(3000); continue; }
-      status = await r.json();
-    } catch (e) { await _sleep(3000); continue; }
-    if (status.state === "running") {
-      if (st) st.textContent = "Optimizing… " + optimizeProgressLine(status)
-        + " (this can take several minutes)";
-      await _sleep(3000);
-      continue;
-    }
-    await runPlan(false);   // pick up the auto-applied winner + new facts
-    if (st) {
-      st.textContent = status.state === "failed"
-        ? "Optimization could not finish: " + (status.error || "unknown error")
-          + ". Plan updated with the latest feedback."
-        : "Plan re-optimized and updated.";
-    }
-    return;
   }
 }
 
 async function startOptimize() {
+  if (!window.confirm(
+    "Optimize may move jobs to different machines and change their order and delivery " +
+    "dates. The floor will see a new plan once you press Apply. Continue?"
+  )) return;
   const budget = "deep";   // one option (owner decision): ~1,800 plans in the cloud (~200 local)
   const prog = $("optimize-progress");
   const box = $("optimize-result");
@@ -1312,9 +1305,24 @@ const REPORT_LABELS = {
 function syncDataGapsCard() {
   const card = $("data-gaps-card");
   if (!card) return;
-  const shown = ["report-panel", "report-noroute"]
+  const shown = ["fixed-plan-alerts", "report-panel", "report-noroute"]
     .some((id) => { const el = $(id); return el && !el.classList.contains("hidden"); });
   card.classList.toggle("hidden", !shown);
+}
+
+function renderFixedPlanAlerts(alerts) {
+  const el = $("fixed-plan-alerts");
+  if (!el) return;
+  if (!alerts || !alerts.length) { el.classList.add("hidden"); el.innerHTML = ""; syncDataGapsCard(); return; }
+  // The notices say "Press Optimize"; only the admin has that button (B5). The
+  // container stays visible to both roles (role gating belongs on the control).
+  // Only once /me has said "user": never while the role is still unknown.
+  const lead = currentRole === "user"
+    ? "<p>Your admin can press Optimize to fix this.</p>" : "";
+  el.innerHTML = "<p><strong>Optimize recommended</strong></p>" + lead + "<ul>"
+    + alerts.map((a) => `<li>${escapeHtml(a)}</li>`).join("") + "</ul>";
+  el.classList.remove("hidden");
+  syncDataGapsCard();
 }
 
 function renderReport(report) {
@@ -1916,12 +1924,12 @@ function actualsFormHtml() {
     <button id="a-mark-complete" class="ghost-btn" title="Close this order for good. You only need the SO No and Item Code, nothing else.">✓ Mark this SO+item complete</button>
     <div class="optimize-done-row">
       <button id="optimize-done" class="primary">Done entering: update plan</button>
-      <span id="optimize-done-status" class="status"></span>
+      <span id="optimize-done-status" class="status">${escapeHtml(lastDoneStatus)}</span>
     </div>
     <p class="explainer">Save records your entry right away. It does <b>not</b> rebuild the
       schedule, so you can punch quickly without waiting. Click <b>Done entering: update
       plan</b> once you're finished for the day to refresh the plan from everything you
-      entered. This can take 15 to 30 minutes. Work that is already part finished stays on the same machine.</p>`;
+      entered. It takes a few seconds. Jobs keep their machines; only times change.</p>`;
 }
 
 // Populate the Capture Actuals Operator dropdown from the app-owned operator

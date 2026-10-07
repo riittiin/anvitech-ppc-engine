@@ -244,7 +244,9 @@ button.danger:hover { filter: brightness(1.05); color: #fff; }
 .report-summary .chev { display: inline-block; transition: transform .15s; }
 .report-summary.open .chev { transform: rotate(90deg); }
 .report-detail { margin-top: 10px; }
-.report-noroute {
+.fixed-plan-alerts p { margin: 0 0 4px; }
+.fixed-plan-alerts ul { margin: 0; padding-left: 18px; }
+.report-noroute, .fixed-plan-alerts {
   background: rgba(210, 153, 34, .1); border: 1px solid var(--warn);
   color: var(--ink); border-radius: var(--radius); padding: 10px 12px;
   font-size: 13px; line-height: 1.5; margin-bottom: 10px;

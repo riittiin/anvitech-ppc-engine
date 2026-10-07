@@ -50,19 +50,22 @@ def _note(c):
             or {}).get("text", "")
 
 
-def test_pressing_done_says_a_search_started_and_who_started_it():
+def test_pressing_done_says_the_plan_was_updated_and_who_pressed_it():
+    """Rebased 2026-10-06 (fixed plan): Done no longer starts a search; it repairs
+    the plan. What stays pinned is the visibility: the owner sees who pressed it
+    and what happened."""
     with pytest.MonkeyPatch.context() as mp:
         m = _api(mp); _seed(m)
         started = []
         mp.setattr(m, "_start_optimize", lambda *a, **k: started.append(k))
         floor = _client(m, "anvitech_user", "anvitech12345678")
 
-        assert floor.post("/optimize/done").json()["started"] is True
-        assert started, "the contest should have been started"
+        assert floor.post("/optimize/done").json()["started"] is False
+        assert not started, "Done must never start a contest now"
 
         owner_sees = _note(_client(m))
         assert "anvitech_user" in owner_sees
-        assert "running" in owner_sees.lower() or "search" in owner_sees.lower()
+        assert "plan updated" in owner_sees.lower()
 
 
 def test_a_search_killed_by_a_restart_is_reported_as_interrupted():
@@ -91,27 +94,29 @@ def test_a_live_search_is_never_mislabelled_as_interrupted():
         assert "interrupted" not in _note(_client(m)).lower()
 
 
-def test_a_search_that_cannot_start_is_never_silent():
-    """The bare `except Exception: return False` reported nothing at all."""
+def test_a_repair_that_fails_is_never_silent():
+    """Rebased 2026-10-06 (fixed plan): the never-silent rule now covers the repair.
+    A failure while refreshing the plan reaches the owner's screen."""
     with pytest.MonkeyPatch.context() as mp:
         m = _api(mp); _seed(m)
 
-        # Something used ONLY by the trigger's gate, so /run itself stays healthy —
-        # the point is that a failure to start still reaches the owner's screen.
+        # Something used ONLY by Done, so /run itself stays healthy — the point is
+        # that a failure still reaches the owner's screen.
         def boom():
             raise RuntimeError("store unreachable")
-        mp.setattr(m, "_applied_plan_meta", boom)
+        mp.setattr(m, "_compute_and_store_frozen", boom)
 
         c = _client(m)
-        assert c.post("/optimize/done").json()["started"] is False
+        assert c.post("/optimize/done").status_code == 500
         text = _note(c)
         assert "store unreachable" in text
         assert "could not" in text.lower()
 
 
-def test_a_refused_start_is_never_silent():
-    """`_start_optimize` raising HTTPException (e.g. nothing to optimize) was
-    also swallowed into a bare False."""
+def test_done_never_reaches_the_search_starter():
+    """Rebased 2026-10-06 (fixed plan): a refusing `_start_optimize` used to be
+    swallowed into a bare False. Done no longer calls it at all, so a refusal there
+    cannot affect it: the repair runs and says so."""
     with pytest.MonkeyPatch.context() as mp:
         from fastapi import HTTPException
         m = _api(mp); _seed(m)
@@ -121,8 +126,9 @@ def test_a_refused_start_is_never_silent():
         mp.setattr(m, "_start_optimize", refuse)
 
         c = _client(m)
-        assert c.post("/optimize/done").json()["started"] is False
-        assert "no active orders to optimize" in _note(c)
+        r = c.post("/optimize/done")
+        assert r.status_code == 200 and r.json()["started"] is False
+        assert "plan updated" in _note(c).lower()
 
 
 def test_the_note_is_display_only_and_never_forces_a_re_plan():

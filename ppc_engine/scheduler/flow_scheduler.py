@@ -37,6 +37,12 @@ from ppc_engine.worktime import effective_shift, iter_windows
 # Tiny tolerance so floating-point minute arithmetic doesn't loop forever.
 _EPS_MIN = 1e-9
 
+# A published job counts as late only when its order reaches it more than this after
+# its published start. Published times are stored to the whole second while the
+# engine works in fractions of a minute, so an on-time job reads a fraction of a
+# second "late" (measured on the live copy: 226 such jobs jumped in one repair).
+_LATE_TOLERANCE = timedelta(minutes=1)
+
 # In-house op kinds — the only ones that can overlap (OS/dispatch stay sequential).
 _INHOUSE = (OperationKind.MACHINING, OperationKind.MANUAL, OperationKind.INSPECTION)
 
@@ -48,6 +54,7 @@ def decode(
     config: PlanConfig,
     dispatch: str = "gt",
     frozen=None,
+    pins=None,
 ) -> Schedule:
     """Schedule ``orders`` following the priority ``sequence``.
 
@@ -66,6 +73,10 @@ def decode(
                     sequence a real lever.
                   - "nondelay": legacy — schedule whichever op can *start* earliest,
                     sequence only breaks exact ties. Kept for A/B measurement.
+
+        pins:     Published ops held to their machine and placed in the published
+                  order, a late job giving way to ready ones (fixed plan, 2026-10-06,
+                  spec section 8; see ``_late``); None or empty is byte-identical.
 
     Returns:
         A Schedule with all segments and each order's completion datetime.
@@ -86,6 +97,9 @@ def decode(
     # into batches, schedule the batches, then map each batch's completion back onto its
     # original orders — so the caller still sees per-original-order completions.
     if getattr(config, "consolidation_window", 0) and config.consolidation_window > 0:
+        if pins:
+            raise ValueError("pins are keyed by batch and cannot be combined with "
+                             "ppc consolidation (never enabled live)")
         return _decode_consolidated(orders, sequence, masters, config, dispatch, frozen)
 
     order_by_key = {o.key: o for o in orders}
@@ -131,6 +145,201 @@ def decode(
             frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of,
             machine_spans, staffing, completion, masters, config, resumed_end))
 
+    pin_of, queue = _pin_queues(pins, order_by_key, ops_of, masters,
+                                skip={(f.order_key, f.op_seq) for f in (frozen or ())})
+    queued = {k for q in queue.values() for k in q}
+
+    def _pin(k):
+        return pin_of.get((k, ops_of[k][idx_of[k]].seq))
+
+    def _queued(k):
+        return (k, ops_of[k][idx_of[k]].seq) in queued
+
+    frozen_end: dict[str, datetime] = {}   # machine -> end of its last frozen op
+    # Frozen ops run first on their machine: queued jobs never take a gap in front of
+    # them, even when a frozen op waits on its own frozen predecessor and starts late.
+    for seg in segments:
+        if seg.machine_id is not None:
+            frozen_end[seg.machine_id] = max(frozen_end.get(seg.machine_id, seg.end), seg.end)
+
+    def _floor(k):
+        return frozen_end.get(_pin(k).machine_id) if _queued(k) else None
+
+    # Fixed plan (repair): place jobs in the order the PUBLISHED plan placed them.
+    # People are booked first come at placement time, so any other order hands a
+    # person the published plan gave one job to another, and the drift compounds
+    # (measured on Test5/8/9 with the Giffler-Thompson pick: an unpunched plan,
+    # repaired, moved up to 20 days, nearly every order later). A step with no
+    # machine (OS, dispatch) books nobody and goes as soon as it is next; a step
+    # with no published rank (an unpublished order) goes after the published work
+    # that is ready, in the machine's free time.
+    use_rank = all(p.rank is not None for p in pin_of.values())
+
+    def _replay_key(k, placement):
+        if placement["machine_id"] is None:
+            return (0, 0, placement["start"])
+        p = _pin(k)
+        if p is None:
+            return (2, 0, placement["start"])
+        return (1, p.rank if use_rank else 0, p.prev_start)
+
+    def _late(k):
+        """Next ready job in published order (owner, 2026-10-06, spec section 8).
+
+        A published job keeps its place in the queue while its order reaches it by
+        the time the published plan expected. When it does not (its previous step is
+        late, or the parts are at a vendor), it ``cannot start yet``: return the time
+        it will be ready. If a job on ITS machine can start before then, the machine
+        takes the next job in published order that is READY by the time it can next
+        start one; other
+        machines are untouched (fix round I1/I2). A job that is on time is never jumped, so the
+        published order wins whenever both are ready, and a repair of a plan nobody
+        has punched against places every job exactly where it was published (the
+        published plan may hold a machine for a job due later; that was the plan's
+        choice, not a late job). None when the job is on time or not published."""
+        if not _queued(k):
+            return None
+        r = max(ready_of[k], config.plan_start)
+        return r if r > _pin(k).prev_start + _LATE_TOLERANCE else None
+
+    def _guarded(key, placement):
+        """Piece-flow guard (2026-07-25 spec): a starved fast op must not finish its
+        WORK before its predecessor delivered the last piece, else the machine-wise
+        schedule processes pieces before they exist ("deburring skipped for the last
+        jobs"). Re-lay it later (batch-at-end) so its work ends >= the predecessor's
+        completion. Block model kept: same machine, same operator rule, same
+        occupancy, just placed later. Returns the placement it really gets."""
+        if placement["machine_id"] is not None and placement["end"] < prev_end_of[key]:
+            # Push the op's START forward by the shortfall (based on its ACTUAL start,
+            # which already sits at the machine's free time — bumping `ready` alone
+            # wouldn't move an op pinned behind a busy machine). Re-lay until its work
+            # ends >= the predecessor's completion; a few passes absorb shift/day gaps.
+            for _ in range(8):
+                _r = placement["start"] + (prev_end_of[key] - placement["end"])
+                placement = _place_operation(
+                    ops_of[key][idx_of[key]], order_by_key[key], _r,
+                    machine_spans, staffing, masters, config, pin=_pin(key),
+                    turn_floor=_floor(key))
+                if placement["end"] >= prev_end_of[key]:
+                    break
+        return placement
+
+    pos_of = {(k, op.seq): i for k in ops_of for i, op in enumerate(ops_of[k])}
+
+    def _order_key(p):
+        return (p.rank, p.prev_start) if use_rank else (p.prev_start,)
+
+    def _jumps_its_machine(g, placements):
+        """Would placing ``g`` now put it in front of a step queued on its own machine
+        earlier in the published order that is not placed yet? (A step whose order is
+        held up behind a job stepping aside is exactly such a step.) A step that is
+        itself the next of its order, LATE and not ready when ``g`` would start, does
+        not count: that machine would let ``g`` go first by this same rule."""
+        if not _queued(g):
+            return False
+        pg = _pin(g)
+        mine = _order_key(pg)
+        for ck in queue.get(pg.machine_id, ()):
+            if ck[0] == g or idx_of[ck[0]] > pos_of[ck] or not (_order_key(pin_of[ck]) < mine):
+                continue
+            if (idx_of[ck[0]] == pos_of[ck] and _late(ck[0]) is not None
+                    and max(ready_of[ck[0]], config.plan_start) > placements[g]["start"]):
+                continue
+            return True
+        return False
+
+    def _pick(cands, placements):
+        rk = lambda k: (_replay_key(k, placements[k]), priority[k], k)
+        key = min(cands, key=rk)
+        deferred = set()
+        for _ in range(2 * len(cands) + 2):
+            r = _late(key)
+            if r is None:
+                return key
+            # Judged on where a job really lands: the piece-flow guard can push a job
+            # that looks startable now past the moment the late job is ready (found
+            # on the live copy). The guarded placement is kept for the commit.
+            # Only on the late job's OWN machine (spec section 8: "on the same
+            # machine"); every other machine keeps its published order.
+            mid = _pin(key).machine_id
+            same = [k for k in cands
+                    if k != key and _queued(k) and _pin(k).machine_id == mid]
+            ahead = []
+            for k in same:
+                if placements[k]["start"] < r:
+                    placements[k] = _guarded(k, placements[k])
+                    if placements[k]["start"] < r:
+                        ahead.append(k)
+            if not ahead:
+                return key
+            # If any can, the jobs READY when the machine can next start one (t0, the
+            # earliest start among them) go in published order: a ready job
+            # beats one that is on time but not ready yet, so the machine never stands
+            # idle behind the late job (fix round I2), while two ready jobs keep their
+            # published order even when the later one could start a little sooner
+            # (no person yet, piece flow). The earliest-starting job is always ready
+            # at t0, so the set is never empty.
+            # The pool is every job queued on this machine, not only those that can
+            # start before the late one is ready: the next READY job in the queue goes
+            # even if its own run starts a little later (live copy, variant A, CNC7).
+            t0 = min(placements[k]["start"] for k in ahead)
+            j = min((k for k in same if max(ready_of[k], config.plan_start) <= t0),
+                    key=rk)
+            # If j's run cannot really start before the late job's can, both are
+            # ready when it would start, and the late job is earlier in the published
+            # order: it goes first (fix round 2; on a CNC/VMC, laid whole, j would
+            # otherwise take the machine in front of it).
+            placements[j] = _guarded(j, placements[j])
+            placements[key] = _guarded(key, placements[key])
+            if placements[j]["start"] >= placements[key]["start"]:
+                return key
+            # Before a later job j takes the machine, the published order is honoured
+            # everywhere up to the moment j would really start (js):
+            # - on this machine, a job earlier in the published order that is READY
+            #   by js goes before j, even if its own run starts a little later
+            #   (published order wins when both are ready; live copy, DTC2 / MW1);
+            # - elsewhere, j goes only when it is next in the published order among
+            #   everything not already stepping aside: an earlier job on ANOTHER
+            #   machine goes
+            #   first (if it is itself late, its own machine decides by this same
+            #   rule). The repair only knows a job is ready once
+            #   the steps feeding it are placed (live copy, CNC7), and placing work
+            #   strictly in published order is the only way to get there without
+            #   reordering another machine's queue (fix round 2: an earlier version
+            #   placed any "feeding" step first and reordered other machines).
+            js = placements[j]["start"]
+            up = [c for c in same if c not in deferred and rk(c) < rk(j)
+                  and max(ready_of[c], config.plan_start) <= js]
+            if up:
+                deferred.add(key)
+                key = min(up, key=rk)
+                continue
+            deferred.add(key)
+            # Only worth it when a job ahead of j on this machine is still waiting for
+            # its order to reach it (its feeding steps are not placed yet): placing
+            # earlier work first is what can make it ready in time. Otherwise j goes.
+            mine = _order_key(_pin(j))
+            if not any(idx_of[ck[0]] < pos_of[ck] and _order_key(pin_of[ck]) < mine
+                       for ck in queue.get(mid, ())):
+                key = j
+                continue
+            rest = [c for c in cands if c not in deferred and c not in same]
+            g = min(rest, key=rk) if rest else None
+            if g is not None and g != j and rk(g) < rk(j):
+                if _jumps_its_machine(g, placements):
+                    # Earlier work elsewhere cannot go without jumping its own
+                    # machine's queue, so whether an earlier job here becomes ready
+                    # in time is unknown: no give-way, the late job keeps its place
+                    # (the published order, as if it were on time).
+                    return key
+                key = g
+                continue
+            key = j
+        # Bounded for safety only: every step either places earlier published work
+        # or moves to a job ready strictly sooner, so this is never reached in
+        # practice; the job in hand is a legal choice either way.
+        return key
+
     # Orders that still have operations left to schedule.
     remaining = [key for key in sequence if idx_of[key] < len(ops_of[key])]
 
@@ -144,52 +353,39 @@ def decode(
         # Evaluate the next op of every remaining order (board read read-only — each
         # placement carries the staffing assignments it would make, committed below
         # only for the chosen op).
+        cands = remaining
         placements = {
             key: _place_operation(
                 ops_of[key][idx_of[key]], order_by_key[key], ready_of[key],
-                machine_spans, staffing, masters, config,
+                machine_spans, staffing, masters, config, pin=_pin(key),
+                turn_floor=_floor(key),
             )
-            for key in remaining
+            for key in cands
         }
 
-        if dispatch == "nondelay":
+        if queued:
+            key = _pick(cands, placements)
+        elif dispatch == "nondelay":
             # Legacy: schedule whichever op can START earliest; sequence breaks ties.
-            key = min(remaining, key=lambda k: (placements[k]["start"], priority[k], k))
+            key = min(cands, key=lambda k: (placements[k]["start"], priority[k], k))
         else:
             # Giffler-Thompson: the critical op is the one finishing earliest; its
             # machine m* is the contested resource. Among ops that want m* and could
             # start before that completion, the order sequence picks the winner. Ops
             # with no machine (OS/dispatch) never contend — schedule them directly.
-            crit = min(remaining, key=lambda k: (placements[k]["end"], priority[k], k))
+            crit = min(cands, key=lambda k: (placements[k]["end"], priority[k], k))
             m_star = placements[crit]["machine_id"]
             if m_star is None:
                 key = crit
             else:
                 c_star = placements[crit]["end"]
                 conflict = [
-                    k for k in remaining
+                    k for k in cands
                     if placements[k]["machine_id"] == m_star and placements[k]["start"] < c_star
                 ]
                 key = min(conflict, key=lambda k: (priority[k], k)) if conflict else crit
 
-        placement = placements[key]
-        # Piece-flow guard (2026-07-25 spec): a starved fast op must not finish its WORK
-        # before its predecessor delivered the last piece — else the machine-wise schedule
-        # processes pieces before they exist ("deburring skipped for the last jobs"). Re-lay
-        # it later (batch-at-end) so its work ends >= the predecessor's completion. Block
-        # model kept: same machine, same operator rule, same occupancy — just placed later.
-        if placement["machine_id"] is not None and placement["end"] < prev_end_of[key]:
-            # Push the op's START forward by the shortfall (based on its ACTUAL start,
-            # which already sits at the machine's free time — bumping `ready` alone
-            # wouldn't move an op pinned behind a busy machine). Re-lay until its work
-            # ends >= the predecessor's completion; a few passes absorb shift/day gaps.
-            for _ in range(8):
-                _r = placement["start"] + (prev_end_of[key] - placement["end"])
-                placement = _place_operation(
-                    ops_of[key][idx_of[key]], order_by_key[key], _r,
-                    machine_spans, staffing, masters, config)
-                if placement["end"] >= prev_end_of[key]:
-                    break
+        placement = _guarded(key, placements[key])
         # Commit the winning placement onto the real state. The machine frees after its
         # actual cutting (placement["end"]) — pacing affects only the ORDER's downstream.
         for machine_id, day, shift, name, seg_start, seg_end in placement["assignments"]:
@@ -265,6 +461,38 @@ def _occupy(spans, mid, start, end):
     lst.sort()
 
 
+def _pin_queues(pins, order_by_key, ops_of, masters, skip):
+    """Fixed plan: (pin_of, queue). ``pin_of`` maps (order_key, op_seq) to its
+    PinnedOp when the pin is still possible (the order is in this plan, the step is
+    in its routing, and the machine exists AND is one of the step's options; any
+    other pin is ignored and the step is planned normally; so is a pin to a machine
+    no operator in the masters is qualified for). ``queue`` maps a machine
+    to its pinned steps in published start order and leaves out frozen steps (they
+    run first, `_preplace_frozen`) and steps with nothing left to make (a finished
+    step is a milestone, never a job on the machine). ``decode`` places the queued
+    steps in published order (``_replay_key``, ``_late``)."""
+    pin_of, queue = {}, {}
+    for p in pins or ():
+        order = order_by_key.get(p.order_key)
+        if order is None or p.machine_id not in masters.machines:
+            continue
+        op = next((o for o in ops_of.get(p.order_key, ()) if o.seq == p.op_seq), None)
+        if op is None or p.machine_id not in op.machine_options:
+            continue
+        if not any(p.machine_id in o.qualified_machines for o in masters.operators):
+            continue   # nobody can man it: planned normally, never a crash
+        pin_of[(p.order_key, p.op_seq)] = p
+    for ck, p in sorted(pin_of.items(), key=lambda kv: (kv[1].prev_start, kv[0])):
+        if ck in skip:
+            continue
+        order = order_by_key[ck[0]]
+        pr = order.process_remaining
+        if (pr.get(ck[1], order.qty) if pr is not None else order.qty) <= 0:
+            continue
+        queue.setdefault(p.machine_id, []).append(ck)
+    return pin_of, queue
+
+
 def _free_runs(mid, after, spans, calendar):
     """The stretches of ``mid``'s time, on/after ``after``, that hold no committed
     operation of THIS plan and no occupancy of an earlier planning stage
@@ -294,6 +522,8 @@ def _place_operation(
     staffing: StaffingBoard,
     masters: Masters,
     config: PlanConfig,
+    pin=None,
+    turn_floor=None,
 ) -> dict:
     """Work out where/when ``op`` would run if scheduled next for ``order``.
 
@@ -316,8 +546,15 @@ def _place_operation(
     dur = operation_duration_min(op, op_qty, config)
 
     if op.kind == OperationKind.OUTSOURCED:
-        # A fixed off-site lead time (or a zero-time milestone if already done).
+        # A fixed off-site lead time (or a zero-time milestone if already done),
+        # round the clock. D12 (spec section 8): when the parts were sent (the step
+        # before was entered complete), the vendor's clock started then, so the step
+        # returns at sent + lead time; never before it is reached (``ready``, which is
+        # never before the plan start), since the plan cannot see the vendor.
         end = ready + timedelta(minutes=dur)
+        sent = (order.os_sent or {}).get(op.seq) if dur > 0 else None
+        if sent is not None:
+            end = max(ready, sent + timedelta(minutes=dur))
         seg = Segment(order.key, op.seq, op.name, op.kind, None, None, ready, end, int(op_qty))
         return {"start": ready, "end": end, "segments": [seg], "assignments": [], "machine_id": None}
 
@@ -331,12 +568,23 @@ def _place_operation(
     # (ties → the machine's preference order). "Soonest finish" naturally prefers a
     # free machine over a busy one.
     best = None
-    for opt_idx, mid in enumerate(op.machine_options):
+    options = list(enumerate(op.machine_options))
+    if pin is not None:
+        # Fixed plan: the published machine only, the published person preferred.
+        options = [(i, mid) for i, mid in options if mid == pin.machine_id]
+    for opt_idx, mid in options:
         machine = masters.machines.get(mid)
         if machine is None:
             continue  # unknown machine id (provisional handling comes with the loader)
-        laid = _lay_around(machine, max(ready, config.plan_start), dur, order, op,
-                           int(op_qty), machine_spans, staffing, masters, config)
+        earliest = max(ready, config.plan_start)
+        if turn_floor is not None and pin is not None and mid == pin.machine_id:
+            # Frozen ops run first on their machine: a published job never takes a
+            # gap in front of a half-finished one.
+            earliest = max(earliest, turn_floor)
+        laid = _lay_around(machine, earliest, dur, order, op,
+                           int(op_qty), machine_spans, staffing, masters, config,
+                           planned_operator=(pin.operator or "") if pin is not None else None,
+                           staff=pin.staff if pin is not None else ())
         if laid is None:
             continue
         cand = (laid["end"], opt_idx)
@@ -404,7 +652,7 @@ def _next_stretch(machine, win, at, win_end, remaining, staffing, masters, confi
 
 def _lay_windows(machine, earliest, dur_min, order, op, op_qty, staffing, masters,
                  config, deadline=None, preferred=None, preferred_ok=None,
-                 partial=False):
+                 partial=False, preferred_for=None):
     """Lay ``dur_min`` minutes of ``op`` on ``machine`` from ``earliest``, window by
     window, in the free stretches of whoever is qualified and on shift.
 
@@ -446,7 +694,10 @@ def _lay_windows(machine, earliest, dur_min, order, op, op_qty, staffing, master
             break        # out of room in this stretch; the caller tries the next one
         win_end = win.end if deadline is None else min(win.end, deadline)
         at = max(cursor, win.start)
-        pref = preferred if (preferred and (preferred_ok is None or preferred_ok(win))) else None
+        if preferred_for is not None:
+            pref = preferred_for(win)
+        else:
+            pref = preferred if (preferred and (preferred_ok is None or preferred_ok(win))) else None
         while at < win_end and remaining > _EPS_MIN:
             pick = _next_stretch(machine, win, at, win_end, remaining, staffing,
                                  masters, config, preferred=pref)
@@ -472,7 +723,7 @@ def _lay_windows(machine, earliest, dur_min, order, op, op_qty, staffing, master
 
 
 def _lay_around(machine, earliest, dur, order, op, op_qty, machine_spans, staffing,
-                masters, config, planned_operator=None):
+                masters, config, planned_operator=None, staff=()):
     """Lay ``op`` on ``machine`` given what the machine is already committed to.
 
     MACHINING (CNC/VMC): one engagement in the earliest free run that holds it
@@ -483,7 +734,7 @@ def _lay_around(machine, earliest, dur, order, op, op_qty, machine_spans, staffi
     the next (it pauses while another job occupies the station, exactly as it
     pauses while its helper is booked elsewhere). ``planned_operator`` is the frozen
     path's pin (see ``_lay_frozen``)."""
-    lay = (functools.partial(_lay_frozen, planned_operator=planned_operator)
+    lay = (functools.partial(_lay_frozen, planned_operator=planned_operator, staff=staff)
            if planned_operator is not None else _lay_on_machine)
     runs = _free_runs(machine.id, earliest, machine_spans, masters.calendar)
     # A machine that carries occupancy from an EARLIER planning stage (the Add New
@@ -556,7 +807,7 @@ def _lay_in_free_run(machine, earliest, dur_min, order, op, op_qty, staffing,
 
 
 def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, staffing, masters,
-                config, deadline=None, partial=False, planned_operator=None):
+                config, deadline=None, partial=False, planned_operator=None, staff=()):
     """Lay a frozen (in-progress) op onto its PINNED machine from ``earliest``.
     Prefer the planned operator in every window they may still man this machine;
     otherwise staff whoever qualified is free (``_lay_windows``). The machine is
@@ -564,22 +815,31 @@ def _lay_frozen(machine, earliest, dur_min, order, op, op_qty, staffing, masters
     operators_by_name = {o.name: o for o in masters.operators}
     planned = operators_by_name.get(planned_operator) if planned_operator else None
 
-    def _ok(win):
+    def _ok(person, win):
         # The pinned operator must STILL be assigned to this machine in Settings.
         # Without this, an admin who removed a machine from someone while they had
         # work in progress got them frozen straight back onto it on the next re-plan
         # (the live "Sidhu Singe on CNC5" bug, 2026-08-03). The machine pin stays;
         # only the person is re-staffed. They must also be rostered on THIS shift
         # and not on leave that day.
-        return (planned is not None
-                and machine.id in planned.qualified_machines
-                and effective_shift(planned, win.shift_date, config) == win.shift
-                and masters.calendar.is_operator_available(planned_operator, win.shift_date))
+        return (person is not None
+                and machine.id in person.qualified_machines
+                and effective_shift(person, win.shift_date, config) == win.shift
+                and masters.calendar.is_operator_available(person.name, win.shift_date))
+
+    def _pref(win):
+        # Fixed plan (D7): the person the published plan had on this op in this
+        # window, while they may still man it; else the planned operator.
+        for s, e, name in staff:
+            if s < win.end and e > win.start:
+                person = operators_by_name.get(name)
+                if _ok(person, win):
+                    return name
+        return planned_operator if _ok(planned, win) else None
 
     return _lay_windows(machine, earliest, dur_min, order, op, op_qty, staffing,
                         masters, config, deadline=deadline, partial=partial,
-                        preferred=planned_operator if planned else None,
-                        preferred_ok=_ok)
+                        preferred_for=_pref)
 
 
 def _ready_after(order, just, nxt, start, paced_end, config, *,
@@ -707,6 +967,10 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
         op = ops_of[key][oi]
         mid = fo.machine_id
         machine = masters.machines[mid]
+        # A resumed op is already set up, unless it was moved to this machine since it
+        # was last worked: then a machining job pays its setup again (2026-08-31).
+        setup = (config.setup_min if fo.setup and op.kind == OperationKind.MACHINING
+                 else 0.0)
         # Without per-step remaining there is no record of what earlier steps still
         # owe (only an order with no punches at all has none), so nothing to hold back.
         blocker = None if order.process_remaining is None else next(
@@ -722,6 +986,7 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
             dur = qty * op.cycle_min                     # no setup on resume
             if qty <= 0 or dur <= 0:
                 continue        # nothing past the blocker yet: the main loop runs it whole
+            dur += setup
             gate = resume_ready.get(key, config.plan_start)
             laid = _lay_pinned(machine, gate, dur, order, op, qty, fo.operator,
                                machine_spans, staffing, masters, config)
@@ -752,12 +1017,13 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
             resumed_end[(key, op.seq)] = paced
             nxt = ops_of[key][oi + 1] if oi + 1 < len(ops_of[key]) else None
             resume_ready[key] = _ready_after(order, op, nxt, laid["start"], paced,
-                                             config, qty=qty, setup_min=0.0)
+                                             config, qty=qty, setup_min=setup)
             continue
 
         dur = fo.remaining_qty * op.cycle_min          # no setup on resume
         if dur <= 0:
             continue
+        dur += setup
         qty = int(fo.remaining_qty)
         # The order's OWN predecessor gates the start, not just the machine's queue;
         # the machine's earliest free run that holds the step whole takes it.
@@ -797,7 +1063,7 @@ def _preplace_frozen(frozen, order_by_key, ops_of, idx_of, ready_of, prev_end_of
             # A resumed op is already set up: it was laid as `remaining_qty * cycle`
             # with no setup, so its successor must not be charged one either.
             _ready_after(order, op, nxt, laid["start"], paced_end, config,
-                         qty=fo.remaining_qty, setup_min=0.0))
+                         qty=fo.remaining_qty, setup_min=setup))
         if nxt is None:
             completion[key] = prev_end_of[key]
 

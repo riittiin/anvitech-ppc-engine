@@ -32,6 +32,12 @@ class Order:
                     see CLAUDE.md's Phase-2 pivot: lanes/promises are display-only,
                     never scheduling constraints). ``None`` on a fresh/uncommitted
                     order — byte-identical to before. Excluded from equality/hash.
+        os_sent:    ``{op.seq -> datetime}`` for an OUTSOURCED step whose previous step
+                    has been entered as complete: when the parts went to the vendor
+                    (D12, spec section 8, 2026-10-06). That step then returns at
+                    sent + lead time, never before it is reached. ``None`` (or no
+                    entry for a step) = its full lead time from when it is reached,
+                    byte-identical to before. Excluded from equality/hash.
     """
 
     so_no: str
@@ -41,6 +47,7 @@ class Order:
     due_date: date
     process_remaining: dict | None = field(default=None, compare=False)
     promise_date: date | None = field(default=None, compare=False)
+    os_sent: dict | None = field(default=None, compare=False)
 
     @property
     def key(self) -> tuple[str, str]:

@@ -202,7 +202,8 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
                 reserved: dict | None = None,
                 priority_rank: dict | None = None,
                 frozen: dict | None = None,
-                occupancy: dict | None = None) -> dict:
+                occupancy: dict | None = None,
+                published: list | None = None) -> dict:
     """Run the forward planning chain 1 → 2 → 3 → 6, returning the trace.
 
     Rules 4/5 are consumed inside Rule 6 (their effect is logged in rule6's
@@ -227,6 +228,12 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
     (see ``new_engine.occupancy_from_entries``) — the new engine works around it
     instead of scheduling over it. ``None`` → no effect (new-engine only; the Add
     New Orders quote's stage-2 plan is the only caller today).
+
+    ``published`` (optional) is the published plan (``freeze.schedule_projection``
+    rows): every op it covers keeps its machine and the published order, a late job
+    letting the next ready job on its machine go first (fixed plan, 2026-10-06, spec
+    section 8).
+    ``None``/empty → no effect (new-engine only).
     """
     config.validate()
     if occupancy and getattr(config, "scheduler", "classic") != "new":
@@ -238,6 +245,11 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
             f"earlier plan's placements are protected when they are not. Set "
             f"config.scheduler to 'new' before calling run_forward with "
             f"occupancy.")
+    if published and getattr(config, "scheduler", "classic") != "new":
+        raise OccupancyRequiresNewEngineError(
+            f"a published plan was passed to run_forward, but config.scheduler is "
+            f"{config.scheduler!r}, not 'new'; only the new engine holds published "
+            f"machines and order.")
     trace: dict = {}
 
     try:
@@ -271,6 +283,8 @@ def run_forward(plan_run: PlanRun, config: Config, masters: Masters,
             # the retired classic/flow schedulers accept **kw and would silently
             # discard it, so this branch is only ever reached with scheduler="new".
             _sched_kw["occupancy"] = occupancy
+        if published:
+            _sched_kw["published"] = published
         plan_run.schedule = run_rule(
             trace, "rule6", scheduler_for(config), plan_run.batches_prioritized,
             **_sched_kw,

@@ -109,6 +109,35 @@ def completed_by_process(actuals) -> dict:
     return {k: max(v, 0.0) for k, v in done.items()}
 
 
+def process_completed_on(actuals, ordered_by_key) -> dict:
+    """(SO number, item code, normalized process) -> the date of the punch that
+    brought that step's good qty up to the line's ordered qty, for every step that is
+    complete now (D12, 2026-10-06: the parts of an outsourced step went to the vendor
+    the day the step before it was entered as complete).
+
+    Same accounting as ``completed_by_process`` (good = produced - rejected, netted
+    across entries), walked in date order (ties: entry order). A later reject that
+    takes the step below its ordered qty un-completes it; a remake completes it again
+    on the remake's date, so the date is the LAST crossing. Lines not in
+    ``ordered_by_key`` ({(so, item): ordered qty}) are ignored."""
+    events = defaultdict(list)
+    for i, a in enumerate(actuals):
+        if a.key in ordered_by_key and a.entry_date is not None:
+            events[(a.so_no, a.item_code, _norm(a.process))].append(
+                (a.entry_date, i, (a.qty_produced or 0.0) - (a.qty_rejected or 0.0)))
+    out = {}
+    for k, evs in events.items():
+        need = ordered_by_key[k[:2]]
+        run, on = 0.0, None
+        for d, _i, g in sorted(evs):
+            before, run = run, run + g
+            if before < need <= run:
+                on = d
+        if on is not None and run >= need:
+            out[k] = on
+    return out
+
+
 def _process_totals(actuals, so_no, item_code):
     """Per-process (produced, good) totals for ONE order — the accounting the feedback
     precedence guard shares with ``completed_by_process`` (same ``_norm``, same good =
@@ -303,6 +332,8 @@ def active_so_lines(active_orders: dict, actuals, masters=None) -> list:
     Orders with nothing left to finish (remaining <= 0) are skipped."""
     good = finished_good_by_order(actuals, masters)
     done = completed_by_process(actuals)
+    done_on = process_completed_on(
+        actuals, {o.key: o.ordered_qty for o in active_orders.values() if not o.completed})
     routings = masters.routings if masters else {}
     started = orders_with_actuals(actuals)
     lines = []
@@ -312,15 +343,19 @@ def active_so_lines(active_orders: dict, actuals, masters=None) -> list:
         remaining = max(o.ordered_qty - good.get(o.key, 0.0), 0.0)
         if remaining <= 0:
             continue
-        pq = None
+        pq = on = None
         routing = routings.get(o.item_code)
         if o.key in started and routing is not None:
             pq = {_norm(p.name): max(o.ordered_qty - done.get((o.so_no, o.item_code, _norm(p.name)), 0.0), 0.0)
                   for p in routing.processes}
+            on = {_norm(p.name): done_on[(o.so_no, o.item_code, _norm(p.name))]
+                  for p in routing.processes
+                  if (o.so_no, o.item_code, _norm(p.name)) in done_on} or None
         lines.append(SOLine(
             so_no=o.so_no, item_code=o.item_code, item_name=o.item_name,
             qty=remaining, delivery_date=o.delivery_date, process_qty=pq,
             commitment=o.commitment, promised_date=o.promised_date,
+            process_done_on=on,
         ))
     return lines
 

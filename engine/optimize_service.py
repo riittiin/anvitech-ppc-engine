@@ -307,6 +307,12 @@ class ContestSetup:
     machine_downtime: list = field(default_factory=list)
 
 
+class NothingToOptimize(ValueError):
+    """The book has no active order with work left: nothing to plan or search.
+    A ValueError, so every caller that already catches that keeps working; a caller
+    that must tell "empty book" from any other bad value catches only this."""
+
+
 def prepare_contest(orders: dict, actuals, masters, config: Config,
                     absences=None, operator_table=None, frozen=None,
                     machine_downtime=None) -> ContestSetup:
@@ -335,7 +341,7 @@ def prepare_contest(orders: dict, actuals, masters, config: Config,
 
     target = so_lines
     if not target:
-        raise ValueError("nothing to optimize: no active orders with work remaining")
+        raise NothingToOptimize("nothing to optimize: no active orders with work remaining")
 
     # The batch sequence only has leverage when Expedite is off (see the
     # 2026-07-13 Expedite↔Optimize fix) — search in the pure non-delay model.

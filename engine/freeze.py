@@ -32,6 +32,13 @@ def schedule_projection(schedule) -> list[dict]:
             # stages is one bar per part, and each line's in-progress work must be
             # pinned to ITS part (the resumed pieces, or the rest), never the other.
             "so_refs": list(getattr(e, "piece_refs", None) or e.so_refs or []),
+            # The order the engine placed it in: a repair places jobs in this order
+            # so each keeps the people the published plan gave it (fixed plan).
+            "placed": int(getattr(e, "placed", 0) or 0),
+            # Who ran it, stretch by stretch: a repair keeps the same person on the
+            # same stretch where they are still allowed (fixed plan, D7).
+            "staff": [[s.isoformat(timespec="seconds"), en.isoformat(timespec="seconds"), n or ""]
+                      for s, en, n in (getattr(e, "op_segments", None) or [])],
         })
     return rows
 
@@ -90,4 +97,37 @@ def compute_frozen_set(applied_rows, so_lines, good_by_step, masters) -> list[di
                 # pinned machine overlaps this step's window (2026-08-31 spec).
                 "prev_end": row["end"],
             })
+            # Moved to this machine since it was last worked (`mark_moved`) and not
+            # punched since: it resumes with a setup (2026-08-31 rule).
+            mv = (row.get("moved") or {}).get(line.so_no)
+            if mv and mv.get("from") not in (None, row["machine"]) and mv.get("good") == good:
+                out[-1]["setup_from"] = mv["from"]
+    return out
+
+
+def mark_moved(rows, old_frozen, good_by_step) -> list[dict]:
+    """Copies of a plan's projection ``rows``, about to be published, where a step
+    that is half finished (in ``old_frozen``, the frozen set on file, built from the
+    plan published before) now sits on a DIFFERENT machine from the one it was last
+    worked on: the row records, per SO line, that machine and the good count at this
+    moment (``"moved": {so: {"from": machine, "good": n}}``). ``compute_frozen_set``
+    turns that into ``setup_from`` while the count is unchanged, so the job pays its
+    setup on the new machine until it is punched again (it has been set up then).
+
+    "Last worked on" is the old frozen row's ``setup_from`` when it still owes a setup
+    (published again before anyone worked it), else its machine. The machine named on
+    a punch would be the direct signal, but it is optional and mostly blank."""
+    last = {}
+    for f in old_frozen or []:
+        last[(f.get("so_no"), f.get("item_code"), _norm(f.get("process") or ""))] = (
+            f.get("setup_from") or f.get("machine"))
+    out = []
+    for r in rows or []:
+        moved = {}
+        for so in r.get("so_refs") or []:
+            k = (so, r.get("item_code"), _norm(r.get("process_name") or ""))
+            was = last.get(k)
+            if was and was != r.get("machine"):
+                moved[so] = {"from": was, "good": int(round(float(good_by_step.get(k, 0))))}
+        out.append({**r, "moved": moved} if moved else dict(r))
     return out

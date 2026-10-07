@@ -50,6 +50,7 @@ from engine import production_analysis
 from engine import planning_time
 from engine import operator_master
 from engine import freeze
+from engine import fixed_plan
 from engine import item_master
 from engine import shop_masters
 from engine.rules import (
@@ -1012,7 +1013,9 @@ def _reid_batches(batches, schedule, prefix):
         b.batch_id = id_map[b.batch_id]
 
 
-def _plan(config: Config):
+def _plan(config: Config, _seeding: bool = False):
+    if not _seeding:
+        _ensure_published_plan()
     # Serve the cached plan when EVERY input is unchanged (the common login/refresh
     # case) — the fingerprint is complete, so a hit is byte-identical to recomputing.
     _fp = _plan_fingerprint(config)
@@ -1105,6 +1108,11 @@ def _plan(config: Config):
     prio = book_store.load_plan_priority()
     ranks = prio["ranks"] if prio else None
     frozen = book_store.load_frozen_ops()
+    # Fixed plan (2026-10-06): every job the published plan covers keeps its machine
+    # and its place in the published order (a late job lets ready ones go first,
+    # spec section 8); only times move. Empty while seeding / before go-live, and on
+    # the retired engines (they cannot hold a published plan).
+    published = [] if _seeding else (_published_rows(config) or [])
 
     # The optimized ranks ARE the prioritization. The Expedite window dynamically
     # re-sorts ops by slack at schedule time, which would OVERRIDE the ranks and cancel
@@ -1119,7 +1127,10 @@ def _plan(config: Config):
     # times (downtime, actual setup) are stored for the record, never scheduled.
     plan_run = PlanRun(so_lines=so_lines)
     trace = run_forward(plan_run, ranked_config, masters, reserved=ab or None,
-                        priority_rank=ranks, frozen=frozen or None)
+                        priority_rank=ranks, frozen=frozen or None,
+                        published=published or None)
+    # Fixed-plan problem lines from every pass (stage 1 here, each stage-2 group below).
+    fixed_alerts = fixed_plan.alerts_from_notes((trace.get("rule6") or {}).get("notes"))
 
     # Stage 2: the arrival queue, CHAINED one ARRIVAL GROUP at a time, in
     # arrival order — each group is planned POOLED (all its own lines in one
@@ -1175,8 +1186,17 @@ def _plan(config: Config):
             group_rank = {f"{l.so_no}{KEY_SEP}{l.item_code}": rank
                          for rank, l in enumerate(group, start=1)}
             stage_i = PlanRun(so_lines=group)
-            run_forward(stage_i, ranked_config, masters, reserved=ab or None,
-                        frozen=None, occupancy=occupancy, priority_rank=group_rank)
+            # `published`: a queued new order keeps the machine and place in order its quote
+            # gave it (fixed plan, D9); it still never moves an existing order,
+            # because existing orders are not in this calculation at all.
+            trace_i = run_forward(stage_i, ranked_config, masters, reserved=ab or None,
+                                  frozen=None, occupancy=occupancy,
+                                  priority_rank=group_rank,
+                                  published=published or None)
+            for a in fixed_plan.alerts_from_notes(
+                    (trace_i.get("rule6") or {}).get("notes")):
+                if a not in fixed_alerts:
+                    fixed_alerts.append(a)
             # `rule1_consolidate` restarts its batch-id counter on every call, so
             # every chain step (like stage 1) mints ids starting at B001 — left
             # alone, this collides with stage 1's and every other step's ids,
@@ -1186,6 +1206,11 @@ def _plan(config: Config):
             # republishes THAT order's completion as the new order's end date
             # (2026-09-11 review, finding A). Re-id before merging.
             _reid_batches(stage_i.batches_prioritized, stage_i.schedule, f"Q{i}-")
+            # Same restart for the placement order a repair replays: this step's
+            # jobs were placed AFTER everything before it.
+            base = 1 + max((e.placed for e in plan_run.schedule), default=-1)
+            for e in stage_i.schedule:
+                e.placed += base
             plan_run.schedule = list(plan_run.schedule) + list(stage_i.schedule)
             plan_run.batches_prioritized = (list(plan_run.batches_prioritized)
                                             + list(stage_i.batches_prioritized))
@@ -1322,7 +1347,22 @@ def _plan(config: Config):
             achieved={"makespan_days": _a_ms, "total_late_days": _a_late},
             diverged=diverged)
 
+    # Machine breaks entered AFTER the plan was published that hold up planned work:
+    # the jobs on that machine wait for it (D5), so the admin is told to Optimize.
+    if published:
+        # Read from THIS plan (the repair), not only the published one, which ages
+        # between Optimize clicks (A0 review I1).
+        from engine import freeze as _freeze
+        from engine import new_engine as _ne
+        fixed_alerts += [fixed_plan.downtime_alert_text(w) for w in fixed_plan.downtime_waits(
+            published, _freeze.schedule_projection(plan_run.schedule), downtime_raw,
+            set(book_store.load_published_meta().get("downtime_ids") or []),
+            config.plan_start_date,
+            first_window=lambda mid, after: _ne.first_window_after(
+                mid, after, ranked_config, ab or None))]
+
     result = {"run_id": run_id, "trace": trace,
+              "fixed_plan_alerts": fixed_alerts,
               "report": _report_for_book(masters, so_lines, absences=absences_raw,
                                          config=config, schedule=plan_run.schedule,
                                          batches=plan_run.batches_prioritized,
@@ -1683,6 +1723,13 @@ def _plan_fingerprint(config: Config) -> str:
         # or a plan computed before an Add New Orders accept would keep being
         # served (the same class of bug the 2026-08-08 cache-freshness fix caught).
         "queue": book_store.load_new_order_queue(),
+        # The published plan holds every job's machine and order (fixed plan,
+        # 2026-10-06), and its meta decides which machine breaks raise the banner:
+        # a change to either must re-plan.
+        "published": hashlib.sha256(json.dumps(
+            book_store.load_last_applied_schedule(), sort_keys=True,
+            default=str).encode("utf-8")).hexdigest(),
+        "published_meta": book_store.load_published_meta(),
         # NOT the Orders-tab note. It is DISPLAY, not a plan input, so it is rebuilt
         # on every cache hit by `_auto_note_for_display()` instead of being keyed on
         # here. Keying on it threw away a perfectly good plan every time a status
@@ -1764,22 +1811,106 @@ def _applied_plan_meta():
     return data.get("meta") or {}
 
 
+# Every write of the published plan holds this lock: a publish (Apply, an accepted
+# earlier date, "Go back to standard plan", the go-live seed) and Add New Orders'
+# read-modify-write append. Without it two admins could interleave an append with a
+# publish and lose one of them. Taken INSIDE `_OPTIMIZE_LOCK` where both are held,
+# never the other way round. Not re-entrant: nothing that holds it may plan.
+_PUBLISH_LOCK = threading.Lock()
+
+
+def _publish(rows: list) -> None:
+    """Write the published plan (fixed plan, 2026-10-06), stamping which machine
+    breaks were already on file. Used by an applied Optimize (also behind an accepted
+    earlier date), "Go back to standard plan" and the go-live seed. Add New Orders
+    appends its new lines with `book_store.save_last_applied_schedule` directly
+    instead, so a break entered before that accept keeps its banner. Nothing else may
+    change a job's machine or the published order."""
+    with _PUBLISH_LOCK:
+        book_store.save_last_applied_schedule(rows)
+        book_store.save_published_meta({
+            "at": _ist_now().isoformat(timespec="seconds"),
+            "downtime_ids": [d.get("id") for d in book_store.load_machine_downtime()
+                             if d.get("id")]})
+
+
+def _publish_with_frozen(rows: list, frozen: list, what: str, retry: str) -> None:
+    """Publish ``rows`` and save the frozen set built from them as ONE step: if either
+    write fails, the previous published plan, its meta and the previous frozen set
+    are written back and this raises 500 saying nothing was changed (A0 review
+    minor 4: a failed frozen save used to leave a new published plan with the old
+    ranks and a bare 500)."""
+    old_rows = book_store.load_last_applied_schedule()
+    old_meta = book_store.load_published_meta()
+    old_frozen = book_store.load_frozen_ops()
+    try:
+        _publish(rows)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=(
+            f"Could not save {what} ({e}). Nothing was changed; {retry}."))
+    try:
+        book_store.save_frozen_ops(frozen)
+    except Exception as e:  # noqa: BLE001
+        with _PUBLISH_LOCK:
+            book_store.save_last_applied_schedule(old_rows)
+            book_store.save_published_meta(old_meta)
+        book_store.save_frozen_ops(old_frozen)
+        raise HTTPException(status_code=500, detail=(
+            f"Could not save {what} ({e}). Nothing was changed; {retry}."))
+
+
+def _ensure_published_plan() -> None:
+    """Go-live seed: with no published plan on file, the plan the floor sees right
+    now (today's planner + applied ranks, no pins) becomes the published plan, once.
+    New engine only; a no-op whenever a plan is already published."""
+    # Keyed on the META, not the rows: the live store already holds a snapshot from
+    # the last auto-applied search (days old, taken at the old settings). Go-live must
+    # replace it with what the floor sees at that moment (spec 4.5).
+    if book_store.load_published_meta():
+        return
+    config = _load_plan_config()
+    if getattr(config, "scheduler", "classic") != "new":
+        return
+    _PLAN_CACHE["key"] = None
+    _plan(config, _seeding=True)
+    art = _PLAN_CACHE.get("artifacts") or {}
+    plan_run = art.get("plan_run")
+    # Written even for an empty book: the meta is what marks the seed as done, so
+    # without it every call would re-seed and throw the plan cache away.
+    _publish(freeze.schedule_projection(plan_run.schedule)
+             if plan_run is not None and plan_run.schedule else [])
+    _PLAN_CACHE["key"] = None
+
+
+def _published_rows(config):
+    """The published plan to hold, or None. New engine only: `run_forward` refuses a
+    published plan on the retired engines, and their plans must stay byte-identical."""
+    if getattr(config, "scheduler", "classic") != "new":
+        return None
+    return book_store.load_last_applied_schedule() or None
+
+
 def _compute_and_store_frozen() -> list:
     """Derive the frozen (in-progress) set from the last-applied plan + the punches and
     persist it (anvitech:frozen_ops). Machine/operator from the applied plan; remaining
     qty from the punches. Empty when nothing is in progress or no plan is on file yet."""
-    from collections import defaultdict
     masters = _current_masters()
     actuals = book_store.load_actuals()
     active = book_store.load_active_orders()
     so_lines = orderbook.active_so_lines(active, actuals, masters)
     applied = book_store.load_last_applied_schedule()
-    good_by_step = defaultdict(float)
-    for a in actuals:
-        good_by_step[(a.so_no, a.item_code, loaders.normalize_process_name(a.process))] += a.good_qty()
-    rows = freeze.compute_frozen_set(applied, so_lines, dict(good_by_step), masters)
+    rows = freeze.compute_frozen_set(applied, so_lines, _good_by_step(actuals), masters)
     book_store.save_frozen_ops(rows)
     return rows
+
+
+def _good_by_step(actuals) -> dict:
+    """Good pieces punched per (SO, item, step name): the one count the frozen set is
+    derived from, whether from the published plan (Done) or a candidate (Apply)."""
+    good = defaultdict(float)
+    for a in actuals:
+        good[(a.so_no, a.item_code, loaders.normalize_process_name(a.process))] += a.good_qty()
+    return dict(good)
 
 
 def _try_start_auto(by: str = "") -> bool:
@@ -2271,11 +2402,30 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
     # (worker result / shard aggregation) call this same function and must see it
     # too. `None` for an ordinary plan run, exactly like before.
     extra_orders = _OPTIMIZE.get("extra_orders")
-    if ranks:
-        _local_best = _metrics_for_ranks(ranks, winner_overlap, winner_flexible,
-                                         extra_orders=extra_orders)
-        if _local_best is not None:
-            best = _local_best
+    # Fixed plan (final review, 2026-10-06): the numbers are those of the plan the
+    # floor gets after Apply -- the candidate published, its frozen set rebuilt, then
+    # repaired (`_repaired_candidate`) -- not the candidate's free plan. Computed ONCE
+    # here and shared by "After", `improved`, the date list and the "what moved" screen.
+    cand, cand_error = None, None
+    try:
+        cand = _repaired_candidate(ranks or None,
+                                   _candidate_config(winner_overlap, winner_flexible),
+                                   extra_orders=extra_orders)
+    except Exception as e:  # noqa: BLE001 — a recompute must never crash finalize
+        cand_error = e
+    # Also with no job order to apply (empty ranks): the date list below comes from
+    # this same candidate, so the numbers must too (Task 9 Part D).
+    # If they cannot be worked out, the search's own numbers stay on screen, and the
+    # reason is shown with them (A0 review minor 5: never silent).
+    metrics_error = None
+    if cand is not None:
+        try:
+            best = _candidate_metrics(cand)
+        except Exception as e:  # noqa: BLE001 — keep the contest's number, say why
+            metrics_error = f"{type(e).__name__}: {e}"
+    else:
+        metrics_error = f"{type(cand_error).__name__}: {cand_error}" if cand_error \
+            else "the candidate plan was not built"
     # `real_baseline` was measured when the contest STARTED, on the previous plan clock.
     # Re-measure it through `_incumbent_metrics` — the ONE "plan you have now" — on the
     # clock just stamped, so the panel's before/after compares two plans on one clock and
@@ -2308,9 +2458,20 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
     quote_movement = None
     if kind == "quote":
         try:
-            quote_movement = _quote_movement(ranks)
+            quote_movement = _quote_movement(ranks, cand=cand)
         except Exception:  # noqa: BLE001 — a movement summary must never crash finalize
             quote_movement = None
+    # The delivery dates that move if this result is applied. None means it could not
+    # be worked out, and the reason is kept so the panel can say so (never silent).
+    date_list, date_error = None, None
+    if kind == "plan":
+        try:
+            if cand is None:
+                raise cand_error or RuntimeError("the candidate plan was not built")
+            _cur = _plan(_load_plan_config()).get("expected_end") or {}
+            date_list = fixed_plan.date_changes(_cur, _expected_keyed(cand.repaired))
+        except Exception as e:  # noqa: BLE001 — the list is advisory; never fail a result
+            date_list, date_error = None, f"{type(e).__name__}: {e}"
     with _OPTIMIZE_LOCK:
         if _OPTIMIZE["job_id"] != job_id:
             return False
@@ -2329,7 +2490,10 @@ def _finalize_optimize(job_id, base_config, real_baseline, label, *,
                     "flexible_machines": bool(winner_flexible),
                     "current_flexible": bool(getattr(base_config, "flexible_machines", False)),
                     "sweep_table": table,
-                    "quote_movement": quote_movement})
+                    "quote_movement": quote_movement,
+                    "date_changes": date_list,
+                    "date_changes_error": date_error,
+                    "metrics_error": metrics_error})
         # Record a "last searched" marker for EVERY completed contest — not
         # just an applied one — so a redundant Done click (no improvement
         # found, or nothing was ever applied) can still be skipped without
@@ -2387,6 +2551,11 @@ def _optimize_status():
     # (2026-09-11 review).
     if kind == "quote" and state == "done":
         out["quote_movement"] = res.get("quote_movement")
+    if kind == "plan" and state == "done":
+        out["date_changes"] = res.get("date_changes")
+        out["date_changes_error"] = res.get("date_changes_error")
+    if state == "done":
+        out["metrics_error"] = res.get("metrics_error")
     return out
 
 
@@ -2471,16 +2640,19 @@ def _cancel_cloud_job(job_id):
                                    "so the current plan is unchanged")
 
 
-def _all_lines_schedule(setup, masters, ranks):
+def _all_lines_schedule(setup, masters, ranks, published=None):
     """A schedule covering ALL active lines, built the SAME way `_plan` builds it
     (one pass, saved ranks replayed with expedite off, operator absences reserved)
     so both sides of the Optimize before/after are scored on the same domain.
+    ``published`` (fixed plan): pass the published plan ONLY for the CURRENT side
+    (the plan in force is the repaired one); a candidate is planned free.
     Returns (schedule, all_lines)."""
     all_lines = list(setup.target)
     ranked_config = replace(setup.config, expedite_window_min=0) if ranks else setup.config
     pr = PlanRun(so_lines=list(all_lines))
     run_forward(pr, ranked_config, masters, reserved=setup.unavailable_reserved,
-                priority_rank=ranks, frozen=getattr(setup, "frozen", None) or None)
+                priority_rank=ranks, frozen=getattr(setup, "frozen", None) or None,
+                published=published or None)
     return pr.schedule, all_lines
 
 
@@ -2532,63 +2704,121 @@ def _movement_note(new_ranks):
         machine_downtime=book_store.load_machine_downtime())
     prio = book_store.load_plan_priority()
     old_ranks = (prio or {}).get("ranks") or None
-    old_sched, _ = _all_lines_schedule(setup, setup.masters, old_ranks)
-    new_sched, _ = _all_lines_schedule(setup, setup.masters, new_ranks or None)
+    old_sched, _ = _all_lines_schedule(setup, setup.masters, old_ranks,
+                                       published=_published_rows(setup.config))
+    # The plan the floor gets once applied (the repaired candidate, one definition).
+    new_sched = _repaired_candidate(new_ranks or None, _candidate_config()).repaired
     movers = _movers(_expected_by_order(old_sched),
                      _expected_by_order(new_sched), _MOVE_LATER_THRESHOLD_DAYS)
     return _format_movers(movers)
 
 
+def _candidate_config(overlap=None, flexible=None):
+    """The saved plan config (UNRESOLVED, as stored) at a candidate's winning overlap
+    and machine set: what Apply will write, and what every candidate is planned at."""
+    config = _load_plan_config()
+    if overlap is not None:
+        config = replace(config, **{optimizer.knob_for(config)[0]: overlap})
+    if flexible is not None:
+        config = replace(config, flexible_machines=bool(flexible))
+    return config
+
+
+def _repaired_candidate(ranks, config, *, extra_orders=None, repair=True):
+    """THE one definition of "the plan the floor gets if this result is applied"
+    (fixed plan, final review 2026-10-06).
+
+    Apply publishes the candidate's FREE plan (``free``), rebuilds the frozen set from
+    that projection (``frozen``), and from then on every plan is a repair of it. So
+    ``repaired`` is ``free`` published then repaired with that frozen set, exactly as
+    the next ``_plan`` will build it. The Optimize panel's numbers, its delivery-date
+    list and the Add New Orders "what moved" screen all read ``repaired``; Apply
+    publishes ``rows``. Before this helper the panel scored the free plan, the date
+    list repaired it with the OLD frozen set, and Apply never rebuilt the frozen set,
+    so the three could disagree with each other and with the floor.
+
+    ``config`` is the unresolved candidate config (``_candidate_config``).
+    ``extra_orders``: Add New Orders draft lines joined in memory, the same join the
+    search used. ``repair=False`` skips the repaired plan (Apply needs only the rows).
+    On the retired engines there is no repair: ``repaired`` is ``free``."""
+    from types import SimpleNamespace
+    rconfig = _resolve_config(config)
+    masters = _current_masters()
+    actuals = book_store.load_actuals()
+    orders = _with_extra_orders(book_store.load_active_orders(), extra_orders)
+    setup = optimize_service.prepare_contest(
+        orders, actuals, masters, rconfig, absences=book_store.load_absences(),
+        operator_table=book_store.load_operator_table(),
+        frozen=book_store.load_frozen_ops(),
+        machine_downtime=book_store.load_machine_downtime())
+    free, all_lines = _all_lines_schedule(setup, setup.masters, ranks or None)
+    good = _good_by_step(actuals)
+    # A half-finished job this plan moves to another machine pays its setup there
+    # (Task 9 Part C): the rows remember where it was last worked.
+    rows = freeze.mark_moved(freeze.schedule_projection(free), setup.frozen, good)
+    frozen = freeze.compute_frozen_set(rows, setup.target, good, setup.masters)
+    repaired = free
+    if repair and getattr(setup.config, "scheduler", "classic") == "new":
+        rsetup = replace(setup, frozen=frozen)
+        repaired, _ = _all_lines_schedule(rsetup, rsetup.masters, ranks or None,
+                                          published=rows)
+    return SimpleNamespace(setup=setup, config=rconfig, free=free, rows=rows,
+                           frozen=frozen, repaired=repaired, all_lines=all_lines)
+
+
+def _expected_keyed(schedule) -> dict:
+    """Per-order expected completion keyed "SO\x1fitem", ISO dates (JSON-safe)."""
+    return {f"{so}{KEY_SEP}{item}": d.isoformat()
+            for (so, item), d in _expected_by_order(schedule).items()}
+
+
+def _schedule_metrics(schedule, all_lines, setup, config, *, with_distribution=True):
+    """``optimizer.plan_metrics`` of one schedule plus its "expected" dates: the one
+    shape every Optimize number is reported in."""
+    metrics = optimizer.plan_metrics(
+        schedule, all_lines, setup.config.plan_start_date,
+        ceiling_days=getattr(config, "worst_ceiling_days", None),
+        with_distribution=with_distribution,
+        promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
+    # Per-order expected completion, keyed "SO\x1fitem" (JSON-safe: this dict is
+    # stored verbatim as _OPTIMIZE["best"] and served by GET /optimize/status) --
+    # the ONE shared definition (optimizer.expected_completion via
+    # _expected_by_order), so the Add New Orders "what moved" screen
+    # (_quote_movement) can never disagree with the Orders tab or the Gantt.
+    metrics["expected"] = _expected_keyed(schedule)
+    return metrics
+
+
+def _candidate_metrics(cand, *, with_distribution=True):
+    """Metrics of the plan the floor gets after Apply (``cand.repaired``)."""
+    return _schedule_metrics(cand.repaired, cand.all_lines, cand.setup, cand.config,
+                             with_distribution=with_distribution)
+
+
+def _candidate_dates(ranks, overlap, flexible):
+    """Delivery dates the floor would see if this result were applied: the candidate
+    plan, published, then repaired exactly as every later plan will be (fixed plan,
+    2026-10-06), so the list the admin approves is the plan the floor gets."""
+    return _expected_keyed(_repaired_candidate(
+        ranks, _candidate_config(overlap, flexible)).repaired)
+
+
 def _metrics_for_ranks(ranks, overlap=None, flexible=None, *, with_distribution=True,
                        extra_orders=None):
-    """Metrics of the plan that replays ``ranks`` through the SAME local path ``_plan``
-    uses (optionally at a given overlap). This is the ONE source of truth for "what
-    this optimized plan achieves": the contest (cloud worker OR local sweep) can report
-    a ``best`` computed a hair differently from how the app actually replays, so the
-    number the Optimize panel shows and the plan the user gets on Apply could disagree
-    (the 2026-07-25 52.5-promised / 55.6-applied gap). Recomputing here makes them one
-    number by construction. Returns None on any failure (caller keeps the contest's).
+    """Metrics of the FREE plan that replays ``ranks`` (no published plan held).
+    Since the fixed plan (2026-10-06) no product surface reports this: the Optimize
+    panel and the "what moved" screen read ``_repaired_candidate`` instead, because
+    a free plan is not what the floor gets after Apply. Kept for the comparisons
+    that genuinely want the free plan (tests measuring the repair against it).
+    Returns None on any failure.
 
     ``extra_orders`` (2026-09-08, review round 2): the SAME in-memory join
-    ``_start_optimize`` used to score ``ranks`` in the first place. A quote-kind
-    ``ranks`` was searched over the book PLUS the draft lines — recomputing here
-    against the saved book alone would silently drop them from ``expected``
-    (their achieved date came back blank) and, worse, would replay the winning
-    ranks on a domain the contest never actually searched, so an EXISTING
-    order's recomputed date could disagree with what the contest itself
-    found (the new order's resource use is simply missing). The metrics pass
-    must see the same book the contest saw, or the comparison is meaningless."""
+    ``_start_optimize`` used to score ``ranks`` in the first place."""
     try:
-        config = _resolve_config(_load_plan_config())
-        if overlap is not None:
-            knob = optimizer.knob_for(config)[0]
-            config = replace(config, **{knob: overlap})
-        if flexible is not None:
-            config = replace(config, flexible_machines=bool(flexible))
-        masters = _current_masters()
-        actuals = book_store.load_actuals()
-        orders = book_store.load_active_orders()
-        orders = _with_extra_orders(orders, extra_orders)
-        absences = book_store.load_absences()
-        setup = optimize_service.prepare_contest(
-            orders, actuals, masters, config, absences=absences,
-            operator_table=book_store.load_operator_table(),
-            frozen=book_store.load_frozen_ops(),
-            machine_downtime=book_store.load_machine_downtime())
-        schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks or None)
-        metrics = optimizer.plan_metrics(
-            schedule, all_lines, setup.config.plan_start_date,
-            ceiling_days=getattr(config, "worst_ceiling_days", None),
-            with_distribution=with_distribution,
-            promise_slack_days=getattr(config, "committed_promise_slack_days", 3))
-        # Per-order expected completion, keyed "SO\x1fitem" (JSON-safe: this dict is
-        # stored verbatim as _OPTIMIZE["best"] and served by GET /optimize/status) —
-        # the ONE shared definition (optimizer.expected_completion via
-        # _expected_by_order), so the Add New Orders "what moved" screen
-        # (_quote_movement) can never disagree with the Orders tab or the Gantt.
-        metrics["expected"] = {f"{so}{KEY_SEP}{item}": d.isoformat()
-                               for (so, item), d in _expected_by_order(schedule).items()}
-        return metrics
+        cand = _repaired_candidate(ranks, _candidate_config(overlap, flexible),
+                                   extra_orders=extra_orders, repair=False)
+        return _schedule_metrics(cand.free, cand.all_lines, cand.setup, cand.config,
+                                 with_distribution=with_distribution)
     except Exception:  # noqa: BLE001 — a metrics recompute must never crash finalize
         return None
 
@@ -2616,7 +2846,9 @@ def _incumbent_metrics(*, with_distribution=False):
                                              machine_downtime=book_store.load_machine_downtime())
     prio = book_store.load_plan_priority()
     ranks = (prio or {}).get("ranks") or None
-    schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks)
+    # The plan in force is the REPAIRED published plan (fixed plan, 2026-10-06).
+    schedule, all_lines = _all_lines_schedule(setup, setup.masters, ranks,
+                                              published=_published_rows(setup.config))
     metrics = optimizer.plan_metrics(
         schedule, all_lines, setup.config.plan_start_date,
         with_distribution=with_distribution,
@@ -2628,7 +2860,7 @@ def _incumbent_metrics(*, with_distribution=False):
     return metrics
 
 
-def _quote_movement(ranks):
+def _quote_movement(ranks, cand=None):
     """For a finished quote search (Add New Orders preponed path, 2026-09-08): what
     the book looks like before and after, for the result screen the director sees
     before deciding whether to accept.
@@ -2669,14 +2901,21 @@ def _quote_movement(ranks):
     whole-book figure. The new order's own on-time performance is not lost: it
     is exactly what its own "achieved" date (in ``after["expected"]``) is for."""
     inc = _incumbent_metrics()
-    drafts = [r for r in book_store.load_new_order_drafts() if r.get("target_date")]
-    # Let a genuine bug in _new_order_extras (e.g. a corrupted stored draft) raise
-    # rather than silently fall back to a no-draft "after" — the caller
-    # (_optimize_status) already guards this call and turns a real exception into
-    # a visible "quote_movement: None" instead of a subtly wrong result.
-    extra = (_new_order_extras(drafts, _current_masters(), _ist_today().isoformat())
-            if drafts else None)
-    after = _metrics_for_ranks(ranks, extra_orders=extra) or {}
+    # Fixed plan (final review, 2026-10-06): "after" is the plan the floor gets once
+    # this is accepted -- the candidate (drafts included) published then repaired,
+    # `_repaired_candidate`, the same definition the Optimize panel uses. `cand` is
+    # passed by `_finalize_optimize`, which has already built it.
+    if cand is None:
+        drafts = [r for r in book_store.load_new_order_drafts() if r.get("target_date")]
+        # Let a genuine bug in _new_order_extras (e.g. a corrupted stored draft) raise
+        # rather than silently fall back to a no-draft "after" — the caller
+        # (_finalize_optimize) already guards this call and turns a real exception
+        # into a visible "quote_movement: None" instead of a subtly wrong result.
+        extra = (_new_order_extras(drafts, _current_masters(), _ist_today().isoformat())
+                 if drafts else None)
+        cand = _repaired_candidate(ranks or None, _candidate_config(),
+                                   extra_orders=extra)
+    after = {"expected": _expected_keyed(cand.repaired)}
 
     def _parse(expected):
         out = {}
@@ -2761,9 +3000,21 @@ def _auto_apply_result():
                          f"({inc['total_late_days']} late-days).")
 
 
-def _optimize_apply():
-    """Persist the last completed run's ranks — from then on every Plan replays
-    them (admin, user, and the auto re-plan after actuals)."""
+def _optimize_apply(extra_orders=None):
+    """Persist the last completed run: publish its plan, rebuild the frozen set from
+    it, save its ranks and winning settings (fixed plan, 2026-10-06).
+
+    ``extra_orders`` (an accepted earlier date, final review C1): the draft lines the
+    search was run with. They are about to be added to the book, so the published
+    plan must contain them at the machines and places the search chose; without them
+    the published plan had a hole where they belong and existing orders sat in their
+    slots.
+
+    Order matters, and nothing is half applied: the committed-promise backstop and
+    building the plan to publish both run before any write; the publish and its frozen
+    set are the FIRST writes, and if either fails both are rolled back and this raises
+    500 with ranks, settings and the queue untouched (the result stays on screen to
+    retry)."""
     with _OPTIMIZE_LOCK:
         res = _OPTIMIZE.get("result")
         if _OPTIMIZE["state"] != "done" or not res:
@@ -2782,6 +3033,27 @@ def _optimize_apply():
                 "(committed orders are capped at promised + "
                 f"{_slack} days). "
                 "Uncommit the affected order first, or apply a plan that keeps it within the cap."))
+        # The winning overlap AND machine set (Settings sweep). The plan is published
+        # at THESE settings, so the published plan is the plan approved.
+        best_ov = res.get("best_overlap")
+        best_flex = res.get("flexible_machines")
+        cfg = _load_plan_config()
+        knob = res.get("knob") or optimizer.knob_for(cfg)[0]
+        target = cfg
+        if best_ov is not None:
+            target = replace(target, **{knob: best_ov})
+        if best_flex is not None:
+            target = replace(target, flexible_machines=bool(best_flex))
+        # The plan to publish: the result's FREE plan (an Optimize result is free by
+        # definition), plus the frozen set rebuilt from it, so the half-finished jobs
+        # the search moved (a down machine) stay where it moved them.
+        try:
+            cand = _repaired_candidate(res["ranks"], target, extra_orders=extra_orders,
+                                       repair=False)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=(
+                f"Could not build the plan to apply ({e}). Nothing was changed."))
+        _publish_with_frozen(cand.rows, cand.frozen, "the new plan", "press Apply again")
         meta = {"saved_at": _ist_now().isoformat(timespec="seconds"),
                 "budget": res["budget"], "seed": res["seed"],
                 "baseline": res["baseline"], "best": res["best"],
@@ -2793,33 +3065,7 @@ def _optimize_apply():
                 # later plan can flag "the dates moved, re-run the deep search".
                 "dates": _delivery_dates()}
         book_store.save_plan_priority(res["ranks"], meta)
-        # Persist the applied plan's per-op assignment (machine/operator/time) so the
-        # next "Done" can freeze whatever is in progress on its real machine. Recompute
-        # from the winning ranks the same way the incumbent is scored.
-        try:
-            setup = optimize_service.prepare_contest(
-                book_store.load_active_orders(), book_store.load_actuals(),
-                _current_masters(), _resolve_config(_load_plan_config()),
-                absences=book_store.load_absences(),
-                operator_table=book_store.load_operator_table(),
-                frozen=book_store.load_frozen_ops(),
-                machine_downtime=book_store.load_machine_downtime())
-            sched, _ = _all_lines_schedule(setup, setup.masters, res["ranks"])
-            book_store.save_last_applied_schedule(freeze.schedule_projection(sched))
-        except Exception:
-            pass  # never let schedule-snapshotting break an apply
-        # Settings sweep: the winning overlap AND machine-set become THE saved plan
-        # settings (the single config every Plan loads and Settings shows). Unchanged
-        # winner -> no write, no churn.
-        best_ov = res.get("best_overlap")
-        best_flex = res.get("flexible_machines")
-        cfg = _load_plan_config()
-        knob = res.get("knob") or optimizer.knob_for(cfg)[0]
-        target = cfg
-        if best_ov is not None:
-            target = replace(target, **{knob: best_ov})
-        if best_flex is not None:
-            target = replace(target, flexible_machines=bool(best_flex))
+        # Unchanged winner -> no write, no churn.
         if target.to_dict() != cfg.to_dict():
             book_store.save_plan_config(json.dumps(target.to_dict()))
         # Clear the in-memory job so a later page refresh doesn't re-show the
@@ -2827,11 +3073,36 @@ def _optimize_apply():
         _OPTIMIZE.update(state="idle", result=None, best=None, baseline=None)
         # A full re-optimization treats every order equally, so arrival positions end here.
         book_store.clear_new_order_queue()
+        _PLAN_CACHE["key"] = None
         return meta
 
 
 def _optimize_clear():
+    """"Go back to standard plan" (final review I6, owner ruling 2026-10-06): forget
+    the applied job order AND republish the standard plan (no ranks, half-finished
+    jobs held), then rebuild the frozen set from it. Under the fixed plan clearing
+    the ranks alone changed almost nothing, since every job keeps its published
+    machine and place in order. A deliberate admin action, behind a confirm that says jobs may
+    move. Built before anything is written, and the publish (with its frozen set) is
+    the first write: a failure changes nothing (the ranks and the Add New Orders
+    arrival queue are forgotten only once the plan is saved; a whole-book publish ends
+    the queue, as Apply does). Only an empty book publishes an empty plan; any other
+    error is raised."""
+    config = _load_plan_config()
+    new = getattr(config, "scheduler", "classic") == "new"
+    if new:
+        try:
+            cand = _repaired_candidate(None, config, repair=False)
+        except optimize_service.NothingToOptimize:   # nothing to plan: an empty plan
+            rows, frozen = [], []
+        else:
+            rows, frozen = cand.rows, cand.frozen
+        _publish_with_frozen(rows, frozen, "the standard plan", "press the button again")
     book_store.clear_plan_priority()
+    # A whole-book plan was just published, so the arrival positions end here, as on
+    # Apply (A0 review I2).
+    book_store.clear_new_order_queue()
+    _PLAN_CACHE["key"] = None
     return {"cleared": True}
 
 
@@ -3033,8 +3304,9 @@ def create_machine_downtime(req: MachineDowntimeRequest, request: Request):
 
     Deliberately validates EXISTENCE, not kind: the engine honours downtime on any
     machine and only the picker is filtered to CNC/VMC, so widening the picker later
-    needs no change here. No optimize trigger — only the Done button starts a
-    contest (same rule as absences)."""
+    needs no change here. No optimize trigger (same rule as absences): the published
+    plan WAITS for the break, and `_plan` raises the "Optimize recommended" banner
+    for a break entered after publishing (fixed plan, 2026-10-06)."""
     require_admin(request)
     try:
         d_from = date.fromisoformat(req.from_date)
@@ -3274,9 +3546,54 @@ def add_new_orders(req: AddNewOrdersRequest, request: Request):
     book_store.add_orders(orders)
     book_store.save_new_order_drafts([])
     _PLAN_CACHE["key"] = None      # the book changed; never serve the old response
-    return {"added": len(orders),
-            "orders": [{"so_no": o.so_no, "item_code": o.item_code,
-                        "delivery_date": o.delivery_date.isoformat()} for o in orders]}
+    # Fixed plan (D9): the new lines keep the machine and place their quote gave them.
+    # Planned now (stage 2, around the existing plan), then APPENDED to the published
+    # plan; existing rows are untouched. Deliberately `save_last_applied_schedule`,
+    # not `_publish`: `_publish` would also re-stamp the known machine breaks and so
+    # hide the banner for a break entered before this accept.
+    # The order is already saved, so a pinning failure must not fail the request, but
+    # it must never be silent either (2026-08-09 rule): unpinned, the new order would
+    # be planned free on every repair and could drift from its quote.
+    warning = None
+    try:
+        _pin_new_orders(config, orders)
+    except Exception as e:  # noqa: BLE001 — saved order; report, do not raise
+        sos = ", ".join(sorted({o.so_no for o in orders}))
+        warning = (f"New order(s) {sos} were saved, but their machines could not be "
+                   f"fixed in the plan: {e}. Press Optimize to plan them.")
+        _auto_note_write(warning)
+    out = {"added": len(orders),
+           "orders": [{"so_no": o.so_no, "item_code": o.item_code,
+                       "delivery_date": o.delivery_date.isoformat()} for o in orders]}
+    if warning:
+        out["warning"] = warning
+    return out
+
+
+def _pin_new_orders(config, orders) -> None:
+    """Append the just-added orders' planned steps (stage 2, around the existing
+    plan, exactly as quoted) to the published plan (fixed plan, D9). Existing rows
+    are untouched. Raises on any failure; the caller reports it."""
+    _plan(config)
+    sched = (_PLAN_CACHE.get("artifacts") or {}).get("plan_run").schedule
+    new_keys = {(o.so_no, o.item_code) for o in orders}
+    add = [r for r in freeze.schedule_projection(sched)
+           if any((so, r["item_code"]) in new_keys for so in r["so_refs"])]
+    if add:
+        # Read-modify-write under the publish lock, so a publish cannot land between
+        # the read and the write and be overwritten (or overwrite these lines).
+        with _PUBLISH_LOCK:
+            existing = book_store.load_last_applied_schedule()
+            # A repair places jobs in the published plan's own placement order. Stage
+            # 2 numbers its placements from 0 again, so the new lines go AFTER every
+            # published job, exactly as stage 2 planned them: behind the book.
+            base = 1 + max((r.get("placed") for r in existing
+                            if isinstance(r.get("placed"), int)), default=-1)
+            for r in add:
+                if isinstance(r.get("placed"), int):
+                    r["placed"] = base + r["placed"]
+            book_store.save_last_applied_schedule(existing + add)
+        _PLAN_CACHE["key"] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -3383,7 +3700,7 @@ def accept_prepone(request: Request):
     # accepting must adopt it — never leave the book planned by an older
     # sequence while claiming these dates. Called BEFORE any write: if its own
     # committed-promise backstop raises, nothing below has happened yet.
-    _optimize_apply()
+    _optimize_apply(extra_orders=orders)
     book_store.add_orders(orders)
     book_store.save_new_order_drafts([])
     # No queue: after a full re-optimization every order is equal by definition
@@ -3973,7 +4290,7 @@ def _plan_run_for_report(config: Config):
     ranked_config = replace(config, expedite_window_min=0) if ranks else config
     plan_run = PlanRun(so_lines=so_lines)
     run_forward(plan_run, ranked_config, masters, reserved=ab or None, priority_rank=ranks,
-                frozen=frozen or None)
+                frozen=frozen or None, published=_published_rows(config))
     return plan_run, so_lines, masters, config
 
 
@@ -4266,23 +4583,32 @@ def optimize_shard_result_ep(req: WorkerShardResult, request: Request):
 
 @app.post("/optimize/done")
 def optimize_done_ep(request: Request):
-    """'Done entering — update plan'. Any logged-in role. Runs an auto-applying
-    RESTRICTED re-optimization (freezes in-progress ops, re-optimizes the rest)
-    every day — no weekday gate. Poll GET /optimize/status for progress when a
-    contest starts; the winner auto-applies if strictly better."""
+    """'Done entering: update plan'. Any logged-in role. Fixed plan (2026-10-06):
+    never starts a search. It refreshes the in-progress (frozen) set from the punches
+    and re-plans: every job keeps its machine and the published order (a late job lets
+    ready ones go first, spec section 8), only times move. Only the admin's Optimize
+    changes machines or the published order. `_try_start_auto` is kept,
+    unreferenced, so scheduled auto-optimize could return by owner decision. The
+    arrival queue is NOT cleared here (only Apply / an accepted earlier date end it)."""
     # No require_admin: the gatekeeper already verified a valid session for any
     # non-public path, and this must be reachable by the user role.
-    started = _try_start_auto(by=getattr(request.state, "user", "") or "")
-    if started:
-        # A full re-optimization treats every order equally, so arrival positions
-        # end here — but only when one actually STARTS. `_try_start_auto` also
-        # returns False when a contest is already running or nothing material
-        # changed; clearing the queue on those skips would drop the arrival
-        # positions with no re-optimization ever having happened to earn it
-        # (2026-09-08 review).
-        book_store.clear_new_order_queue()
-    return {"started": started, "reason": ("started" if started else "skipped"),
-            "state": _optimize_status()["state"]}
+    by = getattr(request.state, "user", "") or ""
+    try:
+        _compute_and_store_frozen()
+        _PLAN_CACHE["key"] = None
+        res = _plan(_load_plan_config())
+        n = len(res.get("fixed_plan_alerts") or [])
+        tail = (f" {n} notice{'s' if n != 1 else ''} at the top "
+                f"need{'' if n != 1 else 's'} your admin." if n else "")
+        _auto_note_write(f"{_who(by)}pressed \"Done entering\" at {_hhmm()}: plan updated "
+                         f"from today's entries. Jobs keep their machines; only times "
+                         f"changed.{tail}")
+    except Exception as e:  # noqa: BLE001 — never silent (2026-08-09 rule)
+        _auto_note_write(f"{_who(by)}pressed \"Done entering\" at {_hhmm()} but the plan "
+                         f"could NOT be updated: {e}. Please try again, and tell your "
+                         "admin if it keeps happening.")
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"started": False, "reason": "repaired", "state": _optimize_status()["state"]}
 
 
 @app.get("/gantt")

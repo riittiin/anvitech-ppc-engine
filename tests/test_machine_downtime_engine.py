@@ -158,4 +158,4 @@ def test_the_scheduler_fingerprint_records_the_new_semantics():
     # while a qualified person is free and work is ready (stretch-based staffing,
     # per-machine committed spans), so ranks scored under the old placement are
     # stale on every book.
-    assert new_engine.SCHEDULER_FINGERPRINT == "new-engine-v11-cnc-vmc-planning-30pct"
+    assert new_engine.SCHEDULER_FINGERPRINT == "new-engine-v13-ready-turn-os-sent"

@@ -55,6 +55,7 @@
          about its own data (2026-08-09 role-parity fix). The card itself stays
          hidden until one of them has something to say — see syncDataGapsCard(). -->
     <div class="card hidden" id="data-gaps-card">
+      <div id="fixed-plan-alerts" class="fixed-plan-alerts hidden"></div>
       <div id="report-noroute" class="report-noroute hidden"></div>
       <section id="report-panel" class="report hidden">
         <button id="report-toggle" class="report-summary"></button>
@@ -110,15 +111,17 @@
         <p class="explainer">Tries many different orders for the jobs and keeps the best one. Fewer late deliveries comes first, shortest total time second.</p>
       </div>
       <div class="optimize-intro admin-only">
-        Same machines, same people. Only the order the jobs run in changes. This does
-        not change your plan by itself. After it finishes you must press Apply.
+        Optimize finds a better job order for the whole book. It is the only thing that
+        moves jobs to other machines or changes their order. You see which delivery dates
+        change, then Apply or Discard.
       </div>
       <div class="optimize-intro user-only">
-        Same machines, same people. Only the order the jobs run in changes. Your admin
-        starts this search and decides whether to use the result. You can watch it here.
+        Optimize can move jobs to other machines and change their order and delivery
+        dates. Your admin starts this and decides whether to use the result. You can
+        watch it here.
       </div>
       <div class="optimize-controls">
-        <button id="optimize-start" class="primary admin-only">Start deep search</button>
+        <button id="optimize-start" class="primary admin-only">Optimize</button>
         <button id="optimize-stop" class="ghost-btn hidden admin-only">Stop &amp; keep best</button>
         <span id="optimize-progress" class="status"></span>
       </div>

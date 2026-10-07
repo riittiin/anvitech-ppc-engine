@@ -249,6 +249,30 @@ def _with_unavailability(masters, reserved):
         cal, leaves=leaves, machine_downtime=downtime))
 
 
+def first_window_after(machine_id: str, after, config, reserved=None):
+    """(start, end) of ``machine_id``'s first working shift at or after ``after``, the
+    way the engine sees it (holidays, weekly off, machine breaks in ``reserved``, the
+    machine's shifts), or None if the machine is unknown. A shift split by its meal
+    break counts as one window. Reporting only: the machine-down banner asks whether
+    a job now starts in the first window after a break (A0 review I1)."""
+    from ppc_engine.worktime import iter_windows
+    m = _with_unavailability(_new_masters(bool(getattr(config, "flexible_machines", False))),
+                             reserved)
+    mac = m.machines.get(machine_id)
+    if mac is None:
+        return None
+    first = None
+    for w in iter_windows(mac, after, m.calendar, _plan_config(config)):
+        if first is None:
+            first = w
+            end = w.end
+        elif (w.shift_date, w.shift) == (first.shift_date, first.shift):
+            end = w.end
+        else:
+            break
+    return None if first is None else (max(first.start, after), end)
+
+
 def occupancy_from_entries(entries, config) -> dict:
     """A finished plan's placements, as the occupancy the NEXT planning stage must
     work around (Add New Orders quote, 2026-09-08 spec).
@@ -384,13 +408,18 @@ def _incumbent_sequence(batches, batch_by_key, seed_ranks, config, masters):
     return seq or None
 
 
-def _orders_from_batches(batches, masters):
+def _orders_from_batches(batches, masters, first_start=None):
     """Old Batch[] -> new Order[], plus an order-key -> batch index for mapping back.
 
     Each batch becomes one Order keyed by (batch_id, item_code) — unique per batch. A
     batch's per-process remaining (`process_qty`, keyed by normalised process name) is
     mapped to the new engine's `process_remaining` (keyed by operation seq) via the
-    routing, so a partially-produced order re-plans each step at its own remaining."""
+    routing, so a partially-produced order re-plans each step at its own remaining.
+
+    D12 (2026-10-06): an OUTSOURCED step whose previous step the batch has completed
+    (`Batch.process_done_on`) gets ``Order.os_sent[seq]`` = that day at the start of
+    the first shift (``first_start``, default 08:00; a punch carries a date, not a
+    time, so the parts are taken as sent when that day's work began)."""
     orders, batch_by_key = [], {}
     for b in batches:
         # An item with no routing is not schedulable — skip it (it still shows in the order
@@ -422,11 +451,19 @@ def _orders_from_batches(batches, masters):
             continue
 
         promise_date = b.promised_date if getattr(b, "commitment", "open") == "committed" else None
+        done_on = getattr(b, "process_done_on", None) or {}
+        ops = routing.operations
+        os_sent = {op.seq: datetime.combine(done_on[_norm(ops[i - 1].name)],
+                                            first_start or time(8, 0))
+                   for i, op in enumerate(ops)
+                   if i > 0 and op.kind == OperationKind.OUTSOURCED
+                   and _norm(ops[i - 1].name) in done_on} or None
         orders.append(Order(
             so_no=b.batch_id, item_code=b.item_code, item_name=b.item_name,
             qty=int(round(b.qty)), due_date=b.so_delivery_date,
             process_remaining=process_remaining,
             promise_date=promise_date,
+            os_sent=os_sent,
         ))
         batch_by_key[key] = b
     return orders, batch_by_key
@@ -446,7 +483,8 @@ def _machine_down_in_window(masters, mid, start_date, end_date) -> bool:
     return any(start_date <= d <= end_date for d in days)
 
 
-def _ppc_frozen(rows, orders, batch_by_key, masters, plan_start_date):
+def _ppc_frozen(rows, orders, batch_by_key, masters, plan_start_date,
+                release_on_downtime=True):
     """Map app-level frozen rows -> ppc FrozenOp[] for decode. Each row is
     {so_no, item_code, process, op_seq, machine, operator, remaining_qty, prev_start-iso,
     prev_end-iso}. ``prev_end`` (added 2026-08-31, ``freeze.compute_frozen_set``) is when
@@ -488,6 +526,7 @@ def _ppc_frozen(rows, orders, batch_by_key, masters, plan_start_date):
             so_to_key[(so, batch.item_code)] = key
     order_by_key = {o.key: o for o in orders}
     pinned = {}                      # (order_key, op_seq) -> (prev_start, so_no, mid, operator)
+    moved_from = {}                  # (order_key, op_seq) -> machines it was last worked on
     for r in rows or []:
         key = so_to_key.get((r.get("so_no"), r.get("item_code")))
         if key is None or key not in order_by_key:
@@ -502,8 +541,8 @@ def _ppc_frozen(rows, orders, batch_by_key, masters, plan_start_date):
             _end = datetime.fromisoformat(r.get("prev_end") or r["prev_start"]).date()
         except (KeyError, ValueError, TypeError):
             _end = plan_start_date
-        if _machine_down_in_window(masters, mid, plan_start_date,
-                                   max(_end, plan_start_date)):
+        if release_on_downtime and _machine_down_in_window(
+                masters, mid, plan_start_date, max(_end, plan_start_date)):
             continue
         try:
             if int(round(float(r.get("remaining_qty", 0)))) <= 0:
@@ -540,6 +579,8 @@ def _ppc_frozen(rows, orders, batch_by_key, masters, plan_start_date):
         cur = pinned.get((key, int(op_seq)))
         if cur is None or stamp < cur[0]:
             pinned[(key, int(op_seq))] = (stamp, mid, r.get("operator", "") or "")
+        if r.get("setup_from"):
+            moved_from.setdefault((key, int(op_seq)), set()).add(r["setup_from"])
 
     out = []
     for (key, op_seq), (stamp, mid, operator) in pinned.items():
@@ -549,10 +590,118 @@ def _ppc_frozen(rows, orders, batch_by_key, masters, plan_start_date):
         qty = int(round(pr.get(op_seq, order.qty))) if pr is not None else int(round(order.qty))
         if qty <= 0:
             continue                 # step already finished for the whole batch
+        # Moved here since a line was last worked on another machine: it is set up
+        # again on resume (2026-08-31 rule; Task 9 Part C).
+        setup = bool(moved_from.get((key, op_seq), set()) - {mid})
         out.append(FrozenOp(order_key=key, op_seq=op_seq, machine_id=mid,
-                            operator=operator, remaining_qty=qty, prev_start=stamp[0]))
+                            operator=operator, remaining_qty=qty, prev_start=stamp[0],
+                            setup=setup))
     out.sort(key=lambda f: (f.prev_start, f.order_key, f.op_seq))
     return out
+
+
+FIXED_PLAN_PREFIX = "FIXED PLAN: "
+
+
+def _ppc_pins(rows, orders, batch_by_key, masters):
+    """Published-plan rows (``freeze.schedule_projection``) -> ppc PinnedOp[], plus
+    plain-English problem lines (fixed plan, 2026-10-06 spec).
+
+    A row maps to the scheduled batch that covers ANY of its SO refs for that item
+    (batch ids restart on every plan, and a batch's membership changes as lines
+    finish or club in, so the SO refs are the stable key). The step is resolved by
+    process NAME, its seq trusted only while it still names that step (routings are
+    editable). Several rows for one (batch, step) -- a step split into parts -- are ONE
+    pin: the earliest-started row's machine, operator and start. Rows for orders not
+    in this plan and OS lanes are dropped silently. A pin whose step is no longer in
+    the routing, whose machine is gone from the Machines list or is no longer one of
+    the step's options, or that nobody in Settings can run any more, is dropped and
+    NAMED: the step is planned normally and the admin is told (D8)."""
+    from datetime import datetime
+    from ppc_engine.scheduler import PinnedOp
+    manned = {m for o in masters.operators for m in o.qualified_machines}
+    so_to_key = {}
+    for key, batch in batch_by_key.items():
+        for so in (getattr(batch, "source_so_refs", None) or []):
+            so_to_key[(so, batch.item_code)] = key
+    order_by_key = {o.key: o for o in orders}
+    best, problems, rank, unranked, staff = {}, [], {}, set(), {}
+    for r in rows or []:
+        # Every current batch that shares ANY SO ref with the row (a published batch
+        # can now be split across several): each keeps the published machine and order.
+        keys = {so_to_key[(so, r.get("item_code"))] for so in (r.get("so_refs") or [])
+                if (so, r.get("item_code")) in so_to_key}
+        keys = sorted(k for k in keys if k in order_by_key)
+        if not keys:
+            continue
+        key = keys[0]
+        mid = r.get("machine")
+        if not mid or mid in OFF_LANES:
+            continue
+        refs = ", ".join(r.get("so_refs") or [])
+        # The step first, then the machine checks, so each problem names the step.
+        routing = masters.routings.get(order_by_key[key].item_code)
+        want = _norm(r.get("process_name", ""))
+        ops = routing.operations if routing is not None else ()
+        op = (next((o for o in ops if o.seq == r.get("process_seq") and _norm(o.name) == want), None)
+              or next((o for o in ops if _norm(o.name) == want), None))
+        if op is None:
+            problems.append(
+                f"{FIXED_PLAN_PREFIX}{refs} {r.get('item_code')} "
+                f"step '{r.get('process_name', '')}' is no longer in this item's routing, "
+                f"so it was planned without its published machine. "
+                f"Press Optimize to plan it properly.")
+            continue
+        if mid not in masters.machines:
+            problems.append(
+                f"{FIXED_PLAN_PREFIX}{refs} {r.get('item_code')} "
+                f"'{op.name}' was planned on {mid}, which is no longer in the Machines list. "
+                f"It will be planned on another allowed machine if there is one. "
+                f"Press Optimize to plan it properly.")
+            continue
+        if mid not in op.machine_options:
+            problems.append(
+                f"{FIXED_PLAN_PREFIX}{refs} {r.get('item_code')} "
+                f"'{op.name}' was planned on {mid}, which is no longer allowed for this step. "
+                f"It was moved to an allowed machine. Press Optimize to plan it properly.")
+            continue
+        if mid not in manned:
+            problems.append(
+                f"{FIXED_PLAN_PREFIX}{refs} {r.get('item_code')} "
+                f"'{op.name}' was planned on {mid}, but nobody in Settings can run {mid} now. "
+                f"It will be planned on another allowed machine if there is one. Press Optimize to plan it properly.")
+            continue
+        try:
+            start = datetime.fromisoformat(r["start"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        stamp = (start, mid, r.get("operator", "") or "")
+        rstaff = []
+        for item in r.get("staff") or ():
+            try:
+                rstaff.append((datetime.fromisoformat(item[0]),
+                               datetime.fromisoformat(item[1]), str(item[2] or "")))
+            except (IndexError, ValueError, TypeError):
+                continue
+        placed = r.get("placed")
+        placed = placed if isinstance(placed, int) and not isinstance(placed, bool) else None
+        for k in keys:
+            cur = best.get((k, op.seq))
+            if cur is None or stamp < cur:
+                best[(k, op.seq)] = stamp
+            if best[(k, op.seq)][1] == mid:
+                staff.setdefault((k, op.seq), []).extend(rstaff)
+            if placed is not None:
+                got = rank.get((k, op.seq))
+                rank[(k, op.seq)] = placed if got is None else min(got, placed)
+            else:
+                unranked.add((k, op.seq))
+    pins = [PinnedOp(order_key=k, op_seq=s, machine_id=mid, operator=opr, prev_start=st,
+                     rank=None if (k, s) in unranked else rank.get((k, s)),
+                     staff=tuple(sorted(staff.get((k, s), ()))))
+            for (k, s), (st, mid, opr) in best.items()]
+    pins.sort(key=lambda p: (p.prev_start, p.order_key, p.op_seq))
+    return pins, sorted(set(problems))
 
 
 def _machine_for(kind, machine_id) -> str:
@@ -805,7 +954,7 @@ def _entries_from_schedule(sched, batch_by_key):
 
     entries = []
     resumed = set()
-    for (order_key, op_seq, resume_from), segs in groups.items():
+    for placed, ((order_key, op_seq, resume_from), segs) in enumerate(groups.items()):
         segs = sorted(segs, key=lambda s: s.start)
         if segs[0].kind == OperationKind.DISPATCH:
             continue
@@ -839,6 +988,7 @@ def _entries_from_schedule(sched, batch_by_key):
                 op_segments=op_segments,
                 resumed=resume_from is not None,
                 piece_refs=piece_refs,
+                placed=placed,
             ))
             if resume_from is not None:
                 resumed.add(id(entries[-1]))
@@ -901,11 +1051,15 @@ def _entries_from_schedule(sched, batch_by_key):
 # clubbed batch mixes stages or an outsourced step still has pieces out.
 # v11 (2026-10-04) = planning schedules every CNC/VMC step at the Excel cycle time
 # + 30% (`engine/planning_time.py`); the workbook keeps the original. Real work moves.
-SCHEDULER_FINGERPRINT = "new-engine-v11-cnc-vmc-planning-30pct"
+# v13 (2026-10-06, owner amendment, spec section 8) = a published job that is late
+# lets the ready jobs behind it on its machine go first (no strict turn), and an
+# outsourced step whose previous step was entered complete returns at sent + lead
+# time instead of a full lead time from now. Real work moves on a held plan.
+SCHEDULER_FINGERPRINT = "new-engine-v13-ready-turn-os-sent"
 
 
 def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
-        reserved=None, frozen=None, occupancy=None, **kw):
+        reserved=None, frozen=None, occupancy=None, published=None, **kw):
     """Scheduler seam contract: prioritized `batches` -> list[ScheduleEntry], via the new
     operator-stable engine.
 
@@ -916,6 +1070,10 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
     ``occupancy`` (optional) is what an EARLIER planning stage already committed —
     see occupancy_from_entries. Present only on stage 2 of the Add New Orders quote;
     ``None`` everywhere else, which is byte-identical to before.
+
+    ``published`` (optional) is the published plan (``freeze.schedule_projection`` rows
+    of the last applied plan): every op it covers keeps its machine and is placed in the published order, a
+    late job letting ready ones go first (fixed plan, 2026-10-06, spec section 8). ``None``/empty is byte-identical to before.
     """
     if not batches:
         return []
@@ -930,16 +1088,26 @@ def run(batches, config=None, notes=None, masters=None, machine_lost_min=None,
             machine_busy=occupancy.get("machine") or {},
             operator_busy=occupancy.get("operator") or {},
             machine_shift_operator=occupancy.get("assign") or {}))
-    orders, batch_by_key = _orders_from_batches(batches, new_masters)
+    sched_cfg = _plan_config(config)
+    orders, batch_by_key = _orders_from_batches(batches, new_masters,
+                                                first_start=sched_cfg.first_start)
     if not orders:
         return []
     # Sequence from the ROUTED orders only (unrouted batches were skipped above), preserving
     # the incoming priority order.
     sequence = [o.key for o in orders]
-    sched_cfg = _plan_config(config)
+    # A fixed-plan repair never releases a half-finished job from a down machine (D11);
+    # the kwarg is passed only then, so every other call is exactly as before.
+    _hold = {"release_on_downtime": False} if published else {}
     ppc_frozen = (_ppc_frozen(frozen, orders, batch_by_key, new_masters,
-                              sched_cfg.plan_start.date()) if frozen else None)
-    sched = decode(orders, sequence, new_masters, sched_cfg, frozen=ppc_frozen)
+                              sched_cfg.plan_start.date(), **_hold) if frozen else None)
+    ppc_pins = None
+    if published:
+        ppc_pins, problems = _ppc_pins(published, orders, batch_by_key, new_masters)
+        if notes is not None:
+            notes.extend(problems)
+    sched = decode(orders, sequence, new_masters, sched_cfg, frozen=ppc_frozen,
+                   pins=ppc_pins)
     return _entries_from_schedule(sched, batch_by_key)
 
 
@@ -964,7 +1132,7 @@ def optimize_sequence(so_lines, config, masters, *, reserved=None, budget_evals=
     batches = rule1_consolidate.run(so_lines, config)
     if not batches:
         return OptimizeResult()
-    orders, batch_by_key = _orders_from_batches(batches, nm)
+    orders, batch_by_key = _orders_from_batches(batches, nm, first_start=cfg.first_start)
     ppc_frozen = (_ppc_frozen(frozen, orders, batch_by_key, nm,
                               cfg.plan_start.date()) if frozen else None)
     # Report EVERY plan (on_eval), not just improvements, so the live counter climbs steadily.
@@ -1016,7 +1184,8 @@ def tune(so_lines, config, masters, *, budget_per_eval=150, seed=42, on_step=Non
     batches = rule1_consolidate.run(so_lines, config)
     if not batches:
         return {}, int(round(base.overlap * 100)), {}, 0
-    orders, batch_by_key = _orders_from_batches(batches, new_masters)
+    orders, batch_by_key = _orders_from_batches(batches, new_masters,
+                                                first_start=base.first_start)
     ppc_frozen = (_ppc_frozen(frozen, orders, batch_by_key, new_masters,
                               base.plan_start.date()) if frozen else None)
 

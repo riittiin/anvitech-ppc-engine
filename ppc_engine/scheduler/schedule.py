@@ -58,13 +58,42 @@ class FrozenOp:
     machine (from the last-applied plan) before that machine takes any new work; its
     owning order's next step waits for it. ``operator`` is the planned operator ("" =
     let staffing pick). ``prev_start`` (last-applied start) orders multiple frozen ops
-    on one machine (previous-plan order)."""
+    on one machine (previous-plan order). ``setup`` = the job was moved to this
+    machine since it was last worked (an applied Optimize moved it off a machine that
+    went down): a machining job pays its setup again on resume (2026-08-31 rule)."""
     order_key: tuple[str, str]
     op_seq: int
     machine_id: str
     operator: str
     remaining_qty: int
     prev_start: datetime
+    setup: bool = False
+
+
+@dataclass(frozen=True)
+class PinnedOp:
+    """A published operation held to its machine and its place in the queue (fixed
+    plan, 2026-10-06; spec section 8: next ready job in published order).
+
+    ``machine_id`` is where the admin's last applied plan put it; ``prev_start`` is
+    when it was due to start there: a job whose order reaches it later than that is
+    late, and jobs that can start before it is ready go first.
+    Times are never pinned: a repair recomputes them from the punches. ``operator``
+    is preferred while they may still man the machine; otherwise whoever qualified
+    is free takes it (people are swapped, never machines)."""
+    order_key: tuple[str, str]
+    op_seq: int
+    machine_id: str
+    operator: str
+    prev_start: datetime
+    # The order the published plan PLACED this op in (None = unknown, e.g. a plan
+    # published before this field existed). A repair places jobs in this order:
+    # people are booked first come at placement time, so any other order hands one
+    # job's person to another and the whole plan drifts.
+    rank: int | None = None
+    # (start, end, person) stretches the published plan gave this op: in each
+    # window the person who ran it then is preferred (empty = ``operator``).
+    staff: tuple = ()
 
 
 @dataclass(frozen=True)

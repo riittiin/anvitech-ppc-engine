@@ -521,7 +521,40 @@ governs the optimizer's *choices* among feasible plans, not physical reality.
   16 to 9 days, at a cost of ~2% more total late-days overall — the accepted price of
   the promise (decision #7 in the design spec).
 
-### Scheduled optimize — the job order re-optimizes itself, twice a week *(feature, 2026-07-18, supersedes the event-triggered "self-tuning plan" of 2026-07-16 — superseded in turn by the daily-cadence "Frozen zone" rule below)*
+### Fixed plan *(feature, 2026-10-06/07; supersedes the daily re-optimize below)*
+
+The plan is constant between the admin's Optimize clicks. Daily entry updates
+progress, not the plan.
+
+- **The published plan.** One plan is published, and it changes only when the admin
+  applies an **Optimize** result, accepts an **earlier delivery date** for a new order
+  (the accepted orders are in it), or presses **Go back to standard plan**; it is also
+  written once at go-live. Add New Orders appends its new lines with the slots the
+  quote gave them. Nothing else may move a job to another machine or change the
+  published order. Optimize never applies itself.
+- **Done entering = repair.** "Done entering — update plan" and every plan view only
+  repair the published plan: every published job keeps its machine and its people
+  where they are still allowed; only times move. It never starts a search.
+- **Order on a machine.** A machine takes its jobs in published order. When the job
+  whose turn it is cannot start when the published plan expected it (its previous step
+  is late, or it is at a vendor), the **next READY job in published order on the same
+  machine** goes first; when several are ready, the published order wins. A job that
+  is ready and on time keeps its place. **One accepted exception (version A0, owner
+  2026-10-07):** when the late job's readiness depends on work that cannot be placed
+  without jumping another machine's queue, there is no give-way and the machine waits
+  for the late job.
+- **Vendor time from the sent date (D12).** When the step before an outsourced step was
+  entered complete (full quantity; for a clubbed batch every line, latest date), the
+  outsourced step returns at that day's first-shift start plus its lead time, never
+  before the plan start. With no sent date known, the old behaviour holds.
+- **Machine down.** A machine marked down after the plan was published does not release
+  its jobs in a repair: they wait. A notice on the data-gaps card (both roles) names
+  each order whose current plan run on that machine overlaps the break or was pushed
+  past it, and says "Press Optimize"; the admin's Optimize decides wait or move.
+- **In-progress work** stays pinned to its machine and runs first on it (the frozen
+  zone mechanics below still apply inside the repair and inside Optimize).
+
+### SUPERSEDED 2026-10-07: Scheduled optimize — the job order re-optimizes itself, twice a week *(feature, 2026-07-18, supersedes the event-triggered "self-tuning plan" of 2026-07-16 — superseded in turn by the daily-cadence "Frozen zone" rule below)*
 
 The plan still re-optimizes itself without anyone remembering to click Optimize — but
 the owner drew a hard line between two very different things:
@@ -566,7 +599,11 @@ the owner drew a hard line between two very different things:
   is no button or setting to turn it off (`AUTO_OPTIMIZE=0` exists only as an internal
   test-isolation switch, never exposed).
 
-### Frozen zone — in-progress work is pinned during daily re-optimization *(feature, 2026-07-29, supersedes the "twice a week" cadence above)*
+### SUPERSEDED 2026-10-07: Frozen zone — in-progress work is pinned during daily re-optimization *(feature, 2026-07-29, supersedes the "twice a week" cadence above)*
+
+*SUPERSEDED 2026-10-07: Done entering no longer re-optimizes at all (see "Fixed
+plan" above). The freeze mechanics in the bullets below still hold inside the repair
+and inside the admin's Optimize; the daily re-optimize does not.*
 
 The scheduled-optimize cadence above is superseded: **"Done entering — update plan"
 now runs a re-optimization every day, not twice a week.** An *unrestricted* daily

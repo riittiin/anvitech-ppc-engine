@@ -448,22 +448,23 @@ def test_adding_is_admin_only(user_client):
     assert user_client.post("/new-orders/add", json={"stamp": "x"}).status_code == 403
 
 
-def test_done_entering_clears_the_queue_when_a_contest_actually_starts(
+def test_done_entering_keeps_the_queue_even_with_auto_on(
         admin_client, uploaded_masters, add_new_order, monkeypatch):
-    """Clearing the queue is only correct when Done actually launches a
-    re-optimization: `_try_start_auto` returning True means a background
-    contest was launched (see test_auto_optimize.py's own pattern for
-    stubbing `_start_optimize` rather than waiting on a real search)."""
+    """Rebased 2026-10-06 (fixed plan): Done used to clear the queue when it
+    launched a contest. It never launches one now, and the queue ends only at a
+    published plan (an applied Optimize or an accepted earlier date), so Done
+    keeps it even with the auto trigger switched on."""
     add_new_order("NEW-1", uploaded_masters, 25)
     assert book_store.load_new_order_queue()
     import api.main as m
     monkeypatch.setenv("AUTO_OPTIMIZE", "1")
+    starts = []
     monkeypatch.setattr(
         m, "_start_optimize",
-        lambda budget_evals, label, background=True, auto=False: None)
+        lambda budget_evals, label, background=True, auto=False: starts.append(1))
     r = admin_client.post("/optimize/done")
-    assert r.json()["started"] is True
-    assert book_store.load_new_order_queue() == []
+    assert r.json()["started"] is False and starts == []
+    assert book_store.load_new_order_queue() == [[["NEW-1", uploaded_masters]]]
 
 
 def test_done_entering_does_not_clear_the_queue_when_it_skips(
@@ -767,9 +768,9 @@ def test_quote_movement_is_computed_once_not_on_every_status_poll(
     calls = []
     real = m._quote_movement
 
-    def _counting(ranks):
+    def _counting(ranks, **kw):        # `cand=`: finalize passes the plan it built
         calls.append(1)
-        return real(ranks)
+        return real(ranks, **kw)
 
     monkeypatch.setattr(m, "_quote_movement", _counting)
     monkeypatch.setitem(m._OPT_BUDGETS, "deep", 15)
@@ -976,13 +977,16 @@ def test_wiring_quote_movement_passes_the_draft_lines_to_the_after_side(
     book_store.save_new_order_drafts(drafts)
     import api.main as m
     seen = {}
-    real = m._metrics_for_ranks
+    # Since the fixed plan's final review (2026-10-06) the after side is the
+    # repaired candidate (`_repaired_candidate`, the one definition the Optimize
+    # panel also uses), no longer `_metrics_for_ranks`'s free plan.
+    real = m._repaired_candidate
 
     def _spy(ranks, *a, **kw):
         seen["extra_orders"] = kw.get("extra_orders")
         return real(ranks, *a, **kw)
 
-    monkeypatch.setattr(m, "_metrics_for_ranks", _spy)
+    monkeypatch.setattr(m, "_repaired_candidate", _spy)
     m._quote_movement({})
     assert seen.get("extra_orders"), (
         "_quote_movement's after-side call did not receive the draft lines")
@@ -1016,14 +1020,14 @@ def test_late_days_totals_are_measured_over_the_existing_book_only(
 
     new_key = f"NEW-1\x1f{uploaded_masters}"
 
-    def _fake_metrics_for_ranks(ranks, *a, **kw):
-        # The new order lands badly late against its typed target, and the
-        # RAW total (as optimizer.plan_metrics would report it) reflects that
-        # — this is exactly the inflated number the fix must not surface.
-        return {"total_late_days": 999,
-                "expected": {key: unmoved_iso, new_key: "2026-01-01"}}
-
-    monkeypatch.setattr(m, "_metrics_for_ranks", _fake_metrics_for_ranks)
+    # The new order lands badly late against its typed target. The after side
+    # is the repaired candidate since 2026-10-06 (`_repaired_candidate`); its
+    # dates are faked here.
+    from types import SimpleNamespace
+    monkeypatch.setattr(m, "_repaired_candidate",
+                        lambda ranks, *a, **kw: SimpleNamespace(repaired="R"))
+    monkeypatch.setattr(m, "_expected_keyed",
+                        lambda sched: {key: unmoved_iso, new_key: "2026-01-01"})
     m.book_store.save_new_order_drafts(
         [{"so_no": "NEW-1", "item_code": uploaded_masters, "qty": 25,
           "target_date": "2025-03-20"}])

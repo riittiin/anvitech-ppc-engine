@@ -86,6 +86,15 @@ def _merge_process_qty(lines):
             for k in keys}
 
 
+def _merge_done_on(lines):
+    """D12: a step counts as complete for the batch only when EVERY clubbed line has
+    completed it, and then on the LATEST of their dates (the batch's parts were all
+    sent only when the last line's were). None when no step qualifies."""
+    dicts = [getattr(l, "process_done_on", None) or {} for l in lines]
+    keys = set(dicts[0]).intersection(*dicts[1:]) if dicts else set()
+    return {k: max(d[k] for d in dicts) for k in keys} or None
+
+
 def _batch_commitment(lines):
     """The tightest committed promise among the batch's member SO-lines: the
     EARLIEST ``promised_date`` of any line with ``commitment == "committed"``.
@@ -115,4 +124,5 @@ def _finalize(cur, idx) -> Batch:
                           for l in cur["lines"]},
         commitment=commitment,
         promised_date=promised_date,
+        process_done_on=_merge_done_on(cur["lines"]),
     )

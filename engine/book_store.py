@@ -27,6 +27,7 @@ LAST_SEARCHED_KEY = "anvitech:last_searched"  # kv: json {book_sig, inputs_sig} 
 ABSENCES_KEY = "anvitech:absences"          # kv: json list of operator absences
 MACHINE_DOWNTIME_KEY = "anvitech:machine_downtime"   # kv: json list of machine maintenance breaks
 OPERATORS_KEY = "anvitech:operators"        # kv: json {week_anchor, operators:[...]}
+PUBLISHED_META_KEY = "anvitech:published_plan_meta"  # kv: json {at, downtime_ids} of the published plan (fixed plan, 2026-10-06)
 LAST_APPLIED_SCHEDULE_KEY = "anvitech:last_applied_schedule"  # kv: json list of applied-schedule op rows
 FROZEN_OPS_KEY = "anvitech:frozen_ops"       # kv: json list of frozen (in-progress) op rows for today
 PLAN_START_FLOOR_KEY = "anvitech:plan_start_floor"  # kv: json {date, floor} — today's pinned auto start
@@ -263,15 +264,28 @@ def load_last_searched():
 
 # --- last-applied schedule (the plan the floor is following) --- #
 def save_last_applied_schedule(rows: list) -> None:
-    """Persist the applied plan's per-op assignment (machine/operator/time). Written
-    only when an optimize result is APPLIED — never on a display re-plan, so it stays
-    'the plan the floor is following' and doesn't drift with new actuals."""
+    """Persist the PUBLISHED plan's per-op assignment (machine/operator/time): the
+    plan the floor is following, which every plan repairs (fixed plan, 2026-10-06).
+    Written through `api.main._publish` (an applied Optimize, an accepted earlier
+    date, the go-live seed) and by Add New Orders appending its new lines. Never on a
+    display re-plan, so it does not drift with new actuals."""
     get_store().kv_set(LAST_APPLIED_SCHEDULE_KEY, json.dumps(rows))
 
 
 def load_last_applied_schedule() -> list:
     raw = get_store().kv_get(LAST_APPLIED_SCHEDULE_KEY)
     return json.loads(raw) if raw else []
+
+
+def save_published_meta(meta: dict) -> None:
+    """When the published plan was written and which machine breaks were already on
+    file then (a break entered later raises the "Optimize recommended" banner)."""
+    get_store().kv_set(PUBLISHED_META_KEY, json.dumps(meta))
+
+
+def load_published_meta() -> dict:
+    raw = get_store().kv_get(PUBLISHED_META_KEY)
+    return json.loads(raw) if raw else {}
 
 
 # --- frozen (in-progress) ops for the current day --- #

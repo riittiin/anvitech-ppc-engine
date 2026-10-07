@@ -57,6 +57,11 @@ class SOLine:
     # Commitment lane carried into planning: "open" (default) | "committed".
     commitment: str = "open"
     promised_date: Optional[date] = None
+    # {normalized process name -> the date of the punch that completed it} for every
+    # step this line has made in full (D12, 2026-10-06: an outsourced step's vendor
+    # time counts from when the step before it was completed). None = no punches.
+    # Internal scheduling input, rebuilt from the punches, never serialized.
+    process_done_on: Optional[dict] = None
 
     @property
     def key(self):
@@ -104,6 +109,10 @@ class Batch:
     # never merges across lanes).
     commitment: str = "open"
     promised_date: Optional[date] = None
+    # {normalized process -> date} for a step EVERY clubbed line has completed: the
+    # latest of their completion dates (D12). None/missing = not complete on every
+    # line. Not serialized into the trace.
+    process_done_on: Optional[dict] = None
 
     def as_row(self):
         return {
@@ -283,6 +292,11 @@ class ScheduleEntry:
     # floor runs one batch as one pile of parts (owner, 2026-09-27: three different
     # SO labels for one batch in the shift-wise filter confused the operators).
     piece_refs: list = field(default_factory=list)
+    # INTERNAL: the order in which the engine placed this operation (0 = first).
+    # Read only by the published plan (`freeze.schedule_projection`): a repair places
+    # jobs in the published plan's own order, because people are booked first come
+    # at placement time (fixed plan, 2026-10-06). Never shown.
+    placed: int = 0
 
     def process_label(self):
         """The process as the floor reads it; a resumed part says so."""
