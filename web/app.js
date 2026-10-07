@@ -40,6 +40,7 @@ let commitmentEnabled = false;  // from /me — are the Committed/Open lanes sho
 
 // ---- Add New Orders (2026-09-08) ----
 let noLines = [];      // local editable rows: [{so_no, item_code, qty, error}]
+let noSoPrefix = "";   // this financial year's SO prefix ("26-27SO"); a new line starts with it
 let noItems = [];      // [{item_code, item_name}] — every item with a routing, for the dropdown
 let noQuote = null;    // the last /new-orders/quote response (for "I need one earlier")
 let quoteStamp = null; // the quote's plan fingerprint — required by /new-orders/add
@@ -831,6 +832,7 @@ async function loadNewOrders() {
     }
     const body = await res.json();
     noItems = body.items || [];
+    noSoPrefix = body.so_prefix || "";
     noLines = (body.drafts || []).map((d) => (
       { so_no: d.so_no, item_code: d.item_code, qty: d.qty, error: "" }));
     renderNewOrderLines();
@@ -886,7 +888,7 @@ function onNoLineChanged(i) {
 
 function addNewOrderLine() {
   if (!newOrdersAllowed()) return;
-  noLines.push({ so_no: "", item_code: "", qty: "", error: "" });
+  noLines.push({ so_no: noSoPrefix, item_code: "", qty: "", error: "" });
   renderNewOrderLines();
 }
 
@@ -1888,35 +1890,41 @@ async function ensureItems() {
   try { ITEMS = await (await fetch("/items")).json(); } catch (e) { ITEMS = { items: {} }; }
   return ITEMS;
 }
-function fy(label, inner) { return `<label class="efield fy">${label}${inner}</label>`; }
-function fr(label, inner) { return `<label class="efield fr">${label}${inner}</label>`; }
+// A Daily Entry field: its name, the plain line under it saying what to type
+// (owner, 2026-10-07: the floor must read what a field is for), then the input.
+function efield(cls, label, hint, inner) {
+  return `<label class="efield ${cls}"><span class="elabel">${label}<span class="ehint">${hint}</span></span>${inner}</label>`;
+}
+function fy(label, hint, inner) { return efield("fy", label, hint, inner); }
+function fr(label, hint, inner) { return efield("fr", label, hint, inner); }
 
 function actualsFormHtml() {
   const today = new Date().toISOString().slice(0, 10);
   const left =
-    fy("Date", `<input id="a-date" type="date" value="${today}" /> <span id="a-date-echo" class="date-echo"></span>`) +
-    fy("Shift", `<select id="a-shift"><option value="1st shift">1st shift</option><option value="2nd shift">2nd shift</option></select>`) +
-    fr("Operator <span class=auto>(required, except for OS/outside steps)</span>", `<select id="a-operator"><option value="">Select operator</option></select>`) +
-    fr("SO No <span class=auto>(step 1: pick from orders)</span>", `<select id="a-so"><option value="">Select SO No</option></select>`) +
-    fr("Item Code <span class=auto>(step 2: pick this SO's item)</span>", `<select id="a-item"><option value="">Select SO No first</option></select>`) +
-    fr("Item Name <span class=auto>(auto)</span>", `<input id="a-itemname" readonly />`) +
-    fr("Process <span class=auto>(dropdown)</span>", `<select id="a-process"></select>`) +
+    fy("Date", "The day this work was done.", `<input id="a-date" type="date" value="${today}" /> <span id="a-date-echo" class="date-echo"></span>`) +
+    fy("Shift", "Which shift did the work.", `<select id="a-shift"><option value="1st shift">1st shift</option><option value="2nd shift">2nd shift</option></select>`) +
+    fr("Operator", "Who ran the machine. Leave empty for outside (OS) steps.", `<select id="a-operator"><option value="">Select operator</option></select>`) +
+    fr("SO No", "Which order this work is for. Pick the SO first.", `<select id="a-so"><option value="">Select SO No</option></select>`) +
+    fr("Item Code", "Which item of that SO. Pick it after the SO.", `<select id="a-item"><option value="">Select SO No first</option></select>`) +
+    fr("Item Name", "The item's name. Already filled in.", `<input id="a-itemname" readonly />`) +
+    fr("Process", "Which step of the job you are entering.", `<select id="a-process"></select>`) +
     `<div id="a-outstanding" class="a-outstanding"></div>` +
-    fr("Machine <span class=auto>(the machine this job ran on)</span>", `<select id="a-machine"><option value="">-</option></select>`) +
-    fr("Cycle Time (min per piece) <span class=auto>(auto, from the Process Master)</span>", `<input id="a-cycle" readonly />`);
+    fr("Machine", "The machine the work was done on.", `<select id="a-machine"><option value="">-</option></select>`) +
+    fr("Cycle Time (min per piece)", "Minutes for one piece. Already filled in.", `<input id="a-cycle" readonly />`);
   const right =
-    fy("Minutes Available in Shift <span class=auto>(time spent on this job; the whole shift unless you split it)</span>", `<input id="a-mins" type="number" min="0" value="" />`) +
-    fy("Qty Produced (good pieces)", `<input id="a-prod" type="number" min="0" value="" />`) +
-    fy("Qty Rejected (bad pieces)", `<input id="a-rej" type="number" min="0" value="" />`) +
-    fy("Standard Setting Time (min) <span class=auto>(auto, change if needed)</span>", `<input id="a-stdsetup" type="number" min="0" value="" />`) +
-    fy("Actual Setting Time (min)", `<input id="a-setup" type="number" min="0" value="" />`) +
-    fy("No Power (min)", `<input id="a-nopower" type="number" min="0" value="" />`) +
-    fy("No Operator (min)", `<input id="a-noop" type="number" min="0" value="" />`) +
-    fy("Tool Problem (min)", `<input id="a-tool" type="number" min="0" value="" />`) +
-    fy("Machine Breakdown (min)", `<input id="a-mbd" type="number" min="0" value="" />`) +
-    fy("No Load (min)", `<input id="a-noload" type="number" min="0" value="" />`) +
-    fy("Other Work (min)", `<input id="a-other" type="number" min="0" value="" />`) +
-    fy("Remarks", `<textarea id="a-remarks" rows="2"></textarea>`);
+    // Fixed by the shift (owner, 2026-10-07): 630 for 1st shift, 570 for 2nd.
+    fr("Minutes Available in Shift", "The working minutes of this shift. Already filled in.", `<input id="a-mins" type="number" min="0" value="" readonly />`) +
+    fy("Qty Produced (good pieces)", "Number of good pieces made.", `<input id="a-prod" type="number" min="0" value="" />`) +
+    fy("Qty Rejected (bad pieces)", "Number of bad pieces.", `<input id="a-rej" type="number" min="0" value="" />`) +
+    fy("Standard Setting Time (min)", "How long a setup on this machine normally takes. The default is 90 minutes. Change it if this job's setup takes more or less time.", `<input id="a-stdsetup" type="number" min="0" value="" />`) +
+    fy("Actual Setting Time (min)", "How many minutes the setup actually took today. Enter 0 if no setup was done (the job continued from the last shift).", `<input id="a-setup" type="number" min="0" value="" />`) +
+    fy("No Power (min)", "Minutes the machine stopped because there was no power.", `<input id="a-nopower" type="number" min="0" value="" />`) +
+    fy("No Operator (min)", "Minutes the machine stood because nobody was running it.", `<input id="a-noop" type="number" min="0" value="" />`) +
+    fy("Tool Problem (min)", "Minutes lost because of a tool problem.", `<input id="a-tool" type="number" min="0" value="" />`) +
+    fy("Machine Breakdown (min)", "Minutes the machine was broken down.", `<input id="a-mbd" type="number" min="0" value="" />`) +
+    fy("No Load (min)", "Minutes the machine had no job to run.", `<input id="a-noload" type="number" min="0" value="" />`) +
+    fy("Other Work (min)", "Minutes the operator spent on other work instead of this job.", `<input id="a-other" type="number" min="0" value="" />`) +
+    fy("Remarks", "Anything else to note.", `<textarea id="a-remarks" rows="2"></textarea>`);
   return `
     <div class="entry-legend"><span class="lg lg-y">Type this yourself</span><span class="lg lg-r">Pick from the list</span></div>
     <div class="entry-grid"><div class="entry-col">${left}</div><div class="entry-col">${right}</div></div>

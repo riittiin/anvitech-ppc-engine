@@ -3383,7 +3383,9 @@ def new_order_drafts(request: Request):
         routing = masters.routings.get(row.get("item_code", ""))
         row["item_name"] = routing.description if routing else ""
     return {"drafts": drafts, "items": _quote_item_options(masters),
-            "queued": book_store.load_new_order_queue()}
+            "queued": book_store.load_new_order_queue(),
+            # Pre-filled in a new line's SO box: the floor types only the digits.
+            "so_prefix": orderbook.so_prefix(_ist_today())}
 
 
 @app.put("/new-orders/drafts")
@@ -3396,12 +3398,16 @@ def save_new_order_drafts_ep(req: DraftsRequest, request: Request):
     active = book_store.load_active_orders()
     completed = book_store.load_completed_orders()
     rows = []
+    today = _ist_today()
     for line in req.drafts:
-        err = orderbook.validate_new_order_line(line.so_no, line.item_code, line.qty,
+        # A bare number is completed to this financial year's prefix before it is
+        # checked, so "228" and "26-27SO228" are the same order (owner, 2026-10-07).
+        so_no = orderbook.normalize_so_no(line.so_no, today)
+        err = orderbook.validate_new_order_line(so_no, line.item_code, line.qty,
                                                 active, completed, masters)
         if err:
             raise HTTPException(status_code=400, detail=err)
-        rows.append({"so_no": line.so_no.strip(), "item_code": line.item_code.strip(),
+        rows.append({"so_no": so_no, "item_code": line.item_code.strip(),
                      "qty": int(line.qty)})
     seen = set()
     for row in rows:

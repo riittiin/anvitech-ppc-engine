@@ -496,6 +496,25 @@ def entry_progress(active_orders: dict, actuals, masters=None) -> dict:
     return out
 
 
+_SO_PREFIX_RE = _re.compile(r"^\d\d-\d\dSO$")
+
+
+def so_prefix(today) -> str:
+    """The SO-number prefix for the Indian financial year ``today`` falls in
+    (1 April to 31 March): "26-27SO" from 1 April 2026 to 31 March 2027. The floor
+    types only the digits after it (owner, 2026-10-07)."""
+    start = today.year if today.month >= 4 else today.year - 1
+    return f"{start % 100:02d}-{(start + 1) % 100:02d}SO"
+
+
+def normalize_so_no(so_no, today) -> str:
+    """A bare number ("228") is completed to the current year's prefix
+    ("26-27SO228"); anything else is kept as typed (trimmed), so an older year's
+    full number is never rewritten."""
+    so = (so_no or "").strip()
+    return so_prefix(today) + so if so.isdigit() else so
+
+
 def validate_new_order_line(so_no, item_code, qty, active, completed, masters):
     """The message to show the director for a line typed into Add New Orders, or
     None when it is good. Pure (2026-09-08 spec).
@@ -508,6 +527,8 @@ def validate_new_order_line(so_no, item_code, qty, active, completed, masters):
     item = (item_code or "").strip()
     if not so:
         return "Enter an SO number."
+    if _SO_PREFIX_RE.match(so):
+        return f"Type the SO number after {so}."
     if not item:
         return "Pick an item."
     try:
