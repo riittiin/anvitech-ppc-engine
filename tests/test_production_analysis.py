@@ -334,7 +334,7 @@ def test_monthly_report_json_and_excel():
     from engine import production_analysis_xlsx as pax
     values = load_workbook(io.BytesIO(x.content), data_only=True)
     formulas = load_workbook(io.BytesIO(x.content))
-    assert values.sheetnames == ["Operator efficiency", "Shift-wise", "Every entry",
+    assert values.sheetnames == ["Operator efficiency", "Shift detail",
                                  "How it is calculated"]
     month_col = 2 + pa.MONTH_COLUMNS.index("Operator efficiency")
     assert values["Operator efficiency"].cell(row=7, column=month_col).value == \
@@ -342,20 +342,169 @@ def test_monthly_report_json_and_excel():
     # Transparent: every calculated cell is a formula over the cells it comes from.
     f = formulas["Operator efficiency"].cell(row=7, column=month_col).value
     assert f.startswith("=IF(") and "/" in f
-    sh = formulas["Shift-wise"]
-    col = lambda name: 2 + pa.SHIFT_COLUMNS.index(name)
-    assert sh.cell(row=7, column=col("Minutes entered")).value.startswith(
-        "=MAX('Every entry'!")
-    assert sh.cell(row=7, column=col("Minutes available in shift")).value.startswith(
-        "=IF(ISNUMBER(")
-    assert sh.cell(row=7, column=col("Standard minutes earned")).value.startswith(
-        "=SUM('Every entry'!")
-    en = formulas["Every entry"]
-    assert en["B6"].value == "Date" and en["C6"].value == "Machine"
-    earned = en.cell(row=7, column=2 + pa.REPORT_COLUMNS.index("Standard minutes earned"))
+    sd = formulas["Shift detail"]
+    vd = values["Shift detail"]
+    col = lambda name: 2 + pax.DETAIL_COLUMNS.index(name)
+    assert sd["B6"].value == "Date" and sd["C6"].value == "Machine"
+    # Two lines, then the shift total on row 9.
+    earned = sd.cell(row=7, column=col("Standard minutes earned"))
     assert earned.value.startswith("=IF(ISNUMBER(")
-    working = values["Shift-wise"].cell(row=7, column=col("Working")).value
+    assert vd.cell(row=9, column=col("Item description")).value == "Shift total"
+    assert sd.cell(row=9, column=col("Minutes available in shift")).value.startswith(
+        "=IF(ISNUMBER(")
+    assert sd.cell(row=9, column=col("Standard minutes earned")).value.startswith("=SUM(")
+    assert vd.cell(row=9, column=col("Operator efficiency")).value == \
+        pytest.approx(90 / 330, abs=0.001)
+    assert vd.cell(row=9, column=col("Actual OK Qty")).value == 18      # 10 + 8
+    assert vd.cell(row=9, column=col("No power (in Min)")).value == 30
+    working = vd.cell(row=9, column=col("Working")).value
     assert working.startswith("Standard minutes earned = 12 x 3 + 8 x 3 = 60")
+
+
+def _mixed_month():
+    """Several lines per shift, a second operator, a 2nd shift, a shift left out
+    for a missing cycle time, and a shift under the meal-break cap."""
+    return [_line("A", 30, 4.0, setup=120, std_setup_min=90, no_operator_min=25),
+            _line("B", 20, 6.0, setup=90, other_work_min=15),
+            _line("C", 25, 2.4, setup=60, std_setup_min=180),
+            _line("A", 50, 6.0, mins=600, op="Operator B", shift="2nd shift"),
+            _line("A", 10, 6.0, day=6), _line("D", 5, None, day=6),
+            _line("A", 10, 6.0, op="Operator B", day=6, no_power_min=60),
+            _line("A", 20, 6.0, mins=300, op="Operator C")]
+
+
+def _tables(acts, wk=WORKING):
+    return {"operators": {"rows": pa.operator_month_rows(acts, None, 2026, 10, wk)},
+            "shifts": {"rows": pa.shift_rows(acts, None, 2026, 10, wk)},
+            "entries": {"rows": pa.monthly_rows(acts, None, 2026, 10, wk)}}
+
+
+def _recalculate(data):
+    """(formulas workbook, cached-values workbook, pycel compiler that must
+    RECALCULATE: openpyxl's re-save drops every stored value)."""
+    pycel = pytest.importorskip("pycel")
+    import pycel.excellib as xl
+    if not hasattr(xl, "counta"):           # pycel lacks COUNTA: Excel's meaning
+        def counta(*args):
+            flat = []
+            for a in args:
+                flat.extend(v for r in a for v in r) if isinstance(a, tuple) else flat.append(a)
+            return sum(1 for v in flat if v not in (None, ""))
+        xl.counta = counta
+    import tempfile, os
+    from openpyxl import load_workbook
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "r.xlsx")
+    open(path, "wb").write(data)
+    wf, wv = load_workbook(path), load_workbook(path, data_only=True)
+    bare = os.path.join(d, "bare.xlsx")
+    wf.save(bare)
+    return wf, wv, pycel.ExcelCompiler(filename=bare)
+
+
+def _pct_cell(v):
+    return "-" if v is None else pytest.approx(v / 100.0, abs=0.0005)
+
+
+DETAIL_HEADERS = [
+    "Date", "Machine", "Shift", "Operator", "Item description", "Item code", "Process",
+    "Cycle time in Min", "Minutes available in shift", "Actual OK Qty", "Rejected qty",
+    "Std. setting time in Min", "Actual setting time in Min", "No power (in Min)",
+    "No operator (in Min)", "Machine Breakdown (in Min)", "Tool problem (in Min)",
+    "Other work done (in Min)", "No Load (in Min)", "Remarks", "Planned qty",
+    "Total Actual Qty", "Overall Productivity", "Operator efficiency",
+    "Working minutes in shift (after break)", "Setting credit in Min",
+    "Downtime credited in Min", "Standard minutes earned", "Operator minutes earned",
+    "Counted in the month", "Note", "Working",
+]
+
+
+def _detail(data):
+    from openpyxl import load_workbook
+    wv = load_workbook(io.BytesIO(data), data_only=True)
+    ws = wv["Shift detail"]
+    heads = [ws.cell(row=6, column=c).value for c in range(2, ws.max_column + 1)]
+    rows = [{h: ws.cell(row=r, column=2 + j).value for j, h in enumerate(heads)}
+            for r in range(7, ws.max_row + 1)]
+    return wv, heads, rows
+
+
+def test_the_workbook_has_three_sheets_in_reading_order():
+    from engine import production_analysis_xlsx as pax
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(pax.build(2026, 10, _tables(_mixed_month()))))
+    assert wb.sheetnames == ["Operator efficiency", "Shift detail", "How it is calculated"]
+    ws = wb["Shift detail"]
+    assert ws["B1"].value == "Monthly production analysis"
+    assert ws["B3"].value == "Month - year" and ws["C3"].value == "10-2026"
+
+
+def test_shift_detail_headers_follow_the_owners_format():
+    from engine import production_analysis_xlsx as pax
+    assert list(pax.DETAIL_COLUMNS) == DETAIL_HEADERS
+    _, heads, _ = _detail(pax.build(2026, 10, _tables(_mixed_month())))
+    assert heads == DETAIL_HEADERS
+
+
+def test_each_shift_total_is_the_shift_row_and_the_month_sheet_is_the_month():
+    from engine import production_analysis_xlsx as pax
+    tables = _tables(_mixed_month())
+    wv, _, rows = _detail(pax.build(2026, 10, tables))
+    totals = [r for r in rows if r["Item description"] == "Shift total"]
+    shifts = tables["shifts"]["rows"]
+    assert len(totals) == len(shifts) == 5
+    for t, s in zip(totals, shifts):
+        assert (t["Date"], t["Shift"], t["Operator"]) == (s["Date"], s["Shift"], s["Operator"])
+        assert t["Overall Productivity"] == _pct_cell(s["Overall Productivity"])
+        assert t["Operator efficiency"] == _pct_cell(s["Operator efficiency"])
+        assert t["Minutes available in shift"] == (s["Minutes available in shift"] or 0)
+        for name in ("Standard minutes earned", "Operator minutes earned",
+                     "Setting credit in Min", "Downtime credited in Min",
+                     "Total Actual Qty", "Counted in the month", "Note", "Working"):
+            assert t[name] == (s[name] or None if name == "Note" else s[name]), name
+    month = wv["Operator efficiency"]
+    for k, want in enumerate(tables["operators"]["rows"]):
+        for j, name in enumerate(pa.MONTH_COLUMNS):
+            got = month.cell(row=7 + k, column=2 + j).value
+            if name in pa.PCT_COLUMNS:
+                assert got == _pct_cell(want[name]), (k, name)
+            elif name == "Note":
+                assert (got or "") == want[name], (k, name)
+            else:
+                assert got == (want[name] or 0 if isinstance(want[name], (int, float))
+                               or want[name] is None else want[name]), (k, name)
+
+
+def test_a_line_row_never_carries_a_percentage():
+    from engine import production_analysis_xlsx as pax
+    _, _, rows = _detail(pax.build(2026, 10, _tables(_mixed_month())))
+    lines = [r for r in rows if r["Item description"] != "Shift total"]
+    assert len(lines) == len(_mixed_month())
+    for r in lines:
+        assert r["Overall Productivity"] is None and r["Operator efficiency"] is None
+        assert r["Counted in the month"] is None and r["Working"] is None
+
+
+def test_the_month_adds_up_shift_totals_only_never_the_lines():
+    """Recalculate the month sheet from scratch: with three lines in one shift,
+    a SUMIFS that also picked up the line rows would double the minutes."""
+    from engine import production_analysis_xlsx as pax
+    tables = _tables(_mixed_month())
+    wf, _, xc = _recalculate(pax.build(2026, 10, tables))
+    month = wf["Operator efficiency"]
+    for k, want in enumerate(tables["operators"]["rows"]):
+        for j, name in enumerate(pa.MONTH_COLUMNS):
+            cell = month.cell(row=7 + k, column=2 + j)
+            if cell.data_type != "f":
+                continue
+            if "IFS(" in cell.value:
+                assert '"Shift total"' in cell.value, cell.value
+            got = xc.evaluate(f"'Operator efficiency'!{cell.coordinate}")
+            w = want[name]
+            if name in pa.PCT_COLUMNS:
+                assert got == ("-" if w is None else pytest.approx(w / 100, abs=0.0005)), name
+            else:
+                assert got == pytest.approx(w or 0, abs=0.05), (k, name, got, w)
 
 
 def test_every_excel_formula_gives_the_value_the_preview_shows():
@@ -377,17 +526,8 @@ def test_every_excel_formula_gives_the_value_the_preview_shows():
     # Setting credits of every kind: a typed standard (A, slower than it), a blank
     # standard (B, the default 90), a faster setup (C); no operator and other work
     # on the same lines, so the credited / not-credited split is checked too.
-    acts = [_line("A", 30, 4.0, setup=120, std_setup_min=90, no_operator_min=25),
-            _line("B", 20, 6.0, setup=90, other_work_min=15),
-            _line("C", 25, 2.4, setup=60, std_setup_min=180),
-            _line("A", 50, 6.0, mins=600, op="Operator B", shift="2nd shift"),
-            _line("A", 10, 6.0, day=6), _line("D", 5, None, day=6),
-            _line("A", 10, 6.0, op="Operator B", day=6, no_power_min=60)]
-    wk = WORKING
-    acts.append(_line("A", 20, 6.0, mins=300, op="Operator C"))     # under the cap
-    tables = {"operators": {"rows": pa.operator_month_rows(acts, None, 2026, 10, wk)},
-              "shifts": {"rows": pa.shift_rows(acts, None, 2026, 10, wk)},
-              "entries": {"rows": pa.monthly_rows(acts, None, 2026, 10, wk)}}
+    acts = _mixed_month()
+    tables = _tables(acts)
     assert any(r["Minutes entered"] == 660 and r["Minutes available in shift"] == 630
                for r in tables["shifts"]["rows"])                     # the cap is exercised
     import tempfile, os
@@ -425,7 +565,9 @@ def test_every_excel_formula_gives_the_value_the_preview_shows():
         assert not any(c.data_type == "f" for row in how.iter_rows() for c in row)
         labels = {how.cell(row=r, column=2).value: how.cell(row=r, column=3).value
                   for r in range(3, how.max_row + 1)}
-        assert labels["Every entry: Total Actual Qty"] == "= Actual OK Qty + Rejected qty"
+        assert labels["Each line: Total Actual Qty"] == "= Actual OK Qty + Rejected qty"
+        assert not any("Shift-wise" in (t or "") or "Every entry" in (t or "")
+                       for kv in labels.items() for t in kv)
 
 
 def test_entries_before_the_report_start_are_left_out():
