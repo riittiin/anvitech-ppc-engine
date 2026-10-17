@@ -387,13 +387,7 @@
 >   **Follow-up (2026-10-04): the report starts at `REPORT_START = 2026-10-03`** (the
 >   form had no minutes/machine before), and **the Excel is fully transparent**:
 >   `engine/production_analysis_xlsx.py` (XlsxWriter, now in requirements) writes
->   every calculated cell as a live formula WITH its value (since 2026-10-17 ONE sheet,
->   "Shift detail", in the owner's format: each operator-shift's Daily Entry lines,
->   then a bold "Shift total" row = SUM/MAX over that block, carrying the shift's
->   productivity/efficiency; lines carry no %. The old "Shift-wise" and "Every entry"
->   sheets are gone. Month = SUMIFS/COUNTIFS with `Item description = "Shift total"`
->   as a criterion so a line row is never counted), plus a "Working" text column
->   and a "How it is calculated" sheet. Text cells go through `write_string`, since a
+>   every calculated cell as a live formula WITH its value. **Since 2026-10-17 (redraft, same day) the first sheet is "Production analysis", a FLAT copy of the owner's format workbook (`Report Generation /Format Production analysis (1).xlsx`, Sheet1): ONE ROW PER DAILY ENTRY and nothing else** — he rejected the interleaved bold, tall "Shift total" rows of "Shift detail" as "very confusing ... messy and non-consistent". Title B1, "Month -year" B3, header row 6 (green inputs, bold orange U..X, lighter working columns), Times New Roman, plain unbolded rows of normal height (no `set_row`, no wrap on data), freeze panes right of Operator, autofilter, `ignore_errors(number_stored_as_text)` so item codes show no green triangle. Overall Productivity / Operator efficiency on EVERY row = that row's SHIFT figure (SUM over the shift's contiguous block / MIN(MAX minutes, working minutes)), so every row of a shift shows the same %; the header comment says "for the whole shift". Rows stay sorted date, shift, operator (`_blocks` asserts it). "Shift minutes available", "Counted in the month" and "Note" repeat per row; the month sheet ("Operator efficiency", second) counts each shift ONCE via the helper column "Shift minutes (first row of shift)" (SUMIFS on it, COUNTIFS `">=0"` for shifts). A sort inside Excel would break the block ranges (filtering is fine). Verified on the 17-10 live copy: 241 rows = 241 entries, W/X equal the old Shift-wise value on all 241 rows, month sheet identical, 2,797 formulas recalculated by pycel with 0 disagreements. The "Working" words column stays on the month sheet only (unwrapped); and a "How it is calculated" sheet. Text cells go through `write_string`, since a
 >   line starting "=" would otherwise become a formula. Verified by recalculating every
 >   formula with pycel from a copy with the stored values STRIPPED (given the original
 >   file, pycel just returns the stored values, and a mutated formula passed);
