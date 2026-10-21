@@ -124,7 +124,7 @@ function showView(v, push) {
   // match. It is a read-only view of the plan both roles already hold, so nothing
   // new is exposed by showing it. Settings likewise shows Operators & shifts /
   // Absences read-only to the user role (the truly admin-only sections inside it —
-  // Plan settings, the production analysis report — are their own admin-only cards).
+  // Plan settings — are their own admin-only cards).
   activeView = v;
   try { localStorage.setItem("anvitech-view", v); } catch (e) { /* private mode */ }
   document.querySelectorAll(".view").forEach((s) => s.classList.toggle("active", s.id === "view-" + v));
@@ -2460,9 +2460,9 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-// ---- Production analysis (Settings-area block; admin-only, pure reporting,
+// ---- Production analysis (Settings-area block; both roles, pure reporting,
 // never touches the plan). GET /production-analysis for the on-screen preview,
-// GET /production-analysis.xlsx for the download; both admin-only server-side. ----
+// GET /production-analysis.xlsx for the download; both open to either role. ----
 function paDefaultMonth() {
   // Current calendar month, "YYYY-MM" (the value a <input type="month"> wants).
   const d = new Date();
@@ -3373,8 +3373,8 @@ if (_downAdd) _downAdd.onclick = addMachineDowntime;
 // way — the server enforces the role).
 const _opAdd = $("op-add-btn");
 if (_opAdd) _opAdd.onclick = addOperator;
-// Production analysis: month input defaults to this month; Preview/Download are
-// admin-only (server enforces it; the card is admin-only so the user role never sees it).
+// Production analysis: month input defaults to this month; Preview/Download work
+// for both roles (owner request, 2026-10-21).
 const _paMonthEl = $("pa-month");
 if (_paMonthEl) _paMonthEl.value = paDefaultMonth();
 const _paPreviewBtn = $("pa-preview-btn");

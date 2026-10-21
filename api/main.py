@@ -4160,10 +4160,10 @@ def _production_tables(year: int, month: int) -> dict:
 
 @app.get("/production-analysis")
 def production_analysis_report(year: int, month: int, request: Request):
-    """Monthly production analysis (admin only): operator efficiency for the
-    month, per shift, and every Daily Entry line. Pure reporting, no plan
-    effect. See engine/production_analysis.py for the formulas."""
-    require_admin(request)
+    """Monthly production analysis (either role since 2026-10-21, owner request):
+    operator efficiency for the month, per shift, and every Daily Entry line.
+    Pure reporting, no plan effect. See engine/production_analysis.py for the
+    formulas."""
     _validate_year_month(year, month)
     return {"year": year, "month": month,
             "starts": production_analysis.REPORT_START.isoformat(),
@@ -4172,10 +4172,9 @@ def production_analysis_report(year: int, month: int, request: Request):
 
 @app.get("/production-analysis.xlsx")
 def production_analysis_xlsx(year: int, month: int, request: Request):
-    """Same report as an Excel file (admin only): every figure a live formula over
+    """Same report as an Excel file (either role): every figure a live formula over
     the cells it comes from, plus a written working. See
     engine/production_analysis_xlsx.py."""
-    require_admin(request)
     _validate_year_month(year, month)
     from engine import production_analysis_xlsx as pax
 
@@ -4308,8 +4307,7 @@ def delay_report_xlsx(request: Request):
 
     Role-open since 2026-08-09 (director asked for the two portals to match): this is a
     read-only view of the SAME plan both roles already see on the Schedule and Gantt
-    tabs, so it exposes nothing the user role could not already read. Contrast
-    /production-analysis, which stays admin-only because it names people."""
+    tabs, so it exposes nothing the user role could not already read."""
     from engine import delay_report as _dr
     plan_run, so_lines, masters, cfg = _plan_run_for_report(_load_plan_config())
     # The SAME unavailability the plan was built with, both halves: a person on
