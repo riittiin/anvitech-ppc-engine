@@ -39,6 +39,12 @@ def _committed_promise_breach(metrics: PlanMetrics, config: PlanConfig) -> float
     return total
 
 
+def _target_breach(metrics: PlanMetrics) -> float:
+    """Days past each order's ``must_finish_by``, summed (linear: when the date cannot
+    be met, the plan that misses it by the fewest days wins). 0 when none is missed."""
+    return float(sum(s for s in metrics.target_slip_by_order.values() if s > 0))
+
+
 def _ontime_breach(metrics: PlanMetrics, config: PlanConfig) -> float:
     """Squared distance from the delivery date, in EITHER direction, beyond a free
     band and capped. This is the whole objective (2026-08-06 spec).
@@ -75,5 +81,6 @@ def score(metrics: PlanMetrics, config: PlanConfig) -> float:
         config.ontime_weight * _ontime_breach(metrics, config)
         + config.ceiling_weight * _ceiling_breach(metrics, config)
         + config.committed_promise_weight * _committed_promise_breach(metrics, config)
+        + config.target_weight * _target_breach(metrics)
         + config.makespan_weight * metrics.makespan_days
     )

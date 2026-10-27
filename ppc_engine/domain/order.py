@@ -38,6 +38,11 @@ class Order:
                     sent + lead time, never before it is reached. ``None`` (or no
                     entry for a step) = its full lead time from when it is reached,
                     byte-identical to before. Excluded from equality/hash.
+        must_finish_by: A date the director REQUIRES this order by (Add New Orders,
+                    "ask for an earlier date", 2026-10-27). The objective weighs every
+                    day past it above everything else, so a plan that meets it always
+                    beats one that does not. ``None`` = no such date, byte-identical to
+                    before. Excluded from equality/hash.
     """
 
     so_no: str
@@ -48,6 +53,7 @@ class Order:
     process_remaining: dict | None = field(default=None, compare=False)
     promise_date: date | None = field(default=None, compare=False)
     os_sent: dict | None = field(default=None, compare=False)
+    must_finish_by: date | None = field(default=None, compare=False)
 
     @property
     def key(self) -> tuple[str, str]:

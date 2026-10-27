@@ -125,4 +125,7 @@ def _finalize(cur, idx) -> Batch:
         commitment=commitment,
         promised_date=promised_date,
         process_done_on=_merge_done_on(cur["lines"]),
+        must_finish_by=min((l.must_finish_by for l in cur["lines"]
+                            if getattr(l, "must_finish_by", None) is not None),
+                           default=None),
     )

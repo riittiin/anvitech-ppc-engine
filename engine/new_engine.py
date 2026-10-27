@@ -30,7 +30,7 @@ from datetime import date, datetime, time, timedelta
 from engine import book_store, item_master
 from engine.loaders import normalize_process_name
 from engine.models import ScheduleEntry
-from engine.optimizer import COMMITTED_PROMISE_WEIGHT
+from engine.optimizer import COMMITTED_PROMISE_WEIGHT, TARGET_WEIGHT
 from engine.planning_time import pad_routings
 
 from ppc_engine.config import PlanConfig
@@ -346,6 +346,7 @@ def _plan_config(config) -> PlanConfig:
         ceiling_days=getattr(config, "worst_ceiling_days", None),
         committed_promise_slack_days=float(getattr(config, "committed_promise_slack_days", 3)),
         committed_promise_weight=COMMITTED_PROMISE_WEIGHT,
+        target_weight=TARGET_WEIGHT,
     )
 
 
@@ -464,6 +465,7 @@ def _orders_from_batches(batches, masters, first_start=None):
             process_remaining=process_remaining,
             promise_date=promise_date,
             os_sent=os_sent,
+            must_finish_by=getattr(b, "must_finish_by", None),
         ))
         batch_by_key[key] = b
     return orders, batch_by_key

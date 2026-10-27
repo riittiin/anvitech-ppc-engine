@@ -194,6 +194,19 @@ def optimize(
         cand = [k for k in seed_sequence if k in keys]
         if len(cand) == len(keys) and len(set(cand)) == len(cand):
             seeds.append(cand)
+    # Orders with a ``must_finish_by`` (an earlier date the director asked for,
+    # 2026-10-27) get a seed of their own: the same sequence with THEM first,
+    # tightest date first. The objective weighs a missed must-finish date above
+    # everything else, so this seed is what lets the search meet the date whenever
+    # putting the order at the head of the queue can; the search then only accepts
+    # plans that keep it met. No such order = no extra seed, byte-identical.
+    targets = sorted((o for o in orders if getattr(o, "must_finish_by", None) is not None),
+                     key=lambda o: o.must_finish_by)
+    if targets:
+        base = seeds[0] if seeds else edd_sequence(orders)
+        first = [o.key for o in targets]
+        head = set(first)
+        seeds.insert(0, first + [k for k in base if k not in head])
     seeds += [
         edd_sequence(orders),
         spt_sequence(orders, masters, config),

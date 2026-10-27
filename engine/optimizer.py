@@ -85,6 +85,10 @@ CEILING_WEIGHT = 100.0
 # the worst committed slip 16 -> 9 days, at ~2% more total late-days; weight 100
 # helped less (8 -> 6). Re-measure on real committed patterns before moving.
 COMMITTED_PROMISE_WEIGHT = 5000.0
+# Every day an order finishes past its must-finish date (the earlier date the director
+# typed on Add New Orders, 2026-10-27). Dominant by design: a plan meeting the date
+# always beats one missing it. == ppc_engine target_weight.
+TARGET_WEIGHT = 1e9
 
 # Local-search shape. Multi-start iterated local search: each restart hill-climbs a
 # fresh random permutation until it has gone this many evaluations with no improvement,
@@ -128,7 +132,8 @@ def score(metrics: dict) -> float:
     return (ONTIME_WEIGHT * metrics["ontime_breach"]
             + MAKESPAN_WEIGHT * metrics["makespan_days"]
             + CEILING_WEIGHT * metrics.get("ceiling_breach", 0.0)
-            + COMMITTED_PROMISE_WEIGHT * metrics.get("committed_promise_breach", 0.0))
+            + COMMITTED_PROMISE_WEIGHT * metrics.get("committed_promise_breach", 0.0)
+            + TARGET_WEIGHT * metrics.get("target_breach", 0.0))
 
 
 def makespan_days(schedule, plan_start) -> float:
@@ -227,6 +232,19 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
             ontime_breach += float(over * over)
         if g > 0:
             ontime_breach += float(ONTIME_LATE_LINEAR_WEIGHT * g)
+    # Must-finish dates (Add New Orders, an earlier date asked for, 2026-10-27):
+    # days past each, summed. Mirror of ppc_engine objective._target_breach.
+    target_breach = 0
+    target_misses = []
+    for l in so_lines:
+        tgt = getattr(l, "must_finish_by", None)
+        k = (l.so_no, l.item_code)
+        if tgt is not None and k in expected and expected[k] > tgt:
+            target_breach += (expected[k] - tgt).days
+            target_misses.append({"so_no": l.so_no, "item_code": l.item_code,
+                                  "target": tgt.isoformat(),
+                                  "expected": expected[k].isoformat(),
+                                  "days": (expected[k] - tgt).days})
     result = {
         "makespan_days": makespan_days(schedule, plan_start),
         "late_orders": len(late),
@@ -243,6 +261,9 @@ def plan_metrics(schedule, so_lines, plan_start, ceiling_days=None,
         # tests/test_scorer_mirror.py stays a strict equality rather than a tolerance.
         "ontime_breach": round(ontime_breach, 4),
     }
+    if target_misses or any(getattr(l, "must_finish_by", None) for l in so_lines):
+        result["target_breach"] = float(target_breach)
+        result["target_misses"] = target_misses
     if with_distribution:
         per = sorted(((k[0], k[1], (expected[k] - due[k]).days)
                       for k in expected if k in due), key=lambda t: -t[2])

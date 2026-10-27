@@ -356,6 +356,7 @@ def active_so_lines(active_orders: dict, actuals, masters=None) -> list:
             qty=remaining, delivery_date=o.delivery_date, process_qty=pq,
             commitment=o.commitment, promised_date=o.promised_date,
             process_done_on=on,
+            must_finish_by=getattr(o, "must_finish_by", None),
         ))
     return lines
 
@@ -421,6 +422,9 @@ def order_rows(active_orders: dict, completed_orders: dict, actuals, masters=Non
             "Lane": o.commitment,
             "Promised": fmt_date(o.promised_date) if o.promised_date else "",
             "Note": "ready to complete" if (status == RUNNING and remaining <= 0) else "",
+            # The day the order entered the book (ISO, "" when unknown). The Orders
+            # tab tags an order added in the last 7 days NEW (2026-10-27).
+            "Added on": o.first_seen or "",
         }
 
     # Sort by the real delivery date (not the DD-MM-YYYY display string, which

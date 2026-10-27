@@ -2911,7 +2911,8 @@ def _quote_movement(ranks, cand=None):
         # rather than silently fall back to a no-draft "after" — the caller
         # (_finalize_optimize) already guards this call and turns a real exception
         # into a visible "quote_movement: None" instead of a subtly wrong result.
-        extra = (_new_order_extras(drafts, _current_masters(), _ist_today().isoformat())
+        extra = (_new_order_extras(drafts, _current_masters(), _ist_today().isoformat(),
+                                   must_finish=True)
                  if drafts else None)
         cand = _repaired_candidate(ranks or None, _candidate_config(),
                                    extra_orders=extra)
@@ -3609,18 +3610,26 @@ def _pin_new_orders(config, orders) -> None:
 # carrying the dates the director typed, and show him every existing order
 # that moved before he decides whether to keep it.
 # --------------------------------------------------------------------------- #
-def _new_order_extras(drafts, masters, today):
+def _new_order_extras(drafts, masters, today, must_finish=False):
     """Draft rows (with a typed ``target_date``) as ``Order`` objects, the same
     shape ``_start_optimize``'s ``extra_orders`` and ``accept_prepone`` both need.
     The typed date becomes the order's SO delivery date — never a date the search
-    achieves — so it is judged the same way every other order in the book is: late
-    if the plan misses it, on time if not."""
+    achieves.
+
+    ``must_finish=True`` (the SEARCH, 2026-10-27, director's complaint: he typed 25
+    Oct and got 27 Oct) also makes the typed date a must-finish date: the search
+    weighs every day past it above everything else in the book, so whenever the
+    shop can make the date at all, the plan it hands back makes it, moving
+    existing orders if it has to. Never set on the orders accept STORES: once in
+    the book the order is judged like any other."""
     return [Order(so_no=r["so_no"], item_code=r["item_code"],
                   item_name=(masters.routings[r["item_code"]].description
                             if r["item_code"] in masters.routings else ""),
                   ordered_qty=float(r["qty"]),
                   delivery_date=date.fromisoformat(r["target_date"]),
-                  first_seen=today)
+                  first_seen=today,
+                  must_finish_by=(date.fromisoformat(r["target_date"])
+                                  if must_finish else None))
             for r in drafts]
 
 
@@ -3657,7 +3666,8 @@ def prepone_new_orders(req: PreponeRequest, request: Request):
         row["target_date"] = target
     book_store.save_new_order_drafts(drafts)
 
-    extra = _new_order_extras(drafts, masters, _ist_today().isoformat())
+    extra = _new_order_extras(drafts, masters, _ist_today().isoformat(),
+                              must_finish=True)
     # background=True: this is the same deep search "Start deep search" runs, just
     # seeded with the draft lines. _start_optimize's own running-check (inside the
     # lock) closes the race between the check above and this call.

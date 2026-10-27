@@ -48,12 +48,17 @@ class PlanMetrics:
     makespan_days: float
     lateness_by_order: dict[tuple[str, str], float]
     promise_slip_by_order: dict[tuple[str, str], float] = field(default_factory=dict)
+    # Days past ``Order.must_finish_by`` (signed), only for orders that carry one.
+    target_slip_by_order: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
 def compute_metrics(schedule: Schedule, orders: list[Order], plan_start: datetime) -> PlanMetrics:
     """Compute the metrics for ``schedule`` against ``orders``' due dates."""
     due_by_key = {o.key: o.due_date for o in orders}
     promise_by_key = {o.key: o.promise_date for o in orders if o.promise_date is not None}
+    target_by_key = {o.key: o.must_finish_by for o in orders
+                     if getattr(o, "must_finish_by", None) is not None}
+    target_slip_by_order: dict[tuple[str, str], float] = {}
 
     lateness_by_order: dict[tuple[str, str], float] = {}
     promise_slip_by_order: dict[tuple[str, str], float] = {}
@@ -71,6 +76,8 @@ def compute_metrics(schedule: Schedule, orders: list[Order], plan_start: datetim
             late_count += 1
         if key in promise_by_key:
             promise_slip_by_order[key] = (completion.date() - promise_by_key[key]).days
+        if key in target_by_key:
+            target_slip_by_order[key] = (completion.date() - target_by_key[key]).days
 
     end = schedule.makespan_end()
     makespan_days = ((end - plan_start).total_seconds() / 86400.0) if end else 0.0
@@ -82,4 +89,5 @@ def compute_metrics(schedule: Schedule, orders: list[Order], plan_start: datetim
         makespan_days=round(makespan_days, 4),
         lateness_by_order=lateness_by_order,
         promise_slip_by_order=promise_slip_by_order,
+        target_slip_by_order=target_slip_by_order,
     )

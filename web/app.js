@@ -1199,6 +1199,7 @@ async function renderPreponeResult(st) {
     if (res.ok) { const body = await res.json(); drafts = body.drafts || []; }
   } catch (e) { /* reported per row below via the empty-drafts message */ }
   const achieved = (st.best && st.best.expected) || {};
+  const impossible = [];
   let h = "<h4>New orders</h4><div class=\"table-wrap\"><table><thead><tr>"
     + "<th>SO number</th><th>Item</th><th>Asked</th><th>Achieved</th></tr></thead><tbody>";
   if (!drafts.length) {
@@ -1220,8 +1221,14 @@ async function renderPreponeResult(st) {
       } else if (diff <= 0) {
         cell = `<strong class="ok">${isoToDdmmyyyy(got)}</strong> · met the date asked for`;
       } else {
+        // The search always meets the date when the shop can (2026-10-27): it is
+        // weighed above every other order. Later than asked therefore means it
+        // cannot be made at all. The asked date is still the one saved.
         cell = `<strong class="warn">${isoToDdmmyyyy(got)}</strong> · `
           + `${diff} day${diff === 1 ? "" : "s"} later than asked`;
+        impossible.push(`${escapeHtml(d.so_no)}: the plan cannot finish this before `
+          + `<strong>${isoToDdmmyyyy(got)}</strong>. ${isoToDdmmyyyy(asked)} is saved `
+          + `as the delivery date, but the plan will be ${diff} day${diff === 1 ? "" : "s"} late.`);
       }
     }
     h += `<tr><td>${escapeHtml(d.so_no)}</td><td>${escapeHtml(d.item_code)} ${escapeHtml(d.item_name || "")}</td>`
@@ -1229,6 +1236,11 @@ async function renderPreponeResult(st) {
       + `<td>${cell}</td></tr>`;
   });
   h += "</tbody></table></div>";
+  if (impossible.length) {
+    h += '<div class="no-impossible">' + impossible.map((t) => `<p>${t}</p>`).join("")
+      + "<p>Even with this order put first on every machine, ahead of every existing "
+      + "order, the machines and people it needs are not free enough to make that date.</p></div>";
+  }
   const mv = st.quote_movement;
   const moved = (mv && mv.moved) || [];
   h += `<h4>Existing orders that moved: ${moved.length}</h4>`;
@@ -1501,6 +1513,8 @@ async function renderOrders() {
        ? 'Lane: <strong>open</strong> = newly arrived · <strong>committed</strong> = promised to the customer. The plan keeps its finish date within 3 days of the promise. Commit an order once you\'ve told the customer a date. '
          + '<strong>Red</strong> "Current expected" = later than the Promised date shown in the same row (the order has slipped).'
        : '"Current expected" is when the plan expects this order to finish.')
+    + ` <span class="new-badge">NEW</span> = added in the last ${NEW_ORDER_DAYS} days. Click a column heading to sort by it.`
+    + (ordersSort ? ' <button id="ord-sort-reset" class="ghost-btn small" type="button">Back to delivery-date order</button>' : '')
     + '</p>';
   if (isAdmin) {
     html += '<div class="danger-strip">'
@@ -1510,6 +1524,15 @@ async function renderOrders() {
       + '<span class="muted"> · deletes permanently from the database (and their production entries)</span></div>';
   }
   root.innerHTML = html;
+  const reset = $("ord-sort-reset");
+  if (reset) reset.onclick = () => {
+    ordersSort = null;
+    try { localStorage.removeItem(ORDERS_SORT_KEY); } catch (e) { /* per-viewer only */ }
+    renderOrders();
+  };
+  root.querySelectorAll("th.sortable").forEach((el) => {
+    el.onclick = () => setOrdersSort(el.dataset.sort);
+  });
   if (isAdmin) { wireOrdersDelete(); wireOrdersCommit(); }
 }
 
@@ -1528,30 +1551,104 @@ function isoToDate(s) {
   return isNaN(d.getTime()) ? null : d;
 }
 
+// Orders tab sorting (2026-10-27, director: a new order merged into the list and he
+// could not find it). Click a header to sort by it, again to reverse. Remembered per
+// browser; null = the server's order (delivery date). Completed orders stay last.
+const ORDERS_SORT_KEY = "anvitech.ordersSort";
+const NEW_ORDER_DAYS = 7;
+const EXPECTED_COL = "Current expected";
+let ordersSort = (() => {
+  try { const v = JSON.parse(localStorage.getItem(ORDERS_SORT_KEY) || "null"); return v && v.col ? v : null; }
+  catch (e) { return null; }
+})();
+
+function setOrdersSort(col) {
+  if (ordersSort && ordersSort.col === col) ordersSort = { col, dir: -ordersSort.dir };
+  else ordersSort = { col, dir: 1 };
+  try { localStorage.setItem(ORDERS_SORT_KEY, JSON.stringify(ordersSort)); } catch (e) { /* per-viewer only */ }
+  renderOrders();
+}
+
+// A sortable value for one cell: DD-MM-YYYY and ISO dates as dates, numbers as
+// numbers, blanks last, anything else as text with its digits read as numbers
+// (so SO 26-27SO99 sorts before 26-27SO100).
+function orderSortValue(v) {
+  const s = v === null || v === undefined ? "" : String(v).trim();
+  if (!s) return null;
+  if (/^\d{2}-\d{2}-\d{4}$/.test(s)) return ddmmyyyyToDate(s);
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return isoToDate(s.slice(0, 10));
+  if (typeof v === "number" || /^-?\d+(\.\d+)?$/.test(s)) return Number(s);
+  return s;
+}
+function compareOrderValues(a, b) {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  if (a instanceof Date && b instanceof Date) return a - b;
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+}
+
+// Added in the last NEW_ORDER_DAYS days (Added on = the ISO day it entered the book).
+function isNewOrder(addedIso) {
+  const added = isoToDate(String(addedIso || "").slice(0, 10));
+  const today = isoToDate(todayIso());
+  if (!added || !today) return false;
+  const days = Math.round((today - added) / 86400000);
+  return days >= 0 && days < NEW_ORDER_DAYS;
+}
+
 function orderTableHtml(table, showSelect) {
   const sIdx = table.columns.indexOf("Status");
   const soIdx = table.columns.indexOf("SO No");
   const itemIdx = table.columns.indexOf("Item Code");
   const laneIdx = table.columns.indexOf("Lane");
   const promIdx = table.columns.indexOf("Promised");
+  const addedIdx = table.columns.indexOf("Added on");
   // While the commit/uncommit feature is hidden, Lane and Promised are dropped
   // from the table entirely — they only mean anything alongside those controls.
-  const hidden = commitmentEnabled ? new Set() : new Set([laneIdx, promIdx].filter((i) => i >= 0));
-  let h = '<div class="table-wrap"><table><thead><tr>';
+  // "Added on" only drives the NEW tag; it is not a column on screen.
+  const hidden = new Set([addedIdx].concat(commitmentEnabled ? [] : [laneIdx, promIdx])
+    .filter((i) => i >= 0));
+  const expOf = (row) => {
+    const key = String(soIdx >= 0 ? row[soIdx] : "") + "\x1f" + String(itemIdx >= 0 ? row[itemIdx] : "");
+    return currentExpected ? currentExpected[key] : null;
+  };
+  let rows = table.rows;
+  if (ordersSort) {
+    const ci = ordersSort.col === EXPECTED_COL ? -1 : table.columns.indexOf(ordersSort.col);
+    if (ci >= 0 || ordersSort.col === EXPECTED_COL) {
+      const val = (r) => orderSortValue(ci >= 0 ? r[ci] : expOf(r));
+      const done = (r) => (sIdx >= 0 && String(r[sIdx]) === "Complete" ? 1 : 0);
+      rows = rows.map((r, n) => [r, n]).sort((x, y) =>
+        (done(x[0]) - done(y[0]))
+        || (ordersSort.dir * compareOrderValues(val(x[0]), val(y[0])))
+        || (x[1] - y[1])).map((p) => p[0]);
+    }
+  }
+  const th = (c) => {
+    const on = ordersSort && ordersSort.col === c;
+    const arrow = on ? (ordersSort.dir > 0 ? " ▲" : " ▼") : "";
+    return `<th class="sortable${on ? " sorted" : ""}" data-sort="${escapeHtml(c)}" title="Sort by ${escapeHtml(c)}">${escapeHtml(c)}${arrow}</th>`;
+  };
+  let h = '<div class="table-wrap"><table class="orders-table"><thead><tr>';
   if (showSelect) h += '<th><input type="checkbox" id="ord-all-check" title="select all"></th>';
-  table.columns.forEach((c, i) => { if (!hidden.has(i)) h += `<th>${escapeHtml(c)}</th>`; });
-  h += '<th>Current expected</th>';
+  table.columns.forEach((c, i) => { if (!hidden.has(i)) h += th(c); });
+  h += th(EXPECTED_COL);
   h += "</tr></thead><tbody>";
-  table.rows.forEach((row) => {
+  rows.forEach((row) => {
     const so = soIdx >= 0 ? String(row[soIdx]) : "";
     const item = itemIdx >= 0 ? String(row[itemIdx]) : "";
-    h += "<tr>";
+    const fresh = addedIdx >= 0 && isNewOrder(row[addedIdx])
+      && !(sIdx >= 0 && String(row[sIdx]) === "Complete");
+    h += fresh ? `<tr class="row-new" title="Added on ${escapeHtml(isoToDdmmyyyy(String(row[addedIdx]).slice(0, 10)))}">` : "<tr>";
     // An order is the (SO#, item) pair — carry both so delete targets the exact line.
     if (showSelect) h += `<td><input type="checkbox" class="ordsel" data-so="${escapeHtml(so)}" data-item="${escapeHtml(item)}"></td>`;
     row.forEach((cell, i) => {
       if (hidden.has(i)) return;
       const v = cell === null || cell === undefined ? "" : String(cell);
-      if (i === sIdx) h += `<td><span class="status-pill status-${v.toLowerCase()}">${escapeHtml(v)}</span></td>`;
+      if (i === soIdx && fresh) h += `<td>${escapeHtml(v)} <span class="new-badge">NEW</span></td>`;
+      else if (i === sIdx) h += `<td><span class="status-pill status-${v.toLowerCase()}">${escapeHtml(v)}</span></td>`;
       else if (i === laneIdx) h += `<td><span class="lane-badge lane-${v.toLowerCase()}">${escapeHtml(v)}</span></td>`;
       else h += `<td>${escapeHtml(v)}</td>`;
     });

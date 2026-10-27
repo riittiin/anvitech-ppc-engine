@@ -596,3 +596,18 @@ td.slip { color: var(--danger); background: rgba(248,81,73,.12); font-weight: 60
   .im-list { max-height: 40vh; border-right: 0; }
   .im-steps { display: block; overflow-x: auto; }
 }
+
+/* Add New Orders, earlier date (2026-10-27): the date asked for cannot be made. */
+.no-impossible { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--danger);
+  border-left-width: 4px; border-radius: 6px; color: var(--danger); font-size: 13px; }
+.no-impossible p { margin: 4px 0; }
+
+/* Orders tab (2026-10-27): new orders stand out; headings sort. */
+.orders-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.orders-table th.sortable:hover { color: var(--accent); }
+.orders-table th.sorted { color: var(--accent); }
+.orders-table tr.row-new td { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.orders-table tr.row-new td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.new-badge { display: inline-block; margin-left: 4px; padding: 0 6px; border-radius: 4px;
+  background: var(--accent); color: #fff; font-size: 10px; font-weight: 700;
+  letter-spacing: .04em; vertical-align: middle; }

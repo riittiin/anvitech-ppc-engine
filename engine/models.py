@@ -62,6 +62,10 @@ class SOLine:
     # time counts from when the step before it was completed). None = no punches.
     # Internal scheduling input, rebuilt from the punches, never serialized.
     process_done_on: Optional[dict] = None
+    # A date this line MUST finish by: the earlier date the director typed on Add New
+    # Orders (2026-10-27). The search weighs a miss above everything else. None = no
+    # such date. Carried only for the length of that one search.
+    must_finish_by: Optional[date] = None
 
     @property
     def key(self):
@@ -113,6 +117,8 @@ class Batch:
     # latest of their completion dates (D12). None/missing = not complete on every
     # line. Not serialized into the trace.
     process_done_on: Optional[dict] = None
+    # The tightest must-finish date of the merged lines (Rule 1). None = none.
+    must_finish_by: Optional[date] = None
 
     def as_row(self):
         return {
@@ -514,6 +520,10 @@ class Order:
     # IST day the order was marked complete (2026-09-25). None while active, and on
     # every order completed before this was recorded: that date is simply unknown.
     completed_on: Optional[date] = None
+    # The earlier date the director REQUIRES on Add New Orders (2026-10-27): set only
+    # on the draft orders of an "ask for an earlier date" search, never stored in the
+    # book. Serialized only when set, so every stored order is byte-identical.
+    must_finish_by: Optional[date] = None
 
     @property
     def key(self):
@@ -521,6 +531,12 @@ class Order:
         return (self.so_no, self.item_code)
 
     def to_json(self):
+        d = self._to_json()
+        if self.must_finish_by is not None:
+            d["must_finish_by"] = self.must_finish_by.isoformat()
+        return d
+
+    def _to_json(self):
         return {
             "so_no": self.so_no,
             "item_code": self.item_code,
@@ -556,6 +572,8 @@ class Order:
             committed_at=d.get("committed_at"),
             completed_on=(date.fromisoformat(d["completed_on"])
                           if d.get("completed_on") else None),
+            must_finish_by=(date.fromisoformat(d["must_finish_by"])
+                            if d.get("must_finish_by") else None),
         )
 
 

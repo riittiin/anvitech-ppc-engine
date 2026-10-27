@@ -1,6 +1,29 @@
 # CLAUDE.md — Anvitech PPC Engine
 
-> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-10-07)
+> ## ⚠️ CURRENT STATE — READ THIS FIRST (updated 2026-10-27)
+>
+> - **ADD NEW ORDERS, "ASK FOR AN EARLIER DATE": THE DATE TYPED IS THE DATE GIVEN
+>   (2026-10-27, director's complaint; branch `new-order-date-and-badge`).** He typed
+>   25 Oct, pressed No, and got 26 or 27 Oct: the search weighed the new order as one
+>   order among ~60, so it traded the new order's days for others'. Now the typed date is
+>   a **must-finish date** for that one search: `Order.must_finish_by` (set only by
+>   `_new_order_extras(must_finish=True)` in `/new-orders/prepone`, NEVER stored on
+>   accept, serialized only when set so stored orders are byte-identical) -> `SOLine` ->
+>   `Batch` (Rule 1: tightest of the clubbed lines) -> ppc `Order` -> metrics
+>   `target_slip_by_order` -> objective `target_weight` (1e9 per day past it) and its
+>   mirror `optimizer.TARGET_WEIGHT` / `plan_metrics` `target_breach` + `target_misses`.
+>   Dominant by design: a plan meeting the date always beats one missing it, existing
+>   orders move if they must (the result screen lists them as before). The search also
+>   gets a seed with the must-finish orders FIRST (`ppc_engine/optimize/search.py`).
+>   **Owner's call when the date is physically impossible:** the typed date is still
+>   saved as the SO delivery date, and the result screen shows a red warning naming the
+>   earliest date the plan gives and the days late (`renderPreponeResult`). Mutation-
+>   tested, 3 of 3 load-bearing (weight in both scorers, the search-side weight alone,
+>   the first-seed alone) in `tests/test_must_finish_by.py`. Same branch: the Orders tab
+>   tags an order added in the last 7 days **NEW** (row highlight; `order_rows` gained
+>   an `"Added on"` field = `first_seen`, hidden on screen) and every column heading
+>   sorts (client-side, remembered per browser, completed orders stay last). Display
+>   only; no plan moves.
 >
 > - **THE PLAN IS FIXED: "DONE ENTERING" ONLY MOVES TIMES; ONLY THE ADMIN'S OPTIMIZE
 >   MOVES A JOB TO ANOTHER MACHINE OR CHANGES THE PUBLISHED ORDER (2026-10-06, owner request after a

@@ -1050,3 +1050,33 @@ def test_with_extra_orders_refuses_a_colliding_key():
                    ordered_qty=2, delivery_date=date(2025, 2, 1))]
     with pytest.raises(ValueError):
         m._with_extra_orders(existing, draft)
+
+
+# --- 2026-10-27: the date asked for is a MUST-FINISH date in the search --- #
+
+def test_prepone_searches_with_the_typed_date_as_a_must_finish_date(
+        admin_client, uploaded_masters, monkeypatch):
+    """The director typed 25 Oct and got 27 Oct: the search treated his date as one
+    order's delivery date among many. It must reach the search as a must-finish date."""
+    seen = {}
+    monkeypatch.setattr("api.main._start_optimize",
+                        lambda *a, **k: seen.update(extra=k.get("extra_orders")))
+    admin_client.put("/new-orders/drafts",
+                     json={"drafts": [{"so_no": "NEW-1",
+                                       "item_code": uploaded_masters, "qty": 25}]})
+    r = admin_client.post("/new-orders/prepone",
+                          json={"targets": {"NEW-1\x1f" + uploaded_masters: "2025-03-20"}})
+    assert r.status_code == 200, r.text
+    [o] = seen["extra"]
+    assert o.must_finish_by == date(2025, 3, 20) == o.delivery_date
+
+
+def test_accepting_stores_the_order_without_a_must_finish_date(
+        admin_client, uploaded_masters, finished_quote_optimize):
+    """Once in the book the order is judged like any other: the must-finish date
+    belongs to that one search, and is never written to the store."""
+    r = admin_client.post("/new-orders/prepone/accept")
+    assert r.status_code == 200, r.text
+    stored = book_store.load_active_orders()[("NEW-1", uploaded_masters)]
+    assert stored.delivery_date == date(2025, 3, 20)
+    assert stored.must_finish_by is None

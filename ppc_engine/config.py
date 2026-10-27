@@ -166,3 +166,9 @@ class PlanConfig:
     # byte-identical otherwise.
     committed_promise_slack_days: float = 3.0
     committed_promise_weight: float = 5000.0
+    # Every day an order finishes past its ``must_finish_by`` (the date the director
+    # typed when asking for an earlier date, 2026-10-27). Far above anything else the
+    # objective can add up (the on-time term of a whole book is a few hundred thousand),
+    # so a plan meeting the date ALWAYS beats one missing it, and among plans that
+    # cannot meet it the least overshoot wins. Mirror: engine/optimizer.TARGET_WEIGHT.
+    target_weight: float = 1e9
