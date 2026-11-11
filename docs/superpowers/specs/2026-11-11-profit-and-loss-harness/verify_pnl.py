@@ -17,6 +17,15 @@ Checks (spec section 13 / task 7):
      complete, then its /profit-loss row recomputed by hand from the raw inputs;
   E. role gate: /profit-loss 403 for the user role; /machines carries no rate for
      the user role, and does for admin.
+  F. every other snapshotted, unstarted order finished the way the REAL Daily Entry
+     form saves it, then counted: how many appear as rows, how many are not shown
+     and why; and the same punches under the OLD blank-machine rule, so the count
+     of orders that rule would have hidden is measured, not assumed.
+
+Every punch is a REAL-FORM punch (final review, 2026-11-11): "Minutes Available in
+Shift" is read-only on the form and always 630 (1st shift) / 570 (2nd shift), and the
+machine is the form's default (the plan's machine where it planned one in-house,
+else the routing's first Allotted/Suggested machine, else blank: OS, DISPATCH).
 
 Usage: DEFAULT_SCHEDULER=new .venv/bin/python -B verify_pnl.py <store_dir>
        (PNL_KEEP_STORE=<new dir> keeps the end-state store)
@@ -81,8 +90,13 @@ def kinds():
             for mid, r in doc["machines"].items()}
 
 
-def punch(so, item, process, machine, operator, qty, shift="1st shift", minutes=0.0,
+SHIFT_MIN = {"1st shift": 630, "2nd shift": 570}     # the form's fixed, read-only box
+
+
+def punch(so, item, process, machine, operator, qty, shift="1st shift", minutes=None,
           complete=False, day=None, **extra):
+    if minutes is None:
+        minutes = SHIFT_MIN[shift]
     body = {"so_no": so, "item_code": item,
             "entry_date": day or CLOCK["now"].date().isoformat(),
             "shift": shift, "process": process, "operator": operator, "qty_produced": qty,
@@ -115,7 +129,7 @@ pre = sorted(first_step_entries(pr.schedule, masters, set()))[:3]
 fs = first_step_entries(pr.schedule, masters, set())
 for k in pre:
     e = fs[k]
-    punch(k[0], k[1], e.process_name, e.machine, e.operator, 1, minutes=60)
+    punch(k[0], k[1], e.process_name, e.machine, e.operator, 1)
 m._snapshot_pnl = real_snapshot
 A.get("/machines")                    # seeds default rates (no plan effect, see plan_hash)
 pr, masters, cfg = run()
@@ -128,12 +142,20 @@ for e in pr.schedule:
     if K.get(e.machine) in ("machining", "inspection"):
         for so in (e.piece_refs or e.so_refs):
             counted_lines.add((so, e.item_code))
-expected = {f"{so}\x1f{it}" for so, it in (active - punched) & counted_lines}
-no_counted = (active - punched) - counted_lines
-check("A1 snapshot == active, zero-punch orders with a counted step",
+planned_lines = set()
+for e in pr.schedule:
+    for so in list(e.so_refs) + list(e.piece_refs or []):
+        planned_lines.add((so, e.item_code))
+expected = {f"{so}\x1f{it}" for so, it in (active - punched) & planned_lines}
+no_counted = ((active - punched) & planned_lines) - counted_lines
+check("A1 snapshot == active, zero-punch orders in the plan",
       set(snap1) == expected, snapshot=len(snap1), expected=len(expected),
       active=len(active), punched=len(punched), unpunched_without_counted_step=len(no_counted),
       extra=sorted(set(snap1) - expected)[:5], missing=sorted(expected - set(snap1))[:5])
+check("A1b an order with no counted step has an EMPTY snapshot (not 'older')",
+      all(snap1[f"{so}\x1f{it}"]["steps"] == [] for so, it in no_counted)
+      and all(snap1[f"{so}\x1f{it}"]["steps"] for so, it in (active - punched) & counted_lines),
+      empty=sorted(no_counted))
 check("A2 every order punched before the first snapshot is absent",
       not any(f"{so}\x1f{it}" in snap1 for so, it in punched), punched_before=pre)
 
@@ -185,20 +207,30 @@ fs = first_step_entries(pr.schedule, masters, punched)
 later = [k for k in sorted(fs) if f"{k[0]}\x1f{k[1]}" in snap1][:3]
 for k in later:
     e = fs[k]
-    punch(k[0], k[1], e.process_name, e.machine, e.operator, 1, minutes=60)
+    punch(k[0], k[1], e.process_name, e.machine, e.operator, 1)
 CLOCK["now"] = datetime(2026, 11, 11, 7, 30)
 pr2, masters, cfg = run()
 snap2 = book_store.load_pnl_planned()
 from engine import profit_loss as pl  # noqa: E402
-fresh2 = pl.planned_steps(pr2.schedule, pr2.batches_prioritized, masters, cfg, K)
+fresh2 = pl.planned_snapshot(pr2.schedule, pr2.batches_prioritized, masters, cfg, K)
 frozen_same = all(snap2[f"{so}\x1f{it}"] == snap1[f"{so}\x1f{it}"] for so, it in later)
 moved = sum(1 for k in later if fresh2.get(k) != snap1[f"{k[0]}\x1f{k[1]}"]["steps"])
-refreshed = sum(1 for kk, v in snap2.items()
-                if tuple(kk.split("\x1f")) not in set(later) | punched and v["at"] != snap1.get(kk, {}).get("at"))
+new_at = CLOCK["now"].isoformat(timespec="seconds")
+changed = kept = bad = 0
+for kk, v in snap2.items():
+    k = tuple(kk.split("\x1f"))
+    if k in set(later) | punched:
+        continue
+    if k in fresh2 and fresh2[k] != snap1.get(kk, {}).get("steps"):
+        changed += 1
+        bad += not (v["steps"] == fresh2[k] and v["at"] == new_at)
+    else:
+        kept += 1
+        bad += v != snap1.get(kk)       # unchanged steps: same entry, same stamp, no write
 check("C1 orders punched after the first snapshot keep it byte-for-byte",
       frozen_same, later_punched=later, whose_plan_figure_changed_since=moved)
-check("C2 unpunched orders are refreshed (new timestamp) on the next compute",
-      refreshed == len(snap2) - len(later), refreshed=refreshed, snapshot=len(snap2))
+check("C2 unpunched orders: refreshed when their plan moved, untouched (stamp kept) when not",
+      bad == 0, refreshed=changed, kept_unchanged=kept, wrong=bad, snapshot=len(snap2))
 
 # ---------------------------------------------------------------- D. one order end to end
 rates = pl.rates_from_doc(book_store.load_machines_doc())
@@ -232,7 +264,9 @@ split_done = False
 for i, p in enumerate(procs):
     e = plan_e.get(p.seq)
     last = i == len(procs) - 1
-    mach = e.machine if e is not None and e.machine not in OFF else ""
+    rmach = m._routing_machines(p)
+    mach = (e.machine if e is not None and e.machine not in OFF
+            else (rmach[0] if rmach else ""))      # the form's default machine
     oper = e.operator if e is not None and e.operator else any_op
     if orderbook.process_is_outsourced(masters.routings.get(it), p.name):
         oper = ""                      # OS steps take no operator (owner rule, 2026-07-26)
@@ -242,21 +276,22 @@ for i, p in enumerate(procs):
     # share a machine-shift: the only overbooked shift is the deliberate one below.
     day = f"2026-10-{10 + i:02d}"
     if kind in ("machining", "inspection") and not split_done and kind == "machining":
-        # Overbooked shift: two punches on the same machine/date/shift claiming
-        # 400 + 400 > 630 working minutes; the second has 30 min of downtime.
+        # Overbooked shift: two real-form punches on the same machine/date/shift,
+        # 630 + 630 > 630 working minutes; the second has 30 min of downtime.
         h1, h2 = Q // 2, Q - Q // 2
-        punch(so, it, p.name, mach, oper, h1, minutes=400, actual_setup_min=90, day=day)
-        punch(so, it, p.name, mach, oper, h2, minutes=400, tool_problem_min=30, complete=last, day=day)
+        punch(so, it, p.name, mach, oper, h1, actual_setup_min=90, day=day)
+        punch(so, it, p.name, mach, oper, h2, tool_problem_min=30, complete=last, day=day)
         w1, w2 = h1 * p.cycle_time + 90, h2 * p.cycle_time
         hand_actual[(step, mach)] += 630 * w1 / (w1 + w2) + (630 * w2 / (w1 + w2) - 30)
         split_done = True
     elif kind in ("machining", "inspection"):
-        mins = 300 if kind == "machining" else 120
-        punch(so, it, p.name, mach, oper, Q, shift="2nd shift", minutes=mins, no_power_min=15,
+        punch(so, it, p.name, mach, oper, Q, shift="2nd shift", no_power_min=15,
               complete=last, day=day)
-        hand_actual[(step, mach)] += mins - 15
+        hand_actual[(step, mach)] += SHIFT_MIN["2nd shift"] - 15
     else:
-        punch(so, it, p.name, mach, oper, Q, minutes=0, complete=last, day=day)
+        # Not counted (manual, OS, DISPATCH): 630 like every real punch; OS and
+        # DISPATCH are saved with a blank machine.
+        punch(so, it, p.name, mach, oper, Q, complete=last, day=day)
 check("D0 order completed through POST /actuals", (so, it) in book_store.load_completed_orders(),
       order=kk, qty=Q, steps=len(procs))
 pr3, _, _ = run()                     # the finished order leaves the plan
@@ -278,7 +313,8 @@ check("D2 /profit-loss row matches the hand calculation",
       row["planned_hours"] == r2(hand_ph) and row["actual_hours"] == r2(hand_ah)
       and row["planned_cost"] == r2(hand_pc) and row["actual_cost"] == r2(hand_ac)
       and row["diff_cost"] == r2(hand_ac - hand_pc) and not row["not_punched"]
-      and not row["rates_missing"],
+      and not row["rates_missing"] and not row["planned_cost_partial"]
+      and not row["actual_cost_partial"],
       row={k: row[k] for k in ("so_no", "item_code", "qty", "completed_on", "planned_hours",
                                "planned_cost", "actual_hours", "actual_cost", "diff_cost",
                                "diff_pct", "not_punched", "rates_missing")},
@@ -300,6 +336,71 @@ check("D2b planned hours equal the routing by hand (Excel cycle x qty + setup, u
 check("D3 totals count the one complete row", rep["totals"]["orders"] == 1
       and rep["totals"]["counted"] == 1, totals=rep["totals"], not_shown=rep["not_shown"],
       older=rep["older_count"])
+
+blank_d = [a.process for a in book_store.load_actuals() if (a.so_no, a.item_code) == (so, it)
+           and not a.machine]
+# The OLD rule (any blank-machine punch is "cannot be priced") would have hidden it.
+_real_counted = pl._counted_step
+pl._counted_step = lambda *a, **k: True
+working = m._shift_minutes(m._load_plan_config())
+old = pl.build_report(list(book_store.load_completed_orders().values()),
+                      book_store.load_pnl_planned(),
+                      pl.actual_minutes(book_store.load_actuals(), masters, K, working), rates)
+pl._counted_step = _real_counted
+check("D4 the end-to-end order has blank-machine punches and the OLD rule would hide it",
+      bool(blank_d) and old["rows"] == [] and len(old["not_shown"]) == 1,
+      blank_machine_steps=blank_d, old_rule_not_shown=old["not_shown"])
+
+# ---------------------------------------------------------------- F. finish the rest, real form
+from datetime import date as _date, timedelta as _td  # noqa: E402
+from collections import Counter  # noqa: E402
+has_punch = {a.key for a in book_store.load_actuals()}
+active_now = book_store.load_active_orders()
+targets = sorted(k for k in (tuple(x.split("\x1f")) for x in snap2)
+                 if k not in has_punch and k in active_now)
+finished, failed = [], []
+for (fso, fit) in targets:
+    fq = active_now[(fso, fit)].ordered_qty
+    fe = {}
+    for e in pr2.schedule:
+        if fso in e.so_refs and e.item_code == fit:
+            fe.setdefault(e.process_seq, e)
+    fprocs = sorted(masters.routings[fit].processes, key=lambda p: p.seq)
+    try:
+        for i, p in enumerate(fprocs):
+            e = fe.get(p.seq)
+            rmach = m._routing_machines(p)
+            mach = (e.machine if e is not None and e.machine not in OFF
+                    else (rmach[0] if rmach else ""))
+            oper = e.operator if e is not None and e.operator else any_op
+            if orderbook.process_is_outsourced(masters.routings.get(fit), p.name):
+                oper = ""
+            punch(fso, fit, p.name, mach, oper, fq, complete=(i == len(fprocs) - 1),
+                  day=(_date(2026, 9, 1) + _td(days=i)).isoformat())
+        finished.append((fso, fit))
+    except AssertionError as ex:
+        failed.append(((fso, fit), str(ex)[:200]))
+done_all = book_store.load_completed_orders()
+repf = A.get("/profit-loss").json()
+pl._counted_step = lambda *a, **k: True
+oldf = pl.build_report(list(done_all.values()), book_store.load_pnl_planned(),
+                       pl.actual_minutes(book_store.load_actuals(), masters, K, working), rates)
+pl._counted_step = _real_counted
+reasons = Counter(n["reason"] for n in repf["not_shown"])
+blank_orders = len({a.key for a in book_store.load_actuals() if not a.machine} & set(done_all))
+check("F1 every order finished with real-form punches is a row or 'no CNC, VMC or "
+      "inspection work'; none hidden for a blank machine",
+      not failed and len(repf["rows"]) + len(repf["not_shown"]) == len(done_all)
+      and set(reasons) <= {"no CNC, VMC or inspection work"} and repf["older_count"] == 0,
+      finished_orders=len(done_all), rows=len(repf["rows"]), not_shown=dict(reasons),
+      older=repf["older_count"], punch_failures=failed[:3],
+      orders_with_a_blank_machine_punch=blank_orders,
+      rows_partial_cost=sum(1 for r in repf["rows"]
+                            if r["planned_cost_partial"] or r["actual_cost_partial"]),
+      rows_in_totals=repf["totals"]["counted"])
+check("F2 the OLD rule on the same punches hides orders (so F1 is not vacuous)",
+      len(oldf["not_shown"]) > len(repf["not_shown"]),
+      old_rule_rows=len(oldf["rows"]), old_rule_not_shown=len(oldf["not_shown"]))
 
 # ---------------------------------------------------------------- E. role gate
 gu = U.get("/machines").json()["machines"]

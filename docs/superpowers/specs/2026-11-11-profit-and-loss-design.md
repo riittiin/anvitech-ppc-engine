@@ -69,6 +69,21 @@ eligible order where a counted step has a punch with no machine recorded, since 
 actual cost cannot be priced. Owner wording for the note is the builder's call, plain
 English.
 
+**Which blank-machine punch counts (final review, 2026-11-11).** The real Daily Entry
+form saves outsourced, DISPATCH and manual steps whose routing names no machine with
+`machine = ""` and the fixed 630/570 minutes. Those must never hide an order: on the
+Test9 / Test8 harness every finished order has one, and the first version hid all of
+them. A blank-machine punch is the "cannot be priced" flag ONLY when its routing
+step is a counted step: one of the machines the routing names for it (Allotted, then
+Suggested, split by `loaders.parse_resource_candidates`, the same list the form's
+machine picker offers via `_routing_machines`) is CNC/VMC or inspection. A step the
+routing does not list at all is treated as counted (held back, not priced on partial
+data). Every other blank-machine punch is dropped silently.
+
+**An order with no counted step at all** (manual / outsourced only) gets an EMPTY
+snapshot (`steps: []`) while unstarted, so it is listed under "not shown: no CNC, VMC
+or inspection work", never miscounted as an older order.
+
 ## 6. Planned hours: what "the plan" means for a finished order
 
 A completed order is no longer in the current plan, so its planned figure must be
@@ -98,10 +113,19 @@ A completed order is no longer in the current plan, so its planned figure must b
 
 ## 7. Actual hours
 
-From Daily Entry punches (`Actual`) for that (SO#, item):
+From Daily Entry punches (`Actual`) for that (SO#, item).
+
+**What "minutes in shift" really is (corrected at final review, 2026-11-11).** On the
+Daily Entry form the box is READ-ONLY and always holds the shift's working minutes,
+630 (1st shift) or 570 (2nd shift), by the owner's 2026-10-07 rule. The operator never
+types the time spent on a job. So a punch's actual time is a share of the machine's
+shift, not a time on the job: **the owner chose this on 2026-11-11 (option a,
+machine-shift sharing)**. Each machine's shift is shared between the jobs punched on
+it that shift by the work each one reports (section 7b); a job punched alone on a
+machine that shift is charged the whole shift, less its downtime.
 
 - Count only punches whose step is a **counted step** (section 8).
-- Minutes per punch = `shift_minutes` (minutes spent on this job) **minus the six
+- Minutes per punch = `shift_minutes` (the fixed shift minutes, see above) **minus the six
   downtime fields** (no power, no operator, machine breakdown, tool problem, other
   work, no load). **Setup time stays in** (owner: take setup, not downtime).
   `shift_minutes` already includes setup (production analysis treats H as the whole
@@ -127,8 +151,8 @@ is never silently counted as 0 and the totals row says how many orders are incom
 
 ## 7b. Several punches on one machine in one shift (owner, 2026-11-11)
 
-The "minutes in shift" box auto-fills with the full shift (630/570) and the operator
-may leave it. Two punches on the same machine in the same shift (e.g. clubbed SO149 +
+The "minutes in shift" box is fixed at the full shift (630/570) and the operator
+cannot change it. Two punches on the same machine in the same shift (e.g. clubbed SO149 +
 SO150, or two jobs) would then count 1,260 minutes in a 630-minute shift.
 
 Rule: group all punches (every order, not only eligible ones) by **(machine, date,
@@ -157,7 +181,12 @@ cannot be grouped and are handled by the section 5 rule.
   CNC1, CNC4, CNC5, CNC7 = 450 · CNC3, CNC6 = 650 · VMC1 = 500 · VMC2, VMC3 = 650 ·
   CMM = 850. MI1/MI2/MI3 and other inspection: blank until the owner gives them.
 - A counted step on a machine with no rate: hours shown, cost "rate not set", and the
-  order's total cost marked incomplete (never silently treated as ₹0).
+  order's total cost marked incomplete (never silently treated as ₹0). **Ruling at
+  final review (2026-11-11):** the row's planned / actual cost is the sum over the
+  machine time that HAS a rate, flagged `planned_cost_partial` / `actual_cost_partial`,
+  shown as the number plus "incomplete (rate not set: MI1)"; the difference is shown
+  only when both sides are complete; totals still cover complete rows only, and read
+  "-" (None) when there is none.
 - The rate field must have **no plan effect**. Verified: `machines_digest` hashes
   name, type and hours only, and it is what feeds `_plan_fingerprint`,
   `_inputs_signature` and the masters cache key; keep it that way and pin it by a test.

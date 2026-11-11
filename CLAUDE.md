@@ -10,22 +10,33 @@
 >   now holds Add New Orders AND Profit and Loss). One row per COMPLETED order: planned
 >   hours / rupees vs actual hours / rupees, CNC, VMC and inspection steps only (manual
 >   stations are not counted), per-step breakdown on click. Pure module
->   **`engine/profit_loss.py`** (`planned_steps`, `merge_snapshot`, `actual_minutes`,
->   `build_report`), no plan effect. **The planned figure is a SNAPSHOT frozen at the
+>   **`engine/profit_loss.py`** (`planned_steps`, `planned_snapshot`, `merge_snapshot`,
+>   `actual_minutes`, `build_report`), no plan effect. **The planned figure is a SNAPSHOT frozen at the
 >   first punch:** `api.main._snapshot_pnl` runs on `_plan`'s COMPUTE path (never a
 >   cache hit), records every order with ZERO punches into store key
 >   **`anvitech:pnl_planned`** (`{"so\x1fitem": {"steps": [...], "at": iso}}`), and
 >   never writes or creates a row for an order that has any punch; a finished order
->   keeps the row it had. Consequence the owner must hear: **orders already started on
+>   keeps the row it had; an unchanged row keeps its stamp (no write per plan); an
+>   unstarted order with no counted step gets `steps: []` so it reads "no CNC, VMC or
+>   inspection work", not "older". Consequence the owner must hear: **orders already started on
 >   the day this ships never get a planned figure** (they count as "older"), so the
 >   tab starts empty on the live book and fills as new orders finish. Planned minutes
 >   are UNPADDED: run = pieces x the Excel cycle time (the 1.3 CNC/VMC planning pad is
 >   undone), plus the setup the plan actually paid, shared across a clubbed batch's
->   lines by pieces. Actual minutes = a punch's `shift_minutes` (capped at the shift's
->   working minutes) less its downtime, setup kept; punches sharing one machine-shift
->   that claim more than the shift share it by pieces x cycle + setup, ACROSS orders
->   (so a row can move when another order is punched on that machine-shift). A punch with shift
->   minutes but no machine puts the order in "not shown". **Rates live on the Machines table**
+>   lines by pieces. **Actual minutes are a SHARE OF THE MACHINE-SHIFT, not time typed on
+>   the job** (corrected at final review: the form's "minutes in shift" box is READ-ONLY,
+>   always 630/570, owner rule 2026-10-07; the owner chose machine-shift sharing on
+>   2026-11-11): a punch's `shift_minutes` (capped at the shift's working minutes) less
+>   its downtime, setup kept; punches sharing one machine-shift share it by pieces x
+>   ORIGINAL master cycle + actual setup, ACROSS orders (so a row can move when another
+>   order is punched on that machine-shift); a job alone on a machine-shift is charged
+>   the whole shift. A blank-machine punch puts the order in "not shown" ONLY on a
+>   counted step (routing Allotted/Suggested names a CNC/VMC/inspection machine);
+>   OS / DISPATCH / no-machine manual punches, which the real form always saves blank,
+>   are dropped. **The first version hid EVERY finished order** (each ends in a blank
+>   DISPATCH punch), found only by re-running the harness with real-form punches. A
+>   missing rate gives a PARTIAL cost (`planned_cost_partial` / `actual_cost_partial`,
+>   shown "incomplete (rate not set: MI1)"), no difference, out of the totals. **Rates live on the Machines table**
 >   (`rate`, rupees/hour, admin only, stripped from `/machines` for the user role, not in
 >   `machines_digest` so no plan effect); `shop_masters.DEFAULT_RATES` (CNC1/4/5/7 450,
 >   CNC3/6 650, VMC1 500, VMC2/3 650, CMM 850) are seeded ONCE (`rates_seeded` flag); a
@@ -37,15 +48,19 @@
 >   orders with a counted step (64/64, 61/61), every pre-punched order absent; clubbed
 >   ops 28 + 31 checked, 0 mismatches (members' setup + run == op setup + Q x original
 >   cycle); freeze held on 3 + 3 orders whose plan figure HAD moved; one order (SO131,
->   11 steps, an overbooked split shift with downtime) driven end to end over HTTP and
->   matched by hand: 249.0 planned h / Rs 1,64,850, 35.5 actual h / Rs 23,425. Browser:
+>   11 steps, an overbooked split shift with downtime) driven end to end over HTTP with
+>   REAL-FORM punches and matched by hand: 249.0 planned h / Rs 1,64,850, 65.5 actual h /
+>   Rs 44,425 (the first version's 35.5 h used typed minutes the form cannot produce);
+>   every other unstarted order finished the same way: Test9 61 rows + 1 "no counted
+>   work" of 62, Test8 58 + 3 of 61, 0 hidden (the old rule hid 62 / 61), but only 5 / 4
+>   rows complete (MI has no rate). Browser:
 >   admin sees the tab and the step table, user has no tab. **Mutation-tested, 10 of 10
 >   load-bearing** (zero-punch gate, unpad, downtime, overbooked scaling, counted-kind
 >   filter both sides, `require_admin`, keep-rate rule, user rate strip, the
->   `_snapshot_pnl` call). Suite: 1500 passed, 5 skipped. **NOT verified: the live-store copy
+>   `_snapshot_pnl` call). Suite: 1521 passed, 5 skipped (after the fix wave). **NOT verified: the live-store copy
 >   (no `MONGODB_URI` this session) — run `plan_hash.py` and `verify_pnl.py` on a
 >   read-only copy of the live store BEFORE pushing**; the cloud optimize paths
->   (untouched). Cosmetic, open: a negative figure renders `₹-1,41,425`. Deliberately
+>   (untouched). Deliberately
 >   not built: selling price / profit, xlsx download, stored rupees.
 >   **Rule: a planned figure that a report compares against must be frozen before the
 >   work it describes starts, or the plan re-planning around the punches erases the

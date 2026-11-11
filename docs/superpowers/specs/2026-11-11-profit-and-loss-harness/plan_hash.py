@@ -76,7 +76,7 @@ def punch_round(sched, skip, n=3):
         r = c.post("/actuals", json={
             "so_no": k[0], "item_code": k[1], "entry_date": "2026-11-11", "shift": "1st shift",
             "process": e.process_name, "operator": e.operator, "qty_produced": 1,
-            "machine": e.machine, "shift_minutes": 120})
+            "machine": e.machine, "shift_minutes": 630})
         assert r.status_code == 200, (k, r.text[:300])
         done.append(k)
         if len(done) == n:
