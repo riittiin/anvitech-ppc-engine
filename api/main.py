@@ -706,6 +706,7 @@ class MachineSaveRequest(BaseModel):
     type: str = ""
     hours: Optional[Union[int, float]] = None
     version: Optional[int] = None
+    rate: Optional[float] = None
 
 
 class MachineIdRequest(BaseModel):
@@ -4034,20 +4035,34 @@ def _machine_users(mid):
         book_store.load_machine_downtime(), book_store.load_frozen_ops())
 
 
-def _machine_view(mid, m):
+def _machine_view(mid, m, role=None):
     from ppc_engine.loaders.normalize import machine_kind_from_type
-    return {"id": mid, "name": m.get("name") or mid, "type": m.get("type") or "",
+    view = {"id": mid, "name": m.get("name") or mid, "type": m.get("type") or "",
             "hours": m.get("hours"), "version": m.get("version", 1),
             "kind": machine_kind_from_type(m.get("type")).value,
             "used_by": _machine_users(mid)}
+    if role == auth.ADMIN:
+        view["rate"] = m.get("rate")
+    return view
+
+
+def _machines_doc_with_rates():
+    """The machines doc with the default hourly rates seeded once (saved when
+    that changed anything). Shared by GET /machines and the profit-loss report."""
+    doc = book_store.load_machines_doc() or {"machines": {}}
+    seeded = shop_masters.seed_default_rates(doc)
+    if seeded != doc and doc.get("machines"):
+        book_store.save_machines_doc(seeded)
+    return seeded
 
 
 @app.get("/machines")
-def get_machines():
+def get_machines(request: Request):
     _current_masters()                        # seeds the tables once
-    doc = book_store.load_machines_doc() or {"machines": {}}
+    doc = _machines_doc_with_rates()
+    role = getattr(request.state, "role", None)
     types = list(dict.fromkeys(m.get("type") for m in doc["machines"].values() if m.get("type")))
-    return {"machines": [_machine_view(mid, m) for mid, m in doc["machines"].items()],
+    return {"machines": [_machine_view(mid, m, role) for mid, m in doc["machines"].items()],
             "types": types,
             "standard_hours": {"two": shop_masters.TWO_SHIFT_HOURS,
                                "one": shop_masters.ONE_SHIFT_HOURS}}
@@ -4056,16 +4071,21 @@ def get_machines():
 def _save_machine(req: MachineSaveRequest, request: Request, create: bool):
     require_admin(request)
     _current_masters()
-    doc = book_store.load_machines_doc() or {"machines": {}}
+    doc = _machines_doc_with_rates()
     raw_id = req.id.strip()
     mid = loaders.normalize_resource_id(raw_id) if raw_id else ""
     if not create and mid not in doc["machines"]:
         raise HTTPException(status_code=404, detail=f"No machine {mid or raw_id}.")
     item = {"name": doc["machines"].get(mid, {}).get("name") or raw_id,
             "type": req.type, "hours": req.hours}
+    if "rate" in req.model_fields_set:
+        item["rate"] = req.rate
+    else:
+        item["rate"] = doc["machines"].get(mid, {}).get("rate")
     if create and mid in doc["machines"]:
         raise HTTPException(status_code=409, detail=f"Machine {mid} already exists.")
     errs = shop_masters.validate_machine(raw_id, item, doc["machines"], create)
+    errs += shop_masters.validate_rate(item.get("rate"))
     if errs:
         raise HTTPException(status_code=400, detail=" ".join(errs))
     try:
@@ -4075,7 +4095,7 @@ def _save_machine(req: MachineSaveRequest, request: Request, create: bool):
     except shop_masters.VersionConflict as e:
         raise HTTPException(status_code=409, detail=str(e))
     book_store.save_machines_doc(new_doc)
-    return {"machine": _machine_view(mid, new_doc["machines"][mid])}
+    return {"machine": _machine_view(mid, new_doc["machines"][mid], auth.ADMIN)}
 
 
 @app.post("/machines")

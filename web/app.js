@@ -2842,13 +2842,16 @@ function renderMachines() {
         + [19.5, 9.5].map((h) => `<option value="${h}"${h === m.hours ? " selected" : ""}>${machineHoursText(h)}</option>`).join("")
         + `</select>`
       : escapeHtml(machineHoursText(m.hours));
+    const rateCell = isAdmin
+      ? `<td class="admin-only"><input type="number" class="mrow-rate" data-id="${id}" min="1" max="100000" step="any" value="${m.rate == null ? "" : escapeHtml(String(m.rate))}" placeholder="No rate" aria-label="Rate per hour in rupees for ${escapeHtml(m.name)}" /></td>`
+      : "";
     const del = isAdmin
       ? `<td class="admin-only"><button type="button" class="ghost-btn small mrow-del" data-id="${id}" title="Remove ${escapeHtml(m.name)}">✕</button></td>`
       : "";
     const name = m.name && m.name.replace(/\s+/g, "").toUpperCase() !== String(m.id).toUpperCase() ? `${escapeHtml(m.id)} <span class="muted">${escapeHtml(m.name)}</span>` : escapeHtml(m.id);
-    return `<tr><td>${name}</td><td>${typeCell}</td><td>${hoursCell}</td>`
+    return `<tr><td>${name}</td><td>${typeCell}</td><td>${hoursCell}</td>${rateCell}`
       + `<td class="used" title="${escapeHtml((m.used_by || []).join("\n"))}">${escapeHtml(machineUsedText(m.used_by))}</td>${del}</tr>`;
-  }).join("") || `<tr><td colspan="${isAdmin ? 5 : 4}" class="empty">No machines yet.${isAdmin ? " Add one below." : ""}</td></tr>`;
+  }).join("") || `<tr><td colspan="${isAdmin ? 6 : 4}" class="empty">No machines yet.${isAdmin ? " Add one below." : ""}</td></tr>`;
   const sel = $("machine-new-type");
   if (sel) {
     const prev = sel.value;
@@ -2894,9 +2897,10 @@ function wireShopMasters() {
     if (currentRole !== "admin") return;
     const m = (shopMachines.machines || []).find((x) => x.id === t.dataset.id);
     if (!m) return;
-    const body = { id: m.id, type: m.type, hours: m.hours, version: m.version };
+    const body = { id: m.id, type: m.type, hours: m.hours, version: m.version, rate: m.rate == null ? null : m.rate };
     if (t.classList.contains("mrow-type")) body.type = t.value;
     else if (t.classList.contains("mrow-hours")) body.hours = Number(t.value);
+    else if (t.classList.contains("mrow-rate")) body.rate = t.value.trim() === "" ? null : Number(t.value);
     else return;
     shopWrite("/machines", "PUT", body, `Saved ${m.id}. Updating the plan.`);
   });

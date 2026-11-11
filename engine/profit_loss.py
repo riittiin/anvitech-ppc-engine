@@ -30,6 +30,16 @@ def machine_kinds(machines_doc: dict) -> dict:
     return out
 
 
+def rates_from_doc(doc: dict) -> dict:
+    """Machine id -> rupees per hour, only for machines that have a rate."""
+    out = {}
+    for mid, row in ((doc or {}).get("machines") or {}).items():
+        r = (row or {}).get("rate")
+        if isinstance(r, (int, float)) and not isinstance(r, bool):
+            out[mid] = float(r)
+    return out
+
+
 def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 

@@ -133,3 +133,33 @@ def test_store_round_trip():
     book_store.save_shop_calendar({"holidays": []})
     assert book_store.load_machines_doc() == {"machines": {}}
     assert book_store.load_shop_calendar() == {"holidays": []}
+
+
+# ---- machine rates (profit and loss, task 5) ----
+def test_validate_rate():
+    assert sm.validate_rate(None) == []
+    assert sm.validate_rate(450) == []
+    for bad in (0, -1, 100001, float("nan"), float("inf"), True, "x"):
+        assert sm.validate_rate(bad), bad
+
+
+def test_seed_default_rates_once_and_never_overwrites():
+    doc = {"machines": {"CNC1": {"name": "CNC1"}, "CNC2": {"name": "CNC2"},
+                        "CMM": {"name": "CMM", "rate": 1}}}
+    out = sm.seed_default_rates(doc)
+    assert out["machines"]["CNC1"]["rate"] == 450
+    assert "rate" not in out["machines"]["CNC2"]
+    assert out["machines"]["CMM"]["rate"] == 1
+    assert out["rates_seeded"] is True
+    assert "rates_seeded" not in doc                      # input untouched
+    out["machines"]["CNC1"]["rate"] = 500
+    assert sm.seed_default_rates(out)["machines"]["CNC1"]["rate"] == 500
+
+
+def test_apply_machine_save_carries_rate_and_digest_ignores_it():
+    doc = {"machines": {"CNC1": {"name": "CNC1", "type": "CNC", "hours": 19.5, "version": 1}}}
+    a = sm.apply_machine_save(doc, "CNC1", {"type": "CNC", "hours": 19.5, "rate": 600}, 1, NOW, "u", False)
+    assert a["machines"]["CNC1"]["rate"] == 600
+    b = sm.apply_machine_save(doc, "CNC1", {"type": "CNC", "hours": 19.5}, 1, NOW, "u", False)
+    assert "rate" not in b["machines"]["CNC1"]
+    assert sm.machines_digest(a) == sm.machines_digest(b)

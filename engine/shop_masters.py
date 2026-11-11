@@ -207,6 +207,34 @@ def apply_machine_save(doc, mid, item, expected_version, now_iso, user, create) 
     machines[mid] = {"name": item.get("name") or mid, "type": str(item.get("type")).strip(),
                      "hours": item.get("hours"), "version": version,
                      "updated_at": now_iso, "updated_by": user}
+    if item.get("rate") is not None:
+        machines[mid]["rate"] = item["rate"]
+    return out
+
+
+# Hourly charge-out rate per machine (rupees), seeded once for the machines the
+# owner priced. It has no plan effect and is NOT part of machines_digest.
+DEFAULT_RATES = {"CNC1": 450, "CNC4": 450, "CNC5": 450, "CNC7": 450, "CNC3": 650,
+                 "CNC6": 650, "VMC1": 500, "VMC2": 650, "VMC3": 650, "CMM": 850}
+
+
+def validate_rate(rate) -> list:
+    if rate is None:
+        return []
+    if (isinstance(rate, bool) or not isinstance(rate, (int, float))
+            or not math.isfinite(rate) or not 0 < rate <= 100000):
+        return ["Rate per hour must be more than 0, or left empty."]
+    return []
+
+
+def seed_default_rates(doc) -> dict:
+    out = copy.deepcopy(doc) if doc else {"machines": {}}
+    if out.get("rates_seeded"):
+        return out
+    for mid, m in out.get("machines", {}).items():
+        if "rate" not in m and mid in DEFAULT_RATES:
+            m["rate"] = DEFAULT_RATES[mid]
+    out["rates_seeded"] = True
     return out
 
 

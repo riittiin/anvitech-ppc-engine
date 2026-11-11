@@ -77,3 +77,72 @@ def test_a_failing_snapshot_never_breaks_the_plan(admin, monkeypatch):
     monkeypatch.setattr(profit_loss, "planned_steps", boom)
     r = c.post("/run", json={"persist": False})
     assert r.status_code == 200 and r.json()["gantt"]
+
+
+# ---- machine rates (task 5) ----
+def _put(c, m_view, **over):
+    body = {"id": m_view["id"], "type": m_view["type"], "hours": m_view["hours"],
+            "version": m_view["version"]}
+    body.update(over)
+    return c.put("/machines", json=body)
+
+
+def _machine(c, mid="CNC1"):
+    return next(x for x in c.get("/machines").json()["machines"] if x["id"] == mid)
+
+
+def test_save_without_rate_keeps_the_stored_rate(admin):
+    m, c = admin
+    v = _machine(c)
+    assert v["rate"] == 450
+    r = _put(c, v, hours=9.5)
+    assert r.status_code == 200, r.text
+    assert _machine(c)["rate"] == 450
+
+
+def test_rate_zero_or_negative_is_rejected(admin):
+    m, c = admin
+    v = _machine(c)
+    for bad in (0, -5):
+        assert _put(c, v, rate=bad).status_code == 400
+    assert _machine(c)["rate"] == 450
+
+
+def test_rate_blank_clears_it(admin):
+    m, c = admin
+    v = _machine(c)
+    assert _put(c, v, rate=None).status_code == 200
+    assert "rate" not in _machine(c) or _machine(c)["rate"] is None
+
+
+def test_default_rates_seed_once_and_never_overwrite(admin):
+    m, c = admin
+    assert _put(c, _machine(c), rate=500).status_code == 200
+    assert _machine(c)["rate"] == 500
+    assert _machine(c)["rate"] == 500                     # reload: still 500
+    assert _machine(c, "VMC1")["rate"] == 500
+
+
+def test_user_role_never_sees_rates(admin):
+    m, c = admin
+    u = TestClient(m.app)
+    u.post("/login", data={"username": "anvitech_user", "password": "anvitech12345678"})
+    r = u.get("/machines")
+    assert r.status_code == 200 and r.json()["machines"]
+    assert "rate" not in r.text
+
+
+def test_rate_has_no_plan_effect(admin):
+    m, c = admin
+    c.get("/machines")
+    cfg = m._load_plan_config()
+    fp = m._plan_fingerprint(cfg)
+    dg = m.shop_masters.machines_digest(book_store.load_machines_doc())
+    assert _put(c, _machine(c), rate=777).status_code == 200
+    assert m.shop_masters.machines_digest(book_store.load_machines_doc()) == dg
+    assert m._plan_fingerprint(cfg) == fp
+
+
+def test_rates_from_doc():
+    doc = {"machines": {"A": {"rate": 5}, "B": {}, "C": {"rate": None}}}
+    assert profit_loss.rates_from_doc(doc) == {"A": 5.0}
