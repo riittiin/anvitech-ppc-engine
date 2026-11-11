@@ -6,7 +6,9 @@ import pytest
 
 from engine.config import Config
 from engine.models import Actual, Batch, Process, Routing, ScheduleEntry
-from engine.profit_loss import COUNTED_KINDS, actual_minutes, machine_kinds, planned_steps
+from engine.models import Order
+from engine.profit_loss import (COUNTED_KINDS, actual_minutes, build_report, machine_kinds,
+                                planned_steps)
 
 T0 = datetime(2026, 11, 2, 8, 0)
 DOC = {"machines": {
@@ -189,3 +191,93 @@ def test_different_days_or_shifts_do_not_share():
 
 def test_unknown_shift_is_not_capped():
     assert am([punch(mins=900, shift="weird")])[("SO1", "X")][0]["minutes"] == 900
+
+
+# ---------------------------------------------------------------- build_report
+def order(so, item="X", done=date(2026, 11, 5), name="Part", qty=10):
+    return Order(so, item, name, qty, date(2026, 12, 1), completed=True, completed_on=done)
+
+
+def pstep(machine, setup=0, run=0, process=None, step=None):
+    p = process or {"CNC4": "CNC FIRST SIDE", "CMM": "INSPECTION"}.get(machine, machine)
+    return {"process": p, "step": step or p, "machine": machine,
+            "setup_min": setup, "run_min": run}
+
+
+def snap(key, steps):
+    return {f"{key[0]}\x1f{key[1]}": {"steps": steps, "at": "2026-11-01T00:00:00"}}
+
+
+def act(machine, minutes, process="CNC FIRST SIDE"):
+    return {"step": process, "process": process, "machine": machine, "minutes": minutes}
+
+
+def test_owner_example_planned_and_actual_cost():
+    r = build_report([order("SO1")], snap(("SO1", "X"), [pstep("CNC4", 0, 6000)]),
+                     {("SO1", "X"): [act("CNC4", 7200)]}, {"CNC4": 100})["rows"][0]
+    assert (r["planned_cost"], r["actual_cost"], r["diff_cost"]) == (10000, 12000, 2000)
+    assert r["diff_pct"] == pytest.approx(20)
+    assert r["completed_on"] == "05-11-2026" and r["planned_hours"] == 100
+
+
+def test_unpunched_step_flags_the_order_incomplete():
+    sn = snap(("SO1", "X"), [pstep("CNC4", 0, 600), pstep("CMM", 0, 60)])
+    rep = build_report([order("SO1")], sn, {("SO1", "X"): [act("CNC4", 600)]},
+                       {"CNC4": 100, "CMM": 50})
+    r = rep["rows"][0]
+    assert r["not_punched"] == ["INSPECTION"] and r["actual_hours"] == pytest.approx(10)
+    assert [s["status"] for s in r["steps"]] == ["ok", "not punched"]
+    assert rep["totals"]["incomplete"] == 1
+
+
+def test_machine_without_rate_is_rate_not_set_never_zero():
+    sn = snap(("SO1", "X"), [pstep("CNC4", 0, 600)])
+    r = build_report([order("SO1")], sn, {("SO1", "X"): [act("CNC4", 600)]}, {})["rows"][0]
+    assert r["planned_cost"] is None and r["actual_cost"] is None
+    assert r["rates_missing"] == ["CNC4"] and r["steps"][0]["status"] == "rate not set"
+    assert r["planned_hours"] == 10 and r["diff_cost"] is None and r["diff_pct"] is None
+
+
+def test_order_without_snapshot_is_counted_as_older_not_shown():
+    rep = build_report([order("OLD")], {}, {}, {})
+    assert rep["rows"] == [] and rep["older_count"] == 1 and rep["not_shown"] == []
+
+
+def test_blank_machine_punch_moves_order_to_not_shown():
+    sn = snap(("SO1", "X"), [pstep("CNC4", 0, 600)])
+    rep = build_report([order("SO1")], sn,
+                       {("SO1", "X"): [{"step": "A", "process": "A", "machine": "", "minutes": None}]},
+                       {"CNC4": 100})
+    assert rep["rows"] == []
+    assert rep["not_shown"] == [{"so_no": "SO1", "item_code": "X",
+                                 "reason": "a punch has no machine, so its time cannot be priced"}]
+
+
+def test_order_with_no_counted_work_is_not_a_zero_row():
+    rep = build_report([order("SO1")], snap(("SO1", "X"), []), {}, {})
+    assert rep["rows"] == []
+    assert rep["not_shown"][0]["reason"] == "no CNC, VMC or inspection work"
+
+
+def test_actual_only_step_is_appended_and_same_names_sum():
+    sn = snap(("SO1", "X"), [pstep("CNC4", 30, 30), pstep("CNC4", 0, 60)])
+    r = build_report([order("SO1")], sn,
+                     {("SO1", "X"): [act("CNC4", 60), act("CMM", 120, "INSPECTION")]},
+                     {"CNC4": 60, "CMM": 30})["rows"][0]
+    assert [s["process"] for s in r["steps"]] == ["CNC FIRST SIDE", "INSPECTION"]
+    assert r["steps"][0]["planned_hours"] == 2 and r["steps"][0]["actual_hours"] == 1
+    last = r["steps"][-1]
+    assert last["planned_hours"] == 0 and last["planned_machine"] == "" and last["actual_cost"] == 60
+
+
+def test_totals_skip_rows_without_both_costs_and_sort_newest_first():
+    sn = {**snap(("A", "X"), [pstep("CNC4", 0, 600)]), **snap(("B", "X"), [pstep("CMM", 0, 600)]),
+          **snap(("C", "X"), [pstep("CNC4", 0, 600)])}
+    ac = {(s, "X"): [act("CNC4" if s != "B" else "CMM", 600)] for s in "ABC"}
+    rep = build_report([order("A", done=date(2026, 11, 1)), order("B", done=date(2026, 11, 9)),
+                        order("C", done=None)], sn, ac, {"CNC4": 60})
+    assert [r["so_no"] for r in rep["rows"]] == ["B", "A", "C"]
+    assert rep["rows"][2]["completed_on"] == ""
+    t = rep["totals"]
+    assert t["orders"] == 3 and t["planned_cost"] == 1200 and t["actual_cost"] == 1200
+    assert t["incomplete"] == 1

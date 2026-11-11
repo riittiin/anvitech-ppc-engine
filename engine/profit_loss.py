@@ -11,6 +11,8 @@ between the lines of a clubbed batch by pieces.
 
 from __future__ import annotations
 
+from datetime import date
+
 from engine.loaders import normalize_process_name
 from engine.models import Actual
 from engine.production_analysis import cycle_time_for
@@ -150,3 +152,118 @@ def actual_minutes(actuals, masters, kinds, working) -> dict:
             out.setdefault(a.key, []).append(
                 {"step": step, "process": a.process, "machine": a.machine, "minutes": m})
     return out
+
+
+def _r2(v):
+    return None if v is None else round(v, 2)
+
+
+def _cost(minutes_by_machine, rates):
+    """Cost of {machine: minutes}; None when any machine has no rate."""
+    total = 0.0
+    for m, mins in minutes_by_machine.items():
+        if m not in rates or rates[m] is None:
+            return None
+        total += mins / 60.0 * rates[m]
+    return total
+
+
+def _fmt_date(d):
+    return d.strftime("%d-%m-%Y") if d else ""
+
+
+def _step_row(process, planned, actual, rates, missing):
+    """planned / actual: {machine: minutes} (planned may be empty)."""
+    pc, ac = _cost(planned, rates), _cost(actual, rates)
+    ph, ah = sum(planned.values()) / 60.0, sum(actual.values()) / 60.0
+    for m in list(planned) + list(actual):
+        if rates.get(m) is None:
+            missing.add(m)
+    if not actual:
+        status = "not punched"
+    elif pc is None or ac is None:
+        status = "rate not set"
+    else:
+        status = "ok"
+    return {"process": process, "planned_machine": "/".join(planned),
+            "planned_hours": ph, "planned_cost": pc,
+            "actual_machines": list(actual), "actual_hours": ah,
+            "actual_cost": ac if actual else 0.0, "status": status}
+
+
+def build_report(completed, snapshot, actual, rates) -> dict:
+    """Planned vs actual machine cost per completed order that has a snapshot.
+
+    snapshot: stored doc form {"so\x1fitem": {"steps": [...], "at": iso}};
+    actual: {(so, item): [...]} from actual_minutes; rates: {machine: Rs/hour}.
+    """
+    rows, not_shown, older = [], [], 0
+    for o in completed or []:
+        doc = (snapshot or {}).get(f"{o.so_no}\x1f{o.item_code}")
+        if doc is None:
+            older += 1
+            continue
+        steps = (doc or {}).get("steps") or []
+        acts = (actual or {}).get(o.key) or []
+        if any(a.get("machine") in ("", None) or a.get("minutes") is None for a in acts):
+            not_shown.append({"so_no": o.so_no, "item_code": o.item_code,
+                              "reason": "a punch has no machine, so its time cannot be priced"})
+            continue
+        if not steps and not acts:
+            not_shown.append({"so_no": o.so_no, "item_code": o.item_code,
+                              "reason": "no CNC, VMC or inspection work"})
+            continue
+        order_names, plan_by, act_by, label = [], {}, {}, {}
+        for s in steps:
+            n = s["step"]
+            if n not in plan_by:
+                order_names.append(n)
+                label[n] = s.get("process") or n
+            m = plan_by.setdefault(n, {})
+            m[s["machine"]] = m.get(s["machine"], 0.0) + (s.get("setup_min") or 0) + (s.get("run_min") or 0)
+        for a in acts:
+            n = a["step"]
+            if n not in plan_by and n not in act_by:
+                order_names.append(n)
+                label[n] = a.get("process") or n
+            m = act_by.setdefault(n, {})
+            m[a["machine"]] = m.get(a["machine"], 0.0) + a["minutes"]
+        missing, srows, not_punched = set(), [], []
+        for n in order_names:
+            r = _step_row(label[n], plan_by.get(n, {}), act_by.get(n, {}), rates or {}, missing)
+            if r["status"] == "not punched":
+                not_punched.append(label[n])
+            srows.append(r)
+        pcs = [r["planned_cost"] for r in srows]
+        acs = [r["actual_cost"] for r in srows]
+        p_cost = None if any(c is None for c in pcs) else sum(pcs)
+        a_cost = None if any(c is None for c in acs) else sum(acs)
+        diff = None if p_cost is None or a_cost is None else a_cost - p_cost
+        pct = None if diff is None or not p_cost else diff / p_cost * 100
+        rows.append({
+            "so_no": o.so_no, "item_code": o.item_code, "item_name": o.item_name,
+            "qty": o.ordered_qty, "completed_on": _fmt_date(o.completed_on),
+            "_sort": o.completed_on,
+            "planned_hours": _r2(sum(r["planned_hours"] for r in srows)),
+            "planned_cost": _r2(p_cost),
+            "actual_hours": _r2(sum(r["actual_hours"] for r in srows)),
+            "actual_cost": _r2(a_cost), "diff_cost": _r2(diff), "diff_pct": _r2(pct),
+            "not_punched": not_punched, "rates_missing": sorted(missing),
+            "steps": [{**r, "planned_hours": _r2(r["planned_hours"]),
+                       "planned_cost": _r2(r["planned_cost"]),
+                       "actual_hours": _r2(r["actual_hours"]),
+                       "actual_cost": _r2(r["actual_cost"])} for r in srows],
+        })
+    rows.sort(key=lambda r: r["_sort"] or date.min, reverse=True)
+    for r in rows:
+        del r["_sort"]
+    full = [r for r in rows if r["planned_cost"] is not None and r["actual_cost"] is not None]
+    pt = sum(r["planned_cost"] for r in full)
+    at = sum(r["actual_cost"] for r in full)
+    totals = {"orders": len(rows),
+              "incomplete": sum(1 for r in rows if r["not_punched"] or r["rates_missing"]),
+              "planned_hours": _r2(sum(r["planned_hours"] for r in full)),
+              "actual_hours": _r2(sum(r["actual_hours"] for r in full)),
+              "planned_cost": _r2(pt), "actual_cost": _r2(at), "diff_cost": _r2(at - pt),
+              "diff_pct": _r2((at - pt) / pt * 100) if pt else None}
+    return {"rows": rows, "totals": totals, "not_shown": not_shown, "older_count": older}
