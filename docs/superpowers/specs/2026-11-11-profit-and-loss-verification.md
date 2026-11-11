@@ -19,9 +19,30 @@ wave; the SO131 figures of the first version (35.5 actual h, Rs 23,425) were bui
 from minutes the form cannot produce and are superseded. The owner chose, on
 2026-11-11, that actual hours are a share of the machine-shift (spec section 7).
 
+## Live-store copy (2026-11-11, added before push)
+
+Done on a READ-ONLY copy of the live Atlas store (every key copied with find() only,
+nothing written back): 75 active orders, 192 completed, 1,672 punches.
+- `plan_hash.py`: 12 of 12 identical (HEAD, HEAD with `_snapshot_pnl` off, base 518b11c; 4 stages).
+- Every read surface, both roles (35 endpoints incl. /run, /gantt, delay report and
+  production analysis xlsx): byte-identical to base except the stripped rate fields;
+  /profit-loss 200 admin / 403 user (404 on base). Add New Orders quote identical.
+- First use writes only `anvitech:machines` (rate + rates_seeded; every other field
+  identical) and `anvitech:pnl_planned`.
+- `verify_pnl.py`: A, B, C, D0, D1, D2b, D3, D4, E, F2 PASS. D2 and F1 "failed" on
+  harness assumptions made for a fresh book, both checked by hand: D2's hand figure
+  assumed no other punch on the machine-shift, but CNC6 10-10 1st shift carries two
+  REAL SO177 punches; the shared share recomputed by hand is 2.36 h, exactly the tab's.
+  F1 asserted older_count == 0; the live book has 192 orders completed before the
+  feature, which is the expected "older" set (37 rows = the 40 snapshots less the 3
+  orders the harness punched but did not finish).
+- Driven in Chrome on a local instance of the copy: admin sees the tab, the step
+  breakdown and totals ("Totals (37 orders, 35 incomplete)"), no console errors; the
+  user role is redirected to Orders, has no tab, and no rate column or input.
+
 ## What was NOT done, said first
 
-- **The live-store copy was NOT made.** The owner's `MONGODB_URI` was not available in
+- **(Superseded by the section above.) The live-store copy was NOT made at first.** The owner's `MONGODB_URI` was not available in
   this session. Every check below ran on a throwaway LOCAL store built from the owner's
   workbooks (Test9.xlsx and Test8.xlsx). The live book has real punches, clubbed
   in-production batches, absences and an applied optimization that these stores do

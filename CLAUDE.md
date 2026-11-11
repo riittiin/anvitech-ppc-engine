@@ -57,10 +57,20 @@
 >   admin sees the tab and the step table, user has no tab. **Mutation-tested, 10 of 10
 >   load-bearing** (zero-punch gate, unpad, downtime, overbooked scaling, counted-kind
 >   filter both sides, `require_admin`, keep-rate rule, user rate strip, the
->   `_snapshot_pnl` call). Suite: 1521 passed, 5 skipped (after the fix wave). **NOT verified: the live-store copy
->   (no `MONGODB_URI` this session) — run `plan_hash.py` and `verify_pnl.py` on a
->   read-only copy of the live store BEFORE pushing**; the cloud optimize paths
->   (untouched). Deliberately
+>   `_snapshot_pnl` call). Suite: 1521 passed, 5 skipped (after the fix wave). **Verified on a READ-ONLY copy of
+>   the live store (2026-11-11, every key copied, nothing written back; 75 active
+>   orders, 192 completed, 1,672 punches): plan hashes identical in 12 of 12 runs
+>   (HEAD / HEAD with the snapshot off / base 518b11c, 4 stages each); every other
+>   surface, both roles (35 endpoints incl. /run, /gantt, delay-report and
+>   production-analysis xlsx, /items, /operators), byte-identical to base apart from
+>   the stripped rate fields; the Add New Orders quote identical; the only store keys
+>   the first use writes are `anvitech:machines` (rate + rates_seeded only) and
+>   `anvitech:pnl_planned`; snapshot = the 40 unpunched active orders exactly; the
+>   192 already-completed orders read "older" (the tab starts empty on deploy); a
+>   finished order's actual shared CNC6's shift with a REAL SO177 punch and matched
+>   the hand figure (2.36 h); driven in Chrome as admin (no console errors) and as
+>   user (redirected to Orders, no tab, no rate column).** Not run: the cloud
+>   optimize paths (untouched). Deliberately
 >   not built: selling price / profit, xlsx download, stored rupees.
 >   **Rule: a planned figure that a report compares against must be frozen before the
 >   work it describes starts, or the plan re-planning around the punches erases the
