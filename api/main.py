@@ -1397,10 +1397,29 @@ def _plan(config: Config, _seeding: bool = False):
     # I4). `/new-orders/quote` and `/new-orders/add` never read this key —
     # they read `plan_run`/`masters`/`config` only — so widening it here moves
     # nothing else.
+    _snapshot_pnl(plan_run, masters, ranked_config, actuals)
     _PLAN_CACHE.update(key=_fp, result=result,
                        artifacts={"plan_run": plan_run, "so_lines": all_active_so_lines,
                                   "masters": masters, "config": ranked_config})
     return result
+
+
+def _snapshot_pnl(plan_run, masters, config, actuals):
+    """Profit and Loss: record each unstarted order's planned machine minutes (frozen
+    at its first punch). Never affects the plan; any failure is logged and swallowed."""
+    try:
+        from engine import profit_loss as _pl
+        kinds = _pl.machine_kinds(book_store.load_machines_doc() or {})
+        fresh = _pl.planned_steps(plan_run.schedule, plan_run.batches_prioritized,
+                                  masters, config, kinds)
+        stored = book_store.load_pnl_planned()
+        merged = _pl.merge_snapshot(stored, fresh, {a.key for a in actuals},
+                                    _ist_now().isoformat(timespec="seconds"))
+        if merged != stored:
+            book_store.save_pnl_planned(merged)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning("profit-loss snapshot failed", exc_info=True)
 
 
 def _commit_orders(pairs):

@@ -373,6 +373,7 @@ def save_item_master(doc: dict) -> None:
 
 
 MACHINES_KEY = "anvitech:machines"            # kv: json {seed..., machines:{id:{name,type,hours,version}}}
+PNL_PLANNED_KEY = "anvitech:pnl_planned"        # kv: json {"so\x1fitem": {steps:[...], at: iso}}
 SHOP_CALENDAR_KEY = "anvitech:shop_calendar"  # kv: json {seed..., holidays:[{date,name}]}
 
 
@@ -384,6 +385,16 @@ def load_machines_doc():
 
 def save_machines_doc(doc: dict) -> None:
     get_store().kv_set(MACHINES_KEY, json.dumps(doc))
+
+
+def load_pnl_planned() -> dict:
+    """Profit and Loss planned-minutes snapshot per order line; ``{}`` when absent."""
+    raw = get_store().kv_get(PNL_PLANNED_KEY)
+    return json.loads(raw) if raw else {}
+
+
+def save_pnl_planned(doc: dict) -> None:
+    get_store().kv_set(PNL_PLANNED_KEY, json.dumps(doc))
 
 
 def load_shop_calendar():

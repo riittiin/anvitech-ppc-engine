@@ -94,3 +94,29 @@ def test_missing_routing_step_uses_fallback_formula():
     e = entry("CNC4", 130, 10, name="UNKNOWN STEP")
     (s,) = planned_steps([e], [batch({"SO1": 10})], masters(), cfg(), KINDS)[("SO1", "X")]
     assert s["setup_min"] == 0 and s["run_min"] == pytest.approx(100)
+
+
+# ---- snapshot merge (frozen at first punch) ---- #
+from engine.profit_loss import merge_snapshot
+
+OLD = {"process": "P", "step": "p", "machine": "CNC4", "setup_min": 1, "run_min": 2}
+NEW = {"process": "P", "step": "p", "machine": "CNC4", "setup_min": 9, "run_min": 9}
+
+
+def test_merge_overwrites_unstarted_orders():
+    out = merge_snapshot({"A\x1fX": {"steps": [OLD], "at": "t0"}}, {("A", "X"): [NEW]}, set(), "t1")
+    assert out["A\x1fX"] == {"steps": [NEW], "at": "t1"}
+
+
+def test_merge_never_touches_a_started_order():
+    out = merge_snapshot({"A\x1fX": {"steps": [OLD], "at": "t0"}}, {("A", "X"): [NEW]}, {("A", "X")}, "t1")
+    assert out["A\x1fX"] == {"steps": [OLD], "at": "t0"}
+
+
+def test_an_order_started_before_any_snapshot_never_gets_one():
+    assert "A\x1fX" not in merge_snapshot({}, {("A", "X"): [NEW]}, {("A", "X")}, "t1")
+
+
+def test_merge_keeps_orders_no_longer_planned():
+    stored = {"A\x1fX": {"steps": [OLD], "at": "t0"}}
+    assert merge_snapshot(stored, {}, set(), "t1") == stored

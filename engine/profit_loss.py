@@ -86,3 +86,15 @@ def planned_steps(schedule, batches, masters, config, kinds) -> dict:
                 "setup_min": setup_op * share, "run_min": run,
             })
     return out
+
+
+def merge_snapshot(stored: dict, fresh: dict, started: set, now_iso: str) -> dict:
+    """Refresh the planned-minutes snapshot of every order NOT yet started; a started
+    order's snapshot is frozen (never written, never created). Orders that left the
+    plan (completed) keep what they had."""
+    out = dict(stored or {})
+    for (so, item), steps in (fresh or {}).items():
+        if (so, item) in started:
+            continue
+        out[f"{so}\x1f{item}"] = {"steps": steps, "at": now_iso}
+    return out
