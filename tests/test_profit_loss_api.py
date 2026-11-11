@@ -215,8 +215,9 @@ def test_end_to_end_row(admin):
     assert row["planned_hours"] == pytest.approx(planned_min / 60, abs=0.01)
     assert row["actual_hours"] == pytest.approx(actual_total / 60, abs=0.01)
     assert row["not_punched"] == []
-    # MI1 has no default rate: priced "rate not set" and kept out of the totals.
-    assert row["rates_missing"] == ["MI1"] and row["planned_cost"] is None
+    # MI1 has no default rate: a partial cost, flagged, kept out of the totals.
+    assert row["rates_missing"] == ["MI1"] and row["planned_cost_partial"]
+    assert row["planned_cost"] > 0 and row["diff_cost"] is None
     assert rep["totals"]["orders"] == 1 and rep["totals"]["incomplete"] == 1 and rep["totals"]["counted"] == 0
     # Once the rate is set the row prices by hand: hours x rate per machine.
     assert _put(c, _machine(c, "MI1"), rate=300).status_code == 200
@@ -260,3 +261,77 @@ def test_already_started_order_never_appears(admin):
     c.post("/run", json={"persist": False})
     rep = c.get("/profit-loss").json()
     assert rep["rows"] == [] and rep["older_count"] == 1
+
+
+# ================================================== final-review fix wave (2026-11-11)
+from tests import new_sample_workbook as nsw
+
+ITEM_C, SO3 = "NEW-C-01", "NSO-003"
+
+
+@pytest.fixture
+def admin_manual(monkeypatch):
+    """The sample book plus a manual-only item C (WASHING -> DISPATCH)."""
+    monkeypatch.setenv("DEFAULT_SCHEDULER", "new")
+    import io
+    import api.main as m
+    importlib.reload(m)
+    wb = nsw.build_workbook()
+    nsw._set(wb["Item's process Master"], 5,
+             {0: 3, 1: "ACME", 2: "NEW WASHER C", 3: ITEM_C, 6: "Dia 10 SS", 10: 20,
+              12: "WASHING", 13: 2, 14: 2, 15: "MW1", 16: "MW1",
+              17: "DISPATCH", 18: 0, 19: 0})
+    buf = io.BytesIO()
+    wb.save(buf)
+    book_store.save_masters_bytes(buf.getvalue())
+    book_store.add_orders([Order(SO1, ITEM_A, ITEM_A, 50, date(2025, 3, 20)),
+                           Order(SO3, ITEM_C, ITEM_C, 20, date(2025, 3, 22))])
+    c = TestClient(m.app)
+    c.post("/login", data={"username": "anvitech", "password": "1930rail"})
+    c.get("/operators")
+    return m, c
+
+
+def test_manual_only_order_is_snapshotted_and_reported_as_no_counted_work(admin_manual):
+    m, c = admin_manual
+    assert c.post("/run", json={"persist": False}).status_code == 200
+    assert book_store.load_pnl_planned()[_key(SO3, ITEM_C)]["steps"] == []
+    # Real Daily Entry form: minutes fixed at 630; DISPATCH has no machine.
+    _punch(c, SO3, ITEM_C, "WASHING", "MW1", 20, 630.0)
+    _punch(c, SO3, ITEM_C, "DISPATCH", "", 20, 630.0, complete=True)
+    rep = c.get("/profit-loss").json()
+    assert rep["older_count"] == 0 and rep["rows"] == []
+    assert rep["not_shown"] == [{"so_no": SO3, "item_code": ITEM_C,
+                                 "reason": "no CNC, VMC or inspection work"}]
+
+
+def test_real_form_punches_show_the_order(admin):
+    """Every step punched as the real form saves it: 630 minutes on every step,
+    DISPATCH with a blank machine. The order must be a row, not hidden."""
+    m, c = admin
+    c.post("/run", json={"persist": False})
+    snap = book_store.load_pnl_planned()[_key(SO1, ITEM_A)]
+    mach_of = {s["process"]: s["machine"] for s in snap["steps"]}
+    routing = m._current_masters().routings[ITEM_A].processes
+    for i, p in enumerate(routing):
+        _punch(c, SO1, ITEM_A, p.name, mach_of.get(p.name, ""), 50, 630.0,
+               day=f"2025-03-{10 + i:02d}", complete=(i == len(routing) - 1))
+    rep = c.get("/profit-loss").json()
+    assert rep["not_shown"] == [], rep["not_shown"]
+    (row,) = rep["rows"]
+    assert row["actual_hours"] == pytest.approx(10.5 * len(mach_of), abs=0.01)
+    # MI1 has no rate yet: a partial number, flagged, no difference.
+    assert row["planned_cost_partial"] and row["actual_cost_partial"]
+    assert row["planned_cost"] > 0 and row["diff_cost"] is None
+
+
+def test_an_unchanged_snapshot_is_not_rewritten_on_every_plan(admin, monkeypatch):
+    m, c = admin
+    c.post("/run", json={"persist": False})
+    before = book_store.load_pnl_planned()
+    writes = []
+    monkeypatch.setattr(book_store, "save_pnl_planned", lambda d: writes.append(d))
+    monkeypatch.setattr(m, "_ist_now", lambda: datetime(2030, 1, 1, 0, 0, 0))
+    m._PLAN_CACHE.clear()
+    assert c.post("/run", json={"persist": False}).status_code == 200
+    assert writes == [] and book_store.load_pnl_planned() == before

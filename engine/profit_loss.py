@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from engine.loaders import normalize_process_name
+from engine.loaders import normalize_process_name, parse_resource_candidates
 from engine.models import Actual
 from engine.production_analysis import cycle_time_for
 from engine.planning_time import CNC_VMC_PLANNING_FACTOR, planning_cycle_time
@@ -102,6 +102,18 @@ def planned_steps(schedule, batches, masters, config, kinds) -> dict:
     return out
 
 
+def planned_snapshot(schedule, batches, masters, config, kinds) -> dict:
+    """``planned_steps`` plus an EMPTY step list for every order the plan holds that has
+    no counted step at all (manual / outsourced only), so the report can say "no CNC,
+    VMC or inspection work" for it instead of calling it an older order."""
+    out = {}
+    for e in schedule or []:
+        for so in list(e.so_refs or []) + list(getattr(e, "piece_refs", None) or []):
+            out.setdefault((so, e.item_code), [])
+    out.update(planned_steps(schedule, batches, masters, config, kinds))
+    return out
+
+
 def merge_snapshot(stored: dict, fresh: dict, started: set, now_iso: str) -> dict:
     """Refresh the planned-minutes snapshot of every order NOT yet started; a started
     order's snapshot is frozen (never written, never created). Orders that left the
@@ -110,8 +122,28 @@ def merge_snapshot(stored: dict, fresh: dict, started: set, now_iso: str) -> dic
     for (so, item), steps in (fresh or {}).items():
         if (so, item) in started:
             continue
-        out[f"{so}\x1f{item}"] = {"steps": steps, "at": now_iso}
+        key = f"{so}\x1f{item}"
+        prev = out.get(key)
+        if prev is not None and prev.get("steps") == steps:
+            continue                      # unchanged: keep the stamp, no store write
+        out[key] = {"steps": steps, "at": now_iso}
     return out
+
+
+def _counted_step(masters, item_code, process, kinds) -> bool:
+    """Is this routing step CNC/VMC or inspection work? True when any machine its
+    routing allows (Allotted or Suggested, split by the same parser the app uses for
+    routing machine text) is a counted kind. A step the routing does not list is
+    treated as counted: its time cannot be shown to be outside the report, so an order
+    with such a blank-machine punch is held back rather than priced on partial data."""
+    routing = (getattr(masters, "routings", None) or {}).get(item_code)
+    target = normalize_process_name(process)
+    for p in (routing.processes if routing else []):
+        if normalize_process_name(p.name) == target:
+            cands = (parse_resource_candidates(p.allotted_machine)
+                     + parse_resource_candidates(p.suggested_machine))
+            return any(kinds.get(m) in COUNTED_KINDS for m in cands)
+    return True
 
 
 def actual_minutes(actuals, masters, kinds, working) -> dict:
@@ -120,7 +152,9 @@ def actual_minutes(actuals, masters, kinds, working) -> dict:
     A punch's minutes are its shift minutes (capped at the shift's working minutes)
     less its downtime; setup stays in. Punches sharing one (machine, date, shift) that
     together claim more than the shift can hold share it by pieces*cycle + setup.
-    A punch with no machine is flagged (``machine`` "", ``minutes`` None).
+    A punch with no machine is flagged (``machine`` "", ``minutes`` None) only when its
+    step is a COUNTED step (``_counted_step``); the real form saves outsourced, dispatch
+    and blank-Allotted manual steps with no machine, and those are dropped silently.
     """
     items = [a for a in actuals or [] if (getattr(a, "shift_minutes", 0.0) or 0.0) > 0]
     groups: dict = {}
@@ -151,6 +185,8 @@ def actual_minutes(actuals, masters, kinds, working) -> dict:
     for i, a in enumerate(items):
         step = normalize_process_name(a.process)
         if not a.machine:
+            if not _counted_step(masters, a.item_code, a.process, kinds):
+                continue
             out.setdefault(a.key, []).append(
                 {"step": step, "process": a.process, "machine": "", "minutes": None})
             continue
@@ -176,6 +212,20 @@ def _cost(minutes_by_machine, rates):
             return None
         total += mins / 60.0 * rates[m]
     return total
+
+
+def _priced(by_step, rates):
+    """(cost of every machine-minute that HAS a rate, or None when nothing on this
+    side is priced; True when some machine on this side has no rate)."""
+    total, priced, partial = 0.0, False, False
+    for mins_by_machine in by_step:
+        for m, mins in mins_by_machine.items():
+            if rates.get(m) is None:
+                partial = True
+            else:
+                total += mins / 60.0 * rates[m]
+                priced = True
+    return (total if priced else None), partial
 
 
 def _fmt_date(d):
@@ -244,20 +294,20 @@ def build_report(completed, snapshot, actual, rates) -> dict:
             if r["status"] == "not punched":
                 not_punched.append(label[n])
             srows.append(r)
-        pcs = [r["planned_cost"] for r in srows]
-        acs = [r["actual_cost"] for r in srows if r["status"] != "not punched"]
-        p_cost = None if any(c is None for c in pcs) else sum(pcs)
-        a_cost = None if any(c is None for c in acs) else sum(acs)
-        diff = None if p_cost is None or a_cost is None else a_cost - p_cost
+        r_rates = rates or {}
+        p_cost, p_part = _priced([plan_by.get(n, {}) for n in order_names], r_rates)
+        a_cost, a_part = _priced([act_by[n] for n in order_names if n in act_by], r_rates)
+        diff = (None if p_cost is None or a_cost is None or p_part or a_part
+                else a_cost - p_cost)
         pct = None if diff is None or not p_cost else diff / p_cost * 100
         rows.append({
             "so_no": o.so_no, "item_code": o.item_code, "item_name": o.item_name,
             "qty": o.ordered_qty, "completed_on": _fmt_date(o.completed_on),
             "_sort": o.completed_on,
             "planned_hours": _r2(sum(r["planned_hours"] for r in srows)),
-            "planned_cost": _r2(p_cost),
+            "planned_cost": _r2(p_cost), "planned_cost_partial": p_part,
             "actual_hours": _r2(sum(r["actual_hours"] or 0.0 for r in srows)),
-            "actual_cost": _r2(a_cost), "diff_cost": _r2(diff), "diff_pct": _r2(pct),
+            "actual_cost": _r2(a_cost), "actual_cost_partial": a_part, "diff_cost": _r2(diff), "diff_pct": _r2(pct),
             "not_punched": not_punched, "rates_missing": sorted(missing),
             "steps": [{**r, "planned_hours": _r2(r["planned_hours"]),
                        "planned_cost": _r2(r["planned_cost"]),
@@ -271,10 +321,13 @@ def build_report(completed, snapshot, actual, rates) -> dict:
             and r["planned_cost"] is not None and r["actual_cost"] is not None]
     pt = sum(r["planned_cost"] for r in full)
     at = sum(r["actual_cost"] for r in full)
+    some = bool(full)                     # no complete order: no total, never a 0
     totals = {"orders": len(rows), "counted": len(full),
               "incomplete": sum(1 for r in rows if r["not_punched"] or r["rates_missing"]),
-              "planned_hours": _r2(sum(r["planned_hours"] for r in full)),
-              "actual_hours": _r2(sum(r["actual_hours"] for r in full)),
-              "planned_cost": _r2(pt), "actual_cost": _r2(at), "diff_cost": _r2(at - pt),
-              "diff_pct": _r2((at - pt) / pt * 100) if pt else None}
+              "planned_hours": _r2(sum(r["planned_hours"] for r in full)) if some else None,
+              "actual_hours": _r2(sum(r["actual_hours"] for r in full)) if some else None,
+              "planned_cost": _r2(pt) if some else None,
+              "actual_cost": _r2(at) if some else None,
+              "diff_cost": _r2(at - pt) if some else None,
+              "diff_pct": _r2((at - pt) / pt * 100) if some and pt else None}
     return {"rows": rows, "totals": totals, "not_shown": not_shown, "older_count": older}

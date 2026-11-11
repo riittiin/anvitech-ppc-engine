@@ -293,3 +293,139 @@ def test_totals_skip_rows_without_both_costs_and_sort_newest_first():
     t = rep["totals"]
     assert t["orders"] == 3 and t["planned_cost"] == 1200 and t["actual_cost"] == 1200
     assert t["incomplete"] == 1 and t["counted"] == 2
+
+
+# ================================================== final-review fix wave (2026-11-11)
+
+def masters_full():
+    """masters() plus the non-counted steps the real form saves with a blank machine."""
+    procs = [
+        Process(1, "CNC FIRST SIDE", 10.0, None, "CNC4", "CNC4"),
+        Process(2, "INSP", 5.0, None, "CMM", "CMM"),
+        Process(3, "BAND SAW OS", 2880.0, None, "OS", "OS"),
+        Process(4, "DEBURING", 1.0, None, "MD1", None),
+        Process(5, "DISPATCH", None, None, None, None),
+        Process(6, "ALT STEP", 4.0, None, "MD1/CNC4", None),
+    ]
+    return SimpleNamespace(routings={"X": Routing("X", "", "", "", None, procs)})
+
+
+def amf(actuals):
+    return actual_minutes(actuals, masters_full(), KINDS, WORKING)
+
+
+@pytest.mark.parametrize("process", ["BAND SAW OS", "DISPATCH", "DEBURING"])
+def test_blank_machine_punch_on_a_not_counted_step_is_dropped(process):
+    # The real form saves OS / DISPATCH / blank-Allotted manual steps with machine ""
+    # and a fixed 630: that must never flag the order.
+    assert amf([punch(machine="", mins=630, process=process)]) == {}
+
+
+@pytest.mark.parametrize("process", ["CNC FIRST SIDE", "INSP", "ALT STEP", "NOT IN ROUTING"])
+def test_blank_machine_punch_on_a_counted_step_is_still_flagged(process):
+    (r,) = amf([punch(machine="", mins=630, process=process)])[("SO1", "X")]
+    assert r["machine"] == "" and r["minutes"] is None
+
+
+def test_os_punch_with_blank_machine_does_not_hide_the_order():
+    acts = amf([punch(machine="CNC4", mins=630),
+                punch(machine="", mins=630, process="BAND SAW OS", day=date(2026, 11, 4)),
+                punch(machine="", mins=630, process="DISPATCH", day=date(2026, 11, 5))])
+    rep = build_report([order("SO1")], snap(("SO1", "X"), [pstep("CNC4", 0, 600)]),
+                       acts, {"CNC4": 60})
+    assert rep["not_shown"] == [] and len(rep["rows"]) == 1
+    assert rep["rows"][0]["actual_hours"] == pytest.approx(10.5)
+
+
+# ---- item 2: an unstarted order with no counted work gets an empty snapshot
+def test_planned_snapshot_records_orders_with_no_counted_steps():
+    es = [entry("CNC4", 350, 20, refs=("SO1",)),
+          entry("MD1", 60, 20, refs=("SO2",), batch="B2")]
+    from engine.profit_loss import planned_snapshot
+    out = planned_snapshot(es, [batch({"SO1": 20})], masters(), cfg(), KINDS)
+    assert out[("SO2", "X")] == [] and out[("SO1", "X")]
+
+
+# ---- item 4: partial costs when a rate is missing
+def test_partial_cost_sums_the_priced_steps_and_says_so():
+    sn = snap(("SO1", "X"), [pstep("CNC4", 0, 600), pstep("CMM", 0, 60)])
+    r = build_report([order("SO1")], sn,
+                     {("SO1", "X"): [act("CNC4", 600), act("CMM", 60, "INSPECTION")]},
+                     {"CNC4": 100})["rows"][0]
+    assert r["planned_cost"] == 1000 and r["actual_cost"] == 1000
+    assert r["planned_cost_partial"] is True and r["actual_cost_partial"] is True
+    assert r["diff_cost"] is None and r["diff_pct"] is None
+    assert r["rates_missing"] == ["CMM"]
+
+
+def test_partial_only_on_the_side_that_lacks_a_rate():
+    sn = snap(("SO1", "X"), [pstep("CNC4", 0, 600)])
+    r = build_report([order("SO1")], sn, {("SO1", "X"): [act("CMM", 60, "CNC FIRST SIDE")]},
+                     {"CNC4": 100})["rows"][0]
+    assert r["planned_cost_partial"] is False and r["actual_cost_partial"] is True
+    assert r["planned_cost"] == 1000 and r["actual_cost"] is None and r["diff_cost"] is None
+
+
+def test_complete_rates_are_not_partial():
+    sn = snap(("SO1", "X"), [pstep("CNC4", 0, 600)])
+    r = build_report([order("SO1")], sn, {("SO1", "X"): [act("CNC4", 600)]},
+                     {"CNC4": 100})["rows"][0]
+    assert r["planned_cost_partial"] is False and r["actual_cost_partial"] is False
+    assert r["diff_cost"] == 0
+
+
+def test_partial_rows_stay_out_of_the_totals():
+    sn = {**snap(("A", "X"), [pstep("CNC4", 0, 600)]),
+          **snap(("B", "X"), [pstep("CNC4", 0, 600), pstep("CMM", 0, 60)])}
+    ac = {("A", "X"): [act("CNC4", 600)],
+          ("B", "X"): [act("CNC4", 600), act("CMM", 60, "INSPECTION")]}
+    t = build_report([order("A"), order("B")], sn, ac, {"CNC4": 60})["totals"]
+    assert t["counted"] == 1 and t["planned_cost"] == 600
+
+
+# ---- item 5: an unchanged snapshot keeps its stamp (no store write per plan)
+def test_merge_keeps_the_stamp_when_steps_are_unchanged():
+    stored = {"A\x1fX": {"steps": [OLD], "at": "t0"}}
+    out = merge_snapshot(stored, {("A", "X"): [dict(OLD)]}, set(), "t1")
+    assert out == stored and out["A\x1fX"]["at"] == "t0"
+
+
+# ---- item 6: totals over zero complete orders are not zero
+def test_totals_are_none_when_no_order_is_complete():
+    sn = snap(("SO1", "X"), [pstep("CNC4", 0, 600)])
+    t = build_report([order("SO1")], sn, {("SO1", "X"): [act("CNC4", 600)]}, {})["totals"]
+    assert t["counted"] == 0 and t["orders"] == 1
+    for f in ("planned_hours", "actual_hours", "planned_cost", "actual_cost",
+              "diff_cost", "diff_pct"):
+        assert t[f] is None, f
+
+
+# ---- item 9 T1: a clubbed line's share follows its per-step qty, not its ordered qty
+def test_clubbed_share_follows_each_lines_step_qty():
+    # SO1 ordered 30 but only 10 still owed on this step; SO2 owes its full 10.
+    b = batch({"SO1": 30, "SO2": 10}, pq={"SO1": {"CNC FIRST SIDE": 10}})
+    out = planned_steps([entry("CNC4", 90 + 20 * 13, 20, refs=("SO1", "SO2"))],
+                        [b], masters(), cfg(), KINDS)
+    assert out[("SO1", "X")][0]["setup_min"] == pytest.approx(45)
+    assert out[("SO2", "X")][0]["setup_min"] == pytest.approx(45)
+    assert out[("SO1", "X")][0]["run_min"] == pytest.approx(100)
+
+
+# ---- item 9 T3: overbooked-shift weight = master cycle (not the punch's) + setup
+def test_overbooked_weight_uses_master_cycle_and_actual_setup():
+    a = punch("SO1", qty=10, mins=630, setup=0.0)
+    a.cycle_time_min = 100.0               # snapshot differs from the master's 10
+    b = punch("SO2", qty=10, mins=630, setup=100.0)
+    out = am([a, b])
+    # weights: SO1 10*10 = 100, SO2 10*10 + 100 = 200
+    assert out[("SO1", "X")][0]["minutes"] == pytest.approx(210)
+    assert out[("SO2", "X")][0]["minutes"] == pytest.approx(420)
+
+
+def test_overbooked_weight_falls_back_to_the_punch_cycle_without_a_master():
+    a = punch("SO1", qty=10, mins=630, process="NOT IN ROUTING")
+    a.cycle_time_min = 20.0
+    b = punch("SO2", qty=10, mins=630)
+    out = am([a, b])
+    # weights: SO1 10*20 = 200 (punch cycle), SO2 10*10 = 100
+    assert out[("SO1", "X")][0]["minutes"] == pytest.approx(420)

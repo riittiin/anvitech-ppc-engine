@@ -1411,8 +1411,8 @@ def _snapshot_pnl(plan_run, masters, config, actuals):
     try:
         from engine import profit_loss as _pl
         kinds = _pl.machine_kinds(book_store.load_machines_doc() or {})
-        fresh = _pl.planned_steps(plan_run.schedule, plan_run.batches_prioritized,
-                                  masters, config, kinds)
+        fresh = _pl.planned_snapshot(plan_run.schedule, plan_run.batches_prioritized,
+                                     masters, config, kinds)
         stored = book_store.load_pnl_planned()
         merged = _pl.merge_snapshot(stored, fresh, {a.key for a in actuals},
                                     _ist_now().isoformat(timespec="seconds"))
