@@ -187,8 +187,8 @@ def _step_row(process, planned, actual, rates, missing):
         status = "ok"
     return {"process": process, "planned_machine": "/".join(planned),
             "planned_hours": ph, "planned_cost": pc,
-            "actual_machines": list(actual), "actual_hours": ah,
-            "actual_cost": ac if actual else 0.0, "status": status}
+            "actual_machines": list(actual), "actual_hours": ah if actual else None,
+            "actual_cost": ac if actual else None, "status": status}
 
 
 def build_report(completed, snapshot, actual, rates) -> dict:
@@ -235,7 +235,7 @@ def build_report(completed, snapshot, actual, rates) -> dict:
                 not_punched.append(label[n])
             srows.append(r)
         pcs = [r["planned_cost"] for r in srows]
-        acs = [r["actual_cost"] for r in srows]
+        acs = [r["actual_cost"] for r in srows if r["status"] != "not punched"]
         p_cost = None if any(c is None for c in pcs) else sum(pcs)
         a_cost = None if any(c is None for c in acs) else sum(acs)
         diff = None if p_cost is None or a_cost is None else a_cost - p_cost
@@ -246,7 +246,7 @@ def build_report(completed, snapshot, actual, rates) -> dict:
             "_sort": o.completed_on,
             "planned_hours": _r2(sum(r["planned_hours"] for r in srows)),
             "planned_cost": _r2(p_cost),
-            "actual_hours": _r2(sum(r["actual_hours"] for r in srows)),
+            "actual_hours": _r2(sum(r["actual_hours"] or 0.0 for r in srows)),
             "actual_cost": _r2(a_cost), "diff_cost": _r2(diff), "diff_pct": _r2(pct),
             "not_punched": not_punched, "rates_missing": sorted(missing),
             "steps": [{**r, "planned_hours": _r2(r["planned_hours"]),
@@ -257,10 +257,11 @@ def build_report(completed, snapshot, actual, rates) -> dict:
     rows.sort(key=lambda r: r["_sort"] or date.min, reverse=True)
     for r in rows:
         del r["_sort"]
-    full = [r for r in rows if r["planned_cost"] is not None and r["actual_cost"] is not None]
+    full = [r for r in rows if not r["not_punched"] and not r["rates_missing"]
+            and r["planned_cost"] is not None and r["actual_cost"] is not None]
     pt = sum(r["planned_cost"] for r in full)
     at = sum(r["actual_cost"] for r in full)
-    totals = {"orders": len(rows),
+    totals = {"orders": len(rows), "counted": len(full),
               "incomplete": sum(1 for r in rows if r["not_punched"] or r["rates_missing"]),
               "planned_hours": _r2(sum(r["planned_hours"] for r in full)),
               "actual_hours": _r2(sum(r["actual_hours"] for r in full)),

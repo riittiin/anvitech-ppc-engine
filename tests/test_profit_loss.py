@@ -228,6 +228,18 @@ def test_unpunched_step_flags_the_order_incomplete():
     assert r["not_punched"] == ["INSPECTION"] and r["actual_hours"] == pytest.approx(10)
     assert [s["status"] for s in r["steps"]] == ["ok", "not punched"]
     assert rep["totals"]["incomplete"] == 1
+    un = r["steps"][1]
+    assert un["actual_hours"] is None and un["actual_cost"] is None
+    assert r["actual_cost"] == 1000 and r["steps"][0]["actual_cost"] == 1000
+
+
+def test_totals_exclude_incomplete_rows_even_with_both_costs():
+    sn = {**snap(("A", "X"), [pstep("CNC4", 0, 600)]),
+          **snap(("B", "X"), [pstep("CNC4", 0, 600), pstep("CMM", 0, 60)])}
+    ac = {("A", "X"): [act("CNC4", 600)], ("B", "X"): [act("CNC4", 600)]}
+    t = build_report([order("A"), order("B")], sn, ac, {"CNC4": 60, "CMM": 60})["totals"]
+    assert (t["orders"], t["counted"], t["incomplete"]) == (2, 1, 1)
+    assert t["planned_cost"] == 600 and t["actual_cost"] == 600
 
 
 def test_machine_without_rate_is_rate_not_set_never_zero():
@@ -280,4 +292,4 @@ def test_totals_skip_rows_without_both_costs_and_sort_newest_first():
     assert rep["rows"][2]["completed_on"] == ""
     t = rep["totals"]
     assert t["orders"] == 3 and t["planned_cost"] == 1200 and t["actual_cost"] == 1200
-    assert t["incomplete"] == 1
+    assert t["incomplete"] == 1 and t["counted"] == 2
