@@ -35,6 +35,7 @@
       <!-- Admin only, like Add New Orders (owner, 2026-10-06): the user login
            neither sees nor changes item routings. Server-enforced on GET too. -->
       <a class="nav-item admin-only" data-view="itemmaster" href="#itemmaster" id="nav-itemmaster">Item Process Master</a>
+      <a class="nav-item admin-only" data-view="profitloss" href="#profitloss" id="nav-profitloss">Profit and Loss</a>
       <a class="nav-item" data-view="analytics" href="#analytics">Analytics</a>
       <a class="nav-item" data-view="settings" href="#settings">Settings</a>
     </nav>
@@ -179,6 +180,17 @@
         <p class="explainer">How busy your machines and operators are in the current plan, and where the work is going.</p>
       </div>
       <div id="analytics-mount"></div>
+    </div>
+  </section>
+
+  <!-- ===================== PROFIT AND LOSS (admin only, 2026-11-11) ===================== -->
+  <section class="view" id="view-profitloss">
+    <div class="card">
+      <div class="card-head">
+        <h2>Profit and Loss</h2>
+        <p class="explainer">Machine time cost of finished orders, CNC, VMC and inspection only. Selling price and profit will be added later.</p>
+      </div>
+      <div id="pl-mount"></div>
     </div>
   </section>
 

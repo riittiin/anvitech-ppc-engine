@@ -220,7 +220,7 @@ def test_no_tab_is_hidden_from_the_user_role():
     precisely which tab is hidden and why, not to make the invariant vague.
     If anyone hides a SECOND tab, this assertion must still fail loudly.
     """
-    ALLOWED_ADMIN_ONLY_TABS = {"neworders", "itemmaster"}
+    ALLOWED_ADMIN_ONLY_TABS = {"neworders", "itemmaster", "profitloss"}
     hidden = [m.group(1) for m in
               re.finditer(r'<a class="[^"]*admin-only[^"]*" data-view="([^"]+)"', INDEX_HTML)]
     unexpected = [v for v in hidden if v not in ALLOWED_ADMIN_ONLY_TABS]

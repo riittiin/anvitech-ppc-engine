@@ -146,3 +146,117 @@ def test_rate_has_no_plan_effect(admin):
 def test_rates_from_doc():
     doc = {"machines": {"A": {"rate": 5}, "B": {}, "C": {"rate": None}}}
     assert profit_loss.rates_from_doc(doc) == {"A": 5.0}
+
+
+# ---- GET /profit-loss (task 6) ----
+@pytest.fixture
+def user(admin):
+    m, _ = admin
+    u = TestClient(m.app)
+    u.post("/login", data={"username": "anvitech_user", "password": "anvitech12345678"})
+    return u
+
+
+def _punch(c, so, item, process, machine, qty, minutes, day="2025-03-10", complete=False):
+    r = c.post("/actuals", json={
+        "so_no": so, "item_code": item, "entry_date": day, "shift": "1st shift",
+        "process": process, "operator": "Alpha", "qty_produced": qty,
+        "machine": machine, "shift_minutes": minutes, "mark_complete": complete})
+    assert r.status_code == 200, r.text
+    return r
+
+
+def _steps(snapshot_doc):
+    return snapshot_doc["steps"]
+
+
+def test_profit_loss_is_admin_only(user):
+    assert user.get("/profit-loss").status_code == 403
+
+
+def _finish_order_a(c, minutes_by_process):
+    """Punch every counted step of order A (50 pcs) on its planned machine."""
+    snap = book_store.load_pnl_planned()[_key(SO1, ITEM_A)]
+    done = []
+    for s in snap["steps"]:
+        if s["process"] in done:
+            continue
+        done.append(s["process"])
+    return snap, done
+
+
+def test_end_to_end_row(admin):
+    m, c = admin
+    c.post("/run", json={"persist": False})
+    snap = book_store.load_pnl_planned()[_key(SO1, ITEM_A)]
+    procs = list(dict.fromkeys(s["process"] for s in snap["steps"]))
+    assert procs, "order A has no counted steps"
+    planned_min = sum(s["setup_min"] + s["run_min"] for s in snap["steps"])
+    cnc, vmc = "CNC1", "VMC1"
+    mach_of = {s["process"]: s["machine"] for s in snap["steps"]}
+    from engine.models import Actual as _A
+    # Punch each routing step in order so the precedence guard accepts it.
+    routing = m._current_masters().routings[ITEM_A].processes
+    actual_total = 0.0
+    last = len(routing) - 1
+    for i, p in enumerate(routing):
+        name = p.name
+        mach = mach_of.get(name)
+        if mach:
+            mins = 60.0
+            actual_total += mins
+        else:
+            mach, mins = "", 0.0
+        _punch(c, SO1, ITEM_A, name, mach, 50, mins, complete=(i == last))
+    rep = c.get("/profit-loss").json()
+    assert len(rep["rows"]) == 1, rep
+    row = rep["rows"][0]
+    assert row["so_no"] == SO1 and row["completed_on"]
+    assert row["planned_hours"] == pytest.approx(planned_min / 60, abs=0.01)
+    assert row["actual_hours"] == pytest.approx(actual_total / 60, abs=0.01)
+    assert row["not_punched"] == []
+    # MI1 has no default rate: priced "rate not set" and kept out of the totals.
+    assert row["rates_missing"] == ["MI1"] and row["planned_cost"] is None
+    assert rep["totals"]["orders"] == 1 and rep["totals"]["incomplete"] == 1 and rep["totals"]["counted"] == 0
+    # Once the rate is set the row prices by hand: hours x rate per machine.
+    assert _put(c, _machine(c, "MI1"), rate=300).status_code == 200
+    row = c.get("/profit-loss").json()["rows"][0]
+    rate = {"CNC1": 450.0, "VMC1": 500.0, "MI1": 300.0}
+    by_step = {s["process"]: s for s in snap["steps"]}
+    exp_planned = sum((s["setup_min"] + s["run_min"]) / 60 * rate[s["machine"]] for s in snap["steps"])
+    exp_actual = sum(rate[mach_of[n]] * 1.0 for n in mach_of)
+    assert row["planned_cost"] == pytest.approx(exp_planned, abs=0.05)
+    assert row["actual_cost"] == pytest.approx(exp_actual, abs=0.05)
+    assert row["diff_cost"] == pytest.approx(exp_actual - exp_planned, abs=0.05)
+    assert row["rates_missing"] == []
+    assert rep["older_count"] == 0
+
+
+def test_rollback_of_completion_removes_the_row(admin):
+    m, c = admin
+    c.post("/run", json={"persist": False})
+    snap = book_store.load_pnl_planned()[_key(SO1, ITEM_A)]
+    mach_of = {s["process"]: s["machine"] for s in snap["steps"]}
+    routing = m._current_masters().routings[ITEM_A].processes
+    ids = []
+    for i, p in enumerate(routing):
+        name = p.name
+        r = _punch(c, SO1, ITEM_A, name, mach_of.get(name, ""), 50,
+                   60.0 if mach_of.get(name) else 0.0, complete=(i == len(routing) - 1))
+    assert len(c.get("/profit-loss").json()["rows"]) == 1
+    last_id = r.json()["actuals_ids"][-1]
+    rb = c.post("/actuals/rollback", json={"id": last_id})
+    assert rb.status_code == 200, rb.text
+    assert c.get("/profit-loss").json()["rows"] == []
+
+
+def test_already_started_order_never_appears(admin):
+    m, c = admin
+    # Punch BEFORE the first /run with the feature: the order is already started.
+    routing = m._current_masters().routings[ITEM_B].processes
+    for i, p in enumerate(routing):
+        n = p.name
+        _punch(c, SO2, ITEM_B, n, "", 100, 0.0, complete=(i == len(routing) - 1))
+    c.post("/run", json={"persist": False})
+    rep = c.get("/profit-loss").json()
+    assert rep["rows"] == [] and rep["older_count"] == 1

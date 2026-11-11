@@ -49,7 +49,7 @@ let quoteStamp = null; // the quote's plan fingerprint — required by /new-orde
 // Six destinations, one visible at a time. Each maps to an existing render call
 // (the old per-rule tab machinery, absorbed into a fixed nav). `mountFor` returns
 // the per-view content div so the unchanged render functions write to the right spot.
-const VIEWS = ["orders", "neworders", "schedule", "gantt", "entry", "analytics", "itemmaster", "settings"];
+const VIEWS = ["orders", "neworders", "schedule", "gantt", "entry", "analytics", "itemmaster", "profitloss", "settings"];
 let activeView = "orders";
 // The last Done outcome, kept in state: runPlan re-renders Daily Entry, which would
 // otherwise wipe the status line the moment the update succeeded.
@@ -95,6 +95,7 @@ function renderView(v) {
   else if (v === "entry") renderTab("rule7");
   else if (v === "analytics") renderAnalytics();
   else if (v === "itemmaster") renderItemMaster();
+  else if (v === "profitloss") renderProfitLoss();
   // "settings" is static markup (cards wired once at boot) — nothing to render.
 }
 
@@ -107,6 +108,7 @@ function showView(v, push) {
   if (v === "neworders" && !newOrdersAllowed()) v = "orders";
   // Item Process Master is admin only too (owner, 2026-10-06): same door closed.
   if (v === "itemmaster" && currentRole !== "admin") v = "orders";
+  if (v === "profitloss" && currentRole !== "admin") v = "orders";
   // The last Done outcome belongs to this visit to Daily Entry only.
   if (activeView === "entry" && v !== "entry") lastDoneStatus = "";
   // Item Process Master: leaving with unsaved edits asks first. Saying no keeps
@@ -3178,6 +3180,82 @@ async function removeOperator(id) {
     await runPlan(false);
   } catch (e) { setStatus("Remove operator error: " + e.message, true); }
 }
+
+// ===== Profit and Loss (admin only) =====
+// Read-only. The server builds every figure; this only draws it. A missing figure is
+// said so in words ("rate not set", "not punched"), never shown as 0.
+let plOpen = new Set();     // "so\x1fitem" rows whose step breakdown is open
+
+function plMoney(v) { return v == null ? "rate not set" : "\u20B9" + Math.round(v).toLocaleString("en-IN"); }
+function plHrs(v) { return v == null ? "not punched" : Number(v).toFixed(1); }
+function plDiffCls(v) { return v != null && v > 0 ? ' style="color:var(--danger);font-weight:600"' : ""; }
+function plPct(v) { return v == null ? "" : (v > 0 ? "+" : "") + v.toFixed(1) + "%"; }
+
+async function renderProfitLoss() {
+  const mount = document.getElementById("pl-mount");
+  if (!mount) return;
+  let d;
+  try {
+    const res = await fetch("/profit-loss");
+    if (!res.ok) { mount.innerHTML = '<p class="empty">Could not load Profit and Loss.</p>'; return; }
+    d = await res.json();
+  } catch (e) { mount.innerHTML = '<p class="empty">Could not load Profit and Loss.</p>'; return; }
+  const e = escapeHtml;
+  let h = "";
+  if (!d.rows.length) {
+    h += '<p class="empty">No finished orders to show yet.</p>';
+  } else {
+    h += '<table><thead><tr><th>SO No</th><th>Item</th><th class="num">Qty</th><th>Completed on</th>' +
+      '<th class="num">Planned hrs</th><th class="num">Planned cost</th><th class="num">Actual hrs</th>' +
+      '<th class="num">Actual cost</th><th class="num">Difference</th><th class="num">Difference %</th></tr></thead><tbody>';
+    for (const r of d.rows) {
+      const key = r.so_no + "\x1f" + r.item_code;
+      const none = r.steps.length > 0 && r.not_punched.length === r.steps.length;   // nothing punched at all
+      const dash = "-";
+      h += '<tr class="pl-row" data-k="' + e(key) + '" style="cursor:pointer">' +
+        "<td>" + e(r.so_no) + "</td><td>" + e(r.item_code) + (r.item_name ? " " + e(r.item_name) : "") + "</td>" +
+        '<td class="num">' + r.qty + "</td><td>" + e(r.completed_on) + "</td>" +
+        '<td class="num">' + plHrs(r.planned_hours) + '</td><td class="num">' + plMoney(r.planned_cost) + "</td>" +
+        '<td class="num">' + (none ? dash : plHrs(r.actual_hours)) + '</td><td class="num">' + (none ? dash : plMoney(r.actual_cost)) + "</td>" +
+        '<td class="num"' + plDiffCls(r.diff_cost) + ">" + (none ? dash : (r.diff_cost == null ? "" : plMoney(r.diff_cost))) + "</td>" +
+        '<td class="num"' + plDiffCls(r.diff_cost) + ">" + (none ? dash : plPct(r.diff_pct)) + "</td></tr>";
+      const notes = [];
+      if (r.rates_missing.length) notes.push("rate not set: " + r.rates_missing.map(e).join(", "));
+      if (r.not_punched.length) notes.push("actual incomplete: " + r.not_punched.length + " step(s) not punched");
+      if (notes.length) h += '<tr><td colspan="10" class="muted" style="padding-top:0">' + notes.join(" | ") + "</td></tr>";
+      if (plOpen.has(key)) {
+        h += '<tr><td colspan="10"><table><thead><tr><th>Step</th><th>Planned machine</th><th class="num">Planned hrs</th>' +
+          '<th class="num">Planned cost</th><th>Actual machine</th><th class="num">Actual hrs</th><th class="num">Actual cost</th></tr></thead><tbody>';
+        for (const s of r.steps) {
+          const np = s.status === "not punched";
+          h += "<tr><td>" + e(s.process) + "</td><td>" + e(s.planned_machine || "") + '</td><td class="num">' + plHrs(s.planned_hours) +
+            '</td><td class="num">' + plMoney(s.planned_cost) + "</td><td>" + e((s.actual_machines || []).join(", ")) +
+            '</td><td class="num">' + (np ? "not punched" : plHrs(s.actual_hours)) +
+            '</td><td class="num">' + (np ? "not punched" : plMoney(s.actual_cost)) + "</td></tr>";
+        }
+        h += "</tbody></table></td></tr>";
+      }
+    }
+    const t = d.totals;
+    h += '<tr style="font-weight:600"><td colspan="4">Totals (' + t.orders + " orders, " + t.incomplete + " incomplete)</td>" +
+      '<td class="num">' + plHrs(t.planned_hours) + '</td><td class="num">' + plMoney(t.planned_cost) + '</td>' +
+      '<td class="num">' + plHrs(t.actual_hours) + '</td><td class="num">' + plMoney(t.actual_cost) + '</td>' +
+      '<td class="num"' + plDiffCls(t.diff_cost) + ">" + plMoney(t.diff_cost) + '</td><td class="num"' + plDiffCls(t.diff_cost) + ">" + plPct(t.diff_pct) + "</td></tr>";
+    h += "</tbody></table>";
+    h += '<p class="muted">Totals cover the ' + t.counted + " complete order(s) only.</p>";
+  }
+  if (d.not_shown.length) {
+    h += '<p class="muted">Not shown:</p><ul>' + d.not_shown.map(n => "<li>" + e(n.so_no) + " " + e(n.item_code) + ": " + e(n.reason) + "</li>").join("") + "</ul>";
+  }
+  if (d.older_count > 0) h += '<p class="muted">' + d.older_count + " finished orders started before Profit and Loss began are not shown.</p>";
+  mount.innerHTML = h;
+  mount.querySelectorAll("tr.pl-row").forEach(tr => tr.addEventListener("click", () => {
+    const k = tr.dataset.k;
+    if (plOpen.has(k)) plOpen.delete(k); else plOpen.add(k);
+    renderProfitLoss();
+  }));
+}
+// ===== end Profit and Loss =====
 
 // ===== Item Process Master =====
 // Routings live in the app (2026-10-05), not the Excel. The server decides what kind

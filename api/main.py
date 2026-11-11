@@ -4207,6 +4207,22 @@ def _production_tables(year: int, month: int) -> dict:
     }
 
 
+@app.get("/profit-loss")
+def profit_loss_report(request: Request):
+    """Machine time cost of finished orders, planned vs actual (admin only). Built live
+    on every call from the stored snapshot, the punches and the current rates; never
+    cached, no plan effect. See engine/profit_loss.py."""
+    require_admin(request)
+    from engine import profit_loss as _pl
+    masters = _current_masters()
+    doc = _machines_doc_with_rates()
+    kinds = _pl.machine_kinds(doc)
+    working = _shift_minutes(_load_plan_config())
+    actual = _pl.actual_minutes(book_store.load_actuals(), masters, kinds, working)
+    return _pl.build_report(list(book_store.load_completed_orders().values()),
+                            book_store.load_pnl_planned(), actual, _pl.rates_from_doc(doc))
+
+
 @app.get("/production-analysis")
 def production_analysis_report(year: int, month: int, request: Request):
     """Monthly production analysis (either role since 2026-10-21, owner request):
