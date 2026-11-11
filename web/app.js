@@ -2785,7 +2785,7 @@ function machineUsedText(usedBy) {
   return parts.join(", ");
 }
 
-async function shopWrite(url, method, body, okMsg) {
+async function shopWrite(url, method, body, okMsg, replan = true) {
   const isMachine = url.startsWith("/machines");
   try {
     const res = await fetch(url, { method, headers: { "Content-Type": "application/json" },
@@ -2806,7 +2806,8 @@ async function shopWrite(url, method, body, okMsg) {
     } else {
       await loadHolidays();
     }
-    await runPlan(false);
+    // A rate has no plan effect (it is not in the plan's fingerprint): no re-plan.
+    if (replan) await runPlan(false);
     return true;
   } catch (e) {
     setStatus("Could not save: " + e.message, true);
@@ -2902,7 +2903,11 @@ function wireShopMasters() {
     const body = { id: m.id, type: m.type, hours: m.hours, version: m.version, rate: m.rate == null ? null : m.rate };
     if (t.classList.contains("mrow-type")) body.type = t.value;
     else if (t.classList.contains("mrow-hours")) body.hours = Number(t.value);
-    else if (t.classList.contains("mrow-rate")) body.rate = t.value.trim() === "" ? null : Number(t.value);
+    else if (t.classList.contains("mrow-rate")) {
+      body.rate = t.value.trim() === "" ? null : Number(t.value);
+      shopWrite("/machines", "PUT", body, `Saved ${m.id}.`, false);
+      return;
+    }
     else return;
     shopWrite("/machines", "PUT", body, `Saved ${m.id}. Updating the plan.`);
   });
@@ -3186,7 +3191,19 @@ async function removeOperator(id) {
 // said so in words ("rate not set", "not punched"), never shown as 0.
 let plOpen = new Set();     // "so\x1fitem" rows whose step breakdown is open
 
-function plMoney(v) { return v == null ? "rate not set" : "\u20B9" + Math.round(v).toLocaleString("en-IN"); }
+function plMoney(v) {
+  if (v == null) return "rate not set";
+  const n = Math.round(v);
+  return (n < 0 ? "-" : "") + "\u20B9" + Math.abs(n).toLocaleString("en-IN");
+}
+// A cost summed from only the machines that have a rate: the number, and why it is short.
+function plCost(v, partial, missing) {
+  if (!partial) return plMoney(v);
+  const why = "incomplete (rate not set: " + (missing || []).map(escapeHtml).join(", ") + ")";
+  return v == null ? why : plMoney(v) + ' <span class="muted">' + why + "</span>";
+}
+function plTot(v, f) { return v == null ? "-" : f(v); }
+function plCount(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
 function plHrs(v) { return v == null ? "not punched" : Number(v).toFixed(1); }
 function plDiffCls(v) { return v != null && v > 0 ? ' style="color:var(--danger);font-weight:600"' : ""; }
 function plPct(v) { return v == null ? "" : (v > 0 ? "+" : "") + v.toFixed(1) + "%"; }
@@ -3215,12 +3232,11 @@ async function renderProfitLoss() {
       h += '<tr class="pl-row" data-k="' + e(key) + '" style="cursor:pointer">' +
         "<td>" + e(r.so_no) + "</td><td>" + e(r.item_code) + (r.item_name ? " " + e(r.item_name) : "") + "</td>" +
         '<td class="num">' + r.qty + "</td><td>" + e(r.completed_on) + "</td>" +
-        '<td class="num">' + plHrs(r.planned_hours) + '</td><td class="num">' + plMoney(r.planned_cost) + "</td>" +
-        '<td class="num">' + (none ? dash : plHrs(r.actual_hours)) + '</td><td class="num">' + (none ? dash : plMoney(r.actual_cost)) + "</td>" +
+        '<td class="num">' + plHrs(r.planned_hours) + '</td><td class="num">' + plCost(r.planned_cost, r.planned_cost_partial, r.rates_missing) + "</td>" +
+        '<td class="num">' + (none ? dash : plHrs(r.actual_hours)) + '</td><td class="num">' + (none ? dash : plCost(r.actual_cost, r.actual_cost_partial, r.rates_missing)) + "</td>" +
         '<td class="num"' + plDiffCls(r.diff_cost) + ">" + (none ? dash : (r.diff_cost == null ? "" : plMoney(r.diff_cost))) + "</td>" +
         '<td class="num"' + plDiffCls(r.diff_cost) + ">" + (none ? dash : plPct(r.diff_pct)) + "</td></tr>";
       const notes = [];
-      if (r.rates_missing.length) notes.push("rate not set: " + r.rates_missing.map(e).join(", "));
       if (r.not_punched.length) notes.push("actual incomplete: " + r.not_punched.length + " step(s) not punched");
       if (notes.length) h += '<tr><td colspan="10" class="muted" style="padding-top:0">' + notes.join(" | ") + "</td></tr>";
       if (plOpen.has(key)) {
@@ -3237,17 +3253,18 @@ async function renderProfitLoss() {
       }
     }
     const t = d.totals;
-    h += '<tr style="font-weight:600"><td colspan="4">Totals (' + t.orders + " orders, " + t.incomplete + " incomplete)</td>" +
-      '<td class="num">' + plHrs(t.planned_hours) + '</td><td class="num">' + plMoney(t.planned_cost) + '</td>' +
-      '<td class="num">' + plHrs(t.actual_hours) + '</td><td class="num">' + plMoney(t.actual_cost) + '</td>' +
-      '<td class="num"' + plDiffCls(t.diff_cost) + ">" + plMoney(t.diff_cost) + '</td><td class="num"' + plDiffCls(t.diff_cost) + ">" + plPct(t.diff_pct) + "</td></tr>";
+    const hrs = (v) => Number(v).toFixed(1);
+    h += '<tr style="font-weight:600"><td colspan="4">Totals (' + plCount(t.orders, "order") + ", " + t.incomplete + " incomplete)</td>" +
+      '<td class="num">' + plTot(t.planned_hours, hrs) + '</td><td class="num">' + plTot(t.planned_cost, plMoney) + '</td>' +
+      '<td class="num">' + plTot(t.actual_hours, hrs) + '</td><td class="num">' + plTot(t.actual_cost, plMoney) + '</td>' +
+      '<td class="num"' + plDiffCls(t.diff_cost) + ">" + plTot(t.diff_cost, plMoney) + '</td><td class="num"' + plDiffCls(t.diff_cost) + ">" + plPct(t.diff_pct) + "</td></tr>";
     h += "</tbody></table>";
-    h += '<p class="muted">Totals cover the ' + t.counted + " complete order(s) only.</p>";
+    h += '<p class="muted">Totals cover the ' + plCount(t.counted, "complete order") + " only.</p>";
   }
   if (d.not_shown.length) {
     h += '<p class="muted">Not shown:</p><ul>' + d.not_shown.map(n => "<li>" + e(n.so_no) + " " + e(n.item_code) + ": " + e(n.reason) + "</li>").join("") + "</ul>";
   }
-  if (d.older_count > 0) h += '<p class="muted">' + d.older_count + " finished orders started before Profit and Loss began are not shown.</p>";
+  if (d.older_count > 0) h += '<p class="muted">' + plCount(d.older_count, "finished order") + " started before Profit and Loss began " + (d.older_count === 1 ? "is" : "are") + " not shown.</p>";
   mount.innerHTML = h;
   mount.querySelectorAll("tr.pl-row").forEach(tr => tr.addEventListener("click", () => {
     const k = tr.dataset.k;
