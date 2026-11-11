@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from engine.config import Config
-from engine.models import Batch, Process, Routing, ScheduleEntry
-from engine.profit_loss import COUNTED_KINDS, machine_kinds, planned_steps
+from engine.models import Actual, Batch, Process, Routing, ScheduleEntry
+from engine.profit_loss import COUNTED_KINDS, actual_minutes, machine_kinds, planned_steps
 
 T0 = datetime(2026, 11, 2, 8, 0)
 DOC = {"machines": {
@@ -120,3 +120,72 @@ def test_an_order_started_before_any_snapshot_never_gets_one():
 def test_merge_keeps_orders_no_longer_planned():
     stored = {"A\x1fX": {"steps": [OLD], "at": "t0"}}
     assert merge_snapshot(stored, {}, set(), "t1") == stored
+
+
+WORKING = {"1st shift": 630, "2nd shift": 570}
+
+
+def punch(so="SO1", item="X", machine="CNC4", mins=600, qty=10, setup=0.0,
+          shift="1st shift", day=date(2026, 11, 3), process="CNC FIRST SIDE", **down):
+    return Actual(so_no=so, item_code=item, entry_date=day, qty_produced=qty,
+                  shift=shift, process=process, machine=machine, shift_minutes=mins,
+                  actual_setup_min=setup, **down)
+
+
+def am(actuals):
+    return actual_minutes(actuals, masters(), KINDS, WORKING)
+
+
+def test_minutes_are_shift_minutes_minus_downtime_with_setup_kept():
+    a = punch(mins=600, setup=90, no_power_min=30, machine_breakdown_min=20)
+    (r,) = am([a])[("SO1", "X")]
+    assert r["minutes"] == 550 and r["machine"] == "CNC4"
+    assert r["step"] == "CNC FIRST SIDE"
+
+
+def test_minutes_never_count_past_the_shift():
+    assert am([punch(mins=700)])[("SO1", "X")][0]["minutes"] == 630
+
+
+def test_two_default_punches_on_one_machine_share_the_shift():
+    out = am([punch("SO149", qty=30, mins=630), punch("SO150", qty=10, mins=630)])
+    assert out[("SO149", "X")][0]["minutes"] == pytest.approx(472.5)
+    assert out[("SO150", "X")][0]["minutes"] == pytest.approx(157.5)
+
+
+def test_punches_that_fit_inside_the_shift_are_used_as_typed():
+    out = am([punch("SO1", mins=300), punch("SO2", mins=200)])
+    assert [out[k][0]["minutes"] for k in (("SO1", "X"), ("SO2", "X"))] == [300, 200]
+
+
+def test_downtime_larger_than_minutes_floors_at_zero():
+    assert am([punch(mins=100, no_power_min=500)]) == {}
+
+
+def test_blank_minutes_punch_is_dropped():
+    assert am([punch(mins=0)]) == {}
+
+
+def test_manual_machine_punch_is_not_counted():
+    assert am([punch(machine="MD1")]) == {}
+
+
+def test_unknown_machine_not_counted_but_shares_the_shift():
+    out = am([punch("SO1", machine="ZZ9", qty=10, mins=630),
+              punch("SO2", machine="ZZ9", qty=10, mins=630)])
+    assert out == {}
+
+
+def test_blank_machine_punch_is_flagged_with_minutes_none():
+    (r,) = am([punch(machine="")])[("SO1", "X")]
+    assert r["machine"] == "" and r["minutes"] is None
+
+
+def test_different_days_or_shifts_do_not_share():
+    out = am([punch("SO1", mins=630), punch("SO2", mins=630, day=date(2026, 11, 4)),
+              punch("SO3", mins=570, shift="2nd shift")])
+    assert [out[(s, "X")][0]["minutes"] for s in ("SO1", "SO2", "SO3")] == [630, 630, 570]
+
+
+def test_unknown_shift_is_not_capped():
+    assert am([punch(mins=900, shift="weird")])[("SO1", "X")][0]["minutes"] == 900

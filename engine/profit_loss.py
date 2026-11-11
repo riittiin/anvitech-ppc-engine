@@ -12,6 +12,8 @@ between the lines of a clubbed batch by pieces.
 from __future__ import annotations
 
 from engine.loaders import normalize_process_name
+from engine.models import Actual
+from engine.production_analysis import cycle_time_for
 from engine.planning_time import CNC_VMC_PLANNING_FACTOR, planning_cycle_time
 from ppc_engine.loaders.normalize import machine_kind_from_type
 
@@ -97,4 +99,54 @@ def merge_snapshot(stored: dict, fresh: dict, started: set, now_iso: str) -> dic
         if (so, item) in started:
             continue
         out[f"{so}\x1f{item}"] = {"steps": steps, "at": now_iso}
+    return out
+
+
+def actual_minutes(actuals, masters, kinds, working) -> dict:
+    """(so_no, item_code) -> [{step, process, machine, minutes}] from the floor punches.
+
+    A punch's minutes are its shift minutes (capped at the shift's working minutes)
+    less its downtime; setup stays in. Punches sharing one (machine, date, shift) that
+    together claim more than the shift can hold share it by pieces*cycle + setup.
+    A punch with no machine is flagged (``machine`` "", ``minutes`` None).
+    """
+    items = [a for a in actuals or [] if (getattr(a, "shift_minutes", 0.0) or 0.0) > 0]
+    groups: dict = {}
+    for i, a in enumerate(items):
+        if a.machine:
+            groups.setdefault((a.machine, a.entry_date, (a.shift or "").strip()), []).append(i)
+
+    hours = {}
+    for (mid, day, shift), idx in groups.items():
+        cap = working.get(shift) if working else None
+        hs = {i: min(items[i].shift_minutes, cap) if cap is not None else items[i].shift_minutes
+              for i in idx}
+        if cap is not None and sum(hs.values()) > cap:
+            ws = {}
+            for i in idx:
+                a = items[i]
+                co = cycle_time_for(masters, a.item_code, a.process)
+                if co is None:
+                    co = getattr(a, "cycle_time_min", None)
+                if not _num(co):
+                    co = 0.0
+                ws[i] = (a.qty_produced or 0.0) * co + (a.actual_setup_min or 0.0)
+            tot = sum(ws.values())
+            hs = {i: cap * (ws[i] / tot if tot > 0 else 1.0 / len(idx)) for i in idx}
+        hours.update(hs)
+
+    out: dict = {}
+    for i, a in enumerate(items):
+        step = normalize_process_name(a.process)
+        if not a.machine:
+            out.setdefault(a.key, []).append(
+                {"step": step, "process": a.process, "machine": "", "minutes": None})
+            continue
+        if kinds.get(a.machine) not in COUNTED_KINDS:
+            continue
+        down = sum(getattr(a, f, 0.0) or 0.0 for f, _ in Actual.DOWNTIME_FIELDS)
+        m = max(0.0, hours[i] - down)
+        if m > 0:
+            out.setdefault(a.key, []).append(
+                {"step": step, "process": a.process, "machine": a.machine, "minutes": m})
     return out
